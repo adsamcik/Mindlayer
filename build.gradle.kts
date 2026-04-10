@@ -7,9 +7,8 @@ plugins {
 }
 
 // Publishing configuration for GitHub Packages
-// Set these via gradle.properties or environment variables:
-//   GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN
-val publishVersion = "0.1.0"
+// Version: override with -PpublishVersion=X.Y.Z or via tag (CI extracts from v-tag)
+val publishVersion = findProperty("publishVersion")?.toString() ?: "0.1.0"
 val githubOwner = findProperty("GITHUB_OWNER")?.toString() ?: System.getenv("GITHUB_OWNER") ?: "OWNER"
 val githubRepo = findProperty("GITHUB_REPO")?.toString() ?: System.getenv("GITHUB_REPO") ?: "Mindlayer"
 val githubToken = findProperty("GITHUB_TOKEN")?.toString() ?: System.getenv("GITHUB_TOKEN") ?: ""
