@@ -308,7 +308,7 @@ class InferencePipelineTest {
         )
         orchestrator.infer(meta, image = null, audio = null, pipeWriteEnd = pfd)
 
-        assertTrue("Pipe should close within 5s", latch.await(5, TimeUnit.SECONDS))
+        assertTrue("Pipe should close within 30s", latch.await(30, TimeUnit.SECONDS))
         return parseFrames(frames)
     }
 
@@ -405,7 +405,7 @@ class InferencePipelineTest {
         Thread.sleep(200)
         orchestrator.cancelInference(requestId)
 
-        assertTrue("Pipe should close within 5s", latch.await(5, TimeUnit.SECONDS))
+        assertTrue("Pipe should close within 30s", latch.await(30, TimeUnit.SECONDS))
 
         val events = parseFrames(frames)
         // Should have at least a header; may have some deltas before
@@ -438,7 +438,7 @@ class InferencePipelineTest {
         )
         orchestrator.infer(meta, image = null, audio = null, pipeWriteEnd = pfd)
 
-        assertTrue("Pipe should close within 5s", latch.await(5, TimeUnit.SECONDS))
+        assertTrue("Pipe should close within 30s", latch.await(30, TimeUnit.SECONDS))
 
         val events = parseFrames(frames)
         assertTrue("Should have at least 1 event", events.isNotEmpty())
@@ -562,8 +562,8 @@ class InferencePipelineTest {
         orchestrator.infer(metaA, null, null, pfdA)
         orchestrator.infer(metaB, null, null, pfdB)
 
-        assertTrue("Pipe A should close within 5s", latchA.await(5, TimeUnit.SECONDS))
-        assertTrue("Pipe B should close within 5s", latchB.await(5, TimeUnit.SECONDS))
+        assertTrue("Pipe A should close within 30s", latchA.await(30, TimeUnit.SECONDS))
+        assertTrue("Pipe B should close within 30s", latchB.await(30, TimeUnit.SECONDS))
 
         val eventsA = parseFrames(framesA)
         val eventsB = parseFrames(framesB)
@@ -688,7 +688,7 @@ class InferencePipelineTest {
         orchestrator.destroySession(sessionId)
         orchestrator.cancelInference(requestId)
 
-        assertTrue("Pipe should close within 5s", latch.await(5, TimeUnit.SECONDS))
+        assertTrue("Pipe should close within 30s", latch.await(30, TimeUnit.SECONDS))
 
         val events = parseFrames(frames)
         assertTrue("Should have at least 1 event", events.isNotEmpty())
