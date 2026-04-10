@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <permission
+        android:name="com.mindlayer.permission.BIND_ML_SERVICE"
+        android:protectionLevel="signature" />
+
+    <application
+        android:label="Mindlayer">
+
+        <uses-native-library android:name="libvndksupport.so" android:required="false" />
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".MindlayerMlService"
+            android:process=":ml"
+            android:exported="true"
+            android:permission="com.mindlayer.permission.BIND_ML_SERVICE"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="On-device LLM inference for active, user-visible requests initiated from authorized apps on the same device." />
+        </service>
+
+    </application>
+
+</manifest>

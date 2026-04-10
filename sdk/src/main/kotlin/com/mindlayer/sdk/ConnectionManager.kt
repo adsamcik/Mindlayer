@@ -1,0 +1,237 @@
+package com.mindlayer.sdk
+
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.IBinder
+import android.util.Log
+import com.mindlayer.IMindlayerService
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicReference
+
+/**
+ * Connection lifecycle for [ConnectionState].
+ */
+enum class ConnectionState {
+    /** No binding exists. */
+    DISCONNECTED,
+
+    /** bindService() called, waiting for onServiceConnected. */
+    CONNECTING,
+
+    /** Binder is live and usable. */
+    CONNECTED,
+
+    /** Lost connection, attempting auto-reconnect. */
+    RECOVERING,
+}
+
+/**
+ * Manages the AIDL service binding lifecycle with 3-signal death detection
+ * and automatic reconnection with exponential backoff.
+ *
+ * ### Death detection signals
+ *
+ *  1. **[ServiceConnection.onServiceDisconnected]** — transient disconnect
+ *     (e.g. service process crashed). The binding stays alive; the system
+ *     will attempt to re-deliver the binder automatically.
+ *
+ *  2. **[ServiceConnection.onBindingDied]** — the binding itself is dead
+ *     and will never recover. We must unbind, create a *fresh*
+ *     [ServiceConnection], and rebind.
+ *
+ *  3. **[IBinder.DeathRecipient.binderDied]** — fastest signal from the
+ *     kernel via `linkToDeath`. Used to eagerly invalidate the cached
+ *     binder so no stale RPCs are attempted.
+ */
+class ConnectionManager {
+
+    companion object {
+        private const val TAG = "ConnectionManager"
+
+        private const val SERVICE_PKG = "com.mindlayer.service"
+        private const val SERVICE_CLS = "com.mindlayer.service.MindlayerMlService"
+
+        private const val INITIAL_BACKOFF_MS = 250L
+        private const val MAX_BACKOFF_MS = 5_000L
+        private const val BACKOFF_MULTIPLIER = 2.0
+
+        private const val BIND_FLAGS =
+            Context.BIND_AUTO_CREATE or
+            Context.BIND_IMPORTANT or
+            Context.BIND_ADJUST_WITH_ACTIVITY
+    }
+
+    private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
+
+    /** Observable connection state. */
+    val state: StateFlow<ConnectionState> = _state.asStateFlow()
+
+    private val binderRef = AtomicReference<IMindlayerService?>(null)
+    private var boundContext: Context? = null
+    private var currentConnection: ServiceConnection? = null
+    private var deathRecipient: IBinder.DeathRecipient? = null
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var backoffMs = INITIAL_BACKOFF_MS
+
+    // -- Public API -----------------------------------------------------------
+
+    /**
+     * Bind to MindlayerMlService. Safe to call multiple times; redundant
+     * calls on an already-connected manager are ignored.
+     */
+    fun connect(context: Context) {
+        if (_state.value == ConnectionState.CONNECTED || _state.value == ConnectionState.CONNECTING) return
+        boundContext = context.applicationContext
+        doBind()
+    }
+
+    /** Unbind and release all resources. */
+    fun disconnect() {
+        _state.value = ConnectionState.DISCONNECTED
+        doUnbind()
+        scope.cancel()
+    }
+
+    /** Returns the live binder or `null` if not currently connected. */
+    fun getService(): IMindlayerService? = binderRef.get()
+
+    /**
+     * Returns the live binder or throws [IllegalStateException].
+     */
+    fun requireService(): IMindlayerService =
+        binderRef.get() ?: throw IllegalStateException(
+            "MindlayerService is not connected (state=${_state.value})",
+        )
+
+    /**
+     * Suspends until the connection reaches [ConnectionState.CONNECTED]
+     * and returns the binder.
+     */
+    suspend fun awaitConnected(): IMindlayerService {
+        _state.first { it == ConnectionState.CONNECTED }
+        return requireService()
+    }
+
+    // -- Binding internals ----------------------------------------------------
+
+    private fun doBind() {
+        val ctx = boundContext ?: return
+        _state.value = ConnectionState.CONNECTING
+
+        val conn = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                if (binder == null) {
+                    Log.w(TAG, "onServiceConnected with null binder")
+                    return
+                }
+                Log.i(TAG, "onServiceConnected")
+                val service = IMindlayerService.Stub.asInterface(binder)
+                binderRef.set(service)
+                backoffMs = INITIAL_BACKOFF_MS
+
+                // Signal 3: linkToDeath for fast kernel-level death notification
+                val recipient = IBinder.DeathRecipient { onBinderDied() }
+                try {
+                    binder.linkToDeath(recipient, 0)
+                } catch (_: Exception) {
+                    // Binder already dead
+                    onBinderDied()
+                    return
+                }
+                deathRecipient = recipient
+
+                _state.value = ConnectionState.CONNECTED
+            }
+
+            override fun onServiceDisconnected(name: ComponentName?) {
+                // Signal 1: transient disconnect — system may reconnect automatically
+                Log.w(TAG, "onServiceDisconnected (transient)")
+                invalidateBinder()
+                _state.value = ConnectionState.RECOVERING
+            }
+
+            override fun onBindingDied(name: ComponentName?) {
+                // Signal 2: binding dead forever — must unbind + fresh rebind
+                Log.w(TAG, "onBindingDied — scheduling fresh rebind")
+                invalidateBinder()
+                _state.value = ConnectionState.RECOVERING
+                doUnbind()
+                scheduleReconnect()
+            }
+        }
+
+        currentConnection = conn
+
+        val intent = Intent().apply {
+            component = ComponentName(SERVICE_PKG, SERVICE_CLS)
+        }
+
+        val bound = try {
+            ctx.bindService(intent, conn, BIND_FLAGS)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "bindService denied", e)
+            false
+        }
+
+        if (!bound) {
+            Log.e(TAG, "bindService returned false — service not found?")
+            _state.value = ConnectionState.DISCONNECTED
+        }
+    }
+
+    private fun doUnbind() {
+        val ctx = boundContext ?: return
+        val conn = currentConnection ?: return
+        try {
+            ctx.unbindService(conn)
+        } catch (_: IllegalArgumentException) {
+            // Not bound — fine
+        }
+        invalidateBinder()
+        currentConnection = null
+    }
+
+    /** Invoked by linkToDeath (signal 3). */
+    private fun onBinderDied() {
+        Log.w(TAG, "binderDied — binder invalidated")
+        invalidateBinder()
+        if (_state.value != ConnectionState.DISCONNECTED) {
+            _state.value = ConnectionState.RECOVERING
+        }
+    }
+
+    private fun invalidateBinder() {
+        val old = binderRef.getAndSet(null)
+        if (old != null) {
+            val recipient = deathRecipient
+            if (recipient != null) {
+                try {
+                    old.asBinder().unlinkToDeath(recipient, 0)
+                } catch (_: Exception) { /* already unlinked */ }
+                deathRecipient = null
+            }
+        }
+    }
+
+    private fun scheduleReconnect() {
+        scope.launch {
+            val wait = backoffMs
+            Log.i(TAG, "Reconnecting in ${wait}ms")
+            delay(wait)
+            backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong().coerceAtMost(MAX_BACKOFF_MS)
+            doBind()
+        }
+    }
+}

@@ -1,0 +1,63 @@
+# Built application files
+*.apk
+*.aar
+*.ap_
+*.aab
+*.apks
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+release/
+
+# Gradle files
+.gradle/
+build/
+buildSrc/build/
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Android Studio / IntelliJ
+*.iml
+.idea/
+.DS_Store
+captures/
+
+# Keystore files (do not commit signing keys)
+*.jks
+*.keystore
+
+# Google Services
+google-services.json
+
+# Large model files — delivered via Play AI Pack, not committed
+*.litertlm
+
+# Bundletool
+bundletool*.jar
+
+# Kotlin compiler error logs
+.kotlin/
+
+# Research prompts (kept locally, not committed)
+prompts/
+
+# OS files
+Thumbs.db
+.DS_Store
+*~
+
+# Kotlin
+*.kotlin_module
+
+# Test output
+test-results/
+reports/

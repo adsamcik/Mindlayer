@@ -1,0 +1,42 @@
+package com.mindlayer.sdk.db
+
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import androidx.room.Transaction
+import androidx.room.Update
+
+@Dao
+interface ConversationDao {
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(conversation: ConversationEntity)
+
+    @Query("SELECT * FROM conversations WHERE conversationId = :id")
+    suspend fun get(id: String): ConversationEntity?
+
+    @Query("UPDATE conversations SET updatedAtMs = :nowMs WHERE conversationId = :id")
+    suspend fun touch(id: String, nowMs: Long = System.currentTimeMillis())
+
+    @Query(
+        "UPDATE conversations SET tokenEstimateTotal = :tokens, updatedAtMs = :nowMs WHERE conversationId = :id",
+    )
+    suspend fun updateTokenEstimate(
+        id: String,
+        tokens: Int,
+        nowMs: Long = System.currentTimeMillis(),
+    )
+
+    @Query(
+        "UPDATE conversations SET lastStableSeq = :seq, updatedAtMs = :nowMs WHERE conversationId = :id",
+    )
+    suspend fun updateLastStableSeq(
+        id: String,
+        seq: Int,
+        nowMs: Long = System.currentTimeMillis(),
+    )
+
+    @Query("DELETE FROM conversations WHERE conversationId = :id")
+    suspend fun delete(id: String)
+}
