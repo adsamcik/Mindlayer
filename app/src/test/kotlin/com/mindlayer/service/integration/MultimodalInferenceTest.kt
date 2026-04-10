@@ -474,6 +474,7 @@ class MultimodalInferenceTest {
         )
 
         // Cleanup should still be called
+        Thread.sleep(200)
         verify(atLeast = 1) { sharedMemoryPool.cleanup(requestId) }
 
         // sendMessageAsync should NOT have been called (staging failed before inference)
@@ -507,6 +508,8 @@ class MultimodalInferenceTest {
             errorEvent!!.errorMessage!!.contains("media_staging_failed"),
         )
 
+        Thread.sleep(200)
+
         verify(atLeast = 1) { sharedMemoryPool.cleanup(requestId) }
         assertTrue(
             "sendMessageAsync should not be called on staging failure",
@@ -534,6 +537,7 @@ class MultimodalInferenceTest {
 
         // cleanup(requestId) is called in the coroutine finally block —
         // give it a moment to execute after the pipe closes
+        Thread.sleep(200)
         Thread.sleep(200)
         verify(atLeast = 1) { sharedMemoryPool.cleanup(requestId) }
     }
@@ -564,6 +568,7 @@ class MultimodalInferenceTest {
         assertNotNull("Should contain an error event", errorEvent)
 
         // cleanup must still be called even though inference failed
+        Thread.sleep(200)
         verify(atLeast = 1) { sharedMemoryPool.cleanup(requestId) }
     }
 
@@ -611,7 +616,9 @@ class MultimodalInferenceTest {
 
         assertTrue("Pipe should close within 30s", latch.await(30, TimeUnit.SECONDS))
 
-        // cleanup must be called even on cancellation
+        // cleanup is called in the coroutine finally block — wait for it
+        Thread.sleep(500)
+        Thread.sleep(200)
         verify(atLeast = 1) { sharedMemoryPool.cleanup(requestId) }
     }
 
@@ -706,6 +713,7 @@ class MultimodalInferenceTest {
         // orchestrator's sequential staging order)
         verify(exactly = 0) { sharedMemoryPool.stageAudio(any()) }
         // Cleanup should still be called
+        Thread.sleep(200)
         verify(atLeast = 1) { sharedMemoryPool.cleanup(requestId) }
     }
 
@@ -740,6 +748,7 @@ class MultimodalInferenceTest {
         )
 
         // Cleanup still called
+        Thread.sleep(200)
         verify(atLeast = 1) { sharedMemoryPool.cleanup(requestId) }
     }
 
@@ -755,6 +764,7 @@ class MultimodalInferenceTest {
         verify(exactly = 0) { sharedMemoryPool.stageImage(any()) }
         verify(exactly = 0) { sharedMemoryPool.stageAudio(any()) }
         // cleanup IS still called in the finally block (with requestId)
+        Thread.sleep(200)
         verify(atLeast = 1) { sharedMemoryPool.cleanup(any()) }
     }
 
