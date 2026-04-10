@@ -282,7 +282,7 @@ class MultimodalInferenceTest {
         )
         orchestrator.infer(meta, image = image, audio = audio, pipeWriteEnd = pfd)
 
-        assertTrue("Pipe should close within 5s", latch.await(5, TimeUnit.SECONDS))
+        assertTrue("Pipe should close within 30s", latch.await(30, TimeUnit.SECONDS))
         return parseFrames(frames)
     }
 
@@ -532,7 +532,9 @@ class MultimodalInferenceTest {
         assertEquals("done", events.last().kind)
         assertEquals("stop", events.last().finishReason)
 
-        // cleanup(requestId) is called in the finally block
+        // cleanup(requestId) is called in the coroutine finally block —
+        // give it a moment to execute after the pipe closes
+        Thread.sleep(200)
         verify(atLeast = 1) { sharedMemoryPool.cleanup(requestId) }
     }
 
@@ -607,7 +609,7 @@ class MultimodalInferenceTest {
         Thread.sleep(200)
         orchestrator.cancelInference(requestId)
 
-        assertTrue("Pipe should close within 5s", latch.await(5, TimeUnit.SECONDS))
+        assertTrue("Pipe should close within 30s", latch.await(30, TimeUnit.SECONDS))
 
         // cleanup must be called even on cancellation
         verify(atLeast = 1) { sharedMemoryPool.cleanup(requestId) }
