@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
     id("kotlin-parcelize")
+    id("maven-publish")
 }
 
 android {
@@ -28,6 +29,12 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+        }
+    }
 }
 
 kotlin {
@@ -36,8 +43,37 @@ kotlin {
     }
 }
 
+afterEvaluate {
+    publishing {
+        publications {
+            create<MavenPublication>("release") {
+                from(components["release"])
+                groupId = "com.mindlayer"
+                artifactId = "sdk"
+                version = rootProject.extra.get("publishVersion") as String
+
+                pom {
+                    name.set("Mindlayer SDK")
+                    description.set("Client SDK for Mindlayer on-device LLM inference service")
+                }
+            }
+        }
+
+        repositories {
+            maven {
+                name = "GitHubPackages"
+                url = uri("https://maven.pkg.github.com/${rootProject.extra.get("githubOwner")}/${rootProject.extra.get("githubRepo")}")
+                credentials {
+                    username = rootProject.extra.get("githubOwner") as String
+                    password = rootProject.extra.get("githubToken") as String
+                }
+            }
+        }
+    }
+}
+
 dependencies {
-    implementation(project(":shared"))
+    api(project(":shared"))  // 'api' so consumers get shared types transitively
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
