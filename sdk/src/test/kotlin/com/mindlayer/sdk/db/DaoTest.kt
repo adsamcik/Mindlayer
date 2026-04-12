@@ -411,6 +411,33 @@ class DaoTest {
     }
 
     @Test
+    fun `insertWithAutoSeq assigns sequential seq numbers`() = runTest {
+        conversationDao.upsert(makeConversation())
+
+        val turn1 = turnDao.insertWithAutoSeq(makeTurn(turnId = "t1", seq = 0))
+        val turn2 = turnDao.insertWithAutoSeq(makeTurn(turnId = "t2", seq = 0))
+        val turn3 = turnDao.insertWithAutoSeq(makeTurn(turnId = "t3", seq = 0))
+
+        assertEquals(0, turn1.seq)
+        assertEquals(1, turn2.seq)
+        assertEquals(2, turn3.seq)
+
+        // Verify persisted values match
+        val all = turnDao.allForConversation("conv-1")
+        assertEquals(3, all.size)
+        assertEquals(listOf(0, 1, 2), all.map { it.seq })
+    }
+
+    @Test
+    fun `insertWithAutoSeq ignores placeholder seq value`() = runTest {
+        conversationDao.upsert(makeConversation())
+
+        // Even with a non-zero placeholder, the auto-assigned seq should be correct
+        val turn = turnDao.insertWithAutoSeq(makeTurn(turnId = "t1", seq = 99))
+        assertEquals(0, turn.seq)
+    }
+
+    @Test
     fun `totalTokenEstimate sums completed turns only`() = runTest {
         conversationDao.upsert(makeConversation())
 
@@ -555,5 +582,69 @@ class DaoTest {
     @Test
     fun `partsForTurn returns empty for nonexistent turn`() = runTest {
         assertTrue(turnDao.partsForTurn("nope").isEmpty())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  ConversationState tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `conversation defaults to READY state`() = runTest {
+        conversationDao.upsert(makeConversation())
+
+        val loaded = conversationDao.get("conv-1")!!
+        assertEquals(ConversationState.READY, loaded.state)
+    }
+
+    @Test
+    fun `updateState transitions CREATING to READY`() = runTest {
+        conversationDao.upsert(
+            makeConversation().copy(state = ConversationState.CREATING),
+        )
+
+        conversationDao.updateState("conv-1", ConversationState.READY, nowMs = 5000L)
+
+        val loaded = conversationDao.get("conv-1")!!
+        assertEquals(ConversationState.READY, loaded.state)
+        assertEquals(5000L, loaded.updatedAtMs)
+    }
+
+    @Test
+    fun `deleteOrphaned removes only CREATING conversations`() = runTest {
+        conversationDao.upsert(
+            makeConversation("creating-1").copy(state = ConversationState.CREATING),
+        )
+        conversationDao.upsert(
+            makeConversation("creating-2").copy(state = ConversationState.CREATING),
+        )
+        conversationDao.upsert(
+            makeConversation("ready-1").copy(state = ConversationState.READY),
+        )
+
+        val deleted = conversationDao.deleteOrphaned()
+        assertEquals(2, deleted)
+
+        assertNull(conversationDao.get("creating-1"))
+        assertNull(conversationDao.get("creating-2"))
+        assertNotNull(conversationDao.get("ready-1"))
+    }
+
+    @Test
+    fun `deleteOrphaned returns zero when no orphans`() = runTest {
+        conversationDao.upsert(makeConversation())
+        assertEquals(0, conversationDao.deleteOrphaned())
+    }
+
+    @Test
+    fun `deleteOrphaned cascades to turns`() = runTest {
+        conversationDao.upsert(
+            makeConversation("orphan").copy(state = ConversationState.CREATING),
+        )
+        turnDao.upsert(makeTurn("t1", conversationId = "orphan", seq = 0))
+
+        conversationDao.deleteOrphaned()
+
+        assertNull(conversationDao.get("orphan"))
+        assertNull(turnDao.get("t1"))
     }
 }
