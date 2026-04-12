@@ -34,4 +34,7 @@ interface IMindlayerService {
 
     // Diagnostic dump for troubleshooting
     String getDiagnostics();
+
+    // Pre-warm the engine in the background (fire-and-forget)
+    oneway void prewarm(String backend);
 }
