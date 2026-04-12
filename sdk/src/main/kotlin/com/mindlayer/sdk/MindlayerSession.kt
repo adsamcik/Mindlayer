@@ -1,7 +1,6 @@
 package com.mindlayer.sdk
 
 import android.graphics.Bitmap
-import kotlinx.coroutines.flow.Flow
 import java.io.File
 
 /**
@@ -10,23 +9,24 @@ import java.io.File
  *
  * ```
  * val session = mindlayer.session(sessionId)
- * session.chat("Hello!").collect { event -> ... }
+ * val handle = session.chat("Hello!")
+ * handle.events.collect { event -> ... }
  * ```
  */
 class MindlayerSession internal constructor(
     private val client: Mindlayer,
     val sessionId: String,
 ) {
-    /** Send a text message and stream events. */
-    fun chat(text: String): Flow<MindlayerEvent> =
+    /** Send a text message and return an [InferenceHandle]. */
+    fun chat(text: String): InferenceHandle =
         client.chat(sessionId, text)
 
-    /** Send a text + bitmap message and stream events. */
-    fun chatWithImage(text: String, bitmap: Bitmap): Flow<MindlayerEvent> =
+    /** Send a text + bitmap message and return an [InferenceHandle]. */
+    fun chatWithImage(text: String, bitmap: Bitmap): InferenceHandle =
         client.chatWithImage(sessionId, text, bitmap)
 
-    /** Send a text + audio file message and stream events. */
-    fun chatWithAudio(text: String, audioFile: File): Flow<MindlayerEvent> =
+    /** Send a text + audio file message and return an [InferenceHandle]. */
+    fun chatWithAudio(text: String, audioFile: File): InferenceHandle =
         client.chatWithAudio(sessionId, text, audioFile)
 
     /** @see Mindlayer.chatOnce */

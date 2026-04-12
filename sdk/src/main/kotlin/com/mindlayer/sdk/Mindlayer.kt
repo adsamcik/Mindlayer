@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.os.ParcelFileDescriptor
 import com.mindlayer.EngineInfo
+import com.mindlayer.HistoryTurn
 import com.mindlayer.RequestMeta
 import com.mindlayer.ServiceStatus
 import com.mindlayer.SessionConfig
@@ -22,13 +23,15 @@ import java.util.UUID
  * ```
  * val mindlayer = Mindlayer.connect(context)
  * val sessionId = mindlayer.createSession { systemPrompt("You are helpful") }
- * mindlayer.chat(sessionId, "Hello!").collect { event ->
+ * val handle = mindlayer.chat(sessionId, "Hello!")
+ * handle.events.collect { event ->
  *     when (event) {
  *         is MindlayerEvent.TextDelta -> print(event.text)
  *         is MindlayerEvent.Done     -> println("\n${event.finishReason}")
  *         else -> { /* metrics, tool calls, … */ }
  *     }
  * }
+ * // To cancel: handle.cancel()
  * mindlayer.disconnect()
  * ```
  */
@@ -92,6 +95,10 @@ class Mindlayer private constructor(
     /**
      * Create a new inference session.
      *
+     * Uses a local-first saga: persist locally as CREATING, then create the
+     * remote session, then confirm locally as READY. If the remote call fails,
+     * the local CREATING record is cleaned up immediately.
+     *
      * @param configure optional DSL block to customise [SessionConfig].
      * @return the server-assigned session ID.
      */
@@ -99,8 +106,28 @@ class Mindlayer private constructor(
         configure: SessionConfigBuilder.() -> Unit = {},
     ): String {
         val config = SessionConfigBuilder().apply(configure).build()
-        val sessionId = connection.awaitConnected().createSession(config)
-        historyStore?.persistConversation(sessionId, config)
+
+        // 1. Persist locally as CREATING (survives process death)
+        val tentativeId = config.sessionId ?: java.util.UUID.randomUUID().toString()
+        val configWithId = if (config.sessionId == null) {
+            config.copy(sessionId = tentativeId)
+        } else {
+            config
+        }
+        historyStore?.prepareConversation(tentativeId, configWithId)
+
+        // 2. Create remote session
+        val sessionId = try {
+            connection.awaitConnected().createSession(configWithId)
+        } catch (e: Exception) {
+            // Remote creation failed — clean up local CREATING record
+            historyStore?.cleanupConversation(tentativeId)
+            throw e
+        }
+
+        // 3. Confirm local record
+        historyStore?.confirmConversation(sessionId)
+
         return sessionId
     }
 
@@ -125,15 +152,17 @@ class Mindlayer private constructor(
      * Send a text message and stream back inference events.
      *
      * Creates a reliable pipe, hands the write end to the service via AIDL,
-     * and returns a cold [Flow] that reads typed events from the read end.
+     * and returns an [InferenceHandle] that provides the [requestId], event
+     * [Flow], and a [cancel][InferenceHandle.cancel] function that reaches
+     * through to the service's native cancel.
      *
      * History persistence: the user turn is saved BEFORE IPC and the
      * assistant turn is marked COMPLETED only after the [MindlayerEvent.Done]
      * event.
      */
-    fun chat(sessionId: String, text: String): Flow<MindlayerEvent> {
+    fun chat(sessionId: String, text: String): InferenceHandle {
         val requestId = UUID.randomUUID().toString()
-        return startTrackedInference(
+        val flow = startTrackedInference(
             sessionId = sessionId,
             userText = text,
             meta = RequestMeta(
@@ -144,6 +173,7 @@ class Mindlayer private constructor(
             image = null,
             audio = null,
         )
+        return buildHandle(requestId, flow)
     }
 
     // -- Chat with image ------------------------------------------------------
@@ -155,10 +185,10 @@ class Mindlayer private constructor(
         sessionId: String,
         text: String,
         bitmap: Bitmap,
-    ): Flow<MindlayerEvent> {
+    ): InferenceHandle {
         val requestId = UUID.randomUUID().toString()
         val imageTransfer = MediaTransfer.fromBitmap(requestId, bitmap)
-        return startTrackedInference(
+        val flow = startTrackedInference(
             sessionId = sessionId,
             userText = text,
             meta = RequestMeta(
@@ -169,6 +199,7 @@ class Mindlayer private constructor(
             image = imageTransfer,
             audio = null,
         )
+        return buildHandle(requestId, flow)
     }
 
     // -- Chat with audio ------------------------------------------------------
@@ -180,10 +211,10 @@ class Mindlayer private constructor(
         sessionId: String,
         text: String,
         audioFile: File,
-    ): Flow<MindlayerEvent> {
+    ): InferenceHandle {
         val requestId = UUID.randomUUID().toString()
         val audioTransfer = MediaTransfer.fromAudioFile(requestId, audioFile)
-        return startTrackedInference(
+        val flow = startTrackedInference(
             sessionId = sessionId,
             userText = text,
             meta = RequestMeta(
@@ -194,6 +225,7 @@ class Mindlayer private constructor(
             image = null,
             audio = audioTransfer,
         )
+        return buildHandle(requestId, flow)
     }
 
     // -- Tool calling ---------------------------------------------------------
@@ -263,7 +295,7 @@ class Mindlayer private constructor(
         var result: String? = null
         val accumulator = StringBuilder()
 
-        chat(sessionId, text).collect { event ->
+        chat(sessionId, text).events.collect { event ->
             when (event) {
                 is MindlayerEvent.TextDelta -> accumulator.append(event.text)
                 is MindlayerEvent.Done -> {
@@ -300,7 +332,7 @@ class Mindlayer private constructor(
         var result: String? = null
         val accumulator = StringBuilder()
 
-        chatWithImage(sessionId, text, bitmap).collect { event ->
+        chatWithImage(sessionId, text, bitmap).events.collect { event ->
             when (event) {
                 is MindlayerEvent.TextDelta -> accumulator.append(event.text)
                 is MindlayerEvent.Done -> {
@@ -378,6 +410,22 @@ class Mindlayer private constructor(
     }
 
     // -- Internals ------------------------------------------------------------
+
+    /**
+     * Creates an [InferenceHandle] with a cancel callback that reaches
+     * through to the service's [IMindlayerService.cancelInference].
+     */
+    private fun buildHandle(requestId: String, flow: Flow<MindlayerEvent>): InferenceHandle {
+        return InferenceHandle(requestId, flow).also { handle ->
+            handle.setCancelCallback {
+                try {
+                    connection.awaitConnected().cancelInference(requestId)
+                } catch (_: Exception) {
+                    // Best-effort cancel — service may be disconnected
+                }
+            }
+        }
+    }
 
     /**
      * Wraps [startInference] with history persistence.
@@ -496,6 +544,7 @@ class SessionConfigBuilder {
     private var temperature: Float = 0.7f
     private var toolsJson: String? = null
     private var extraContextJson: String? = null
+    private var initialHistory: List<HistoryTurn>? = null
 
     fun sessionId(id: String) { sessionId = id }
     fun systemPrompt(prompt: String) { systemPrompt = prompt }
@@ -506,6 +555,7 @@ class SessionConfigBuilder {
     fun temperature(t: Float) { temperature = t }
     fun tools(json: String) { toolsJson = json }
     fun extraContext(json: String) { extraContextJson = json }
+    fun initialHistory(history: List<HistoryTurn>) { initialHistory = history }
 
     internal fun build(): SessionConfig = SessionConfig(
         sessionId = sessionId,
@@ -517,5 +567,6 @@ class SessionConfigBuilder {
         samplerTemperature = temperature,
         toolsJson = toolsJson,
         extraContextJson = extraContextJson,
+        initialHistory = initialHistory,
     )
 }
