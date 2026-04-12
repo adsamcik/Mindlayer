@@ -29,6 +29,14 @@ class MindlayerSession internal constructor(
     fun chatWithAudio(text: String, audioFile: File): Flow<MindlayerEvent> =
         client.chatWithAudio(sessionId, text, audioFile)
 
+    /** @see Mindlayer.chatOnce */
+    suspend fun chatOnce(text: String): String =
+        client.chatOnce(sessionId, text)
+
+    /** @see Mindlayer.chatWithImageOnce */
+    suspend fun chatWithImageOnce(text: String, bitmap: Bitmap): String =
+        client.chatWithImageOnce(sessionId, text, bitmap)
+
     /** Submit a tool result for continued inference. */
     suspend fun submitToolResult(
         requestId: String,
