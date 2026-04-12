@@ -18,7 +18,14 @@ data class ConversationEntity(
     val lastStableSeq: Int = 0,
     val createdAtMs: Long,
     val updatedAtMs: Long,
+    val state: String = ConversationState.READY,
 )
+
+/** Conversation lifecycle states. */
+object ConversationState {
+    const val CREATING = "CREATING"
+    const val READY = "READY"
+}
 
 @Entity(
     tableName = "turns",

@@ -1,6 +1,7 @@
 package com.mindlayer.sdk
 
 import android.util.Log
+import com.mindlayer.HistoryTurn
 import com.mindlayer.IMindlayerService
 import com.mindlayer.SessionConfig
 import com.mindlayer.sdk.db.TurnEntity
@@ -10,6 +11,7 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
+import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -81,7 +83,7 @@ class SessionRecoveryTest {
     // -- recoverSession with valid history ------------------------------------
 
     @Test
-    fun `recoverSession with valid history creates session and replays turns`() = runTest {
+    fun `recoverSession with valid history creates session with initialHistory`() = runTest {
         val turns = listOf(
             makeTurn("t1", TurnRole.USER, "Hello"),
             makeTurn("t2", TurnRole.ASSISTANT, "Hi there"),
@@ -99,10 +101,18 @@ class SessionRecoveryTest {
         assertEquals(0, result.cleanedTurnCount)
         assertNull(result.pendingUserText)
 
-        // Verify turns were replayed via AIDL
-        verify(exactly = 1) { mockService.replayTurn(newSessionId, "user", "Hello") }
-        verify(exactly = 1) { mockService.replayTurn(newSessionId, "model", "Hi there") }
-        verify(exactly = 1) { mockService.replayTurn(newSessionId, "user", "How are you?") }
+        // Verify history was passed via createSession config, not replayTurn
+        val configSlot = slot<SessionConfig>()
+        verify(exactly = 1) { mockService.createSession(capture(configSlot)) }
+        val history = configSlot.captured.initialHistory
+        assertNotNull(history)
+        assertEquals(3, history!!.size)
+        assertEquals(HistoryTurn("user", "Hello"), history[0])
+        assertEquals(HistoryTurn("model", "Hi there"), history[1])
+        assertEquals(HistoryTurn("user", "How are you?"), history[2])
+
+        // replayTurn should NOT be called
+        verify(exactly = 0) { mockService.replayTurn(any(), any(), any()) }
     }
 
     // -- recoverSession with no history ---------------------------------------
@@ -180,7 +190,7 @@ class SessionRecoveryTest {
     // -- Role mapping ---------------------------------------------------------
 
     @Test
-    fun `TOOL role maps to tool in replayTurn`() = runTest {
+    fun `TOOL role maps to tool in initialHistory`() = runTest {
         val turns = listOf(
             makeTurn("t1", TurnRole.TOOL, "tool output"),
         )
@@ -189,11 +199,16 @@ class SessionRecoveryTest {
 
         recovery.recoverSession(oldSessionId)
 
-        verify(exactly = 1) { mockService.replayTurn(newSessionId, "tool", "tool output") }
+        val configSlot = slot<SessionConfig>()
+        verify(exactly = 1) { mockService.createSession(capture(configSlot)) }
+        val history = configSlot.captured.initialHistory!!
+        assertEquals(1, history.size)
+        assertEquals("tool", history[0].role)
+        assertEquals("tool output", history[0].text)
     }
 
     @Test
-    fun `unknown role defaults to user in replayTurn`() = runTest {
+    fun `unknown role defaults to user in initialHistory`() = runTest {
         val turns = listOf(
             makeTurn("t1", "UNKNOWN_ROLE", "some text"),
         )
@@ -202,13 +217,18 @@ class SessionRecoveryTest {
 
         recovery.recoverSession(oldSessionId)
 
-        verify(exactly = 1) { mockService.replayTurn(newSessionId, "user", "some text") }
+        val configSlot = slot<SessionConfig>()
+        verify(exactly = 1) { mockService.createSession(capture(configSlot)) }
+        val history = configSlot.captured.initialHistory!!
+        assertEquals(1, history.size)
+        assertEquals("user", history[0].role)
+        assertEquals("some text", history[0].text)
     }
 
     // -- Null text content ----------------------------------------------------
 
     @Test
-    fun `replayTurn uses empty string when textContent is null`() = runTest {
+    fun `initialHistory uses empty string when textContent is null`() = runTest {
         val turns = listOf(
             makeTurn("t1", TurnRole.USER, null),
         )
@@ -217,7 +237,11 @@ class SessionRecoveryTest {
 
         recovery.recoverSession(oldSessionId)
 
-        verify(exactly = 1) { mockService.replayTurn(newSessionId, "user", "") }
+        val configSlot = slot<SessionConfig>()
+        verify(exactly = 1) { mockService.createSession(capture(configSlot)) }
+        val history = configSlot.captured.initialHistory!!
+        assertEquals(1, history.size)
+        assertEquals("", history[0].text)
     }
 
     // -- Empty turn list ------------------------------------------------------
@@ -229,6 +253,10 @@ class SessionRecoveryTest {
 
         val result = recovery.recoverSession(oldSessionId)!!
         assertEquals(0, result.replayedTurnCount)
+        // No initialHistory set when turns are empty
+        val configSlot = slot<SessionConfig>()
+        verify(exactly = 1) { mockService.createSession(capture(configSlot)) }
+        assertNull(configSlot.captured.initialHistory)
         verify(exactly = 0) { mockService.replayTurn(any(), any(), any()) }
     }
 
@@ -291,19 +319,38 @@ class SessionRecoveryTest {
 
         recovery.recoverSession(oldSessionId)
 
-        coVerify(exactly = 1) { mockConnection.awaitConnected() }
+        // Called twice: once for destroySession (best-effort), once for createSession
+        coVerify(atLeast = 1) { mockConnection.awaitConnected() }
     }
 
-    // -- replayTurn failure propagates ----------------------------------------
+    // -- destroySession best-effort before createSession -----------------------
 
-    @Test(expected = RuntimeException::class)
-    fun `recoverSession propagates exception from replayTurn`() = runTest {
-        val turns = listOf(makeTurn("t1", TurnRole.USER, "boom"))
+    @Test
+    fun `recoverSession calls destroySession best-effort before createSession`() = runTest {
+        val turns = listOf(makeTurn("t1", TurnRole.USER, "Hello"))
         stubReplayData(turns = turns, pendingUserTurn = null)
         coEvery { mockHistoryStore.cleanupInterruptedTurns(oldSessionId) } returns 0
-        every { mockService.replayTurn(any(), any(), any()) } throws RuntimeException("RPC failed")
 
         recovery.recoverSession(oldSessionId)
+
+        // destroySession is called before createSession
+        verify(exactly = 1) { mockService.destroySession(oldSessionId) }
+        verify(exactly = 1) { mockService.createSession(any()) }
+    }
+
+    @Test
+    fun `recoverSession continues when destroySession throws`() = runTest {
+        val turns = listOf(makeTurn("t1", TurnRole.USER, "Hello"))
+        stubReplayData(turns = turns, pendingUserTurn = null)
+        coEvery { mockHistoryStore.cleanupInterruptedTurns(oldSessionId) } returns 0
+        every { mockService.destroySession(any()) } throws RuntimeException("Session not found")
+
+        val result = recovery.recoverSession(oldSessionId)
+
+        assertNotNull(result)
+        assertEquals(newSessionId, result!!.newSessionId)
+        // createSession still called despite destroySession failure
+        verify(exactly = 1) { mockService.createSession(any()) }
     }
 
     // -- RecoveryResult data class equality -----------------------------------

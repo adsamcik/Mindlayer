@@ -132,26 +132,35 @@ class InferenceOrchestrator(
         sessionManager.shutdown()
     }
 
-    // ---- History replay ----------------------------------------------------
+    // ---- History replay (DEPRECATED) -----------------------------------------
 
     /**
      * Inject a completed turn into a session's conversation history without
-     * triggering inference. Used by the client SDK to replay persisted history
-     * after an OOM recovery.
+     * triggering inference.
+     *
+     * @deprecated Post-creation history injection is no longer supported by
+     *   LiteRT-LM (addHistory removed in 0.10.0). Use
+     *   [SessionConfig.initialHistory] / [ConversationConfig.initialMessages]
+     *   at session creation time instead. This method is retained only for
+     *   AIDL backward compatibility — it updates bookkeeping counters but
+     *   does NOT inject the turn into the LLM conversation context.
      *
      * @param sessionId the server-side session ID.
      * @param role "user" or "model".
      * @param text the turn's text content.
      */
+    @Deprecated(
+        message = "Use SessionConfig.initialHistory at session creation time. " +
+            "replayTurn only updates counters — turns are NOT injected into conversation context.",
+        replaceWith = ReplaceWith("SessionConfig.initialHistory"),
+    )
     fun replayTurn(sessionId: String, role: String, text: String) {
         val handle = sessionManager.getSession(sessionId)
             ?: throw IllegalArgumentException("Unknown session: $sessionId")
 
-        // addHistory() was removed in litertlm 0.10.0.
-        // History replay now requires ConversationConfig.initialMessages at
-        // creation time — post-creation injection is no longer supported.
-        MindlayerLog.w(TAG, "replayTurn: addHistory removed in litertlm 0.10.0; " +
-            "turn tracked but not injected into conversation context", sessionId = sessionId)
+        MindlayerLog.w(TAG, "replayTurn: DEPRECATED — addHistory removed in litertlm 0.10.0; " +
+            "turn tracked but not injected into conversation context. " +
+            "Use SessionConfig.initialHistory instead.", sessionId = sessionId)
         handle.turnCount++
         handle.estimatedTokens += (text.length / 4).coerceAtLeast(1)
         handle.recordAccess()

@@ -6,10 +6,12 @@ import com.mindlayer.service.logging.MindlayerLog
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.OpenApiTool
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.ToolProvider
 import com.google.ai.edge.litertlm.tool
+import com.mindlayer.HistoryTurn
 import com.mindlayer.SessionConfig
 import com.mindlayer.SessionInfo
 import kotlinx.coroutines.sync.Mutex
@@ -128,11 +130,22 @@ class SessionManager(
 
         val hasTools = !effectiveTools.isNullOrEmpty()
 
+        // Map client-supplied history turns to LiteRT-LM Message objects
+        val initialMessages = config.initialHistory?.map { turn ->
+            val contents = Contents.of(turn.text)
+            when (turn.role) {
+                "model" -> Message.model(contents)
+                "tool" -> Message.tool(contents)
+                else -> Message.user(contents)
+            }
+        } ?: emptyList()
+
         val conversationConfig = ConversationConfig(
             systemInstruction = effectiveSystemPrompt?.let { Contents.of(it) },
             samplerConfig = samplerConfig,
             tools = effectiveTools ?: emptyList(),
             automaticToolCalling = !hasTools,
+            initialMessages = initialMessages,
         )
 
         val conversation = engine.createConversation(conversationConfig)

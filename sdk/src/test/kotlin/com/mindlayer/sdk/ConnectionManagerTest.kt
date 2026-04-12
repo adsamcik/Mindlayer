@@ -17,6 +17,7 @@ import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
@@ -184,6 +185,57 @@ class ConnectionManagerTest {
         deliverBinder()
         val result = deferred.await()
         assertNotNull(result)
+    }
+
+    @Test
+    fun `awaitConnected retries when binder dies between state and read`() = runTest {
+        mgr.connect(mockContext)
+
+        // Set up a binder whose binderRef will be nulled right after CONNECTED
+        val recipientSlot = slot<IBinder.DeathRecipient>()
+        val rawBinder1 = mockk<IBinder>(relaxed = true) {
+            every { linkToDeath(capture(recipientSlot), any()) } just Runs
+            every { queryLocalInterface(any()) } returns null
+        }
+
+        val deferred = async { mgr.awaitConnected() }
+
+        // Deliver binder → CONNECTED, then immediately kill it
+        connSlot.captured.onServiceConnected(stubComponent(), rawBinder1)
+        // Simulate binder death right after CONNECTED — triggers RECOVERING
+        recipientSlot.captured.binderDied()
+
+        // Still active because binder was nulled, loop retries
+        assertTrue(deferred.isActive)
+
+        // Deliver a fresh binder → CONNECTED again
+        deliverBinder()
+        val result = deferred.await()
+        assertNotNull(result)
+    }
+
+    @Test
+    fun `awaitConnected times out when service never connects`() = runTest {
+        mgr.connect(mockContext)
+
+        assertThrows(TimeoutCancellationException::class.java) {
+            @Suppress("BlockingMethodInNonBlockingContext")
+            kotlinx.coroutines.runBlocking {
+                mgr.awaitConnected(timeoutMs = 100L)
+            }
+        }
+    }
+
+    @Test
+    fun `awaitConnected with custom timeout`() = runTest {
+        mgr.connect(mockContext)
+
+        assertThrows(TimeoutCancellationException::class.java) {
+            @Suppress("BlockingMethodInNonBlockingContext")
+            kotlinx.coroutines.runBlocking {
+                mgr.awaitConnected(timeoutMs = 50L)
+            }
+        }
     }
 
     // -- StateFlow emissions --------------------------------------------------

@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.mindlayer.HistoryTurn
 import com.mindlayer.IMindlayerService
 import com.mindlayer.SessionConfig
 import com.mindlayer.sdk.ConnectionManager
@@ -196,24 +197,24 @@ class OomRecoveryFlowTest {
         assertEquals(sessionId, result.newSessionId)
         assertEquals(10, result.replayedTurnCount) // 5 pairs = 10 turns
 
-        // Verify createSession was called
-        verify(exactly = 1) { mockService.createSession(any()) }
-
-        // Verify replayTurn called 10 times (5 user + 5 assistant)
-        verify(exactly = 10) { mockService.replayTurn(any(), any(), any()) }
+        // Verify createSession was called with initialHistory
+        val configSlot = slot<SessionConfig>()
+        verify(exactly = 1) { mockService.createSession(capture(configSlot)) }
+        val history = configSlot.captured.initialHistory
+        assertNotNull(history)
+        assertEquals(10, history!!.size)
 
         // Verify roles are correct: user turns use "user", assistant turns use "model"
-        val roleSlot = mutableListOf<String>()
-        val textSlot = mutableListOf<String>()
-        verify(exactly = 10) {
-            mockService.replayTurn(any(), capture(roleSlot), capture(textSlot))
-        }
-
-        // Odd-indexed captures are assistant ("model"), even-indexed are "user"
         for (i in 0 until 10) {
             val expectedRole = if (i % 2 == 0) "user" else "model"
-            assertEquals("Turn $i role", expectedRole, roleSlot[i])
+            assertEquals("Turn $i role", expectedRole, history[i].role)
         }
+
+        // replayTurn should NOT be called — history is injected at creation time
+        verify(exactly = 0) { mockService.replayTurn(any(), any(), any()) }
+
+        // destroySession should be called best-effort before createSession
+        verify(exactly = 1) { mockService.destroySession(sessionId) }
     }
 
     @Test
@@ -285,7 +286,14 @@ class OomRecoveryFlowTest {
         // Only the completed user turn is replayed
         assertEquals(1, result.replayedTurnCount)
 
-        verify(exactly = 1) { mockService.replayTurn(any(), eq("user"), eq("Hello")) }
+        val configSlot = slot<SessionConfig>()
+        verify(exactly = 1) { mockService.createSession(capture(configSlot)) }
+        val history = configSlot.captured.initialHistory!!
+        assertEquals(1, history.size)
+        assertEquals(HistoryTurn("user", "Hello"), history[0])
+
+        // replayTurn should NOT be called
+        verify(exactly = 0) { mockService.replayTurn(any(), any(), any()) }
     }
 
     @Test
@@ -324,10 +332,15 @@ class OomRecoveryFlowTest {
             result.replayedTurnCount > 0,
         )
 
-        // Verify replayTurn called the same number of times
-        verify(exactly = result.replayedTurnCount) {
-            mockService.replayTurn(any(), any(), any())
-        }
+        // Verify initialHistory size matches replayed count
+        val configSlot = slot<SessionConfig>()
+        verify(exactly = 1) { mockService.createSession(capture(configSlot)) }
+        val history = configSlot.captured.initialHistory
+        assertNotNull(history)
+        assertEquals(result.replayedTurnCount, history!!.size)
+
+        // replayTurn should NOT be called
+        verify(exactly = 0) { mockService.replayTurn(any(), any(), any()) }
     }
 
     @Test
@@ -369,28 +382,20 @@ class OomRecoveryFlowTest {
     // === Edge-case tests ===
 
     @Test
-    fun `recovery_replayFailure_abortsCleanly`() = runTest {
+    fun `recovery_destroySession_bestEffort`() = runTest {
         persistConversation()
         for (i in 0 until 5) {
             persistTurnPair(i, "User message $i", "Assistant reply $i")
         }
 
-        // Make replayTurn throw on the 3rd invocation
-        var replayCount = 0
-        every { mockService.replayTurn(any(), any(), any()) } answers {
-            replayCount++
-            if (replayCount == 3) throw RuntimeException("Service crash on replay")
-        }
+        // Make destroySession throw — recovery should continue
+        every { mockService.destroySession(any()) } throws RuntimeException("Session not found")
 
-        var caught: Exception? = null
-        try {
-            recovery.recoverSession(sessionId)
-        } catch (e: RuntimeException) {
-            caught = e
-        }
+        val result = recovery.recoverSession(sessionId)
 
-        assertNotNull("recoverSession should propagate replay failure", caught)
-        assertEquals("Service crash on replay", caught!!.message)
+        assertNotNull("recoverSession should succeed despite destroySession failure", result)
+        assertEquals(sessionId, result!!.newSessionId)
+        verify(exactly = 1) { mockService.createSession(any()) }
     }
 
     @Test
@@ -404,7 +409,7 @@ class OomRecoveryFlowTest {
         assertEquals(0, result!!.replayedTurnCount)
         assertEquals(sessionId, result.newSessionId)
 
-        // Session was created but no turns replayed
+        // Session was created but no turns replayed — initialHistory should be null
         verify(exactly = 1) { mockService.createSession(any()) }
         verify(exactly = 0) { mockService.replayTurn(any(), any(), any()) }
 
@@ -412,6 +417,7 @@ class OomRecoveryFlowTest {
         val configSlot = slot<SessionConfig>()
         verify { mockService.createSession(capture(configSlot)) }
         assertEquals("You are a helpful assistant.", configSlot.captured.systemPrompt)
+        assertNull(configSlot.captured.initialHistory)
     }
 
     @Test
@@ -426,7 +432,9 @@ class OomRecoveryFlowTest {
         assertNotNull(result2)
         assertEquals(result1!!.originalSessionId, result2!!.originalSessionId)
 
-        // Both calls should create a session and replay successfully
+        // Both calls should create a session (with initialHistory) and succeed
         verify(exactly = 2) { mockService.createSession(any()) }
+        // replayTurn should never be called
+        verify(exactly = 0) { mockService.replayTurn(any(), any(), any()) }
     }
 }
