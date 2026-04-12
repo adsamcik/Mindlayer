@@ -18,6 +18,7 @@ import com.mindlayer.EngineInfo
 import com.mindlayer.ToolResult
 import com.mindlayer.sdk.db.MindlayerDatabase
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
@@ -27,10 +28,12 @@ import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -87,6 +90,7 @@ class MindlayerApiTest {
             every { getService() } returns mockService
             every { requireService() } returns mockService
             every { state } returns MutableStateFlow(ConnectionState.CONNECTED)
+            coEvery { awaitConnected(any()) } returns mockService
             coEvery { awaitConnected() } returns mockService
         }
 
@@ -253,10 +257,10 @@ class MindlayerApiTest {
         }
 
         // Calling chat should create a pipe and pass write end to infer()
-        val flow = mindlayer.chat("sess-1", "Hello")
+        val handle = mindlayer.chat("sess-1", "Hello")
 
         // Collect — will hit EOF immediately since mock closes write end
-        val events = flow.toList()
+        val events = handle.events.toList()
 
         // Verify infer was called with a PFD
         verify(exactly = 1) { mockService.infer(any(), any(), any(), any()) }
@@ -274,8 +278,8 @@ class MindlayerApiTest {
             pfd.close()
         }
 
-        val flow = mindlayer.chat("sess-meta", "Tell me a joke")
-        flow.toList()
+        val handle = mindlayer.chat("sess-meta", "Tell me a joke")
+        handle.events.toList()
 
         val meta = metaSlot.captured
         assertEquals("sess-meta", meta.sessionId)
@@ -294,7 +298,7 @@ class MindlayerApiTest {
             arg<ParcelFileDescriptor>(3).close()
         }
 
-        mindlayer.chat("sess-1", "No media").toList()
+        mindlayer.chat("sess-1", "No media").events.toList()
 
         // infer called with null for image and audio
         verify(exactly = 1) {
@@ -318,7 +322,7 @@ class MindlayerApiTest {
 
         val bitmap = Bitmap.createBitmap(100, 80, Bitmap.Config.ARGB_8888)
         try {
-            mindlayer.chatWithImage("sess-img", "Describe this", bitmap).toList()
+            mindlayer.chatWithImage("sess-img", "Describe this", bitmap).events.toList()
 
             assertTrue(imageSlot.isCaptured)
             val img = imageSlot.captured
@@ -342,7 +346,7 @@ class MindlayerApiTest {
 
         val bitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
         try {
-            mindlayer.chatWithImage("sess-img2", "What is this?", bitmap).toList()
+            mindlayer.chatWithImage("sess-img2", "What is this?", bitmap).events.toList()
 
             assertEquals("What is this?", metaSlot.captured.textContent)
             assertEquals("sess-img2", metaSlot.captured.sessionId)
@@ -370,7 +374,7 @@ class MindlayerApiTest {
         val tempFile = File.createTempFile("test_audio", ".wav")
         try {
             tempFile.writeBytes(ByteArray(100) { 0x42 })
-            mindlayer.chatWithAudio("sess-aud", "Transcribe this", tempFile).toList()
+            mindlayer.chatWithAudio("sess-aud", "Transcribe this", tempFile).events.toList()
 
             assertTrue(audioSlot.isCaptured)
             val audio = audioSlot.captured
@@ -395,7 +399,7 @@ class MindlayerApiTest {
         val tempFile = File.createTempFile("test_audio2", ".mp3")
         try {
             tempFile.writeBytes(ByteArray(50))
-            mindlayer.chatWithAudio("sess-aud2", "What was said?", tempFile).toList()
+            mindlayer.chatWithAudio("sess-aud2", "What was said?", tempFile).events.toList()
 
             assertEquals("What was said?", metaSlot.captured.textContent)
             assertEquals("sess-aud2", metaSlot.captured.sessionId)
@@ -426,7 +430,7 @@ class MindlayerApiTest {
         }
 
         val disconnectedMl = buildMindlayer(disconnectedConn, null)
-        disconnectedMl.chat("sess-x", "Hello").toList()
+        disconnectedMl.chat("sess-x", "Hello").events.toList()
     }
 
     @Test(expected = RemoteException::class)
@@ -435,7 +439,7 @@ class MindlayerApiTest {
             mockService.infer(any(), any(), any(), any())
         } throws RemoteException("Service crashed")
 
-        mindlayer.chat("sess-err", "Boom").toList()
+        mindlayer.chat("sess-err", "Boom").events.toList()
     }
 
     @Test
@@ -523,7 +527,7 @@ class MindlayerApiTest {
             arg<ParcelFileDescriptor>(3).close()
         }
 
-        session.chat("Delegated message").toList()
+        session.chat("Delegated message").events.toList()
 
         assertEquals("sess-wrapper", metaSlot.captured.sessionId)
         assertEquals("Delegated message", metaSlot.captured.textContent)
@@ -547,5 +551,60 @@ class MindlayerApiTest {
         assertEquals(ConnectionState.CONNECTING, ml.connectionState.value)
         stateFlow.value = ConnectionState.CONNECTED
         assertEquals(ConnectionState.CONNECTED, ml.connectionState.value)
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  InferenceHandle
+    // ═════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `chat_returns_InferenceHandle_with_requestId`() = runTest {
+        every {
+            mockService.infer(any(), any(), any(), any())
+        } answers {
+            arg<ParcelFileDescriptor>(3).close()
+        }
+
+        val handle = mindlayer.chat("sess-handle", "Hello")
+        assertNotNull(handle.requestId)
+        assertTrue(handle.requestId.isNotEmpty())
+        assertFalse(handle.isCancelled)
+
+        // Verify we can still collect events through the handle
+        handle.events.toList()
+    }
+
+    @Test
+    fun `InferenceHandle_exposes_requestId_immediately`() {
+        val handle = InferenceHandle("test-req-id", flowOf())
+        assertEquals("test-req-id", handle.requestId)
+        assertFalse(handle.isCancelled)
+    }
+
+    @Test
+    fun `InferenceHandle_cancel_is_idempotent`() = runTest {
+        var cancelCount = 0
+        val handle = InferenceHandle("req", flowOf())
+        handle.setCancelCallback { cancelCount++ }
+        handle.cancel()
+        handle.cancel()
+        handle.cancel()
+        assertEquals(1, cancelCount)
+        assertTrue(handle.isCancelled)
+    }
+
+    @Test
+    fun `InferenceHandle_cancel_calls_cancelInference_on_service`() = runTest {
+        every {
+            mockService.infer(any(), any(), any(), any())
+        } answers {
+            arg<ParcelFileDescriptor>(3).close()
+        }
+
+        val handle = mindlayer.chat("sess-cancel", "Cancel me")
+        handle.cancel()
+
+        assertTrue(handle.isCancelled)
+        coVerify(exactly = 1) { mockService.cancelInference(handle.requestId) }
     }
 }
