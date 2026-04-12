@@ -72,6 +72,21 @@ class Mindlayer private constructor(
         connection.disconnect()
     }
 
+    // -- Prewarm --------------------------------------------------------------
+
+    /**
+     * Pre-warms the LLM engine in the background. Call this early (e.g., when
+     * scan screen opens) so the first [createSession] doesn't pay the 5-10s
+     * init cost. Safe to call multiple times — subsequent calls are no-ops if
+     * the engine is already loaded.
+     *
+     * @param backend the preferred backend to initialize ("GPU", "CPU", "NPU").
+     */
+    suspend fun prewarm(backend: String = "GPU") {
+        val service = connection.awaitConnected()
+        service.prewarm(backend)
+    }
+
     // -- Session management ---------------------------------------------------
 
     /**

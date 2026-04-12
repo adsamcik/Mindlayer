@@ -16,6 +16,10 @@ import com.mindlayer.service.engine.InferenceOrchestrator
 import com.mindlayer.service.engine.MemoryBudget
 import com.mindlayer.service.engine.ThermalMonitor
 import com.mindlayer.service.logging.DiagnosticExporter
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.File
 
@@ -31,6 +35,8 @@ class ServiceBinder(
     private val thermalMonitor: ThermalMonitor,
     private val memoryBudget: MemoryBudget,
 ) : IMindlayerService.Stub() {
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     companion object {
         private const val TAG = "ServiceBinder"
@@ -89,6 +95,22 @@ class ServiceBinder(
     override fun replayTurn(sessionId: String, role: String, text: String) {
         MindlayerLog.d(TAG, "replayTurn: session=$sessionId, role=$role", sessionId = sessionId)
         orchestrator.replayTurn(sessionId, role, text)
+    }
+
+    // ---- Prewarm -----------------------------------------------------------
+
+    override fun prewarm(backend: String?) {
+        MindlayerLog.d(TAG, "prewarm: backend=${backend ?: "GPU"}")
+        scope.launch {
+            try {
+                engineManager.initialize(
+                    preferredBackend = backend ?: "GPU",
+                    maxTokens = 4096,
+                )
+            } catch (e: Exception) {
+                MindlayerLog.w(TAG, "Prewarm failed: ${e.message}")
+            }
+        }
     }
 
     // ---- Status ------------------------------------------------------------
