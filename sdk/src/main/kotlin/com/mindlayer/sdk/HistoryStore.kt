@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.mindlayer.SessionConfig
 import com.mindlayer.sdk.db.ConversationEntity
+import com.mindlayer.sdk.db.ConversationState
 import com.mindlayer.sdk.db.MindlayerDatabase
 import com.mindlayer.sdk.db.TurnEntity
 import com.mindlayer.sdk.db.TurnRole
@@ -63,6 +64,58 @@ class HistoryStore internal constructor(context: Context) {
         )
     }
 
+    /**
+     * Persist a conversation as CREATING before the remote session is created.
+     * This ensures we have a local record even if the process dies mid-creation.
+     */
+    suspend fun prepareConversation(sessionId: String, config: SessionConfig) {
+        val samplerJson = buildJsonObject {
+            put("topK", config.samplerTopK)
+            put("topP", config.samplerTopP)
+            put("temperature", config.samplerTemperature)
+        }.toString()
+
+        val now = System.currentTimeMillis()
+        conversationDao.upsert(
+            ConversationEntity(
+                conversationId = sessionId,
+                systemPrompt = config.systemPrompt,
+                backend = config.backend,
+                maxTokens = config.maxTokens,
+                samplerConfigJson = samplerJson,
+                toolsJson = config.toolsJson,
+                extraContextJson = config.extraContextJson,
+                createdAtMs = now,
+                updatedAtMs = now,
+                state = ConversationState.CREATING,
+            ),
+        )
+    }
+
+    /**
+     * Mark a CREATING conversation as READY after successful remote session creation.
+     */
+    suspend fun confirmConversation(sessionId: String) {
+        conversationDao.updateState(sessionId, ConversationState.READY)
+    }
+
+    /** Remove a specific conversation (used when remote creation fails). */
+    suspend fun cleanupConversation(sessionId: String) {
+        conversationDao.delete(sessionId)
+    }
+
+    /**
+     * Clean up orphaned CREATING conversations from previous crashes.
+     * Call on SDK initialization.
+     */
+    suspend fun cleanupOrphanedConversations(): Int {
+        val deleted = conversationDao.deleteOrphaned()
+        if (deleted > 0) {
+            Log.i(TAG, "Cleaned up $deleted orphaned CREATING conversations")
+        }
+        return deleted
+    }
+
     // -- Turn persistence -----------------------------------------------------
 
     /**
@@ -76,15 +129,14 @@ class HistoryStore internal constructor(context: Context) {
         sessionId: String,
         text: String,
     ): String {
-        val seq = turnDao.nextSeq(sessionId)
         val turnId = UUID.randomUUID().toString()
         val tokens = estimateTokens(text)
 
-        turnDao.upsert(
+        turnDao.insertWithAutoSeq(
             TurnEntity(
                 turnId = turnId,
                 conversationId = sessionId,
-                seq = seq,
+                seq = 0, // placeholder — overwritten by insertWithAutoSeq
                 role = TurnRole.USER,
                 state = TurnState.PENDING,
                 textContent = text,
@@ -101,14 +153,13 @@ class HistoryStore internal constructor(context: Context) {
      * @return the generated turn ID.
      */
     suspend fun beginAssistantTurn(sessionId: String): String {
-        val seq = turnDao.nextSeq(sessionId)
         val turnId = UUID.randomUUID().toString()
 
-        turnDao.upsert(
+        turnDao.insertWithAutoSeq(
             TurnEntity(
                 turnId = turnId,
                 conversationId = sessionId,
-                seq = seq,
+                seq = 0, // placeholder — overwritten by insertWithAutoSeq
                 role = TurnRole.ASSISTANT,
                 state = TurnState.STREAMING,
                 textContent = null,
