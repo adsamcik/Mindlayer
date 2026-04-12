@@ -245,6 +245,138 @@ class Mindlayer private constructor(
     fun session(sessionId: String): MindlayerSession =
         MindlayerSession(this, sessionId)
 
+    // -- One-shot convenience ------------------------------------------------
+
+    /**
+     * Send a text message and return the complete response text.
+     *
+     * Collects the streaming [chat] flow to completion and returns the
+     * accumulated text. Throws [MindlayerException] on service errors.
+     *
+     * @throws MindlayerException if the service reports an error or sends
+     *   an unexpected [MindlayerEvent.ToolCall] (tool calling is not
+     *   supported in one-shot mode).
+     * @throws IllegalStateException if the stream ends without a terminal
+     *   [MindlayerEvent.Done] event.
+     */
+    suspend fun chatOnce(sessionId: String, text: String): String {
+        var result: String? = null
+        val accumulator = StringBuilder()
+
+        chat(sessionId, text).collect { event ->
+            when (event) {
+                is MindlayerEvent.TextDelta -> accumulator.append(event.text)
+                is MindlayerEvent.Done -> {
+                    result = event.fullText ?: accumulator.toString()
+                }
+                is MindlayerEvent.Error -> throw MindlayerException(
+                    message = event.message,
+                    code = event.code,
+                )
+                is MindlayerEvent.ToolCall -> throw MindlayerException(
+                    message = "Tool calls are not supported in one-shot mode. " +
+                        "Use the streaming chat() API with a ToolCall handler instead.",
+                    code = "UNSUPPORTED_TOOL_CALL",
+                )
+                else -> { /* Started, Metrics — ignored */ }
+            }
+        }
+
+        return result ?: throw IllegalStateException(
+            "Inference stream ended without a Done event"
+        )
+    }
+
+    /**
+     * Send a text + image message and return the complete response text.
+     *
+     * @see chatOnce for error semantics.
+     */
+    suspend fun chatWithImageOnce(
+        sessionId: String,
+        text: String,
+        bitmap: Bitmap,
+    ): String {
+        var result: String? = null
+        val accumulator = StringBuilder()
+
+        chatWithImage(sessionId, text, bitmap).collect { event ->
+            when (event) {
+                is MindlayerEvent.TextDelta -> accumulator.append(event.text)
+                is MindlayerEvent.Done -> {
+                    result = event.fullText ?: accumulator.toString()
+                }
+                is MindlayerEvent.Error -> throw MindlayerException(
+                    message = event.message,
+                    code = event.code,
+                )
+                is MindlayerEvent.ToolCall -> throw MindlayerException(
+                    message = "Tool calls are not supported in one-shot mode.",
+                    code = "UNSUPPORTED_TOOL_CALL",
+                )
+                else -> {}
+            }
+        }
+
+        return result ?: throw IllegalStateException(
+            "Inference stream ended without a Done event"
+        )
+    }
+
+    /**
+     * Stateless one-shot generation: creates a temporary session, sends
+     * the prompt, collects the full response, and destroys the session.
+     *
+     * Use this when each inference is independent (no conversation
+     * context needed). Session cleanup is best-effort — a service crash
+     * during cleanup will not mask the successful response.
+     *
+     * @param text the prompt to send.
+     * @param configure optional DSL block to customise session parameters
+     *   (temperature, topK, maxTokens, systemPrompt, etc.).
+     * @return the complete generated text.
+     * @throws MindlayerException on service errors.
+     */
+    suspend fun generate(
+        text: String,
+        configure: SessionConfigBuilder.() -> Unit = {},
+    ): String {
+        val sessionId = createSession(configure)
+        return try {
+            chatOnce(sessionId, text)
+        } finally {
+            // Best-effort cleanup — don't mask a successful result or
+            // a meaningful exception if the service has disconnected.
+            try {
+                destroySession(sessionId)
+            } catch (_: Exception) {
+                // Session will be cleaned up server-side on timeout
+            }
+        }
+    }
+
+    /**
+     * Stateless one-shot image + text generation.
+     *
+     * @see generate for lifecycle semantics.
+     */
+    suspend fun generateWithImage(
+        text: String,
+        bitmap: Bitmap,
+        configure: SessionConfigBuilder.() -> Unit = {},
+    ): String {
+        val sessionId = createSession(configure)
+        return try {
+            chatWithImageOnce(sessionId, text, bitmap)
+        } finally {
+            try {
+                destroySession(sessionId)
+            } catch (_: Exception) {
+                // Best-effort cleanup
+            }
+        }
+    }
+
     // -- Internals ------------------------------------------------------------
 
     /**
