@@ -169,7 +169,7 @@ class TokenStreamReaderTest {
             fullText = event.payload["full_text"]?.jsonPrimitive?.contentOrNull,
             seq = event.seq,
         )
-        else -> MindlayerEvent.TextDelta(text = "", seq = event.seq)
+        else -> MindlayerEvent.Unknown(type = event.type, seq = event.seq)
     }
 
     // =========================================================================
@@ -322,13 +322,13 @@ class TokenStreamReaderTest {
     // =========================================================================
 
     @Test
-    fun `unknown event type defaults to TextDelta with empty text`() {
+    fun `unknown event type returns Unknown event`() {
         val event = StreamEvent(
             seq = 20, type = "some_future_type", tsMs = 0,
             payload = buildJsonObject { put("data", "whatever") },
         )
-        val result = mapEvent(event) as MindlayerEvent.TextDelta
-        assertEquals("", result.text)
+        val result = mapEvent(event) as MindlayerEvent.Unknown
+        assertEquals("some_future_type", result.type)
         assertEquals(20L, result.seq)
     }
 

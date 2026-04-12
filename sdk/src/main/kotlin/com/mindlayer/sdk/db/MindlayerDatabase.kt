@@ -4,10 +4,12 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [ConversationEntity::class, TurnEntity::class, TurnPartEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class MindlayerDatabase : RoomDatabase() {
@@ -21,6 +23,12 @@ abstract class MindlayerDatabase : RoomDatabase() {
         @Volatile
         private var instance: MindlayerDatabase? = null
 
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE conversations ADD COLUMN state TEXT NOT NULL DEFAULT 'READY'")
+            }
+        }
+
         fun getInstance(context: Context): MindlayerDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -28,6 +36,7 @@ abstract class MindlayerDatabase : RoomDatabase() {
                     MindlayerDatabase::class.java,
                     DB_NAME,
                 )
+                    .addMigrations(MIGRATION_1_2)
                     .fallbackToDestructiveMigrationFrom(1)
                     .build()
                     .also { instance = it }

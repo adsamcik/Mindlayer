@@ -41,6 +41,7 @@ sealed class MindlayerEvent {
         val fullText: String?,
         val seq: Long,
     ) : MindlayerEvent()
+    data class Unknown(val type: String, val seq: Long) : MindlayerEvent()
 }
 
 /**
@@ -174,6 +175,6 @@ object TokenStreamReader {
             seq = event.seq,
         )
 
-        else -> MindlayerEvent.TextDelta(text = "", seq = event.seq)
+        else -> MindlayerEvent.Unknown(type = event.type, seq = event.seq)
     }
 }

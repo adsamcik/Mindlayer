@@ -28,10 +28,15 @@ class TypesTest {
         assertEquals(0.7f, cfg.samplerTemperature, 0.001f)
         assertNull(cfg.toolsJson)
         assertNull(cfg.extraContextJson)
+        assertNull(cfg.initialHistory)
     }
 
     @Test
     fun `SessionConfig with custom values`() {
+        val history = listOf(
+            HistoryTurn("user", "Hello"),
+            HistoryTurn("model", "Hi"),
+        )
         val cfg = SessionConfig(
             sessionId = "s1",
             systemPrompt = "You are helpful",
@@ -42,6 +47,7 @@ class TypesTest {
             samplerTemperature = 0.5f,
             toolsJson = """{"tools":[]}""",
             extraContextJson = """{"ctx":"val"}""",
+            initialHistory = history,
         )
         assertEquals("s1", cfg.sessionId)
         assertEquals("You are helpful", cfg.systemPrompt)
@@ -52,6 +58,7 @@ class TypesTest {
         assertEquals(0.5f, cfg.samplerTemperature, 0.001f)
         assertEquals("""{"tools":[]}""", cfg.toolsJson)
         assertEquals("""{"ctx":"val"}""", cfg.extraContextJson)
+        assertEquals(history, cfg.initialHistory)
     }
 
     @Test
@@ -249,6 +256,38 @@ class TypesTest {
         val copied = original.copy(backend = "CPU")
         assertEquals("/m", copied.modelPath)
         assertEquals("CPU", copied.backend)
+    }
+
+    // ── HistoryTurn ─────────────────────────────────────────────────────
+
+    @Test
+    fun `HistoryTurn construction`() {
+        val ht = HistoryTurn(role = "user", text = "Hello world")
+        assertEquals("user", ht.role)
+        assertEquals("Hello world", ht.text)
+    }
+
+    @Test
+    fun `HistoryTurn equals and hashCode`() {
+        val a = HistoryTurn("model", "response text")
+        val b = HistoryTurn("model", "response text")
+        assertEquals(a, b)
+        assertEquals(a.hashCode(), b.hashCode())
+    }
+
+    @Test
+    fun `HistoryTurn copy preserves unchanged fields`() {
+        val original = HistoryTurn("user", "hello")
+        val copied = original.copy(role = "model")
+        assertEquals("model", copied.role)
+        assertEquals("hello", copied.text)
+    }
+
+    @Test
+    fun `HistoryTurn tool role`() {
+        val ht = HistoryTurn(role = "tool", text = """{"result":"42"}""")
+        assertEquals("tool", ht.role)
+        assertEquals("""{"result":"42"}""", ht.text)
     }
 
     // ── SessionInfo ──────────────────────────────────────────────────────

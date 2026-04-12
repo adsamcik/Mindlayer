@@ -5,6 +5,12 @@ import android.os.ParcelFileDescriptor
 import kotlinx.parcelize.Parcelize
 
 @Parcelize
+data class HistoryTurn(
+    val role: String,   // "user" | "model" | "tool"
+    val text: String,
+) : Parcelable
+
+@Parcelize
 data class SessionConfig(
     val sessionId: String? = null,
     val systemPrompt: String? = null,
@@ -15,6 +21,7 @@ data class SessionConfig(
     val samplerTemperature: Float = 0.7f,
     val toolsJson: String? = null,
     val extraContextJson: String? = null,
+    val initialHistory: List<HistoryTurn>? = null,
 ) : Parcelable
 
 @Parcelize

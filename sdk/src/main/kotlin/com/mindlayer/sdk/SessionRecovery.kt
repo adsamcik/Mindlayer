@@ -1,6 +1,7 @@
 package com.mindlayer.sdk
 
 import android.util.Log
+import com.mindlayer.HistoryTurn
 import com.mindlayer.sdk.db.TurnRole
 
 /**
@@ -53,7 +54,23 @@ class SessionRecovery internal constructor(
             return null
         }
 
-        // 3. Create a fresh server session seeded with history
+        // 3. Build history turns for session creation
+        val historyTurns = replay.turns.map { turn ->
+            HistoryTurn(
+                role = when (turn.role) {
+                    TurnRole.USER -> "user"
+                    TurnRole.ASSISTANT -> "model"
+                    TurnRole.TOOL -> "tool"
+                    else -> "user"
+                },
+                text = turn.textContent ?: "",
+            )
+        }
+
+        // Destroy old session (best-effort) before creating replacement
+        try { mindlayer.connection.awaitConnected().destroySession(sessionId) } catch (_: Exception) {}
+
+        // 4. Create a fresh server session seeded with history via initialMessages
         val config = SessionConfigBuilder().apply {
             sessionId(sessionId)
             replay.config.systemPrompt?.let { systemPrompt(it) }
@@ -64,25 +81,13 @@ class SessionRecovery internal constructor(
             temperature(replay.config.samplerTemperature)
             replay.config.toolsJson?.let { tools(it) }
             replay.config.extraContextJson?.let { extraContext(it) }
+            if (historyTurns.isNotEmpty()) {
+                initialHistory(historyTurns)
+            }
         }.build()
 
         val newSessionId = mindlayer.connection.awaitConnected().createSession(config)
-
-        // 4. Replay completed turns as initial context
-        val service = mindlayer.connection.requireService()
-        for (turn in replay.turns) {
-            val role = when (turn.role) {
-                TurnRole.USER -> "user"
-                TurnRole.ASSISTANT -> "model"
-                TurnRole.TOOL -> "tool"
-                else -> "user"
-            }
-            service.replayTurn(
-                newSessionId,
-                role,
-                turn.textContent ?: "",
-            )
-        }
+        // NO replayTurn loop — history injected at creation time
 
         Log.i(
             TAG,

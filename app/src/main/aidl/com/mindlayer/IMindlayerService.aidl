@@ -25,7 +25,9 @@ interface IMindlayerService {
     // Function calling — inject tool results back
     void submitToolResult(String requestId, in ToolResult result);
 
-    // History replay — inject a completed turn without triggering inference
+    // History replay (DEPRECATED) — kept for backward compat.
+    // Use SessionConfig.initialHistory instead; replayTurn only updates
+    // counters and does NOT inject turns into the LLM conversation context.
     void replayTurn(String sessionId, String role, String text);
 
     // Service status

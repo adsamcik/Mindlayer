@@ -37,6 +37,17 @@ interface ConversationDao {
         nowMs: Long = System.currentTimeMillis(),
     )
 
+    @Query("UPDATE conversations SET state = :state, updatedAtMs = :nowMs WHERE conversationId = :id")
+    suspend fun updateState(
+        id: String,
+        state: String,
+        nowMs: Long = System.currentTimeMillis(),
+    )
+
+    /** Delete orphaned conversations that were never confirmed. */
+    @Query("DELETE FROM conversations WHERE state = 'CREATING'")
+    suspend fun deleteOrphaned(): Int
+
     @Query("DELETE FROM conversations WHERE conversationId = :id")
     suspend fun delete(id: String)
 }

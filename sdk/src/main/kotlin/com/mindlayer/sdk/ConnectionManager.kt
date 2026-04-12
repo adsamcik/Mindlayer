@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -65,6 +66,8 @@ class ConnectionManager {
         private const val INITIAL_BACKOFF_MS = 250L
         private const val MAX_BACKOFF_MS = 5_000L
         private const val BACKOFF_MULTIPLIER = 2.0
+
+        const val DEFAULT_CONNECT_TIMEOUT_MS = 15_000L
 
         private const val BIND_FLAGS =
             Context.BIND_AUTO_CREATE or
@@ -116,12 +119,27 @@ class ConnectionManager {
         )
 
     /**
-     * Suspends until the connection reaches [ConnectionState.CONNECTED]
-     * and returns the binder.
+     * Suspends until the connection reaches [ConnectionState.CONNECTED] and
+     * returns a validated binder reference, or throws
+     * [kotlinx.coroutines.TimeoutCancellationException] after [timeoutMs].
+     *
+     * Handles the TOCTOU race where the binder can die between the state
+     * transition and the binder read by retrying — the state machine
+     * guarantees that binder death moves state to RECOVERING.
      */
-    suspend fun awaitConnected(): IMindlayerService {
-        _state.first { it == ConnectionState.CONNECTED }
-        return requireService()
+    suspend fun awaitConnected(
+        timeoutMs: Long = DEFAULT_CONNECT_TIMEOUT_MS,
+    ): IMindlayerService = withTimeout(timeoutMs) {
+        while (true) {
+            _state.first { it == ConnectionState.CONNECTED }
+            val service = binderRef.get()
+            if (service != null) return@withTimeout service
+            // Binder invalidated between state transition and our read.
+            // State should now be RECOVERING — loop to wait for reconnect.
+            Log.w(TAG, "awaitConnected: binder invalidated after CONNECTED; retrying")
+        }
+        @Suppress("UNREACHABLE_CODE")
+        error("unreachable")
     }
 
     // -- Binding internals ----------------------------------------------------
