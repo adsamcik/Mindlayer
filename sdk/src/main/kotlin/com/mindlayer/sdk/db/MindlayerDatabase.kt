@@ -37,7 +37,7 @@ abstract class MindlayerDatabase : RoomDatabase() {
                     DB_NAME,
                 )
                     .addMigrations(MIGRATION_1_2)
-                    .fallbackToDestructiveMigrationFrom(1)
+                    .fallbackToDestructiveMigration()
                     .build()
                     .also { instance = it }
             }
