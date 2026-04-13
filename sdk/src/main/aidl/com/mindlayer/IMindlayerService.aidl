@@ -8,6 +8,7 @@ import com.mindlayer.ToolResult;
 import com.mindlayer.ServiceStatus;
 import com.mindlayer.EngineInfo;
 import com.mindlayer.SessionInfo;
+import com.mindlayer.ModelInfoParcel;
 
 interface IMindlayerService {
     // Session management
@@ -39,4 +40,7 @@ interface IMindlayerService {
 
     // Pre-warm the engine in the background (fire-and-forget)
     oneway void prewarm(String backend);
+
+    // Model discovery
+    List<ModelInfoParcel> listModels();
 }

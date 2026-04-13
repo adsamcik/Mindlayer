@@ -87,6 +87,7 @@ class SessionManager(
                 engineManager.initialize(
                     preferredBackend = config.backend,
                     maxTokens = config.maxTokens,
+                    modelId = config.modelId,
                 )
             }
         }

@@ -16,7 +16,8 @@ import java.io.File
 
 /**
  * Manages the LiteRT-LM [Engine] lifecycle: initialization with automatic
- * backend fallback (NPU → GPU → CPU), model file discovery, and teardown.
+ * backend fallback (NPU → GPU → CPU), model discovery via [ModelRegistry],
+ * and teardown.
  *
  * All public methods are coroutine-safe and serialize via [Mutex] so only one
  * init/shutdown can be in flight at a time.
@@ -29,6 +30,7 @@ class EngineManager(
     companion object {
         private const val TAG = "EngineManager"
 
+        /** Hint filename used for Play AI Pack extraction fallback. */
         const val DEFAULT_MODEL_FILENAME = "gemma-4-E2B-it.litertlm"
 
         // Qualcomm SoCs with NPU support
@@ -59,9 +61,31 @@ class EngineManager(
     var isInitialized: Boolean = false
         private set
 
-    val modelPath: String by lazy {
-        findModelFile()
+    /** The model currently loaded in the engine, or `null` if not yet initialised. */
+    @Volatile
+    var currentModel: ModelInfo? = null
+        private set
+
+    /** All models discovered on the device (lazy, discovered on first access). */
+    val availableModels: List<ModelInfo> by lazy {
+        val models = ModelRegistry.discoverModels(context)
+        val default = ModelRegistry.getDefaultModel(models)
+        if (default != null) {
+            models.map { if (it.id == default.id) it.copy(isDefault = true) else it }
+        } else {
+            models
+        }
     }
+
+    /** Convenience: path of the currently loaded (or default) model. */
+    val modelPath: String
+        get() = currentModel?.path
+            ?: availableModels.firstOrNull { it.isDefault }?.path
+            ?: availableModels.firstOrNull()?.path
+            ?: throw IllegalStateException(
+                "No .litertlm model files found. Place a model in app filesDir, " +
+                "externalFilesDir, cacheDir, /data/local/tmp, or deploy via Play AI pack."
+            )
 
     // ---- Public API --------------------------------------------------------
 
@@ -75,27 +99,38 @@ class EngineManager(
      * @param preferredBackend Force a specific backend ("NPU", "GPU", "CPU").
      *        When `null`, the default chain GPU → CPU is used.
      * @param maxTokens KV-cache budget (input + output tokens combined).
+     * @param modelId Target model ID. When `null`, the default model is used.
+     *        If a different model is already loaded the engine is torn down first.
      * @return The initialized [Engine].
      */
     suspend fun initialize(
         preferredBackend: String? = null,
         maxTokens: Int = 4096,
+        modelId: String? = null,
     ): Engine = mutex.withLock {
-        // Fast-path: already initialised
-        engine?.let {
-            Log.i(TAG, "Engine already initialized with backend=$currentBackend")
-            return it
+        val target = resolveTargetModel(modelId)
+
+        // Fast-path: same model already loaded
+        engine?.let { eng ->
+            if (currentModel?.id == target.id) {
+                Log.i(TAG, "Engine already initialized with model=${target.id}, backend=$currentBackend")
+                return eng
+            }
+            // Different model requested — tear down first
+            Log.i(TAG, "Model switch: ${currentModel?.id} → ${target.id}, shutting down")
+            shutdownInternal()
         }
 
-        val path = modelPath
+        val path = target.path
         val cacheDir = context.cacheDir.resolve("litert_cache").also { it.mkdirs() }
 
         // Pre-flight memory check: model needs ~2.5GB + working buffers
-        val modelSizeBytes = java.io.File(path).length()
+        val modelSizeBytes = target.sizeBytes
         val activityManager = context.getSystemService(android.app.ActivityManager::class.java)
         val memInfo = android.app.ActivityManager.MemoryInfo()
         activityManager.getMemoryInfo(memInfo)
         val requiredBytes = modelSizeBytes + (512L * 1024 * 1024) // model + 512MB headroom
+        Log.i(TAG, "Loading model '${target.id}' (${target.displayName})")
         Log.i(TAG, "Memory check: available=${memInfo.availMem / 1024 / 1024}MB, " +
             "model=${modelSizeBytes / 1024 / 1024}MB, required=${requiredBytes / 1024 / 1024}MB")
         if (memInfo.availMem < requiredBytes) {
@@ -108,7 +143,7 @@ class EngineManager(
 
         for (backend in backends) {
             val name = backendName(backend)
-            Log.i(TAG, "Attempting init with backend=$name")
+            Log.i(TAG, "Attempting init with backend=$name, model=${target.id}")
 
             try {
                 val startNs = System.nanoTime()
@@ -126,10 +161,11 @@ class EngineManager(
 
                 val elapsed = (System.nanoTime() - startNs) / 1_000_000_000f
                 val durationMs = ((System.nanoTime() - startNs) / 1_000_000)
-                Log.i(TAG, "Engine initialized: backend=$name, time=${elapsed}s")
+                Log.i(TAG, "Engine initialized: model=${target.id}, backend=$name, time=${elapsed}s")
 
                 engine = eng
                 currentBackend = name
+                currentModel = target
                 initTimeSeconds = elapsed
                 isInitialized = true
                 logRepository?.logEngineInit(name, durationMs, path)
@@ -138,7 +174,6 @@ class EngineManager(
             } catch (t: Throwable) {
                 Log.w(TAG, "Backend $name failed: ${t.message}", t)
                 lastError = t
-                // Log fallback if there are more backends to try
                 logRepository?.log(com.mindlayer.service.logging.LogEntry(
                     timestampMs = System.currentTimeMillis(),
                     category = com.mindlayer.service.logging.LogCategory.ENGINE,
@@ -151,8 +186,8 @@ class EngineManager(
 
         val availMb = memInfo.availMem / 1024 / 1024
         throw IllegalStateException(
-            "All backends failed for model at $path (available RAM: ${availMb}MB, " +
-                "model: ${modelSizeBytes / 1024 / 1024}MB). " +
+            "All backends failed for model '${target.id}' at $path " +
+                "(available RAM: ${availMb}MB, model: ${modelSizeBytes / 1024 / 1024}MB). " +
                 "Try closing other apps to free memory.", lastError
         )
     }
@@ -166,23 +201,7 @@ class EngineManager(
 
     /** Shut down the engine and release native resources. */
     suspend fun shutdown() = mutex.withLock {
-        engine?.let { eng ->
-            val backend = currentBackend
-            Log.i(TAG, "Shutting down engine (backend=$backend)")
-            withContext(Dispatchers.IO) {
-                try {
-                    eng.close()
-                } catch (t: Throwable) {
-                    Log.e(TAG, "Error closing engine", t)
-                }
-            }
-            engine = null
-            currentBackend = "NONE"
-            isInitialized = false
-            initTimeSeconds = 0f
-            logRepository?.logEngineShutdown(backend)
-            Log.i(TAG, "Engine shutdown complete")
-        }
+        shutdownInternal()
     }
 
     /**
@@ -195,62 +214,56 @@ class EngineManager(
     ): Engine {
         Log.i(TAG, "Switching backend: $currentBackend → $newBackend")
         shutdown()
-        return initialize(preferredBackend = newBackend, maxTokens = maxTokens)
+        return initialize(
+            preferredBackend = newBackend,
+            maxTokens = maxTokens,
+            modelId = currentModel?.id,
+        )
     }
 
     // ---- Private helpers ---------------------------------------------------
 
-    /**
-     * Locate the `.litertlm` model file in well-known directories.
-     * Checked in order: filesDir → externalFilesDir → cacheDir.
-     */
-    private fun findModelFile(): String {
-        val candidates = mutableListOf<File>()
-
-        // 1. App-private storage (manual placement or first-launch download)
-        candidates.add(File(context.filesDir, DEFAULT_MODEL_FILENAME))
-        context.getExternalFilesDir(null)?.let {
-            candidates.add(File(it, DEFAULT_MODEL_FILENAME))
+    /** Resolve the target [ModelInfo] for the given [modelId]. */
+    private fun resolveTargetModel(modelId: String?): ModelInfo {
+        val models = availableModels
+        if (models.isEmpty()) {
+            throw IllegalStateException(
+                "No .litertlm model files found. Place a model in app filesDir, " +
+                "externalFilesDir, cacheDir, /data/local/tmp, or deploy via Play AI pack."
+            )
         }
-        candidates.add(File(context.cacheDir, DEFAULT_MODEL_FILENAME))
 
-        // 2. Play for On-device AI pack (install-time delivery)
-        //    Install-time AI pack assets are merged into the app's asset path.
-        //    They can be accessed by extracting from AssetManager, or on some
-        //    devices they're directly accessible in the APK's native lib path.
-        //    For LiteRT-LM which needs a file path, we check if the asset exists
-        //    and extract it to filesDir on first use.
-        try {
-            val aiPackAssets = context.assets.list("") ?: emptyArray()
-            if (DEFAULT_MODEL_FILENAME in aiPackAssets) {
-                val extracted = File(context.filesDir, DEFAULT_MODEL_FILENAME)
-                if (!extracted.exists()) {
-                    MindlayerLog.i(TAG, "Extracting model from AI pack to filesDir...")
-                    context.assets.open(DEFAULT_MODEL_FILENAME).use { input ->
-                        extracted.outputStream().use { output ->
-                            input.copyTo(output, bufferSize = 8 * 1024 * 1024)
-                        }
-                    }
-                    MindlayerLog.i(TAG, "Model extracted: ${extracted.length() / 1_048_576}MB")
+        if (modelId != null) {
+            return ModelRegistry.findModelById(models, modelId)
+                ?: throw IllegalArgumentException(
+                    "Model '$modelId' not found. Available: ${models.map { it.id }}"
+                )
+        }
+
+        // Default: use the model marked isDefault, or first available
+        return models.firstOrNull { it.isDefault } ?: models.first()
+    }
+
+    /** Internal shutdown without acquiring the mutex (caller must hold it). */
+    private suspend fun shutdownInternal() {
+        engine?.let { eng ->
+            val backend = currentBackend
+            Log.i(TAG, "Shutting down engine (backend=$backend, model=${currentModel?.id})")
+            withContext(Dispatchers.IO) {
+                try {
+                    eng.close()
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Error closing engine", t)
                 }
-                return extracted.absolutePath
             }
-        } catch (e: Exception) {
-            MindlayerLog.w(TAG, "AI pack asset check failed: ${e.message}")
+            engine = null
+            currentBackend = "NONE"
+            currentModel = null
+            isInitialized = false
+            initTimeSeconds = 0f
+            logRepository?.logEngineShutdown(backend)
+            Log.i(TAG, "Engine shutdown complete")
         }
-
-        // 3. Debug/testing: /data/local/tmp (adb push target)
-        candidates.add(File("/data/local/tmp", DEFAULT_MODEL_FILENAME))
-
-        for (file in candidates) {
-            if (file.exists()) return file.absolutePath
-        }
-
-        throw IllegalStateException(
-            "Model file '$DEFAULT_MODEL_FILENAME' not found. " +
-            "Place it in app filesDir, externalFilesDir, cacheDir, /data/local/tmp, " +
-            "or deploy via Play for On-device AI pack."
-        )
     }
 
     /**
