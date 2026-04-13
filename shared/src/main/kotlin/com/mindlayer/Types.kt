@@ -24,6 +24,8 @@ data class SessionConfig(
     val initialHistory: List<HistoryTurn>? = null,
     /** Target model ID. `null` means use the default model. */
     val modelId: String? = null,
+    /** Session expiration in milliseconds. Default: 14 days. */
+    val expirationMs: Long = 14L * 24 * 60 * 60 * 1000,
 ) : Parcelable
 
 @Parcelize
@@ -120,4 +122,8 @@ data class SessionInfo(
     val createdAtMs: Long,
     val lastAccessedAtMs: Long,
     val isStreaming: Boolean,
+    /** Session expiration duration in milliseconds. */
+    val expirationMs: Long = 14L * 24 * 60 * 60 * 1000,
+    /** Absolute wall-clock time when this session expires. */
+    val expiresAtMs: Long = createdAtMs + expirationMs,
 ) : Parcelable

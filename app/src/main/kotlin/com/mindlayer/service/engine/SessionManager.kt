@@ -63,6 +63,7 @@ class SessionManager(
      * memory-pressure recommendation.
      */
     fun createSession(config: SessionConfig): String {
+        cleanupExpiredSessions()
         val tier = memoryBudget.deviceTier
         val snap = memoryBudget.currentSnapshot()
 
@@ -178,8 +179,17 @@ class SessionManager(
         return sessionId
     }
 
-    /** Return the live handle for [id], or `null` if the session is unknown. */
-    fun getSession(id: String): SessionHandle? = sessions[id]
+    /** Return the live handle for [id], or `null` if the session is unknown or expired. */
+    fun getSession(id: String): SessionHandle? {
+        val handle = sessions[id] ?: return null
+        if (System.currentTimeMillis() - handle.createdAtMs > handle.expirationMs) {
+            MindlayerLog.i(TAG, "Session expired: $id", sessionId = id)
+            destroySession(id)
+            return null
+        }
+        handle.recordAccess()
+        return handle
+    }
 
     fun destroySession(id: String) {
         val handle = sessions.remove(id) ?: run {
@@ -333,6 +343,18 @@ class SessionManager(
         }
     }
 
+    /** Remove all sessions that have exceeded their expiration. */
+    private fun cleanupExpiredSessions() {
+        val now = System.currentTimeMillis()
+        val expired = sessions.filter { (_, handle) ->
+            now - handle.createdAtMs > handle.expirationMs
+        }
+        expired.forEach { (id, _) -> destroySession(id) }
+        if (expired.isNotEmpty()) {
+            MindlayerLog.i(TAG, "Cleaned up ${expired.size} expired session(s)")
+        }
+    }
+
     /** Destroy all sessions. Called during service teardown. */
     fun shutdown() {
         val ids = sessions.keys.toList()
@@ -399,6 +421,7 @@ class SessionManager(
         val config: SessionConfig,
         val createdAtMs: Long,
         val effectiveMaxTokens: Int,
+        val expirationMs: Long = config.expirationMs,
         val structuredOutputConfig: StructuredOutputConfig? = null,
     ) {
         val mutex = Mutex()
@@ -427,6 +450,7 @@ class SessionManager(
             createdAtMs = createdAtMs,
             lastAccessedAtMs = lastAccessedAtMs,
             isStreaming = isStreaming,
+            expirationMs = expirationMs,
         )
     }
 }
