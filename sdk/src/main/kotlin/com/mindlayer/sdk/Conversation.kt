@@ -105,6 +105,7 @@ class Conversation internal constructor(
             temperature(config.temperature)
             topK(config.topK)
             topP(config.topP)
+            expirationMs(config.expiration.inWholeMilliseconds)
         }
         sessionId = sid
         sid
@@ -126,7 +127,7 @@ class Conversation internal constructor(
             val newSid = ensureSession()
             block(newSid)
         } catch (e: MindlayerException) {
-            if (e.code == "SESSION_NOT_FOUND" || e.code == "SESSION_EVICTED") {
+            if (e.code == "SESSION_NOT_FOUND" || e.code == "SESSION_EVICTED" || e.code == "SESSION_EXPIRED") {
                 if (closed) throw e
                 mutex.withLock { sessionId = null }
                 val newSid = ensureSession()

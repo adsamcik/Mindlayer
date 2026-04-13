@@ -26,6 +26,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import kotlin.time.Duration.Companion.days
+import kotlin.time.Duration.Companion.hours
 
 /**
  * Tests for the [Conversation] class and the simple [Mindlayer.chat] /
@@ -244,6 +246,7 @@ class ConversationTest {
         assertEquals(0.7f, config.temperature)
         assertEquals(40, config.topK)
         assertEquals(0.95f, config.topP)
+        assertEquals(14.days, config.expiration)
     }
 
     @Test
@@ -287,5 +290,70 @@ class ConversationTest {
         }
         // Just verify it returns without error and is the right type
         assert(conv is Conversation)
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  Expiration
+    // ═════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `conversationBuilder_custom_expiration`() {
+        val config = ConversationBuilder().apply {
+            expiration(7.days)
+        }.build()
+
+        assertEquals(7.days, config.expiration)
+    }
+
+    @Test
+    fun `conversationBuilder_expirationDays`() {
+        val config = ConversationBuilder().apply {
+            expirationDays(7)
+        }.build()
+
+        assertEquals(7.days, config.expiration)
+    }
+
+    @Test
+    fun `conversationBuilder_expiration_hours`() {
+        val config = ConversationBuilder().apply {
+            expiration(6.hours)
+        }.build()
+
+        assertEquals(6.hours, config.expiration)
+    }
+
+    @Test
+    fun `conversationBuilder_validates_expiration_positive`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ConversationBuilder().apply { expiration((-1).days) }
+        }
+    }
+
+    @Test
+    fun `conversationBuilder_validates_expirationDays_positive`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ConversationBuilder().apply { expirationDays(0) }
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ConversationBuilder().apply { expirationDays(-5) }
+        }
+    }
+
+    @Test
+    fun `conversation_passes_expiration_to_session`() = runTest {
+        stubInferToClose()
+
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "session-exp"
+
+        val conv = mindlayer.conversation {
+            expirationDays(7)
+        }
+
+        try { conv.chat("Hi") } catch (_: Exception) { }
+
+        val cfg = configSlot.captured
+        assertEquals(7L * 24 * 60 * 60 * 1000, cfg.expirationMs)
     }
 }

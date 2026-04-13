@@ -648,6 +648,7 @@ class SessionConfigBuilder {
     private var extraContextJson: String? = null
     private var initialHistory: List<HistoryTurn>? = null
     private var modelId: String? = null
+    private var expirationMs: Long = 14L * 24 * 60 * 60 * 1000
 
     /**
      * Set a custom session ID. If not set, a UUID is generated automatically.
@@ -739,6 +740,9 @@ class SessionConfigBuilder {
     )
     fun model(id: String) { modelId = id }
 
+    /** Set session expiration in milliseconds. Internal — consumers use [ConversationBuilder.expiration]. */
+    internal fun expirationMs(ms: Long) { expirationMs = ms }
+
     internal fun build(): SessionConfig = SessionConfig(
         sessionId = sessionId,
         systemPrompt = systemPrompt,
@@ -751,5 +755,6 @@ class SessionConfigBuilder {
         extraContextJson = extraContextJson,
         initialHistory = initialHistory,
         modelId = modelId,
+        expirationMs = expirationMs,
     )
 }

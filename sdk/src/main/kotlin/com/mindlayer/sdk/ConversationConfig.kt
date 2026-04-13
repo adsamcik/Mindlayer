@@ -1,5 +1,8 @@
 package com.mindlayer.sdk
 
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.days
+
 /**
  * Immutable configuration for a [Conversation].
  *
@@ -11,6 +14,7 @@ class ConversationConfig internal constructor(
     internal val temperature: Float = 0.7f,
     internal val topK: Int = 40,
     internal val topP: Float = 0.95f,
+    internal val expiration: Duration = 14.days,
 )
 
 /**
@@ -29,6 +33,7 @@ class ConversationBuilder {
     private var temperature: Float = 0.7f
     private var topK: Int = 40
     private var topP: Float = 0.95f
+    private var expiration: Duration = 14.days
 
     /** System instruction defining the model's behavior. */
     fun systemPrompt(prompt: String) { systemPrompt = prompt }
@@ -57,5 +62,23 @@ class ConversationBuilder {
         topP = p
     }
 
-    internal fun build() = ConversationConfig(systemPrompt, maxTokens, temperature, topK, topP)
+    /**
+     * Set conversation expiration duration. The conversation's session and
+     * history will be automatically cleaned up after this duration of inactivity.
+     * Default: 14 days.
+     *
+     * @param duration Expiration duration. Must be positive.
+     */
+    fun expiration(duration: Duration) {
+        require(duration.isPositive()) { "expiration must be positive" }
+        expiration = duration
+    }
+
+    /** Convenience: set expiration in days. */
+    fun expirationDays(days: Int) {
+        require(days > 0) { "expirationDays must be > 0" }
+        expiration = days.days
+    }
+
+    internal fun build() = ConversationConfig(systemPrompt, maxTokens, temperature, topK, topP, expiration)
 }
