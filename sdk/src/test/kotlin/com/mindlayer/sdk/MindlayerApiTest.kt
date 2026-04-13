@@ -500,6 +500,7 @@ class MindlayerApiTest {
 
         val result = mindlayer.getEngineInfo()
         assertEquals("/data/models/llama.gguf", result.modelPath)
+        assertEquals("llama.gguf", result.modelId)
         assertEquals(8192, result.maxTokens)
         assertEquals(35f, result.lastDecodeToksPerSec)
     }
@@ -534,10 +535,18 @@ class MindlayerApiTest {
     }
 
     @Test
-    fun `mindlayerSession_destroy_callsDestroySession`() = runTest {
+    fun `mindlayerSession_delete_callsDestroySession`() = runTest {
         val session = mindlayer.session("sess-destroy")
-        session.destroy()
+        session.delete()
         verify(exactly = 1) { mockService.destroySession("sess-destroy") }
+    }
+
+    @Suppress("DEPRECATION")
+    @Test
+    fun `mindlayerSession_destroy_delegatesToDelete`() = runTest {
+        val session = mindlayer.session("sess-destroy-compat")
+        session.destroy()
+        verify(exactly = 1) { mockService.destroySession("sess-destroy-compat") }
     }
 
     @Test

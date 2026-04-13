@@ -38,7 +38,14 @@ class InferenceHandle(
     private val cancelled = AtomicBoolean(false)
     private var cancelCallback: (suspend () -> Unit)? = null
 
-    /** Whether cancel() has been called. */
+    /**
+     * Whether [cancel] has been called on this handle.
+     *
+     * **Note:** This reflects the client-side cancellation state, not whether
+     * the service has finished processing. Use this to avoid redundant [cancel]
+     * calls. Monitor [events] for [MindlayerEvent.Done] or [MindlayerEvent.Error]
+     * to detect actual completion.
+     */
     val isCancelled: Boolean get() = cancelled.get()
 
     internal fun setCancelCallback(cb: suspend () -> Unit) {

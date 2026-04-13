@@ -77,15 +77,20 @@ data class ServiceStatus(
     val availableRamMb: Long = 0,
     val totalRamMb: Long = 0,
     val maxSessions: Int = 0,
+    @Deprecated("Internal tuning parameter, use Mindlayer's default backend selection")
     val recommendedBackend: String = "GPU",
+    @Deprecated("Internal tuning parameter, not consumer-facing")
     val burstSeconds: Int = 12,
+    @Deprecated("Internal tuning parameter, not consumer-facing")
     val restSeconds: Int = 0,
+    @Deprecated("Internal tuning parameter, not consumer-facing")
     val chunkTokens: Int = 128,
     val headroom: Float? = null,
 ) : Parcelable
 
 @Parcelize
 data class EngineInfo(
+    @Deprecated("Internal file path, not consumer-facing. Use modelId from listModels() instead.")
     val modelPath: String,
     val modelSizeBytes: Long,
     val backend: String,
@@ -93,6 +98,7 @@ data class EngineInfo(
     val initTimeSeconds: Float,
     val lastPrefillToksPerSec: Float,
     val lastDecodeToksPerSec: Float,
+    val modelId: String = modelPath.substringAfterLast("/").removeSuffix(".litertlm"),
 ) : Parcelable
 
 @Parcelize

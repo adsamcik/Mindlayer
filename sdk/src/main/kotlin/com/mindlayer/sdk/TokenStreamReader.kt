@@ -18,29 +18,50 @@ import java.io.EOFException
 import java.io.IOException
 
 /**
- * Typed events the SDK consumer receives from the inference pipe.
+ * Typed events emitted during inference, collected from [InferenceHandle.events].
+ *
+ * **Event ordering guarantee:**
+ * 1. [Started] — exactly once, always first
+ * 2. [TextDelta], [ToolCall], [Metrics] — zero or more, in sequence order
+ * 3. [Done] or [Error] — exactly one, always last (terminal event)
+ *
+ * If the flow completes without a terminal event, the inference was cancelled
+ * or the service connection was lost.
  */
 sealed class MindlayerEvent {
+    /** Signals that the service has accepted the request and inference is beginning. */
     data class Started(val requestId: String) : MindlayerEvent()
+
+    /** An incremental chunk of generated text. Collect and concatenate these for the full response. */
     data class TextDelta(val text: String, val seq: Long) : MindlayerEvent()
+
+    /** The model is requesting a tool invocation. Respond with [Mindlayer.submitToolResult]. */
     data class ToolCall(
         val toolName: String,
         val arguments: String,
         val callId: String,
         val seq: Long,
     ) : MindlayerEvent()
+
+    /** Performance metrics snapshot emitted periodically during inference. */
     data class Metrics(
         val prefillToksPerSec: Float?,
         val decodeToksPerSec: Float?,
         val thermalBand: String?,
         val seq: Long,
     ) : MindlayerEvent()
+
+    /** Terminal event indicating an error. No further events will follow. */
     data class Error(val message: String, val code: String?, val seq: Long) : MindlayerEvent()
+
+    /** Terminal event indicating successful completion. [fullText] contains the accumulated response if available. */
     data class Done(
         val finishReason: String,
         val fullText: String?,
         val seq: Long,
     ) : MindlayerEvent()
+
+    /** An event type not recognised by this SDK version. Safe to ignore. */
     data class Unknown(val type: String, val seq: Long) : MindlayerEvent()
 }
 
