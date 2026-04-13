@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.os.ParcelFileDescriptor
 import com.mindlayer.EngineInfo
 import com.mindlayer.HistoryTurn
+import com.mindlayer.ModelInfoParcel
 import com.mindlayer.RequestMeta
 import com.mindlayer.ServiceStatus
 import com.mindlayer.SessionConfig
@@ -266,6 +267,11 @@ class Mindlayer private constructor(
     /** Get a diagnostic JSON dump for bug reports and troubleshooting. */
     suspend fun getDiagnostics(): String {
         return connection.awaitConnected().diagnostics
+    }
+
+    /** List all available models on the device. */
+    suspend fun listModels(): List<ModelInfoParcel> {
+        return connection.awaitConnected().listModels()
     }
 
     // -- Convenience ----------------------------------------------------------
@@ -545,6 +551,7 @@ class SessionConfigBuilder {
     private var toolsJson: String? = null
     private var extraContextJson: String? = null
     private var initialHistory: List<HistoryTurn>? = null
+    private var modelId: String? = null
 
     fun sessionId(id: String) { sessionId = id }
     fun systemPrompt(prompt: String) { systemPrompt = prompt }
@@ -556,6 +563,7 @@ class SessionConfigBuilder {
     fun tools(json: String) { toolsJson = json }
     fun extraContext(json: String) { extraContextJson = json }
     fun initialHistory(history: List<HistoryTurn>) { initialHistory = history }
+    fun model(id: String) { modelId = id }
 
     internal fun build(): SessionConfig = SessionConfig(
         sessionId = sessionId,
@@ -568,5 +576,6 @@ class SessionConfigBuilder {
         toolsJson = toolsJson,
         extraContextJson = extraContextJson,
         initialHistory = initialHistory,
+        modelId = modelId,
     )
 }

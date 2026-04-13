@@ -6,6 +6,7 @@ import com.mindlayer.AudioTransfer
 import com.mindlayer.EngineInfo
 import com.mindlayer.IMindlayerService
 import com.mindlayer.ImageTransfer
+import com.mindlayer.ModelInfoParcel
 import com.mindlayer.RequestMeta
 import com.mindlayer.ServiceStatus
 import com.mindlayer.SessionConfig
@@ -110,6 +111,20 @@ class ServiceBinder(
             } catch (e: Exception) {
                 MindlayerLog.w(TAG, "Prewarm failed: ${e.message}")
             }
+        }
+    }
+
+    // ---- Model discovery -----------------------------------------------------
+
+    override fun listModels(): List<ModelInfoParcel> {
+        return engineManager.availableModels.map { model ->
+            ModelInfoParcel(
+                id = model.id,
+                displayName = model.displayName,
+                sizeBytes = model.sizeBytes,
+                isDefault = model.isDefault,
+                isLoaded = model.id == engineManager.currentModel?.id,
+            )
         }
     }
 

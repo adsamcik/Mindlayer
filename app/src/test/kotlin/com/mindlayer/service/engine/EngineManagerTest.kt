@@ -192,7 +192,7 @@ class EngineManagerTest {
             val mgr = EngineManager(context)
             mgr.modelPath
         } catch (e: IllegalStateException) {
-            assertTrue(e.message!!.contains(EngineManager.DEFAULT_MODEL_FILENAME))
+            assertTrue(e.message!!.contains("litertlm"))
             assertTrue(e.message!!.contains("filesDir"))
             return
         }

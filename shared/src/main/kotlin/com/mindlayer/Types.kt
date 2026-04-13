@@ -22,6 +22,8 @@ data class SessionConfig(
     val toolsJson: String? = null,
     val extraContextJson: String? = null,
     val initialHistory: List<HistoryTurn>? = null,
+    /** Target model ID. `null` means use the default model. */
+    val modelId: String? = null,
 ) : Parcelable
 
 @Parcelize
@@ -91,6 +93,15 @@ data class EngineInfo(
     val initTimeSeconds: Float,
     val lastPrefillToksPerSec: Float,
     val lastDecodeToksPerSec: Float,
+) : Parcelable
+
+@Parcelize
+data class ModelInfoParcel(
+    val id: String,
+    val displayName: String,
+    val sizeBytes: Long,
+    val isDefault: Boolean,
+    val isLoaded: Boolean,
 ) : Parcelable
 
 @Parcelize
