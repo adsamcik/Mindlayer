@@ -90,6 +90,19 @@ class EngineManager(
         val path = modelPath
         val cacheDir = context.cacheDir.resolve("litert_cache").also { it.mkdirs() }
 
+        // Pre-flight memory check: model needs ~2.5GB + working buffers
+        val modelSizeBytes = java.io.File(path).length()
+        val activityManager = context.getSystemService(android.app.ActivityManager::class.java)
+        val memInfo = android.app.ActivityManager.MemoryInfo()
+        activityManager.getMemoryInfo(memInfo)
+        val requiredBytes = modelSizeBytes + (512L * 1024 * 1024) // model + 512MB headroom
+        Log.i(TAG, "Memory check: available=${memInfo.availMem / 1024 / 1024}MB, " +
+            "model=${modelSizeBytes / 1024 / 1024}MB, required=${requiredBytes / 1024 / 1024}MB")
+        if (memInfo.availMem < requiredBytes) {
+            Log.w(TAG, "Low memory: ${memInfo.availMem / 1024 / 1024}MB available, " +
+                "need ${requiredBytes / 1024 / 1024}MB. Engine init may fail.")
+        }
+
         val backends = resolveBackendChain(preferredBackend)
         var lastError: Throwable? = null
 
@@ -136,8 +149,11 @@ class EngineManager(
             }
         }
 
+        val availMb = memInfo.availMem / 1024 / 1024
         throw IllegalStateException(
-            "All backends failed for model at $path", lastError
+            "All backends failed for model at $path (available RAM: ${availMb}MB, " +
+                "model: ${modelSizeBytes / 1024 / 1024}MB). " +
+                "Try closing other apps to free memory.", lastError
         )
     }
 
