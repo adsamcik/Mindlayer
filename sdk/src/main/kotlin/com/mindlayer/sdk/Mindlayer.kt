@@ -48,9 +48,8 @@ import java.util.UUID
  * wait for the connection, and [disconnect] to release resources. The service
  * continues running independently — reconnecting will find existing sessions.
  *
- * **Models:** Mindlayer discovers available models automatically. Use
- * [listModels] to see what's available. By default, the best model is selected.
- * Override with [SessionConfigBuilder.model] for specific model requests.
+ * **Models:** Mindlayer discovers available models automatically.
+ * The best available model is always used.
  *
  * **Thread safety:** All methods are safe to call from any thread.
  * Suspend methods use the caller's coroutine context.
@@ -310,12 +309,60 @@ class Mindlayer private constructor(
         return connection.awaitConnected().diagnostics
     }
 
-    /** List all available models on the device. */
+    /** List all available models on the device. Internal diagnostics only. */
+    @Deprecated(
+        "Mindlayer always uses the best available model. " +
+        "This method is retained for internal diagnostics only.",
+        level = DeprecationLevel.WARNING,
+    )
     suspend fun listModels(): List<ModelInfoParcel> {
         return connection.awaitConnected().listModels()
     }
 
+    // ── Simple API ──────────────────────────────────────────────────────
+
+    /**
+     * Start a multi-turn conversation. The session is created lazily on first message.
+     *
+     * ```kotlin
+     * val conv = mindlayer.conversation {
+     *     systemPrompt("You are a helpful barista.")
+     * }
+     * val response = conv.chat("What's a cortado?")
+     * conv.close()
+     * ```
+     */
+    fun conversation(configure: ConversationBuilder.() -> Unit = {}): Conversation {
+        val config = ConversationBuilder().apply(configure).build()
+        return Conversation(this, config)
+    }
+
+    /**
+     * Send a single message and get the response. No session management needed.
+     * Creates a temporary session, sends the message, destroys the session.
+     *
+     * For multi-turn conversations, use [conversation] instead.
+     *
+     * ```kotlin
+     * val answer = mindlayer.chat("What is specialty coffee?")
+     * ```
+     */
+    suspend fun chat(text: String): String {
+        awaitConnected()
+        return generate(text)
+    }
+
+    /**
+     * Send a message with an image and get the response. No session management needed.
+     */
+    suspend fun chat(text: String, image: Bitmap): String {
+        awaitConnected()
+        return generateWithImage(text, image)
+    }
+
     // -- Convenience ----------------------------------------------------------
+
+    // ── Advanced API ──────────────────────────────────────────────────────
 
     /**
      * Create a [MindlayerSession] scoped to a single session for a more
@@ -682,9 +729,14 @@ class SessionConfigBuilder {
     fun initialHistory(history: List<HistoryTurn>) { initialHistory = history }
 
     /**
-     * Select a specific model by ID. If not set, the default (best available)
-     * model is used. Use [Mindlayer.listModels] to discover available models.
+     * Select a specific model by ID. Internal use only — Mindlayer always
+     * picks the best available model.
      */
+    @Deprecated(
+        "Mindlayer always uses the best available model. " +
+        "This method is retained for internal use only.",
+        level = DeprecationLevel.WARNING,
+    )
     fun model(id: String) { modelId = id }
 
     internal fun build(): SessionConfig = SessionConfig(
