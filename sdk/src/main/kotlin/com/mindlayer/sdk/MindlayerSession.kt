@@ -48,6 +48,9 @@ class MindlayerSession internal constructor(
     suspend fun cancelInference(requestId: String) =
         client.cancelInference(requestId)
 
-    /** Destroy this session on the server. */
-    suspend fun destroy() = client.destroySession(sessionId)
+    /** Delete this session and release its resources on the service. */
+    suspend fun delete() = client.destroySession(sessionId)
+
+    @Deprecated("Use delete() instead", replaceWith = ReplaceWith("delete()"))
+    suspend fun destroy() = delete()
 }

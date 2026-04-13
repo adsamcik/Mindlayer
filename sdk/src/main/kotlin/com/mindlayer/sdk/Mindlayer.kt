@@ -18,24 +18,53 @@ import java.io.File
 import java.util.UUID
 
 /**
- * Main public entry-point for the Mindlayer SDK.
+ * Client for the Mindlayer on-device LLM service.
  *
- * Usage:
- * ```
+ * Mindlayer runs large language models (Gemma, etc.) locally on the device
+ * as a separate Android service. This class manages the connection lifecycle,
+ * session creation, and inference requests.
+ *
+ * **Quick start:**
+ * ```kotlin
  * val mindlayer = Mindlayer.connect(context)
- * val sessionId = mindlayer.createSession { systemPrompt("You are helpful") }
- * val handle = mindlayer.chat(sessionId, "Hello!")
- * handle.events.collect { event ->
+ * mindlayer.awaitConnected()
+ *
+ * val sessionId = mindlayer.createSession {
+ *     systemPrompt("You are a helpful assistant.")
+ * }
+ *
+ * mindlayer.chat(sessionId, "Hello!").events.collect { event ->
  *     when (event) {
  *         is MindlayerEvent.TextDelta -> print(event.text)
- *         is MindlayerEvent.Done     -> println("\n${event.finishReason}")
- *         else -> { /* metrics, tool calls, … */ }
+ *         is MindlayerEvent.Done -> println()
+ *         else -> {}
  *     }
  * }
- * // To cancel: handle.cancel()
+ *
  * mindlayer.disconnect()
  * ```
+ *
+ * **Lifecycle:** Call [connect] to bind to the service, [awaitConnected] to
+ * wait for the connection, and [disconnect] to release resources. The service
+ * continues running independently — reconnecting will find existing sessions.
+ *
+ * **Models:** Mindlayer discovers available models automatically. Use
+ * [listModels] to see what's available. By default, the best model is selected.
+ * Override with [SessionConfigBuilder.model] for specific model requests.
+ *
+ * **Thread safety:** All methods are safe to call from any thread.
+ * Suspend methods use the caller's coroutine context.
  */
+/** Inference backend for engine pre-warming. */
+enum class InferenceBackend(internal val value: String) {
+    /** GPU acceleration (default, recommended). */
+    GPU("GPU"),
+    /** CPU fallback. */
+    CPU("CPU"),
+    /** Neural Processing Unit (device-specific). */
+    NPU("NPU"),
+}
+
 class Mindlayer private constructor(
     internal val connection: ConnectionManager,
     private val historyStore: HistoryStore?,
@@ -43,6 +72,10 @@ class Mindlayer private constructor(
 
     companion object {
         private const val TAG = "Mindlayer"
+
+        internal const val TOOL_CALL_IN_ONESHOT_MSG =
+            "Tool calls are not supported in one-shot mode. " +
+            "Use the streaming chat() API with a ToolCall handler instead."
 
         /**
          * Create a [Mindlayer] instance and start binding to the service.
@@ -71,7 +104,15 @@ class Mindlayer private constructor(
         connection.awaitConnected()
     }
 
-    /** Unbind from the service and release resources. */
+    /**
+     * Unbind from the Mindlayer service and release resources.
+     *
+     * Active inference flows will complete with [MindlayerEvent.Error] (code: "DISCONNECTED").
+     * Blocking one-shot methods ([chatOnce], [generate]) will throw [MindlayerException].
+     * Sessions are preserved on the service side and can be resumed after [connect].
+     *
+     * Safe to call from any thread. Idempotent — multiple calls are harmless.
+     */
     fun disconnect() {
         connection.disconnect()
     }
@@ -84,11 +125,11 @@ class Mindlayer private constructor(
      * init cost. Safe to call multiple times — subsequent calls are no-ops if
      * the engine is already loaded.
      *
-     * @param backend the preferred backend to initialize ("GPU", "CPU", "NPU").
+     * @param backend the preferred backend to initialize.
      */
-    suspend fun prewarm(backend: String = "GPU") {
+    suspend fun prewarm(backend: InferenceBackend = InferenceBackend.GPU) {
         val service = connection.awaitConnected()
-        service.prewarm(backend)
+        service.prewarm(backend.value)
     }
 
     // -- Session management ---------------------------------------------------
@@ -312,8 +353,7 @@ class Mindlayer private constructor(
                     code = event.code,
                 )
                 is MindlayerEvent.ToolCall -> throw MindlayerException(
-                    message = "Tool calls are not supported in one-shot mode. " +
-                        "Use the streaming chat() API with a ToolCall handler instead.",
+                    message = TOOL_CALL_IN_ONESHOT_MSG,
                     code = "UNSUPPORTED_TOOL_CALL",
                 )
                 else -> { /* Started, Metrics — ignored */ }
@@ -349,7 +389,7 @@ class Mindlayer private constructor(
                     code = event.code,
                 )
                 is MindlayerEvent.ToolCall -> throw MindlayerException(
-                    message = "Tool calls are not supported in one-shot mode.",
+                    message = TOOL_CALL_IN_ONESHOT_MSG,
                     code = "UNSUPPORTED_TOOL_CALL",
                 )
                 else -> {}
@@ -538,7 +578,16 @@ class Mindlayer private constructor(
 }
 
 /**
- * DSL builder for [SessionConfig].
+ * DSL builder for configuring a Mindlayer inference session.
+ *
+ * Example:
+ * ```
+ * val sessionId = mindlayer.createSession {
+ *     systemPrompt("You are a coffee expert.")
+ *     maxTokens(2048)
+ *     temperature(0.7f)
+ * }
+ * ```
  */
 class SessionConfigBuilder {
     private var sessionId: String? = null
@@ -553,16 +602,89 @@ class SessionConfigBuilder {
     private var initialHistory: List<HistoryTurn>? = null
     private var modelId: String? = null
 
+    /**
+     * Set a custom session ID. If not set, a UUID is generated automatically.
+     * Use this for deterministic session tracking or reconnection after OOM.
+     */
     fun sessionId(id: String) { sessionId = id }
+
+    /**
+     * System instruction that defines the model's behavior and persona.
+     * This is injected before the first user message and persists for the session.
+     */
     fun systemPrompt(prompt: String) { systemPrompt = prompt }
-    fun maxTokens(n: Int) { maxTokens = n }
-    fun backend(b: String) { backend = b }
-    fun topK(k: Int) { topK = k }
-    fun topP(p: Float) { topP = p }
-    fun temperature(t: Float) { temperature = t }
+
+    /**
+     * Maximum number of tokens (input + output) for this session's KV cache.
+     * Higher values allow longer conversations but consume more memory.
+     * Valid range: 128–8192. Default: 4096.
+     */
+    fun maxTokens(n: Int) {
+        require(n in 128..8192) { "maxTokens must be between 128 and 8192, got $n" }
+        maxTokens = n
+    }
+
+    /**
+     * Set the compute backend for inference.
+     * Supported values: "GPU" (default), "CPU", "NPU".
+     */
+    internal fun backend(b: String) { backend = b }
+
+    /**
+     * Top-K sampling: only consider the K most likely tokens at each step.
+     * Lower values = more focused, higher values = more diverse.
+     * Default: 40. Must be >= 1.
+     */
+    fun topK(k: Int) {
+        require(k >= 1) { "topK must be >= 1, got $k" }
+        topK = k
+    }
+
+    /**
+     * Top-P (nucleus) sampling: only consider tokens whose cumulative
+     * probability reaches P. Complements top-K.
+     * Default: 0.95. Must be in (0.0, 1.0].
+     */
+    fun topP(p: Float) {
+        require(p > 0.0f && p <= 1.0f) { "topP must be in (0.0, 1.0], got $p" }
+        topP = p
+    }
+
+    /**
+     * Sampling temperature controlling response randomness.
+     * - 0.0 = deterministic (always pick most likely token)
+     * - 0.7 = balanced creativity (default, recommended for most uses)
+     * - 1.0+ = highly random
+     * Must be >= 0.0.
+     */
+    fun temperature(t: Float) {
+        require(t >= 0.0f) { "temperature must be >= 0.0, got $t" }
+        temperature = t
+    }
+
+    /**
+     * Register tools (function calling) for this session.
+     * Pass a JSON array of OpenAPI-style tool definitions.
+     * See [MindlayerEvent.ToolCall] for handling tool invocations.
+     */
     fun tools(json: String) { toolsJson = json }
+
+    /**
+     * Additional context passed to the model as grounding data.
+     * This is injected alongside the system prompt.
+     */
     fun extraContext(json: String) { extraContextJson = json }
+
+    /**
+     * Pre-populate conversation history for session recovery.
+     * Turns are injected into the model's context at creation time.
+     */
     fun initialHistory(history: List<HistoryTurn>) { initialHistory = history }
+
+    /**
+     * Select a specific model by ID. If not set, the default (best available)
+     * model is used. Use [Mindlayer.listModels] to discover available models.
+     */
     fun model(id: String) { modelId = id }
 
     internal fun build(): SessionConfig = SessionConfig(
