@@ -131,7 +131,13 @@ fun SessionDetailScreen(
                             )
                         }
                         items(state.events) { event ->
-                            EventRow(event)
+                            if (event.category.equals("INFERENCE", ignoreCase = true) &&
+                                (event.event.equals("User message", ignoreCase = true) ||
+                                 event.event.equals("Model response", ignoreCase = true))) {
+                                MessageEventRow(event)
+                            } else {
+                                EventRow(event)
+                            }
                         }
                     }
                 }
@@ -222,6 +228,61 @@ private fun SummaryCard(state: SessionDetailUiState) {
                 label = "Log entries",
                 value = formatWholeNumber(state.eventCount),
             )
+        }
+    }
+}
+
+@Composable
+private fun MessageEventRow(event: SessionEventItem) {
+    val isUser = event.event.lowercase().contains("user")
+    val bubbleColor = if (isUser) {
+        MaterialTheme.colorScheme.primaryContainer
+    } else {
+        MaterialTheme.colorScheme.surfaceContainerHigh
+    }
+    val textColor = if (isUser) {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    } else {
+        MaterialTheme.colorScheme.onSurface
+    }
+    val label = if (isUser) "User" else "Model"
+    val alignment = if (isUser) Alignment.End else Alignment.Start
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = alignment,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = event.timestampLabel,
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = bubbleColor,
+            modifier = Modifier.fillMaxWidth(0.9f),
+        ) {
+            SelectionContainer {
+                Text(
+                    text = event.detail,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = textColor,
+                    modifier = Modifier.padding(12.dp),
+                )
+            }
         }
     }
 }
@@ -375,6 +436,20 @@ private val PreviewEvents = listOf(
         event = "Request complete",
         requestIdLabel = "req-9f2a…81c4",
         detail = "8,400ms • 620 tokens • 73.8 tok/s",
+    ),
+    SessionEventItem(
+        timestampLabel = "14:32:28.400",
+        category = "INFERENCE",
+        event = "Model response",
+        requestIdLabel = "req-9f2a…81c4",
+        detail = "I'm Gemma, a large language model created by Google DeepMind. I'm designed to be helpful, harmless, and honest. I can assist with a wide variety of tasks including answering questions, writing, analysis, and more.",
+    ),
+    SessionEventItem(
+        timestampLabel = "14:32:00.100",
+        category = "INFERENCE",
+        event = "User message",
+        requestIdLabel = "req-9f2a…81c4",
+        detail = "Hello! What are you? Can you tell me about yourself?",
     ),
 )
 
