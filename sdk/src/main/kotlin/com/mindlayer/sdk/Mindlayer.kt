@@ -360,6 +360,57 @@ class Mindlayer private constructor(
         return generateWithImage(text, image)
     }
 
+    // ── History ─────────────────────────────────────────────
+
+    /**
+     * List past conversations with turn previews.
+     * Returns conversations from the local history database, including
+     * both active and destroyed sessions.
+     *
+     * ```kotlin
+     * val history = mindlayer.listHistory(limit = 20)
+     * history.forEach { conv ->
+     *     println("${conv.conversationId}: ${conv.turnCount} turns")
+     *     conv.preview.forEach { turn ->
+     *         println("  ${turn.role}: ${turn.text?.take(50)}")
+     *     }
+     * }
+     * ```
+     */
+    suspend fun listHistory(limit: Int = 50, offset: Int = 0): List<ConversationSummary> {
+        val summaries = historyStore?.listConversations(limit, offset) ?: emptyList()
+        val activeSessions = try {
+            if (connectionState.value == ConnectionState.CONNECTED) {
+                listSessions().map { it.sessionId }.toSet()
+            } else emptySet()
+        } catch (_: Exception) { emptySet() }
+
+        return summaries.map { it.copy(isActive = it.conversationId in activeSessions) }
+    }
+
+    /**
+     * Get full conversation history for a specific session.
+     */
+    suspend fun getHistory(conversationId: String): List<TurnPreview> {
+        return historyStore?.getConversationHistory(conversationId) ?: emptyList()
+    }
+
+    /**
+     * Delete conversations older than [maxAgeDays] days.
+     * Returns count of deleted conversations.
+     */
+    suspend fun pruneHistory(maxAgeDays: Int = 30): Int {
+        val maxAgeMs = maxAgeDays.toLong() * 24 * 60 * 60 * 1000
+        return historyStore?.pruneOlderThan(maxAgeMs) ?: 0
+    }
+
+    /**
+     * Count total conversations in history.
+     */
+    suspend fun historyCount(): Int {
+        return historyStore?.conversationCount() ?: 0
+    }
+
     // -- Convenience ----------------------------------------------------------
 
     // ── Advanced API ──────────────────────────────────────────────────────

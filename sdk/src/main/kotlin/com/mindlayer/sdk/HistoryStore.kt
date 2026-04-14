@@ -249,6 +249,65 @@ class HistoryStore internal constructor(context: Context) {
         )
     }
 
+    // -- History queries ------------------------------------------------------
+
+    /**
+     * List all past conversations with turn count and preview.
+     */
+    suspend fun listConversations(limit: Int = 50, offset: Int = 0): List<ConversationSummary> {
+        val conversations = db.conversationDao().listPaged(limit, offset)
+        return conversations.map { conv ->
+            val turnCount = db.turnDao().countCompleted(conv.conversationId)
+            val lastTurns = db.turnDao().lastNTurns(conv.conversationId, 3)
+            ConversationSummary(
+                conversationId = conv.conversationId,
+                systemPrompt = conv.systemPrompt,
+                turnCount = turnCount,
+                tokenEstimate = conv.tokenEstimateTotal,
+                createdAt = conv.createdAtMs,
+                lastActiveAt = conv.updatedAtMs,
+                isActive = false, // Will be enriched by SDK
+                preview = lastTurns.reversed().map { turn ->
+                    TurnPreview(
+                        role = turn.role,
+                        text = turn.textContent?.take(200),
+                        timestamp = turn.startedAtMs,
+                    )
+                },
+            )
+        }
+    }
+
+    /**
+     * Get full conversation history (all turns).
+     */
+    suspend fun getConversationHistory(conversationId: String): List<TurnPreview> {
+        val turns = db.turnDao().completedForConversation(conversationId)
+        return turns.map { turn ->
+            TurnPreview(
+                role = turn.role,
+                text = turn.textContent,
+                timestamp = turn.startedAtMs,
+            )
+        }
+    }
+
+    /**
+     * Delete conversations older than the given duration.
+     * Returns count of deleted conversations.
+     */
+    suspend fun pruneOlderThan(maxAgeMs: Long): Int {
+        val cutoff = System.currentTimeMillis() - maxAgeMs
+        return db.conversationDao().deleteOlderThan(cutoff)
+    }
+
+    /**
+     * Count total stored conversations.
+     */
+    suspend fun conversationCount(): Int {
+        return db.conversationDao().count()
+    }
+
     // -- Internals ------------------------------------------------------------
 
     private fun estimateTokens(text: String?): Int {

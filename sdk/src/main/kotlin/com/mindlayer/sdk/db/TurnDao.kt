@@ -105,4 +105,12 @@ abstract class TurnDao {
 
     @Query("DELETE FROM turns WHERE turnId = :turnId")
     abstract suspend fun delete(turnId: String)
+
+    /** Count completed turns for a conversation. */
+    @Query("SELECT COUNT(*) FROM turns WHERE conversationId = :conversationId AND state = 'COMPLETED'")
+    abstract suspend fun countCompleted(conversationId: String): Int
+
+    /** Get the last N turns for a conversation (for preview). */
+    @Query("SELECT * FROM turns WHERE conversationId = :conversationId AND state = 'COMPLETED' ORDER BY seq DESC LIMIT :limit")
+    abstract suspend fun lastNTurns(conversationId: String, limit: Int): List<TurnEntity>
 }

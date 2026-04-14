@@ -50,4 +50,20 @@ interface ConversationDao {
 
     @Query("DELETE FROM conversations WHERE conversationId = :id")
     suspend fun delete(id: String)
+
+    /** List all conversations, newest first. */
+    @Query("SELECT * FROM conversations ORDER BY updatedAtMs DESC")
+    suspend fun listAll(): List<ConversationEntity>
+
+    /** List conversations with pagination. */
+    @Query("SELECT * FROM conversations ORDER BY updatedAtMs DESC LIMIT :limit OFFSET :offset")
+    suspend fun listPaged(limit: Int, offset: Int): List<ConversationEntity>
+
+    /** Count all conversations. */
+    @Query("SELECT COUNT(*) FROM conversations")
+    suspend fun count(): Int
+
+    /** Delete conversations older than a given timestamp. */
+    @Query("DELETE FROM conversations WHERE updatedAtMs < :beforeMs")
+    suspend fun deleteOlderThan(beforeMs: Long): Int
 }

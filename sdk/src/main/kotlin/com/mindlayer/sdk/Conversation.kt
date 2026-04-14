@@ -92,6 +92,15 @@ class Conversation internal constructor(
         }
     }
 
+    /**
+     * Get the full turn history of this conversation.
+     * Returns all completed turns in chronological order.
+     */
+    suspend fun history(): List<TurnPreview> {
+        val sid = sessionId ?: return emptyList()
+        return client.getHistory(sid)
+    }
+
     // -- Internals ----------------------------------------------------------------
 
     private suspend fun ensureSession(): String = mutex.withLock {
