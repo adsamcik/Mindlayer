@@ -54,9 +54,38 @@ interface LogDao {
     // Total count
     @Query("SELECT COUNT(*) FROM usage_logs")
     suspend fun totalCount(): Int
+
+    // Session history
+    @Query("""
+        SELECT 
+            sessionId,
+            MIN(timestampMs) AS firstEventMs,
+            MAX(timestampMs) AS lastEventMs,
+            MAX(CASE WHEN backend IS NOT NULL THEN backend ELSE NULL END) AS backend,
+            SUM(CASE WHEN event = 'request_complete' THEN 1 ELSE 0 END) AS inferenceCount,
+            COALESCE(SUM(CASE WHEN event = 'request_complete' THEN tokensGenerated ELSE 0 END), 0) AS totalTokens
+        FROM usage_logs
+        WHERE sessionId IS NOT NULL
+        GROUP BY sessionId
+        ORDER BY MAX(timestampMs) DESC
+        LIMIT :limit OFFSET :offset
+    """)
+    suspend fun listSessionSummaries(limit: Int = 50, offset: Int = 0): List<SessionSummaryRow>
+
+    @Query("SELECT COUNT(DISTINCT sessionId) FROM usage_logs WHERE sessionId IS NOT NULL")
+    suspend fun countDistinctSessions(): Int
 }
 
 data class ThermalBandCount(
     val thermalBand: String?,
     val count: Int,
+)
+
+data class SessionSummaryRow(
+    val sessionId: String,
+    val firstEventMs: Long,
+    val lastEventMs: Long,
+    val backend: String?,
+    val inferenceCount: Int,
+    val totalTokens: Int,
 )
