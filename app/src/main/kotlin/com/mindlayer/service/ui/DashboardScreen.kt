@@ -102,7 +102,7 @@ private fun formatUptime(ms: Long): String {
 // ---------------------------------------------------------------------------
 
 @Composable
-fun DashboardScreen(state: DashboardUiState, onTestInference: () -> Unit = {}) {
+fun DashboardScreen(state: DashboardUiState, onTestInference: () -> Unit = {}, onNavigateToHistory: () -> Unit = {}) {
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
@@ -121,6 +121,39 @@ fun DashboardScreen(state: DashboardUiState, onTestInference: () -> Unit = {}) {
             item { MemoryCard(state) }
             // Sessions
             item { ActiveSessionsCard(state) }
+            // Session History
+            item {
+                ElevatedCard(
+                    onClick = onNavigateToHistory,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column {
+                            Text(
+                                text = "Session History",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = "View past sessions and inference activity",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Text(
+                            text = "→",
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+            }
             // Test inference
             item { TestInferenceCard(state, onTestInference) }
             // Logs
