@@ -61,3 +61,5 @@ Thumbs.db
 # Test output
 test-results/
 reports/
+
+logcat*.txt
