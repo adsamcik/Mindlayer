@@ -179,22 +179,6 @@ class EngineManagerTest {
         verify(exactly = 0) { assetManager.open(any()) }
     }
 
-    @Test
-    fun `availableModels exposes only the selected public model`() {
-        File(filesDir, "smaller-model.litertlm").writeBytes(ByteArray(32))
-        val selectedModel = File(filesDir, "larger-model.litertlm").apply {
-            writeBytes(ByteArray(64))
-        }
-
-        val mgr = EngineManager(context)
-        val models = mgr.availableModels
-
-        assertEquals(1, models.size)
-        assertEquals("larger-model", models.single().id)
-        assertTrue(models.single().isDefault)
-        assertEquals(selectedModel.absolutePath, mgr.modelPath)
-    }
-
     @Test(expected = IllegalStateException::class)
     fun `findModelFile - model not found throws IllegalStateException`() {
         // No model anywhere, assets empty

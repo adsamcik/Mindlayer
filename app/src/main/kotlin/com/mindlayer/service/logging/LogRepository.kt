@@ -116,6 +116,30 @@ class LogRepository(private val dao: LogDao) {
         ))
     }
 
+    fun logUserMessage(requestId: String, sessionId: String, text: String) {
+        val truncated = if (text.length > 4000) text.take(4000) + "…" else text
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.INFERENCE,
+            event = LogEvent.USER_MESSAGE,
+            requestId = requestId,
+            sessionId = sessionId,
+            extraJson = truncated,
+        ))
+    }
+
+    fun logModelResponse(requestId: String, sessionId: String, text: String) {
+        val truncated = if (text.length > 4000) text.take(4000) + "…" else text
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.INFERENCE,
+            event = LogEvent.MODEL_RESPONSE,
+            requestId = requestId,
+            sessionId = sessionId,
+            extraJson = truncated,
+        ))
+    }
+
     // Cleanup logs older than N days
     suspend fun cleanup(retentionDays: Int = 7) {
         val cutoff = System.currentTimeMillis() - (retentionDays * 24 * 60 * 60 * 1000L)

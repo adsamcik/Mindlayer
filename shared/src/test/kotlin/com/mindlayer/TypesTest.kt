@@ -166,10 +166,6 @@ class TypesTest {
             availableRamMb = 4096,
             totalRamMb = 8192,
             maxSessions = 4,
-            recommendedBackend = "CPU",
-            burstSeconds = 8,
-            restSeconds = 4,
-            chunkTokens = 64,
             headroom = 0.75f,
         )
         assertTrue(ss.isEngineLoaded)
@@ -183,10 +179,6 @@ class TypesTest {
         assertEquals(4096L, ss.availableRamMb)
         assertEquals(8192L, ss.totalRamMb)
         assertEquals(4, ss.maxSessions)
-        assertEquals("CPU", ss.recommendedBackend)
-        assertEquals(8, ss.burstSeconds)
-        assertEquals(4, ss.restSeconds)
-        assertEquals(64, ss.chunkTokens)
         assertEquals(0.75f, ss.headroom!!, 0.001f)
     }
 
@@ -205,10 +197,6 @@ class TypesTest {
         assertEquals(0L, ss.availableRamMb)
         assertEquals(0L, ss.totalRamMb)
         assertEquals(0, ss.maxSessions)
-        assertEquals("GPU", ss.recommendedBackend)
-        assertEquals(12, ss.burstSeconds)
-        assertEquals(0, ss.restSeconds)
-        assertEquals(128, ss.chunkTokens)
         assertNull(ss.headroom)
     }
 
@@ -225,7 +213,7 @@ class TypesTest {
     @Test
     fun `EngineInfo construction`() {
         val ei = EngineInfo(
-            modelPath = "/data/models/gemma.bin",
+            modelId = "gemma-4-e2b-it",
             modelSizeBytes = 4_000_000_000L,
             backend = "GPU",
             maxTokens = 8192,
@@ -233,7 +221,7 @@ class TypesTest {
             lastPrefillToksPerSec = 120.0f,
             lastDecodeToksPerSec = 45.5f,
         )
-        assertEquals("/data/models/gemma.bin", ei.modelPath)
+        assertEquals("gemma-4-e2b-it", ei.modelId)
         assertEquals(4_000_000_000L, ei.modelSizeBytes)
         assertEquals("GPU", ei.backend)
         assertEquals(8192, ei.maxTokens)
@@ -244,17 +232,17 @@ class TypesTest {
 
     @Test
     fun `EngineInfo equals and hashCode`() {
-        val a = EngineInfo("/m", 100L, "GPU", 4096, 1.0f, 50.0f, 30.0f)
-        val b = EngineInfo("/m", 100L, "GPU", 4096, 1.0f, 50.0f, 30.0f)
+        val a = EngineInfo("gemma-4-e2b-it", 100L, "GPU", 4096, 1.0f, 50.0f, 30.0f)
+        val b = EngineInfo("gemma-4-e2b-it", 100L, "GPU", 4096, 1.0f, 50.0f, 30.0f)
         assertEquals(a, b)
         assertEquals(a.hashCode(), b.hashCode())
     }
 
     @Test
     fun `EngineInfo copy preserves unchanged fields`() {
-        val original = EngineInfo("/m", 100L, "GPU", 4096, 1.0f, 50.0f, 30.0f)
+        val original = EngineInfo("gemma-4-e2b-it", 100L, "GPU", 4096, 1.0f, 50.0f, 30.0f)
         val copied = original.copy(backend = "CPU")
-        assertEquals("/m", copied.modelPath)
+        assertEquals("gemma-4-e2b-it", copied.modelId)
         assertEquals("CPU", copied.backend)
     }
 

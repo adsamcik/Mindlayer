@@ -156,10 +156,6 @@ class DashboardViewModel : ViewModel() {
                             backend = status.backend,
                             uptimeMs = status.uptimeMs,
                             thermalBand = status.thermalBand,
-                            recommendedBackend = status.recommendedBackend,
-                            burstSeconds = status.burstSeconds,
-                            restSeconds = status.restSeconds,
-                            chunkTokens = status.chunkTokens,
                             headroom = status.headroom,
                             memoryPressure = status.memoryPressure,
                             availableRamMb = status.availableRamMb,
@@ -179,7 +175,7 @@ class DashboardViewModel : ViewModel() {
                                 )
                             } ?: emptyList(),
                             initTimeSeconds = engineInfo?.initTimeSeconds ?: 0f,
-                            modelPath = engineInfo?.modelPath ?: "",
+                            modelId = engineInfo?.modelId ?: "",
                         )
                     }
                 } catch (e: Exception) {

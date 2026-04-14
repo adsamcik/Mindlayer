@@ -39,6 +39,8 @@ object LogEvent {
     const val REQUEST_ERROR = "request_error"
     const val TOOL_CALL = "tool_call"
     const val TOOL_RESULT = "tool_result"
+    const val USER_MESSAGE = "user_message"
+    const val MODEL_RESPONSE = "model_response"
     // Thermal
     const val BAND_CHANGE = "band_change"
     const val BACKEND_SWITCH = "backend_switch"

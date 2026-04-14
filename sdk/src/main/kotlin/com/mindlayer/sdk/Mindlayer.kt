@@ -298,7 +298,7 @@ class Mindlayer private constructor(
         return connection.awaitConnected().status
     }
 
-    /** Get engine info (model path, perf stats, etc.). */
+    /** Get engine info (selected model, perf stats, etc.). */
     suspend fun getEngineInfo(): EngineInfo {
         return connection.awaitConnected().engineInfo
     }

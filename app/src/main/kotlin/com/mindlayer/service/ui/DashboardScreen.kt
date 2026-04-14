@@ -134,8 +134,8 @@ private fun formatUptime(ms: Long): String {
 private fun formatSampleTime(timestampMs: Long?, nowMs: Long, fallback: String): String =
     timestampMs?.let { formatRelativeTimestamp(it, nowMs) } ?: fallback
 
-private fun modelDisplayName(modelPath: String): String =
-    modelPath.substringAfterLast('/').substringAfterLast('\\')
+private fun modelDisplayName(modelId: String): String =
+    modelId.substringAfterLast('/').substringAfterLast('\\')
 
 private fun connectionLabel(connectionState: DashboardConnectionState): String = when (connectionState) {
     DashboardConnectionState.CONNECTING -> "CONNECTING"
@@ -251,9 +251,9 @@ private fun HeaderSection(state: DashboardUiState) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (state.modelPath.isNotBlank()) {
+        if (state.modelId.isNotBlank()) {
             Text(
-                text = modelDisplayName(state.modelPath),
+                text = modelDisplayName(state.modelId),
                 style = MaterialTheme.typography.bodyMedium,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Medium,
@@ -363,8 +363,8 @@ private fun EngineStatusCard(state: DashboardUiState) {
             }
 
             LabelValue(
-                "Model file",
-                state.modelPath.takeIf { it.isNotBlank() }?.let(::modelDisplayName) ?: "Not reported",
+                "Model",
+                state.modelId.takeIf { it.isNotBlank() }?.let(::modelDisplayName) ?: "Not reported",
             )
             LabelValue(
                 "Init time",
@@ -394,7 +394,8 @@ private fun ThermalStatusCard(state: DashboardUiState) {
                 state.thermalBand.equals("CRITICAL", ignoreCase = true)
             ) {
                 DiagnosticCallout(
-                    message = "Thermal control is actively limiting sustained work. Recommended backend: ${state.recommendedBackend}.",
+                    message = "Thermal control is actively limiting sustained work. " +
+                        "Expect reduced throughput until the device cools.",
                     tone = if (state.thermalBand.equals("CRITICAL", ignoreCase = true)) {
                         DashboardMessageTone.ERROR
                     } else {
@@ -403,9 +404,6 @@ private fun ThermalStatusCard(state: DashboardUiState) {
                 )
             }
 
-            LabelValue("Recommended backend", state.recommendedBackend)
-            LabelValue("Burst / rest", "${state.burstSeconds}s / ${state.restSeconds}s")
-            LabelValue("Chunk tokens", "${state.chunkTokens}")
             LabelValue(
                 "Headroom",
                 state.headroom?.let { "%.2f".format(it) } ?: "Not reported",
@@ -937,12 +935,8 @@ private val PreviewState = DashboardUiState(
     backend = "GPU",
     initTimeSeconds = 2.3f,
     uptimeMs = 3_723_000,
-    modelPath = "/data/local/tmp/gemma-3n-E4B-it-int4.task",
+    modelId = "gemma-4-E2B-it",
     thermalBand = "WARM",
-    recommendedBackend = "GPU",
-    burstSeconds = 8,
-    restSeconds = 3,
-    chunkTokens = 64,
     headroom = 0.78f,
     memoryPressure = "NORMAL",
     availableRamMb = 4_200,

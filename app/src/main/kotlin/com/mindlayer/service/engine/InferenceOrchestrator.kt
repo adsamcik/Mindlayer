@@ -132,41 +132,6 @@ class InferenceOrchestrator(
         sessionManager.shutdown()
     }
 
-    // ---- History replay (DEPRECATED) -----------------------------------------
-
-    /**
-     * Inject a completed turn into a session's conversation history without
-     * triggering inference.
-     *
-     * @deprecated Post-creation history injection is no longer supported by
-     *   LiteRT-LM (addHistory removed in 0.10.0). Use
-     *   [SessionConfig.initialHistory] / [ConversationConfig.initialMessages]
-     *   at session creation time instead. This method is retained only for
-     *   AIDL backward compatibility — it updates bookkeeping counters but
-     *   does NOT inject the turn into the LLM conversation context.
-     *
-     * @param sessionId the server-side session ID.
-     * @param role "user" or "model".
-     * @param text the turn's text content.
-     */
-    @Deprecated(
-        message = "Use SessionConfig.initialHistory at session creation time. " +
-            "replayTurn only updates counters — turns are NOT injected into conversation context.",
-        replaceWith = ReplaceWith("SessionConfig.initialHistory"),
-    )
-    fun replayTurn(sessionId: String, role: String, text: String) {
-        val handle = sessionManager.getSession(sessionId)
-            ?: throw IllegalArgumentException("Unknown session: $sessionId")
-
-        MindlayerLog.w(TAG, "replayTurn: DEPRECATED — addHistory removed in litertlm 0.10.0; " +
-            "turn tracked but not injected into conversation context. " +
-            "Use SessionConfig.initialHistory instead.", sessionId = sessionId)
-        handle.turnCount++
-        handle.estimatedTokens += (text.length / 4).coerceAtLeast(1)
-        handle.recordAccess()
-        MindlayerLog.d(TAG, "Replayed $role turn into session $sessionId (tracking only)", sessionId = sessionId)
-    }
-
     // ---- Private -----------------------------------------------------------
 
     private suspend fun runInference(
@@ -214,6 +179,7 @@ class InferenceOrchestrator(
             logRepository?.logInferenceStart(
                 meta.requestId, meta.sessionId, service.engineManager.currentBackend
             )
+            logRepository?.logUserMessage(meta.requestId, meta.sessionId, meta.textContent ?: "")
             try {
                 writer.writeHeader(meta.requestId)
 
@@ -247,6 +213,7 @@ class InferenceOrchestrator(
                 var toolCallRound = 0
                 var requestTokenCount = 0
                 var firstTokenSeen = false
+                val responseTextBuilder = StringBuilder()
                 val accumulatedToolCalls = mutableListOf<Pair<String, String>>()
 
                 val soConfig = handle.structuredOutputConfig
@@ -264,6 +231,7 @@ class InferenceOrchestrator(
                 handle.conversation.sendMessageAsync(contents).collect { chunk ->
                     val text = chunk.text()
                     if (!text.isNullOrEmpty()) {
+                        responseTextBuilder.append(text)
                         if (isPromptValidate) {
                             responseBuffer!!.append(text)
                         } else {
@@ -416,6 +384,9 @@ class InferenceOrchestrator(
                 val durationMs = (System.nanoTime() - inferenceStartNs) / 1_000_000
                 val tokensGenerated = handle.estimatedTokens
                 val tokPerSec = if (durationMs > 0) tokensGenerated * 1000f / durationMs else 0f
+                logRepository?.logModelResponse(
+                    meta.requestId, meta.sessionId, responseTextBuilder.toString()
+                )
                 logRepository?.logInferenceComplete(
                     requestId = meta.requestId,
                     sessionId = meta.sessionId,

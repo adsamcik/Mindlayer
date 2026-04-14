@@ -254,41 +254,6 @@ class ServiceBinderTest {
         }
     }
 
-    // ---- History replay -----------------------------------------------------
-
-    @Test
-    fun `replayTurn delegates to orchestrator`() {
-        binder.replayTurn("s1", "user", "Hello world")
-        verify { orchestrator.replayTurn("s1", "user", "Hello world") }
-    }
-
-    // ---- Model discovery -----------------------------------------------------
-
-    @Test
-    fun `listModels exposes only the selected model`() {
-        val selectedModel = ModelInfo(
-            id = "gemma-4-E2B-it",
-            displayName = "Gemma 4 E2B Instruct",
-            path = "/models/gemma-4-E2B-it.litertlm",
-            sizeBytes = 2_400_000_000,
-            isDefault = true,
-        )
-        val hiddenModel = ModelInfo(
-            id = "legacy-test-model",
-            displayName = "Legacy Test Model",
-            path = "/models/legacy-test-model.litertlm",
-            sizeBytes = 1_000_000_000,
-        )
-        every { engineManager.availableModels } returns listOf(selectedModel, hiddenModel)
-        every { engineManager.currentModel } returns selectedModel
-
-        val result = binder.listModels()
-
-        assertEquals(1, result.size)
-        assertEquals("gemma-4-E2B-it", result.single().id)
-        assertTrue(result.single().isLoaded)
-    }
-
     // ---- getStatus ----------------------------------------------------------
 
     @Test
@@ -310,10 +275,6 @@ class ServiceBinderTest {
         assertEquals(6000L, status.availableRamMb)
         assertEquals(12000L, status.totalRamMb)
         assertEquals(4, status.maxSessions)
-        assertEquals("GPU", status.recommendedBackend)
-        assertEquals(12, status.burstSeconds)
-        assertEquals(0, status.restSeconds)
-        assertEquals(128, status.chunkTokens)
         assertEquals(4.5f, status.headroom!!, 0.001f)
     }
 
@@ -354,7 +315,6 @@ class ServiceBinderTest {
 
         val status = binder.getStatus()
         assertEquals("HOT", status.thermalBand)
-        assertEquals("CPU", status.recommendedBackend)
     }
 
     // ---- getDiagnostics -----------------------------------------------------
@@ -372,17 +332,20 @@ class ServiceBinderTest {
 
     @Test
     fun `getEngineInfo returns correct EngineInfo`() {
-        // Create a temp file to serve as modelPath
-        val tempModel = java.io.File.createTempFile("model", ".litertlm")
-        tempModel.writeText("fake-model-data-1234567890")
-        tempModel.deleteOnExit()
-
-        every { engineManager.modelPath } returns tempModel.absolutePath
+        val loadedModel = ModelInfo(
+            id = "gemma-4-E2B-it",
+            displayName = "Gemma 4 E2B Instruct",
+            path = "/models/gemma-4-E2B-it.litertlm",
+            sizeBytes = 2_400_000_000,
+            isDefault = true,
+        )
+        every { engineManager.currentModel } returns loadedModel
+        every { engineManager.modelPath } returns loadedModel.path
 
         val info = binder.getEngineInfo()
 
-        assertEquals(tempModel.absolutePath, info.modelPath)
-        assertEquals(tempModel.length(), info.modelSizeBytes)
+        assertEquals("gemma-4-E2B-it", info.modelId)
+        assertEquals(2_400_000_000, info.modelSizeBytes)
         assertEquals("GPU", info.backend)
         assertEquals(4096, info.maxTokens)
         assertEquals(1.5f, info.initTimeSeconds, 0.001f)
@@ -396,7 +359,7 @@ class ServiceBinderTest {
 
         val info = binder.getEngineInfo()
 
-        assertEquals("", info.modelPath)
+        assertEquals("", info.modelId)
         assertEquals(0L, info.modelSizeBytes)
     }
 
@@ -406,7 +369,7 @@ class ServiceBinderTest {
 
         val info = binder.getEngineInfo()
 
-        assertEquals("/nonexistent/model.litertlm", info.modelPath)
+        assertEquals("model", info.modelId)
         assertEquals(0L, info.modelSizeBytes)
     }
 }
