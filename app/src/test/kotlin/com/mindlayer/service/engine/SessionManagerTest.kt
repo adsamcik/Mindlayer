@@ -254,15 +254,13 @@ class SessionManagerTest {
         assertEquals(2, sessionManager.sessionCount)
     }
 
-    @Suppress("DEPRECATION")
     @Test
-    fun `createSession ignores requested model selection during lazy init`() {
+    fun `createSession passes backend and maxTokens during lazy init`() {
         every { engineManager.isInitialized } returns false
         coEvery {
             engineManager.initialize(
                 preferredBackend = "CPU",
                 maxTokens = 2048,
-                modelId = null,
             )
         } returns mockEngine
 
@@ -271,7 +269,6 @@ class SessionManagerTest {
                 sessionId = "single-model",
                 backend = "CPU",
                 maxTokens = 2048,
-                modelId = "legacy-model",
             )
         )
 
@@ -280,7 +277,6 @@ class SessionManagerTest {
             engineManager.initialize(
                 preferredBackend = "CPU",
                 maxTokens = 2048,
-                modelId = null,
             )
         }
     }

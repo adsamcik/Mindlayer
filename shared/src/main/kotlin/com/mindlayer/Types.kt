@@ -22,15 +22,6 @@ data class SessionConfig(
     val toolsJson: String? = null,
     val extraContextJson: String? = null,
     val initialHistory: List<HistoryTurn>? = null,
-    /**
-     * Legacy compatibility field. Mindlayer ignores explicit model selection and
-     * always uses the device-selected model.
-     */
-    @Deprecated(
-        "Ignored. Mindlayer always uses the device-selected model.",
-        level = DeprecationLevel.WARNING,
-    )
-    val modelId: String? = null,
     /** Session expiration in milliseconds. Default: 14 days. */
     val expirationMs: Long = 14L * 24 * 60 * 60 * 1000,
 ) : Parcelable
@@ -86,41 +77,19 @@ data class ServiceStatus(
     val availableRamMb: Long = 0,
     val totalRamMb: Long = 0,
     val maxSessions: Int = 0,
-    @Deprecated("Internal tuning parameter, use Mindlayer's default backend selection")
-    val recommendedBackend: String = "GPU",
-    @Deprecated("Internal tuning parameter, not consumer-facing")
-    val burstSeconds: Int = 12,
-    @Deprecated("Internal tuning parameter, not consumer-facing")
-    val restSeconds: Int = 0,
-    @Deprecated("Internal tuning parameter, not consumer-facing")
-    val chunkTokens: Int = 128,
     val headroom: Float? = null,
 ) : Parcelable
 
 @Parcelize
 data class EngineInfo(
-    @Deprecated("Internal file path, not consumer-facing. Use EngineInfo.modelId for diagnostics instead.")
-    val modelPath: String,
+    /** Identifier of the single model Mindlayer selected on this device. */
+    val modelId: String,
     val modelSizeBytes: Long,
     val backend: String,
     val maxTokens: Int,
     val initTimeSeconds: Float,
     val lastPrefillToksPerSec: Float,
     val lastDecodeToksPerSec: Float,
-    /** Identifier of the single model Mindlayer selected on this device. */
-    val modelId: String = modelPath
-        .substringAfterLast("/")
-        .substringAfterLast("\\")
-        .removeSuffix(".litertlm"),
-) : Parcelable
-
-@Parcelize
-data class ModelInfoParcel(
-    val id: String,
-    val displayName: String,
-    val sizeBytes: Long,
-    val isDefault: Boolean,
-    val isLoaded: Boolean,
 ) : Parcelable
 
 @Parcelize

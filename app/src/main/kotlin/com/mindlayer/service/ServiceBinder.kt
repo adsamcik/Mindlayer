@@ -6,7 +6,6 @@ import com.mindlayer.AudioTransfer
 import com.mindlayer.EngineInfo
 import com.mindlayer.IMindlayerService
 import com.mindlayer.ImageTransfer
-import com.mindlayer.ModelInfoParcel
 import com.mindlayer.RequestMeta
 import com.mindlayer.ServiceStatus
 import com.mindlayer.SessionConfig
@@ -91,13 +90,6 @@ class ServiceBinder(
         )
     }
 
-    // ---- History replay ----------------------------------------------------
-
-    override fun replayTurn(sessionId: String, role: String, text: String) {
-        MindlayerLog.d(TAG, "replayTurn: session=$sessionId, role=$role", sessionId = sessionId)
-        orchestrator.replayTurn(sessionId, role, text)
-    }
-
     // ---- Prewarm -----------------------------------------------------------
 
     override fun prewarm(backend: String?) {
@@ -111,20 +103,6 @@ class ServiceBinder(
             } catch (e: Exception) {
                 MindlayerLog.w(TAG, "Prewarm failed: ${e.message}")
             }
-        }
-    }
-
-    // ---- Model discovery -----------------------------------------------------
-
-    override fun listModels(): List<ModelInfoParcel> {
-        return engineManager.availableModels.take(1).map { model ->
-            ModelInfoParcel(
-                id = model.id,
-                displayName = model.displayName,
-                sizeBytes = model.sizeBytes,
-                isDefault = model.isDefault,
-                isLoaded = model.id == engineManager.currentModel?.id,
-            )
         }
     }
 
@@ -147,10 +125,6 @@ class ServiceBinder(
             availableRamMb = memSnapshot.availableMb,
             totalRamMb = memSnapshot.totalMb,
             maxSessions = memoryBudget.deviceTier.maxSessions,
-            recommendedBackend = thermalPolicy.recommendedBackend,
-            burstSeconds = thermalPolicy.burstSeconds,
-            restSeconds = thermalPolicy.restSeconds,
-            chunkTokens = thermalPolicy.chunkTokens,
             headroom = thermalSample?.headroom10s,
         )
     }
@@ -160,17 +134,26 @@ class ServiceBinder(
     }
 
     override fun getEngineInfo(): EngineInfo {
+        val currentModel = engineManager.currentModel
         val modelPath = try {
             engineManager.modelPath
         } catch (_: Throwable) {
             ""
         }
-        val modelSize = if (modelPath.isNotEmpty()) {
-            try { File(modelPath).length() } catch (_: Throwable) { 0L }
+        val modelId = currentModel?.id ?: modelPath
+            .substringAfterLast('/')
+            .substringAfterLast('\\')
+            .removeSuffix(".litertlm")
+        val modelSize = currentModel?.sizeBytes ?: if (modelPath.isNotEmpty()) {
+            try {
+                File(modelPath).length()
+            } catch (_: Throwable) {
+                0L
+            }
         } else 0L
 
         return EngineInfo(
-            modelPath = modelPath,
+            modelId = modelId,
             modelSizeBytes = modelSize,
             backend = engineManager.currentBackend,
             maxTokens = 4096,

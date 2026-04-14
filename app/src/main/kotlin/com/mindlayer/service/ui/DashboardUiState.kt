@@ -44,13 +44,9 @@ data class DashboardUiState(
     val backend: String = "NONE",
     val initTimeSeconds: Float = 0f,
     val uptimeMs: Long = 0,
-    val modelPath: String = "",
+    val modelId: String = "",
     // Thermal
     val thermalBand: String = "COOL",
-    val recommendedBackend: String = "GPU",
-    val burstSeconds: Int = 12,
-    val restSeconds: Int = 0,
-    val chunkTokens: Int = 128,
     val headroom: Float? = null,
     // Memory
     val memoryPressure: String = "NORMAL",

@@ -489,7 +489,7 @@ class MindlayerApiTest {
     @Test
     fun `getEngineInfo_returnsEngineInfo`() = runTest {
         val info = EngineInfo(
-            modelPath = "/data/models/llama.gguf",
+            modelId = "llama",
             modelSizeBytes = 4_000_000_000,
             backend = "GPU",
             maxTokens = 8192,
@@ -500,17 +500,15 @@ class MindlayerApiTest {
         every { mockService.engineInfo } returns info
 
         val result = mindlayer.getEngineInfo()
-        assertEquals("/data/models/llama.gguf", result.modelPath)
-        assertEquals("llama.gguf", result.modelId)
+        assertEquals("llama", result.modelId)
         assertEquals(8192, result.maxTokens)
         assertEquals(35f, result.lastDecodeToksPerSec)
     }
 
-    @Suppress("DEPRECATION")
     @Test
-    fun `EngineInfo modelId handles Windows path separators`() {
+    fun `EngineInfo preserves explicit modelId`() {
         val info = EngineInfo(
-            modelPath = "C:\\models\\gemma-4-E2B-it.litertlm",
+            modelId = "gemma-4-E2B-it",
             modelSizeBytes = 2_400_000_000,
             backend = "GPU",
             maxTokens = 4096,

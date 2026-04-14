@@ -16,8 +16,8 @@ import java.io.File
 
 /**
  * Manages the LiteRT-LM [Engine] lifecycle: initialization with automatic
- * backend fallback (NPU → GPU → CPU), single-model selection via
- * [ModelRegistry], and teardown.
+ * backend fallback (NPU → GPU → CPU), single-model selection via [ModelRegistry],
+ * and teardown.
  *
  * All public methods are coroutine-safe and serialize via [Mutex] so only one
  * init/shutdown can be in flight at a time.
@@ -76,11 +76,6 @@ class EngineManager(
         ModelRegistry.getDefaultModel(installedModels) ?: throw noModelFoundException()
     }
 
-    /** Single public model exposed to clients (legacy APIs still return a one-item list). */
-    val availableModels: List<ModelInfo> by lazy {
-        listOf(selectedModel)
-    }
-
     /** Convenience: path of the currently loaded (or selected) model. */
     val modelPath: String
         get() = currentModel?.path
@@ -98,16 +93,13 @@ class EngineManager(
      * @param preferredBackend Force a specific backend ("NPU", "GPU", "CPU").
      *        When `null`, the default chain GPU → CPU is used.
      * @param maxTokens KV-cache budget (input + output tokens combined).
-     * @param modelId Legacy compatibility parameter. Explicit model selection is
-     *        ignored; Mindlayer always uses the device-selected model.
      * @return The initialized [Engine].
      */
     suspend fun initialize(
         preferredBackend: String? = null,
         maxTokens: Int = 4096,
-        modelId: String? = null,
     ): Engine = mutex.withLock {
-        val target = resolveTargetModel(modelId)
+        val target = selectedModel
 
         // Fast-path: the selected device model is already loaded.
         engine?.let { eng ->
@@ -215,18 +207,6 @@ class EngineManager(
     }
 
     // ---- Private helpers ---------------------------------------------------
-
-    /** Resolve the target [ModelInfo] for the given [modelId]. */
-    private fun resolveTargetModel(modelId: String?): ModelInfo {
-        val target = selectedModel
-        if (modelId != null && modelId != target.id) {
-            Log.w(
-                TAG,
-                "Ignoring requested model '$modelId'; using single selected model '${target.id}'"
-            )
-        }
-        return target
-    }
 
     private fun noModelFoundException(): IllegalStateException =
         IllegalStateException(

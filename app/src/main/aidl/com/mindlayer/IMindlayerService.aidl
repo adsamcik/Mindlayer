@@ -8,7 +8,6 @@ import com.mindlayer.ToolResult;
 import com.mindlayer.ServiceStatus;
 import com.mindlayer.EngineInfo;
 import com.mindlayer.SessionInfo;
-import com.mindlayer.ModelInfoParcel;
 
 interface IMindlayerService {
     // Session management
@@ -26,11 +25,6 @@ interface IMindlayerService {
     // Function calling — inject tool results back
     void submitToolResult(String requestId, in ToolResult result);
 
-    // History replay (DEPRECATED) — kept for backward compat.
-    // Use SessionConfig.initialHistory instead; replayTurn only updates
-    // counters and does NOT inject turns into the LLM conversation context.
-    void replayTurn(String sessionId, String role, String text);
-
     // Service status
     ServiceStatus getStatus();
     EngineInfo getEngineInfo();
@@ -40,7 +34,4 @@ interface IMindlayerService {
 
     // Pre-warm the engine in the background (fire-and-forget)
     oneway void prewarm(String backend);
-
-    // Legacy model diagnostics. Returns the single model selected on this device.
-    List<ModelInfoParcel> listModels();
 }
