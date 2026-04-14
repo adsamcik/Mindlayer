@@ -1,14 +1,18 @@
 package com.mindlayer.service.ui
 
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
+import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -22,21 +26,27 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContent {
             MaterialTheme {
-                Surface {
-                    val navController = rememberNavController()
-
-                    NavHost(navController = navController, startDestination = "dashboard") {
-                        composable("dashboard") {
+                val navController = rememberNavController()
+                Scaffold { innerPadding ->
+                    NavHost(
+                        navController = navController,
+                        startDestination = SessionHistoryNavigation.DashboardRoute,
+                        modifier = Modifier.padding(innerPadding),
+                    ) {
+                        composable(SessionHistoryNavigation.DashboardRoute) {
                             val state by dashboardViewModel.uiState.collectAsState()
                             DashboardScreen(
                                 state = state,
                                 onTestInference = { dashboardViewModel.runTestInference() },
-                                onNavigateToHistory = { navController.navigate("history") },
+                                onNavigateToHistory = {
+                                    navController.navigate(SessionHistoryNavigation.HistoryRoute)
+                                },
                             )
                         }
-                        composable("history") {
+                        composable(SessionHistoryNavigation.HistoryRoute) {
                             LaunchedEffect(Unit) {
                                 historyViewModel.loadSessions()
                             }
@@ -44,24 +54,46 @@ class MainActivity : ComponentActivity() {
                             SessionHistoryScreen(
                                 state = state,
                                 onSessionClick = { sessionId ->
-                                    navController.navigate("detail/$sessionId")
+                                    navController.navigate(
+                                        SessionHistoryNavigation.detailRoute(sessionId),
+                                    )
                                 },
                                 onBack = { navController.popBackStack() },
+                                onRetry = historyViewModel::loadSessions,
                             )
                         }
                         composable(
-                            route = "detail/{sessionId}",
-                            arguments = listOf(navArgument("sessionId") { type = NavType.StringType }),
+                            route = SessionHistoryNavigation.DetailRoute,
+                            arguments = listOf(
+                                navArgument(SessionHistoryNavigation.SessionIdArgument) {
+                                    type = NavType.StringType
+                                },
+                            ),
                         ) { backStackEntry ->
-                            val sessionId = backStackEntry.arguments?.getString("sessionId") ?: return@composable
-                            LaunchedEffect(sessionId) {
-                                detailViewModel.loadSession(sessionId)
-                            }
-                            val state by detailViewModel.uiState.collectAsState()
-                            SessionDetailScreen(
-                                state = state,
-                                onBack = { navController.popBackStack() },
+                            val sessionId = SessionHistoryNavigation.decodeSessionId(
+                                backStackEntry.arguments?.getString(
+                                    SessionHistoryNavigation.SessionIdArgument,
+                                ),
                             )
+                            if (sessionId == null) {
+                                SessionDetailScreen(
+                                    state = SessionDetailUiState(
+                                        isLoading = false,
+                                        errorMessage = "The requested session route is missing a valid session ID. Return to Session History and open the session again.",
+                                    ),
+                                    onBack = { navController.popBackStack() },
+                                )
+                            } else {
+                                LaunchedEffect(sessionId) {
+                                    detailViewModel.loadSession(sessionId)
+                                }
+                                val state by detailViewModel.uiState.collectAsState()
+                                SessionDetailScreen(
+                                    state = state,
+                                    onBack = { navController.popBackStack() },
+                                    onRetry = { detailViewModel.loadSession(sessionId) },
+                                )
+                            }
                         }
                     }
                 }
@@ -78,4 +110,20 @@ class MainActivity : ComponentActivity() {
         super.onStop()
         dashboardViewModel.unbindService(this)
     }
+}
+
+internal object SessionHistoryNavigation {
+    const val DashboardRoute = "dashboard"
+    const val HistoryRoute = "history"
+    const val SessionIdArgument = "sessionId"
+    const val DetailRoute = "detail/{$SessionIdArgument}"
+
+    private const val DetailPrefix = "detail/"
+
+    fun detailRoute(sessionId: String): String = "$DetailPrefix${Uri.encode(sessionId)}"
+
+    fun decodeSessionId(rawSessionId: String?): String? =
+        rawSessionId
+            ?.takeIf { it.isNotBlank() }
+            ?.let(Uri::decode)
 }

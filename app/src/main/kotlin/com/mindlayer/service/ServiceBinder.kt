@@ -117,7 +117,7 @@ class ServiceBinder(
     // ---- Model discovery -----------------------------------------------------
 
     override fun listModels(): List<ModelInfoParcel> {
-        return engineManager.availableModels.map { model ->
+        return engineManager.availableModels.take(1).map { model ->
             ModelInfoParcel(
                 id = model.id,
                 displayName = model.displayName,

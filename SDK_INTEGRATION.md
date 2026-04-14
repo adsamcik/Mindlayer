@@ -150,7 +150,7 @@ mindlayer.chat(sessionId, "What's the weather in Prague?").collect { event ->
 ```kotlin
 val session = mindlayer.session(sessionId)
 session.chat("Hello!").collect { ... }
-session.destroy()
+session.delete()
 ```
 
 ### Cleanup

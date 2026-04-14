@@ -50,7 +50,4 @@ class MindlayerSession internal constructor(
 
     /** Delete this session and release its resources on the service. */
     suspend fun delete() = client.destroySession(sessionId)
-
-    @Deprecated("Use delete() instead", replaceWith = ReplaceWith("delete()"))
-    suspend fun destroy() = delete()
 }

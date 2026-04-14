@@ -210,9 +210,6 @@ class OomRecoveryFlowTest {
             assertEquals("Turn $i role", expectedRole, history[i].role)
         }
 
-        // replayTurn should NOT be called — history is injected at creation time
-        verify(exactly = 0) { mockService.replayTurn(any(), any(), any()) }
-
         // destroySession should be called best-effort before createSession
         verify(exactly = 1) { mockService.destroySession(sessionId) }
     }
@@ -291,9 +288,6 @@ class OomRecoveryFlowTest {
         val history = configSlot.captured.initialHistory!!
         assertEquals(1, history.size)
         assertEquals(HistoryTurn("user", "Hello"), history[0])
-
-        // replayTurn should NOT be called
-        verify(exactly = 0) { mockService.replayTurn(any(), any(), any()) }
     }
 
     @Test
@@ -338,9 +332,6 @@ class OomRecoveryFlowTest {
         val history = configSlot.captured.initialHistory
         assertNotNull(history)
         assertEquals(result.replayedTurnCount, history!!.size)
-
-        // replayTurn should NOT be called
-        verify(exactly = 0) { mockService.replayTurn(any(), any(), any()) }
     }
 
     @Test
@@ -411,7 +402,6 @@ class OomRecoveryFlowTest {
 
         // Session was created but no turns replayed — initialHistory should be null
         verify(exactly = 1) { mockService.createSession(any()) }
-        verify(exactly = 0) { mockService.replayTurn(any(), any(), any()) }
 
         // System prompt preserved in the new session config
         val configSlot = slot<SessionConfig>()
@@ -434,7 +424,5 @@ class OomRecoveryFlowTest {
 
         // Both calls should create a session (with initialHistory) and succeed
         verify(exactly = 2) { mockService.createSession(any()) }
-        // replayTurn should never be called
-        verify(exactly = 0) { mockService.replayTurn(any(), any(), any()) }
     }
 }

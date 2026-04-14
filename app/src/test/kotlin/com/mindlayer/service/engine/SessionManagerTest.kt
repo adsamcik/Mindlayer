@@ -6,6 +6,8 @@ import android.util.Log
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.Engine
 import com.mindlayer.SessionConfig
+import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -250,6 +252,37 @@ class SessionManagerTest {
         assertEquals(1, sessionManager.sessionCount)
         createDefaultSession()
         assertEquals(2, sessionManager.sessionCount)
+    }
+
+    @Suppress("DEPRECATION")
+    @Test
+    fun `createSession ignores requested model selection during lazy init`() {
+        every { engineManager.isInitialized } returns false
+        coEvery {
+            engineManager.initialize(
+                preferredBackend = "CPU",
+                maxTokens = 2048,
+                modelId = null,
+            )
+        } returns mockEngine
+
+        val id = sessionManager.createSession(
+            SessionConfig(
+                sessionId = "single-model",
+                backend = "CPU",
+                maxTokens = 2048,
+                modelId = "legacy-model",
+            )
+        )
+
+        assertEquals("single-model", id)
+        coVerify(exactly = 1) {
+            engineManager.initialize(
+                preferredBackend = "CPU",
+                maxTokens = 2048,
+                modelId = null,
+            )
+        }
     }
 
     @Test

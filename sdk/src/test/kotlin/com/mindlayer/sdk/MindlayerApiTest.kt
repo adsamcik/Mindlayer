@@ -35,6 +35,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -505,6 +506,22 @@ class MindlayerApiTest {
         assertEquals(35f, result.lastDecodeToksPerSec)
     }
 
+    @Suppress("DEPRECATION")
+    @Test
+    fun `EngineInfo modelId handles Windows path separators`() {
+        val info = EngineInfo(
+            modelPath = "C:\\models\\gemma-4-E2B-it.litertlm",
+            modelSizeBytes = 2_400_000_000,
+            backend = "GPU",
+            maxTokens = 4096,
+            initTimeSeconds = 1.0f,
+            lastPrefillToksPerSec = 0f,
+            lastDecodeToksPerSec = 0f,
+        )
+
+        assertEquals("gemma-4-E2B-it", info.modelId)
+    }
+
     // ═════════════════════════════════════════════════════════════════════
     //  Session wrapper (MindlayerSession)
     // ═════════════════════════════════════════════════════════════════════
@@ -539,14 +556,6 @@ class MindlayerApiTest {
         val session = mindlayer.session("sess-destroy")
         session.delete()
         verify(exactly = 1) { mockService.destroySession("sess-destroy") }
-    }
-
-    @Suppress("DEPRECATION")
-    @Test
-    fun `mindlayerSession_destroy_delegatesToDelete`() = runTest {
-        val session = mindlayer.session("sess-destroy-compat")
-        session.destroy()
-        verify(exactly = 1) { mockService.destroySession("sess-destroy-compat") }
     }
 
     @Test

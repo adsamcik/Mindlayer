@@ -101,7 +101,7 @@ class SessionRecoveryTest {
         assertEquals(0, result.cleanedTurnCount)
         assertNull(result.pendingUserText)
 
-        // Verify history was passed via createSession config, not replayTurn
+        // Verify history was passed via createSession config
         val configSlot = slot<SessionConfig>()
         verify(exactly = 1) { mockService.createSession(capture(configSlot)) }
         val history = configSlot.captured.initialHistory
@@ -110,9 +110,6 @@ class SessionRecoveryTest {
         assertEquals(HistoryTurn("user", "Hello"), history[0])
         assertEquals(HistoryTurn("model", "Hi there"), history[1])
         assertEquals(HistoryTurn("user", "How are you?"), history[2])
-
-        // replayTurn should NOT be called
-        verify(exactly = 0) { mockService.replayTurn(any(), any(), any()) }
     }
 
     // -- recoverSession with no history ---------------------------------------
@@ -257,7 +254,6 @@ class SessionRecoveryTest {
         val configSlot = slot<SessionConfig>()
         verify(exactly = 1) { mockService.createSession(capture(configSlot)) }
         assertNull(configSlot.captured.initialHistory)
-        verify(exactly = 0) { mockService.replayTurn(any(), any(), any()) }
     }
 
     // -- Token budget propagation ---------------------------------------------

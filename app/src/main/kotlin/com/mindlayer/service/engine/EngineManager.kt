@@ -16,8 +16,8 @@ import java.io.File
 
 /**
  * Manages the LiteRT-LM [Engine] lifecycle: initialization with automatic
- * backend fallback (NPU → GPU → CPU), model discovery via [ModelRegistry],
- * and teardown.
+ * backend fallback (NPU → GPU → CPU), single-model selection via
+ * [ModelRegistry], and teardown.
  *
  * All public methods are coroutine-safe and serialize via [Mutex] so only one
  * init/shutdown can be in flight at a time.
@@ -61,31 +61,30 @@ class EngineManager(
     var isInitialized: Boolean = false
         private set
 
-    /** The model currently loaded in the engine, or `null` if not yet initialised. */
+    /** The single model currently loaded in the engine, or `null` if not yet initialised. */
     @Volatile
     var currentModel: ModelInfo? = null
         private set
 
-    /** All models discovered on the device (lazy, discovered on first access). */
-    val availableModels: List<ModelInfo> by lazy {
-        val models = ModelRegistry.discoverModels(context)
-        val default = ModelRegistry.getDefaultModel(models)
-        if (default != null) {
-            models.map { if (it.id == default.id) it.copy(isDefault = true) else it }
-        } else {
-            models
-        }
+    /** All model files detected on the device for internal selection purposes. */
+    private val installedModels: List<ModelInfo> by lazy {
+        ModelRegistry.discoverModels(context)
     }
 
-    /** Convenience: path of the currently loaded (or default) model. */
+    /** The single model Mindlayer selects and exposes on this device. */
+    private val selectedModel: ModelInfo by lazy {
+        ModelRegistry.getDefaultModel(installedModels) ?: throw noModelFoundException()
+    }
+
+    /** Single public model exposed to clients (legacy APIs still return a one-item list). */
+    val availableModels: List<ModelInfo> by lazy {
+        listOf(selectedModel)
+    }
+
+    /** Convenience: path of the currently loaded (or selected) model. */
     val modelPath: String
         get() = currentModel?.path
-            ?: availableModels.firstOrNull { it.isDefault }?.path
-            ?: availableModels.firstOrNull()?.path
-            ?: throw IllegalStateException(
-                "No .litertlm model files found. Place a model in app filesDir, " +
-                "externalFilesDir, cacheDir, /data/local/tmp, or deploy via Play AI pack."
-            )
+            ?: selectedModel.path
 
     // ---- Public API --------------------------------------------------------
 
@@ -99,8 +98,8 @@ class EngineManager(
      * @param preferredBackend Force a specific backend ("NPU", "GPU", "CPU").
      *        When `null`, the default chain GPU → CPU is used.
      * @param maxTokens KV-cache budget (input + output tokens combined).
-     * @param modelId Target model ID. When `null`, the default model is used.
-     *        If a different model is already loaded the engine is torn down first.
+     * @param modelId Legacy compatibility parameter. Explicit model selection is
+     *        ignored; Mindlayer always uses the device-selected model.
      * @return The initialized [Engine].
      */
     suspend fun initialize(
@@ -110,15 +109,10 @@ class EngineManager(
     ): Engine = mutex.withLock {
         val target = resolveTargetModel(modelId)
 
-        // Fast-path: same model already loaded
+        // Fast-path: the selected device model is already loaded.
         engine?.let { eng ->
-            if (currentModel?.id == target.id) {
-                Log.i(TAG, "Engine already initialized with model=${target.id}, backend=$currentBackend")
-                return eng
-            }
-            // Different model requested — tear down first
-            Log.i(TAG, "Model switch: ${currentModel?.id} → ${target.id}, shutting down")
-            shutdownInternal()
+            Log.i(TAG, "Engine already initialized with model=${target.id}, backend=$currentBackend")
+            return eng
         }
 
         val path = target.path
@@ -217,7 +211,6 @@ class EngineManager(
         return initialize(
             preferredBackend = newBackend,
             maxTokens = maxTokens,
-            modelId = currentModel?.id,
         )
     }
 
@@ -225,24 +218,21 @@ class EngineManager(
 
     /** Resolve the target [ModelInfo] for the given [modelId]. */
     private fun resolveTargetModel(modelId: String?): ModelInfo {
-        val models = availableModels
-        if (models.isEmpty()) {
-            throw IllegalStateException(
-                "No .litertlm model files found. Place a model in app filesDir, " +
-                "externalFilesDir, cacheDir, /data/local/tmp, or deploy via Play AI pack."
+        val target = selectedModel
+        if (modelId != null && modelId != target.id) {
+            Log.w(
+                TAG,
+                "Ignoring requested model '$modelId'; using single selected model '${target.id}'"
             )
         }
-
-        if (modelId != null) {
-            return ModelRegistry.findModelById(models, modelId)
-                ?: throw IllegalArgumentException(
-                    "Model '$modelId' not found. Available: ${models.map { it.id }}"
-                )
-        }
-
-        // Default: use the model marked isDefault, or first available
-        return models.firstOrNull { it.isDefault } ?: models.first()
+        return target
     }
+
+    private fun noModelFoundException(): IllegalStateException =
+        IllegalStateException(
+            "No .litertlm model files found. Place a model in app filesDir, " +
+                "externalFilesDir, cacheDir, /data/local/tmp, or deploy via Play AI pack."
+        )
 
     /** Internal shutdown without acquiring the mutex (caller must hold it). */
     private suspend fun shutdownInternal() {
