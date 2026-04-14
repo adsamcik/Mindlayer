@@ -6,10 +6,11 @@ import java.io.File
 import java.util.Locale
 
 /**
- * Discovers and manages available LLM model files on the device.
+ * Discovers installed LLM model files on the device.
  *
- * Scans well-known directories for `.litertlm` files, deduplicates by
- * filename (preferring app-private storage), and provides lookup helpers.
+ * Mindlayer may detect multiple candidates internally, but runtime behavior is
+ * single-model only: the best available model is selected once and exposed to
+ * clients as the device's single installed model.
  */
 object ModelRegistry {
 
@@ -84,7 +85,7 @@ object ModelRegistry {
     }
 
     /**
-     * Pick the best default model from [models].
+     * Pick the single model Mindlayer exposes publicly from [models].
      *
      * - Single model → that's the default.
      * - Multiple → prefer the largest (most capable).

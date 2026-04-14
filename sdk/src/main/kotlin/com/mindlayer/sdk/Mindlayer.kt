@@ -5,7 +5,6 @@ import android.graphics.Bitmap
 import android.os.ParcelFileDescriptor
 import com.mindlayer.EngineInfo
 import com.mindlayer.HistoryTurn
-import com.mindlayer.ModelInfoParcel
 import com.mindlayer.RequestMeta
 import com.mindlayer.ServiceStatus
 import com.mindlayer.SessionConfig
@@ -307,16 +306,6 @@ class Mindlayer private constructor(
     /** Get a diagnostic JSON dump for bug reports and troubleshooting. */
     suspend fun getDiagnostics(): String {
         return connection.awaitConnected().diagnostics
-    }
-
-    /** List all available models on the device. Internal diagnostics only. */
-    @Deprecated(
-        "Mindlayer always uses the best available model. " +
-        "This method is retained for internal diagnostics only.",
-        level = DeprecationLevel.WARNING,
-    )
-    suspend fun listModels(): List<ModelInfoParcel> {
-        return connection.awaitConnected().listModels()
     }
 
     // ── Simple API ──────────────────────────────────────────────────────
@@ -698,7 +687,6 @@ class SessionConfigBuilder {
     private var toolsJson: String? = null
     private var extraContextJson: String? = null
     private var initialHistory: List<HistoryTurn>? = null
-    private var modelId: String? = null
     private var expirationMs: Long = 14L * 24 * 60 * 60 * 1000
 
     /**
@@ -780,17 +768,6 @@ class SessionConfigBuilder {
      */
     fun initialHistory(history: List<HistoryTurn>) { initialHistory = history }
 
-    /**
-     * Select a specific model by ID. Internal use only — Mindlayer always
-     * picks the best available model.
-     */
-    @Deprecated(
-        "Mindlayer always uses the best available model. " +
-        "This method is retained for internal use only.",
-        level = DeprecationLevel.WARNING,
-    )
-    fun model(id: String) { modelId = id }
-
     /** Set session expiration in milliseconds. Internal — consumers use [ConversationBuilder.expiration]. */
     internal fun expirationMs(ms: Long) { expirationMs = ms }
 
@@ -805,7 +782,6 @@ class SessionConfigBuilder {
         toolsJson = toolsJson,
         extraContextJson = extraContextJson,
         initialHistory = initialHistory,
-        modelId = modelId,
         expirationMs = expirationMs,
     )
 }

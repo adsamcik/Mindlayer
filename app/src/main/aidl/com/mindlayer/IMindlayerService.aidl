@@ -41,6 +41,6 @@ interface IMindlayerService {
     // Pre-warm the engine in the background (fire-and-forget)
     oneway void prewarm(String backend);
 
-    // Model discovery
+    // Legacy model diagnostics. Returns the single model selected on this device.
     List<ModelInfoParcel> listModels();
 }

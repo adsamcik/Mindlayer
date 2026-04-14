@@ -22,7 +22,14 @@ data class SessionConfig(
     val toolsJson: String? = null,
     val extraContextJson: String? = null,
     val initialHistory: List<HistoryTurn>? = null,
-    /** Target model ID. `null` means use the default model. */
+    /**
+     * Legacy compatibility field. Mindlayer ignores explicit model selection and
+     * always uses the device-selected model.
+     */
+    @Deprecated(
+        "Ignored. Mindlayer always uses the device-selected model.",
+        level = DeprecationLevel.WARNING,
+    )
     val modelId: String? = null,
     /** Session expiration in milliseconds. Default: 14 days. */
     val expirationMs: Long = 14L * 24 * 60 * 60 * 1000,
@@ -92,7 +99,7 @@ data class ServiceStatus(
 
 @Parcelize
 data class EngineInfo(
-    @Deprecated("Internal file path, not consumer-facing. Use modelId from listModels() instead.")
+    @Deprecated("Internal file path, not consumer-facing. Use EngineInfo.modelId for diagnostics instead.")
     val modelPath: String,
     val modelSizeBytes: Long,
     val backend: String,
@@ -100,7 +107,11 @@ data class EngineInfo(
     val initTimeSeconds: Float,
     val lastPrefillToksPerSec: Float,
     val lastDecodeToksPerSec: Float,
-    val modelId: String = modelPath.substringAfterLast("/").removeSuffix(".litertlm"),
+    /** Identifier of the single model Mindlayer selected on this device. */
+    val modelId: String = modelPath
+        .substringAfterLast("/")
+        .substringAfterLast("\\")
+        .removeSuffix(".litertlm"),
 ) : Parcelable
 
 @Parcelize

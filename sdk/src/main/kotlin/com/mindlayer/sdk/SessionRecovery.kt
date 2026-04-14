@@ -70,7 +70,7 @@ class SessionRecovery internal constructor(
         // Destroy old session (best-effort) before creating replacement
         try { mindlayer.connection.awaitConnected().destroySession(sessionId) } catch (_: Exception) {}
 
-        // 4. Create a fresh server session seeded with history via initialMessages
+        // 4. Create a fresh server session seeded with history via initialHistory
         val config = SessionConfigBuilder().apply {
             sessionId(sessionId)
             replay.config.systemPrompt?.let { systemPrompt(it) }
@@ -87,7 +87,6 @@ class SessionRecovery internal constructor(
         }.build()
 
         val newSessionId = mindlayer.connection.awaitConnected().createSession(config)
-        // NO replayTurn loop — history injected at creation time
 
         Log.i(
             TAG,

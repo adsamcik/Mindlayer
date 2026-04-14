@@ -15,6 +15,7 @@ import com.mindlayer.service.engine.InferenceOrchestrator
 import com.mindlayer.service.engine.MemoryBudget
 import com.mindlayer.service.engine.MemoryPressure
 import com.mindlayer.service.engine.MemorySnapshot
+import com.mindlayer.service.engine.ModelInfo
 import com.mindlayer.service.engine.ThermalBand
 import com.mindlayer.service.engine.ThermalMonitor
 import com.mindlayer.service.engine.ThermalPolicy
@@ -259,6 +260,33 @@ class ServiceBinderTest {
     fun `replayTurn delegates to orchestrator`() {
         binder.replayTurn("s1", "user", "Hello world")
         verify { orchestrator.replayTurn("s1", "user", "Hello world") }
+    }
+
+    // ---- Model discovery -----------------------------------------------------
+
+    @Test
+    fun `listModels exposes only the selected model`() {
+        val selectedModel = ModelInfo(
+            id = "gemma-4-E2B-it",
+            displayName = "Gemma 4 E2B Instruct",
+            path = "/models/gemma-4-E2B-it.litertlm",
+            sizeBytes = 2_400_000_000,
+            isDefault = true,
+        )
+        val hiddenModel = ModelInfo(
+            id = "legacy-test-model",
+            displayName = "Legacy Test Model",
+            path = "/models/legacy-test-model.litertlm",
+            sizeBytes = 1_000_000_000,
+        )
+        every { engineManager.availableModels } returns listOf(selectedModel, hiddenModel)
+        every { engineManager.currentModel } returns selectedModel
+
+        val result = binder.listModels()
+
+        assertEquals(1, result.size)
+        assertEquals("gemma-4-E2B-it", result.single().id)
+        assertTrue(result.single().isLoaded)
     }
 
     // ---- getStatus ----------------------------------------------------------

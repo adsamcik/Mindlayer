@@ -5,13 +5,13 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -36,13 +37,10 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-// ---------------------------------------------------------------------------
-// UI state
-// ---------------------------------------------------------------------------
-
 data class SessionHistoryUiState(
     val sessions: List<SessionHistoryItem> = emptyList(),
     val isLoading: Boolean = true,
+    val errorMessage: String? = null,
 )
 
 data class SessionHistoryItem(
@@ -55,10 +53,6 @@ data class SessionHistoryItem(
     val totalTokens: Int,
 )
 
-// ---------------------------------------------------------------------------
-// Color helpers
-// ---------------------------------------------------------------------------
-
 private val BackendGpu = Color(0xFF42A5F5)
 private val BackendCpu = Color(0xFF9E9E9E)
 private val BackendNpu = Color(0xFF66BB6A)
@@ -70,42 +64,18 @@ private fun backendColor(backend: String?): Color = when (backend?.uppercase()) 
     else -> BackendCpu
 }
 
-// ---------------------------------------------------------------------------
-// Date formatting helpers
-// ---------------------------------------------------------------------------
-
-private fun formatDate(ms: Long): String {
-    val sdf = java.text.SimpleDateFormat("MMM d, yyyy HH:mm", java.util.Locale.getDefault())
-    return sdf.format(java.util.Date(ms))
-}
-
-private fun formatRelativeTime(ms: Long): String {
-    val diff = System.currentTimeMillis() - ms
-    return when {
-        diff < 60_000 -> "just now"
-        diff < 3_600_000 -> "${diff / 60_000}m ago"
-        diff < 86_400_000 -> "${diff / 3_600_000}h ago"
-        diff < 604_800_000 -> "${diff / 86_400_000}d ago"
-        else -> formatDate(ms)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Screen
-// ---------------------------------------------------------------------------
-
 @Composable
 fun SessionHistoryScreen(
     state: SessionHistoryUiState,
     onSessionClick: (String) -> Unit = {},
     onBack: () -> Unit = {},
+    onRetry: () -> Unit = {},
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Top bar
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -118,45 +88,62 @@ fun SessionHistoryScreen(
                         contentDescription = "Back",
                     )
                 }
-                Text(
-                    text = "Session History",
-                    style = MaterialTheme.typography.headlineLarge,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(start = 4.dp),
-                )
+                Column(modifier = Modifier.padding(start = 4.dp)) {
+                    Text(
+                        text = "Session history",
+                        style = MaterialTheme.typography.headlineLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        text = "Recent diagnostics sessions stored in the local log database.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
 
             when {
                 state.isLoading -> {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        CircularProgressIndicator()
-                    }
+                    HistoryStatusPane(
+                        title = "Loading session history",
+                        message = "Reading the most recent session summaries from the diagnostics log.",
+                        showProgress = true,
+                    )
+                }
+
+                state.errorMessage != null -> {
+                    HistoryStatusPane(
+                        title = "Couldn't load session history",
+                        message = state.errorMessage,
+                        actionLabel = "Retry",
+                        onAction = onRetry,
+                    )
                 }
 
                 state.sessions.isEmpty() -> {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = "No sessions yet",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    HistoryStatusPane(
+                        title = "No sessions recorded yet",
+                        message = "Run a dashboard test inference or wait for a client request to create session log entries.",
+                    )
                 }
 
                 else -> {
+                    Text(
+                        text = "Showing ${formatWholeNumber(state.sessions.size)} recent sessions. Tap a card to inspect the full event timeline.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+                        contentPadding = PaddingValues(16.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         items(state.sessions, key = { it.sessionId }) { item ->
-                            SessionCard(item = item, onClick = { onSessionClick(item.sessionId) })
+                            SessionCard(
+                                item = item,
+                                onClick = { onSessionClick(item.sessionId) },
+                            )
                         }
                     }
                 }
@@ -164,10 +151,6 @@ fun SessionHistoryScreen(
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Session card
-// ---------------------------------------------------------------------------
 
 @Composable
 private fun SessionCard(item: SessionHistoryItem, onClick: () -> Unit) {
@@ -177,7 +160,6 @@ private fun SessionCard(item: SessionHistoryItem, onClick: () -> Unit) {
             .clickable(onClick = onClick),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            // Header row: session ID + backend badge
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -186,35 +168,33 @@ private fun SessionCard(item: SessionHistoryItem, onClick: () -> Unit) {
                 Text(
                     text = item.displayId,
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier.weight(1f),
                 )
-                if (item.backend != null) {
+                item.backend?.let { backend ->
                     Spacer(modifier = Modifier.width(8.dp))
-                    BackendBadge(backend = item.backend)
+                    BackendBadge(backend = backend)
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            if (item.displayId != item.sessionId) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = item.sessionId,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
 
-            // Time info
-            Text(
-                text = "Created: ${item.createdLabel}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = "Last active: ${item.lastActiveLabel}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Spacer(modifier = Modifier.height(10.dp))
+            HistoryLabelValue(label = "Created", value = item.createdLabel)
+            HistoryLabelValue(label = "Last active", value = item.lastActiveLabel)
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Stats row
+            Spacer(modifier = Modifier.height(10.dp))
             Text(
-                text = "${item.inferenceCount} inferences • ${item.totalTokens} tokens",
+                text = "${formatWholeNumber(item.inferenceCount)} requests • ${formatWholeNumber(item.totalTokens)} tokens",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.primary,
                 fontWeight = FontWeight.Medium,
@@ -223,9 +203,26 @@ private fun SessionCard(item: SessionHistoryItem, onClick: () -> Unit) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Backend badge
-// ---------------------------------------------------------------------------
+@Composable
+private fun HistoryLabelValue(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 1.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
 
 @Composable
 private fun BackendBadge(backend: String) {
@@ -246,9 +243,45 @@ private fun BackendBadge(backend: String) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Preview
-// ---------------------------------------------------------------------------
+@Composable
+private fun HistoryStatusPane(
+    title: String,
+    message: String,
+    showProgress: Boolean = false,
+    actionLabel: String? = null,
+    onAction: () -> Unit = {},
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(32.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (showProgress) {
+                CircularProgressIndicator()
+            }
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            actionLabel?.let { label ->
+                FilledTonalButton(onClick = onAction) {
+                    Text(text = label)
+                }
+            }
+        }
+    }
+}
 
 @Preview(showBackground = true)
 @Composable
@@ -260,7 +293,7 @@ private fun SessionHistoryScreenPreview() {
                 sessions = listOf(
                     SessionHistoryItem(
                         sessionId = "abc123def456ghi789",
-                        displayId = "abc123def456…",
+                        displayId = "abc123de…ghi789",
                         backend = "GPU",
                         createdLabel = "Jun 15, 2025 09:30",
                         lastActiveLabel = "2h ago",
@@ -269,23 +302,27 @@ private fun SessionHistoryScreenPreview() {
                     ),
                     SessionHistoryItem(
                         sessionId = "xyz987wvu654tsr321",
-                        displayId = "xyz987wvu654…",
+                        displayId = "xyz987wv…tsr321",
                         backend = "CPU",
                         createdLabel = "Jun 14, 2025 14:12",
                         lastActiveLabel = "1d ago",
                         inferenceCount = 7,
                         totalTokens = 1_024,
                     ),
-                    SessionHistoryItem(
-                        sessionId = "npu000session001ab",
-                        displayId = "npu000sessio…",
-                        backend = "NPU",
-                        createdLabel = "Jun 13, 2025 08:00",
-                        lastActiveLabel = "2d ago",
-                        inferenceCount = 120,
-                        totalTokens = 32_768,
-                    ),
                 ),
+            ),
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "Error")
+@Composable
+private fun SessionHistoryErrorPreview() {
+    MaterialTheme {
+        SessionHistoryScreen(
+            state = SessionHistoryUiState(
+                isLoading = false,
+                errorMessage = "The diagnostics log database couldn't be queried.",
             ),
         )
     }
