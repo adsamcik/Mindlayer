@@ -23,6 +23,7 @@ class MainActivity : ComponentActivity() {
     private val dashboardViewModel: DashboardViewModel by viewModels()
     private val historyViewModel: SessionHistoryViewModel by viewModels()
     private val detailViewModel: SessionDetailViewModel by viewModels()
+    private val logsViewModel: RecentLogsViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,6 +44,9 @@ class MainActivity : ComponentActivity() {
                                 onTestInference = { dashboardViewModel.runTestInference() },
                                 onNavigateToHistory = {
                                     navController.navigate(SessionHistoryNavigation.HistoryRoute)
+                                },
+                                onNavigateToLogs = {
+                                    navController.navigate(SessionHistoryNavigation.LogsRoute)
                                 },
                             )
                         }
@@ -95,6 +99,16 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                         }
+                        composable(SessionHistoryNavigation.LogsRoute) {
+                            LaunchedEffect(Unit) {
+                                logsViewModel.loadLogs()
+                            }
+                            val state by logsViewModel.uiState.collectAsState()
+                            RecentLogsScreen(
+                                state = state,
+                                onBack = { navController.popBackStack() },
+                            )
+                        }
                     }
                 }
             }
@@ -115,6 +129,7 @@ class MainActivity : ComponentActivity() {
 internal object SessionHistoryNavigation {
     const val DashboardRoute = "dashboard"
     const val HistoryRoute = "history"
+    const val LogsRoute = "logs"
     const val SessionIdArgument = "sessionId"
     const val DetailRoute = "detail/{$SessionIdArgument}"
 

@@ -212,7 +212,8 @@ fun DashboardScreen(
     state: DashboardUiState,
     onTestInference: () -> Unit = {},
     onNavigateToHistory: () -> Unit = {},
-) {
+    onNavigateToLogs: () -> Unit = {},
+){
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
@@ -223,9 +224,9 @@ fun DashboardScreen(
         ) {
             item { HeaderSection(state) }
             item { ServiceHealthCard(state) }
-            item { RecentLogsCard(state) }
             item { ActiveSessionsCard(state) }
             item { SessionHistoryCard(onNavigateToHistory) }
+            item { RecentLogsNavigationCard(onNavigateToLogs) }
             item { TestInferenceCard(state, onTestInference) }
             item { EngineStatusCard(state) }
             item { ThermalStatusCard(state) }
@@ -716,119 +717,35 @@ private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Un
 }
 
 @Composable
-private fun RecentLogsCard(state: DashboardUiState) {
-    val nowMs = System.currentTimeMillis()
-    val freshness = state.logsFreshness(nowMs)
-
-    DashboardCard(title = "Recent Logs") {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Badge(
-                    text = if (state.logsErrorMessage == null) "LOG DB OK" else "LOG DB ISSUE",
-                    color = if (state.logsErrorMessage == null) {
-                        toneColor(DashboardMessageTone.SUCCESS)
-                    } else {
-                        toneColor(DashboardMessageTone.ERROR)
-                    },
-                )
-                Badge("LOGS ${freshnessLabel(freshness)}", freshnessColor(freshness))
-            }
-
-            when {
-                state.logsErrorMessage != null -> {
-                    DiagnosticCallout(
-                        message = state.logsErrorMessage,
-                        tone = DashboardMessageTone.ERROR,
-                    )
-                }
-
-                state.isLogsLoading && state.recentLogs.isEmpty() -> {
-                    DiagnosticCallout(
-                        message = "Reading the diagnostics log store…",
-                        tone = DashboardMessageTone.INFO,
-                    )
-                }
-
-                freshness == DashboardFreshness.STALE -> {
-                    DiagnosticCallout(
-                        message = "Log list is older than the normal refresh window. New events may not be reflected yet.",
-                        tone = DashboardMessageTone.WARNING,
-                    )
-                }
-            }
-
-            if (state.lastLogsUpdateMs != null) {
-                Text(
-                    text = "Last refresh ${formatRelativeTimestamp(state.lastLogsUpdateMs, nowMs)}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            if (state.recentLogs.isEmpty()) {
-                Text(
-                    text = when {
-                        state.isLogsLoading -> "No log rows yet."
-                        state.logsErrorMessage != null -> "No recent logs could be loaded."
-                        else -> "No recent events have been recorded yet."
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                state.recentLogs.forEachIndexed { index, log ->
-                    if (index > 0) {
-                        HorizontalDivider(
-                            modifier = Modifier.padding(vertical = 2.dp),
-                            color = MaterialTheme.colorScheme.outlineVariant,
-                        )
-                    }
-                    LogRow(log)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LogRow(log: LogUiItem) {
-    Surface(
+private fun RecentLogsNavigationCard(onNavigateToLogs: () -> Unit) {
+    ElevatedCard(
+        onClick = onNavigateToLogs,
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(8.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
     ) {
-        Column(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
+            Column {
                 Text(
-                    text = log.timestampLabel,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
+                    text = "Recent Logs",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "Browse diagnostics and event log entries",
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Badge(text = log.category.uppercase(), color = categoryColor(log.category))
             }
             Text(
-                text = log.event,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
+                text = "→",
+                style = MaterialTheme.typography.headlineMedium,
+                color = MaterialTheme.colorScheme.primary,
             )
-            if (log.detail.isNotBlank()) {
-                Text(
-                    text = log.detail,
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        fontFamily = FontFamily.Monospace,
-                    ),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
         }
     }
 }
