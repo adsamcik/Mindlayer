@@ -140,11 +140,15 @@ class ServiceBinder(
         } catch (_: Throwable) {
             ""
         }
-        val modelId = currentModel?.id ?: modelPath
+        val modelId = currentModel?.id
+            ?.takeUnless { it.isBlank() }
+            ?: modelPath
             .substringAfterLast('/')
             .substringAfterLast('\\')
             .removeSuffix(".litertlm")
-        val modelSize = currentModel?.sizeBytes ?: if (modelPath.isNotEmpty()) {
+        val modelSize = currentModel?.sizeBytes
+            ?.takeIf { it > 0 }
+            ?: if (modelPath.isNotEmpty()) {
             try {
                 File(modelPath).length()
             } catch (_: Throwable) {

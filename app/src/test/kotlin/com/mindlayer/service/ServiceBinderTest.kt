@@ -3,9 +3,7 @@ package com.mindlayer.service
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
-import com.mindlayer.EngineInfo
 import com.mindlayer.RequestMeta
-import com.mindlayer.ServiceStatus
 import com.mindlayer.SessionConfig
 import com.mindlayer.SessionInfo
 import com.mindlayer.ToolResult
@@ -345,7 +343,7 @@ class ServiceBinderTest {
         val info = binder.getEngineInfo()
 
         assertEquals("gemma-4-E2B-it", info.modelId)
-        assertEquals(2_400_000_000, info.modelSizeBytes)
+        assertEquals(2_400_000_000L, info.modelSizeBytes)
         assertEquals("GPU", info.backend)
         assertEquals(4096, info.maxTokens)
         assertEquals(1.5f, info.initTimeSeconds, 0.001f)
