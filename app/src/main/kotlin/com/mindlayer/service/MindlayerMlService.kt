@@ -64,6 +64,9 @@ class MindlayerMlService : Service() {
     var serviceState: String = STATE_IDLE
         private set
 
+    @Volatile
+    private var pendingBackend: String? = null
+
     var activeInferenceCount = 0
         private set
     private val stateLock = Any()
@@ -101,6 +104,7 @@ class MindlayerMlService : Service() {
         memoryBudget.start()
         thermalMonitor.start()
         observeMemoryPressure()
+        observeThermalPolicy()
     }
 
     override fun onBind(intent: Intent?): IBinder {
@@ -162,6 +166,76 @@ class MindlayerMlService : Service() {
         }
     }
 
+    /**
+     * Observe [ThermalMonitor.currentPolicy] and schedule backend switches
+     * when the recommended backend differs from the active one.
+     *
+     * Switches are deferred until [activeInferenceCount] reaches 0 to avoid
+     * tearing down a [Conversation] mid-inference.  The pending target is
+     * stored in [pendingBackend] and applied either here (immediate idle) or
+     * in [exitForeground] (after last inference completes).
+     */
+    private fun observeThermalPolicy() {
+        serviceScope.launch {
+            thermalMonitor.currentPolicy.collect { policy ->
+                if (!engineManager.isInitialized || engineManager.currentBackend == "NONE") return@collect
+
+                val current = engineManager.currentBackend
+                val recommended = policy.recommendedBackend
+
+                if (recommended == current) {
+                    pendingBackend = null
+                    return@collect
+                }
+
+                Log.i(TAG, "Thermal recommends $recommended, currently on $current")
+                pendingBackend = recommended
+
+                if (activeInferenceCount == 0) {
+                    applyPendingBackendSwitch()
+                }
+                // Otherwise, will be applied in exitForeground()
+            }
+        }
+    }
+
+    /**
+     * Switch [EngineManager] to [pendingBackend] if the service is idle.
+     *
+     * All sessions are destroyed first because their [Conversation] references
+     * become invalid after engine teardown.  GPU re-enable is gated by
+     * [ThermalMonitor.canReenableGpu] (30 s cooldown).
+     */
+    private fun applyPendingBackendSwitch() {
+        val target = pendingBackend ?: return
+        val current = engineManager.currentBackend
+
+        if (target == current) {
+            pendingBackend = null
+            return
+        }
+
+        // For GPU re-enable, check cooldown
+        if (target == "GPU" && !thermalMonitor.canReenableGpu()) {
+            Log.i(TAG, "GPU re-enable cooldown not elapsed, deferring")
+            return
+        }
+
+        Log.i(TAG, "Applying backend switch: $current → $target")
+        pendingBackend = null
+
+        serviceScope.launch {
+            try {
+                // Destroy all sessions first — they hold Conversation refs to old engine
+                sessionManager.shutdown()
+                engineManager.switchBackend(target)
+                Log.i(TAG, "Backend switch complete: now on ${engineManager.currentBackend}")
+            } catch (t: Throwable) {
+                Log.e(TAG, "Backend switch failed: ${t.message}", t)
+            }
+        }
+    }
+
     // --- Foreground state management ---
 
     /**
@@ -200,6 +274,8 @@ class MindlayerMlService : Service() {
             if (activeInferenceCount == 0) {
                 ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
                 Log.i(TAG, "Exited foreground")
+                // Apply pending backend switch when idle
+                applyPendingBackendSwitch()
             }
         }
         updateNotification()
