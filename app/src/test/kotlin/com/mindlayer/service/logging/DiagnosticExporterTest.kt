@@ -199,6 +199,26 @@ class DiagnosticExporterTest {
     }
 
     @Test
+    fun `engine section has lastGpuFailureReason null when no failure`() = runTest {
+        every { engineManager.lastGpuFailureReason } returns null
+
+        val engine = exportJson()["engine"]!!.jsonObject
+        assertTrue(engine.containsKey("lastGpuFailureReason"))
+        assertTrue(engine["lastGpuFailureReason"] is JsonNull)
+    }
+
+    @Test
+    fun `engine section has lastGpuFailureReason with reason when GPU failed`() = runTest {
+        every { engineManager.lastGpuFailureReason } returns "RuntimeException: GPU driver crash caused by UnsupportedOperationException: compute shaders"
+
+        val engine = exportJson()["engine"]!!.jsonObject
+        assertEquals(
+            "RuntimeException: GPU driver crash caused by UnsupportedOperationException: compute shaders",
+            engine["lastGpuFailureReason"]!!.jsonPrimitive.content,
+        )
+    }
+
+    @Test
     fun `engine section omits modelPath when it throws`() = runTest {
         every { engineManager.modelPath } throws IllegalStateException("not found")
 

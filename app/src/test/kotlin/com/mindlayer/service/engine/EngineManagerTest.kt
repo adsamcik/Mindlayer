@@ -294,6 +294,12 @@ class EngineManagerTest {
         assertEquals(0f, mgr.initTimeSeconds, 0.0001f)
     }
 
+    @Test
+    fun `initial state - lastGpuFailureReason is null`() {
+        val mgr = EngineManager(context)
+        assertNull(mgr.lastGpuFailureReason)
+    }
+
     // ---- shutdown -----------------------------------------------------------
 
     @Test
@@ -303,6 +309,30 @@ class EngineManagerTest {
         assertNull(mgr.getEngine())
         assertFalse(mgr.isInitialized)
         assertEquals("NONE", mgr.currentBackend)
+    }
+
+    @Test
+    fun `shutdown clears lastGpuFailureReason`() = runTest {
+        val mgr = EngineManager(context)
+        // Set via reflection since we can't trigger a real GPU failure in unit tests
+        val field = EngineManager::class.java.getDeclaredField("lastGpuFailureReason")
+        field.isAccessible = true
+        field.set(mgr, "RuntimeException: GPU driver crash")
+
+        assertEquals("RuntimeException: GPU driver crash", mgr.lastGpuFailureReason)
+
+        // Create a model file so selectedModel lazy doesn't throw during init
+        File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME).writeText("fake-model")
+
+        // Force engine field to non-null so shutdownInternal actually executes the cleanup block
+        val engineField = EngineManager::class.java.getDeclaredField("engine")
+        engineField.isAccessible = true
+        val mockEngine = mockk<Engine>(relaxed = true)
+        engineField.set(mgr, mockEngine)
+
+        mgr.shutdown()
+
+        assertNull(mgr.lastGpuFailureReason)
     }
 
     // ---- backendName (tested via resolveBackendChain path) ------------------
