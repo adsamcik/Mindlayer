@@ -215,11 +215,13 @@ class DashboardViewModel : ViewModel() {
                 try {
                     val now = System.currentTimeMillis()
                     val recent = dao.getRecent(20)
+                    val gpuFailure = dao.latestGpuFallbackMessage()
                     _uiState.update { current ->
                         current.copy(
                             isLogsLoading = false,
                             lastLogsUpdateMs = now,
                             logsErrorMessage = null,
+                            gpuFailureReason = gpuFailure,
                             recentLogs = recent.map { entry ->
                                 LogUiItem(
                                     timestampLabel = formatRelativeTimestamp(entry.timestampMs, now),
@@ -297,7 +299,6 @@ class DashboardViewModel : ViewModel() {
                 sessionId = svc.createSession(SessionConfig(
                     systemPrompt = "You are a helpful assistant. Be concise.",
                     maxTokens = 2048,
-                    backend = "CPU",
                 ))
                 val activeSessionId = requireNotNull(sessionId) {
                     "Service returned a null session id"

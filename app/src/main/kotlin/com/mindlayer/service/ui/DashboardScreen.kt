@@ -322,6 +322,16 @@ private fun ServiceHealthCard(state: DashboardUiState) {
             }
 
             LabelValue("Backend", state.backend.ifBlank { "NONE" })
+            state.gpuFailureReason?.let { reason ->
+                if (state.backend.equals("CPU", ignoreCase = true)) {
+                    Text(
+                        text = "⚠ GPU init failed: $reason",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(start = 16.dp, top = 4.dp),
+                    )
+                }
+            }
             LabelValue(
                 "Last status sample",
                 formatSampleTime(state.lastStatusUpdateMs, nowMs, "No successful sample yet"),

@@ -45,6 +45,7 @@ class DiagnosticExporter(
                 put("loaded", engineManager.isInitialized)
                 put("backend", engineManager.currentBackend)
                 put("initTimeSeconds", engineManager.initTimeSeconds)
+                put("lastGpuFailureReason", engineManager.lastGpuFailureReason)
                 try { put("modelPath", engineManager.modelPath) } catch (_: Exception) {}
             }
 
