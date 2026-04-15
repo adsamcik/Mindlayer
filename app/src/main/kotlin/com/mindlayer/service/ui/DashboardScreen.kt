@@ -1,12 +1,18 @@
 package com.mindlayer.service.ui
 
+import android.app.Activity
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -19,19 +25,40 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -39,6 +66,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mindlayer.service.ui.theme.MindlayerTheme
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 private val WarningAmber = Color(0xFFB26A00)
 
@@ -207,82 +237,170 @@ private fun testBadgeLabel(state: DashboardUiState): String = when {
     else -> "READY"
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(
     state: DashboardUiState,
     onTestInference: () -> Unit = {},
     onNavigateToHistory: () -> Unit = {},
     onNavigateToLogs: () -> Unit = {},
-){
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var isRefreshing by remember { mutableStateOf(false) }
+    val pullState = rememberPullToRefreshState()
+
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
     ) {
-        LazyColumn(
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = {
+                scope.launch {
+                    isRefreshing = true
+                    // UI-only refresh: recreate activity to re-bind and re-poll
+                    (context as? Activity)?.recreate()
+                    delay(500)
+                    isRefreshing = false
+                }
+            },
+            state = pullState,
         ) {
-            item { HeaderSection(state) }
-            item { ServiceHealthCard(state) }
-            item { ActiveSessionsCard(state) }
-            item { SessionHistoryCard(onNavigateToHistory) }
-            item { RecentLogsNavigationCard(onNavigateToLogs) }
-            item { TestInferenceCard(state, onTestInference) }
-            item { EngineStatusCard(state) }
-            item { ThermalStatusCard(state) }
-            item { MemoryCard(state) }
+            LazyColumn(
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item { DashboardHero(state) }
+                item { StatusSection(state) }
+                item { ThermalMemoryRow(state) }
+                item { ActiveSessionsCard(state) }
+                item { ActivityNavigationCard(onNavigateToHistory, onNavigateToLogs) }
+                item { TestInferenceCard(state, onTestInference) }
+                item { Spacer(Modifier.height(8.dp)) }
+            }
         }
     }
 }
 
+// ── Hero ─────────────────────────────────────────────────────────────────────
+
 @Composable
-private fun HeaderSection(state: DashboardUiState) {
+private fun DashboardHero(state: DashboardUiState) {
+    val nowMs = System.currentTimeMillis()
+    val health = state.serviceHealth(nowMs)
+    val healthTint = healthColor(health)
+    val showBanner = health == DashboardHealthLevel.DEGRADED || health == DashboardHealthLevel.ERROR
+
     Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(
-            text = "Mindlayer",
-            style = MaterialTheme.typography.headlineLarge,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.primary,
-        )
-        Text(
-            text = "Single-screen operations console for service health, logs, and test inference.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (state.modelId.isNotBlank()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(
-                text = modelDisplayName(state.modelId),
-                style = MaterialTheme.typography.bodyMedium,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                text = "Mindlayer",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            if (!showBanner) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = health.name,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = healthTint,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    StatusDot(healthTint)
+                }
+            }
+        }
+
+        if (showBanner) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+                color = healthTint.copy(alpha = 0.15f),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    StatusDot(healthTint)
+                    Text(
+                        text = health.name,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = healthTint,
+                    )
+                    Text(
+                        text = "—",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = healthTint,
+                    )
+                    Text(
+                        text = healthHeadline(state, health),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = healthTint,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+
+        if (state.modelId.isNotBlank()) {
+            AssistChip(
+                onClick = {},
+                label = {
+                    Text(
+                        text = modelDisplayName(state.modelId),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Filled.Build,
+                        contentDescription = null,
+                        modifier = Modifier.size(AssistChipDefaults.IconSize),
+                    )
+                },
             )
         }
     }
 }
 
+// ── Status section (Service Health + Engine Details merged) ──────────────────
+
 @Composable
-private fun ServiceHealthCard(state: DashboardUiState) {
+private fun StatusSection(state: DashboardUiState) {
     val nowMs = System.currentTimeMillis()
     val health = state.serviceHealth(nowMs)
     val healthTint = healthColor(health)
     val freshness = state.statusFreshness(nowMs)
-    val modelTone = when {
+    val engineTone = when {
         state.isEngineLoaded -> DashboardMessageTone.SUCCESS
         state.connectionState == DashboardConnectionState.DISCONNECTED -> DashboardMessageTone.ERROR
         else -> DashboardMessageTone.WARNING
     }
 
-    DashboardCard(title = "Service Health") {
+    DashboardCard(title = "Service Status", icon = Icons.Filled.Info) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            // Health headline row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+                verticalAlignment = Alignment.Top,
             ) {
                 Column(
                     modifier = Modifier.weight(1f),
@@ -290,205 +408,242 @@ private fun ServiceHealthCard(state: DashboardUiState) {
                 ) {
                     Text(
                         text = healthHeadline(state, health),
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
                         color = healthTint,
                     )
                     Text(
                         text = healthDetail(state, nowMs),
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                Spacer(Modifier.width(12.dp))
                 StatusDot(healthTint)
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Key badges — only show what adds information; suppress redundant ones
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Badge(connectionLabel(state.connectionState), connectionColor(state.connectionState))
                 Badge(
-                    text = if (state.isEngineLoaded) "MODEL LOADED" else "MODEL NOT READY",
-                    color = toneColor(modelTone),
+                    text = if (state.isEngineLoaded) "LOADED" else "NOT READY",
+                    color = toneColor(engineTone),
                 )
-                Badge("STATUS ${freshnessLabel(freshness)}", freshnessColor(freshness))
+                if (freshness == DashboardFreshness.STALE) {
+                    Badge("STALE", freshnessColor(freshness))
+                }
             }
 
             if (state.statusErrorMessage != null &&
                 state.connectionState == DashboardConnectionState.CONNECTED
             ) {
+                DiagnosticCallout(message = state.statusErrorMessage, tone = DashboardMessageTone.ERROR)
+            }
+
+            // Engine detail grid — 2 columns to save vertical space
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    LabelValue("Backend", state.backend.ifBlank { "NONE" })
+                    LabelValue(
+                        "Init time",
+                        if (state.initTimeSeconds > 0f) "%.1fs".format(state.initTimeSeconds) else "—",
+                    )
+                }
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    LabelValue("Uptime", formatUptime(state.uptimeMs))
+                    LabelValue(
+                        "Sampled",
+                        formatSampleTime(state.lastStatusUpdateMs, nowMs, "never"),
+                    )
+                }
+            }
+
+            if (!state.isEngineLoaded || state.backend.equals("NONE", ignoreCase = true)) {
                 DiagnosticCallout(
-                    message = state.statusErrorMessage,
-                    tone = DashboardMessageTone.ERROR,
+                    message = "Runtime sample does not show a loaded model. Earlier test output is historical.",
+                    tone = DashboardMessageTone.WARNING,
                 )
             }
 
-            LabelValue("Backend", state.backend.ifBlank { "NONE" })
             state.gpuFailureReason?.let { reason ->
                 if (state.backend.equals("CPU", ignoreCase = true)) {
                     Text(
                         text = "⚠ GPU init failed: $reason",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(start = 16.dp, top = 4.dp),
                     )
                 }
             }
-            LabelValue(
-                "Last status sample",
-                formatSampleTime(state.lastStatusUpdateMs, nowMs, "No successful sample yet"),
-            )
-            LabelValue(
-                "Last log refresh",
-                formatSampleTime(
-                    state.lastLogsUpdateMs,
-                    nowMs,
-                    if (state.isLogsLoading) "Loading…" else "No log refresh yet",
-                ),
-            )
         }
     }
 }
 
+// ── Thermal + Memory 2-column row ─────────────────────────────────────────────
+
 @Composable
-private fun EngineStatusCard(state: DashboardUiState) {
-    val engineTone = when {
-        state.isEngineLoaded -> DashboardMessageTone.SUCCESS
-        state.connectionState == DashboardConnectionState.DISCONNECTED -> DashboardMessageTone.ERROR
-        else -> DashboardMessageTone.WARNING
-    }
-
-    DashboardCard(title = "Engine Details") {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Badge(
-                    text = if (state.isEngineLoaded) "LOADED" else "NOT LOADED",
-                    color = toneColor(engineTone),
-                )
-                Badge(text = state.backend.uppercase(), color = backendColor(state.backend))
-            }
-
-            if (!state.isEngineLoaded || state.backend.equals("NONE", ignoreCase = true)) {
-                DiagnosticCallout(
-                    message = "Latest runtime sample does not show a loaded model. Treat earlier test output as historical until a fresh healthy sample arrives.",
-                    tone = DashboardMessageTone.WARNING,
-                )
-            }
-
-            LabelValue(
-                "Model",
-                state.modelId.takeIf { it.isNotBlank() }?.let(::modelDisplayName) ?: "Not reported",
-            )
-            LabelValue(
-                "Init time",
-                if (state.initTimeSeconds > 0f) "%.1fs".format(state.initTimeSeconds) else "Not reported",
-            )
-            LabelValue("Uptime", formatUptime(state.uptimeMs))
-        }
+private fun ThermalMemoryRow(state: DashboardUiState) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(IntrinsicSize.Min),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        ThermalMiniCard(state, modifier = Modifier.weight(1f).fillMaxHeight())
+        MemoryMiniCard(state, modifier = Modifier.weight(1f).fillMaxHeight())
     }
 }
 
 @Composable
-private fun ThermalStatusCard(state: DashboardUiState) {
-    DashboardCard(title = "Thermal Guard") {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                StatusDot(thermalColor(state.thermalBand))
-                Spacer(Modifier.width(8.dp))
+private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifier) {
+    val tint = thermalColor(state.thermalBand)
+    val isHot = state.thermalBand.equals("HOT", ignoreCase = true) ||
+        state.thermalBand.equals("CRITICAL", ignoreCase = true)
+
+    ElevatedCard(modifier = modifier) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = "Thermal",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                StatusDot(tint)
                 Text(
                     text = state.thermalBand.uppercase(),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = thermalColor(state.thermalBand),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = tint,
                 )
             }
-
-            if (state.thermalBand.equals("HOT", ignoreCase = true) ||
-                state.thermalBand.equals("CRITICAL", ignoreCase = true)
-            ) {
-                DiagnosticCallout(
-                    message = "Thermal control is actively limiting sustained work. " +
-                        "Expect reduced throughput until the device cools.",
-                    tone = if (state.thermalBand.equals("CRITICAL", ignoreCase = true)) {
-                        DashboardMessageTone.ERROR
-                    } else {
-                        DashboardMessageTone.WARNING
-                    },
+            state.headroom?.let {
+                Text(
+                    text = "Headroom",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "%.2f".format(it),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Medium,
+                    color = tint,
                 )
             }
-
-            LabelValue(
-                "Headroom",
-                state.headroom?.let { "%.2f".format(it) } ?: "Not reported",
-            )
+            if (isHot) {
+                Text(
+                    text = "Throttling active",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = tint,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun MemoryCard(state: DashboardUiState) {
+private fun MemoryMiniCard(state: DashboardUiState, modifier: Modifier = Modifier) {
+    val tint = pressureColor(state.memoryPressure)
     val fraction = if (state.totalRamMb > 0) {
         state.availableRamMb.toFloat() / state.totalRamMb.toFloat()
     } else {
         0f
     }
+    val isElevated = state.memoryPressure.equals("CRITICAL", ignoreCase = true) ||
+        state.memoryPressure.equals("EMERGENCY", ignoreCase = true)
 
-    DashboardCard(title = "Memory Headroom") {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                StatusDot(pressureColor(state.memoryPressure))
-                Spacer(Modifier.width(8.dp))
+    ElevatedCard(modifier = modifier) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Memory",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "Max sessions: ${state.maxSessions}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                StatusDot(tint)
                 Text(
                     text = state.memoryPressure.uppercase(),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = pressureColor(state.memoryPressure),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = tint,
                 )
             }
-
-            if (state.memoryPressure.equals("CRITICAL", ignoreCase = true) ||
-                state.memoryPressure.equals("EMERGENCY", ignoreCase = true)
-            ) {
-                DiagnosticCallout(
-                    message = "Low RAM headroom may block new sessions or large prefills.",
-                    tone = if (state.memoryPressure.equals("EMERGENCY", ignoreCase = true)) {
-                        DashboardMessageTone.ERROR
-                    } else {
-                        DashboardMessageTone.WARNING
-                    },
-                )
-            }
-
-            LabelValue(
-                "Available RAM",
-                if (state.totalRamMb > 0) {
-                    "${state.availableRamMb} MB of ${state.totalRamMb} MB"
-                } else {
-                    "Awaiting memory sample"
-                },
-            )
-
             if (state.totalRamMb > 0) {
                 LinearProgressIndicator(
                     progress = { fraction.coerceIn(0f, 1f) },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(6.dp)
-                        .clip(RoundedCornerShape(3.dp)),
-                    color = pressureColor(state.memoryPressure),
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp)),
+                    color = tint,
                     trackColor = MaterialTheme.colorScheme.surfaceVariant,
                 )
+                Text(
+                    text = "Available: ${state.availableRamMb} MB / ${state.totalRamMb} MB",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-
-            LabelValue("Max sessions", "${state.maxSessions}")
+            if (isElevated) {
+                Text(
+                    text = "Low headroom",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = tint,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
         }
     }
 }
+
+// ── Active Sessions ───────────────────────────────────────────────────────────
 
 @Composable
 private fun ActiveSessionsCard(state: DashboardUiState) {
     val nowMs = System.currentTimeMillis()
 
-    DashboardCard(title = "Active Sessions (${state.activeSessions.size})") {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    DashboardCard(
+        title = "Active Sessions (${state.activeSessions.size})",
+        icon = Icons.Filled.Info,
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             when {
                 state.connectionState == DashboardConnectionState.CONNECTING &&
                     state.activeSessions.isEmpty() -> {
@@ -501,7 +656,7 @@ private fun ActiveSessionsCard(state: DashboardUiState) {
                 state.connectionState == DashboardConnectionState.DISCONNECTED &&
                     state.activeSessions.isEmpty() -> {
                     DiagnosticCallout(
-                        message = "Session list is unavailable while the service is disconnected.",
+                        message = "Session list unavailable while the service is disconnected.",
                         tone = DashboardMessageTone.WARNING,
                     )
                 }
@@ -523,8 +678,8 @@ private fun ActiveSessionsCard(state: DashboardUiState) {
                     state.activeSessions.forEachIndexed { index, session ->
                         if (index > 0) {
                             HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 2.dp),
-                                color = MaterialTheme.colorScheme.outlineVariant,
+                                modifier = Modifier.padding(vertical = 4.dp),
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
                             )
                         }
                         SessionRow(session)
@@ -542,105 +697,177 @@ private fun SessionRow(session: SessionUiItem) {
     } else {
         0f
     }
+    val backendTint = backendColor(session.backend)
 
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
+        // Backend avatar
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(backendTint.copy(alpha = 0.15f)),
+            contentAlignment = Alignment.Center,
         ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+            Text(
+                text = session.backend.take(1).uppercase(),
+                style = MaterialTheme.typography.titleSmall,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                color = backendTint,
+            )
+        }
+
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
                     text = session.sessionId,
-                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyMedium,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    text = "Last active ${session.lastAccessedLabel}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                if (session.isStreaming) {
+                    Spacer(Modifier.width(8.dp))
+                    Badge(text = "LIVE", color = CategoryInference)
+                }
             }
-            Column(
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Badge(text = session.backend.uppercase(), color = backendColor(session.backend))
-                Badge(
-                    text = if (session.isStreaming) "STREAMING" else "IDLE",
-                    color = if (session.isStreaming) CategoryInference else CategoryDefault,
-                )
-            }
-        }
-
-        Text(
-            text = "${session.tokenCount}/${session.maxTokens} tokens",
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        LinearProgressIndicator(
-            progress = { tokenFraction.coerceIn(0f, 1f) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(6.dp)
-                .clip(RoundedCornerShape(3.dp)),
-            color = backendColor(session.backend),
-            trackColor = MaterialTheme.colorScheme.surfaceVariant,
-        )
-    }
-}
-
-@Composable
-private fun SessionHistoryCard(onNavigateToHistory: () -> Unit) {
-    ElevatedCard(
-        onClick = onNavigateToHistory,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column {
                 Text(
-                    text = "Session History",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = "View past sessions and inference activity",
+                    text = session.lastAccessedLabel,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Text(
+                    text = "·",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "${session.tokenCount}/${session.maxTokens} tok",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-            Text(
-                text = "→",
-                style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.primary,
+            LinearProgressIndicator(
+                progress = { tokenFraction.coerceIn(0f, 1f) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .clip(RoundedCornerShape(2.dp)),
+                color = backendTint,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant,
             )
         }
     }
 }
+
+// ── Activity navigation (Session History + Recent Logs consolidated) ──────────
+
+@Composable
+private fun ActivityNavigationCard(
+    onNavigateToHistory: () -> Unit,
+    onNavigateToLogs: () -> Unit,
+) {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column {
+            ListItem(
+                headlineContent = {
+                    Text(
+                        text = "Session History",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                    )
+                },
+                supportingContent = {
+                    Text(
+                        text = "Past sessions and inference activity",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                },
+                leadingContent = {
+                    Icon(
+                        imageVector = Icons.Filled.List,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                },
+                trailingContent = {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = "Navigate to session history",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                modifier = Modifier.clickable { onNavigateToHistory() },
+            )
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+            )
+            ListItem(
+                headlineContent = {
+                    Text(
+                        text = "Recent Logs",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                    )
+                },
+                supportingContent = {
+                    Text(
+                        text = "Diagnostics and event log entries",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                },
+                leadingContent = {
+                    Icon(
+                        imageVector = Icons.Filled.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                },
+                trailingContent = {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = "Navigate to recent logs",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                modifier = Modifier.clickable { onNavigateToLogs() },
+            )
+        }
+    }
+}
+
+// ── Test Inference ────────────────────────────────────────────────────────────
 
 @Composable
 private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Unit) {
     val nowMs = System.currentTimeMillis()
     val displayTone = if (state.isTestRunning) DashboardMessageTone.INFO else state.testStatusTone
 
-    DashboardCard(title = "Test Inference") {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    DashboardCard(title = "Test Inference", icon = Icons.Filled.PlayArrow) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -658,42 +885,45 @@ private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Un
                         )
                         Spacer(Modifier.width(8.dp))
                     }
-                    Text(if (state.isTestRunning) "Running…" else "Run Test Prompt")
+                    Text(if (state.isTestRunning) "Running…" else "Run Test")
                 }
-                Badge(text = testBadgeLabel(state), color = toneColor(displayTone))
+                Column(horizontalAlignment = Alignment.End) {
+                    Badge(text = testBadgeLabel(state), color = toneColor(displayTone))
+                    state.lastTestCompletedAtMs?.let { ts ->
+                        if (!state.isTestRunning) {
+                            Text(
+                                text = formatRelativeTimestamp(ts, nowMs),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 2.dp),
+                            )
+                        }
+                    }
+                }
             }
 
             if (state.testStatus.isNotBlank()) {
-                DiagnosticCallout(
-                    message = state.testStatus,
-                    tone = displayTone,
-                )
+                DiagnosticCallout(message = state.testStatus, tone = displayTone)
             } else {
                 Text(
-                    text = "Run a prompt to verify AIDL control flow and pipe streaming end to end.",
+                    text = "Verify AIDL control flow and pipe streaming end to end.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
-            if (state.lastTestCompletedAtMs != null && !state.isTestRunning) {
-                Text(
-                    text = "Last run ${formatRelativeTimestamp(state.lastTestCompletedAtMs, nowMs)}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            if (state.shouldHighlightTestResult(nowMs)) {
+            AnimatedVisibility(visible = state.shouldHighlightTestResult(nowMs)) {
                 DiagnosticCallout(
-                    message = "Current engine state is not ready. Treat the last successful test output as historical until you rerun after recovery.",
+                    message = "Engine not ready — last test output is historical until you rerun after recovery.",
                     tone = DashboardMessageTone.WARNING,
                 )
             }
 
             Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .animateContentSize(),
+                shape = RoundedCornerShape(8.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
             ) {
                 Column(
@@ -703,59 +933,30 @@ private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Un
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text(
-                        text = "Latest output",
+                        text = "Output",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontWeight = FontWeight.SemiBold,
                     )
+                    val hasOutput = state.testOutput.isNotBlank()
                     Text(
-                        text = state.testOutput.ifBlank {
-                            "No streaming output captured yet. Successful runs will show token deltas here."
-                        },
+                        text = if (hasOutput) state.testOutput else "No output captured yet.",
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 180.dp, max = 260.dp)
-                            .verticalScroll(rememberScrollState()),
+                            .then(
+                                if (hasOutput) {
+                                    Modifier.heightIn(min = 48.dp, max = 200.dp)
+                                        .verticalScroll(rememberScrollState())
+                                } else {
+                                    Modifier
+                                }
+                            ),
                         style = MaterialTheme.typography.bodySmall.copy(
                             fontFamily = FontFamily.Monospace,
                         ),
                     )
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun RecentLogsNavigationCard(onNavigateToLogs: () -> Unit) {
-    ElevatedCard(
-        onClick = onNavigateToLogs,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column {
-                Text(
-                    text = "Recent Logs",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = "Browse diagnostics and event log entries",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Text(
-                text = "→",
-                style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
         }
     }
 }
@@ -780,16 +981,30 @@ private fun DiagnosticCallout(message: String, tone: DashboardMessageTone) {
 @Composable
 private fun DashboardCard(
     title: String,
+    icon: ImageVector? = null,
     content: @Composable () -> Unit,
 ) {
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (icon != null) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
             Spacer(Modifier.height(10.dp))
             content()
         }
@@ -815,6 +1030,7 @@ private fun LabelValue(label: String, value: String) {
             text = value.ifBlank { "—" },
             modifier = Modifier.weight(1f),
             style = MaterialTheme.typography.bodyMedium,
+            fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Medium,
             textAlign = TextAlign.End,
             maxLines = 2,
@@ -903,7 +1119,7 @@ private val PreviewState = DashboardUiState(
 @Preview(showBackground = true, widthDp = 400, heightDp = 960)
 @Composable
 private fun DashboardScreenPreview() {
-    MaterialTheme {
+    MindlayerTheme {
         DashboardScreen(state = PreviewState)
     }
 }
@@ -911,7 +1127,7 @@ private fun DashboardScreenPreview() {
 @Preview(showBackground = true, widthDp = 400, heightDp = 700, name = "Disconnected")
 @Composable
 private fun DashboardScreenEmptyPreview() {
-    MaterialTheme {
+    MindlayerTheme {
         DashboardScreen(
             state = DashboardUiState(
                 connectionState = DashboardConnectionState.DISCONNECTED,
