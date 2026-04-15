@@ -3,6 +3,13 @@ package com.mindlayer.service.ui
 import android.app.Activity
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -12,12 +19,15 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,17 +36,20 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -48,6 +61,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,32 +69,26 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mindlayer.service.ui.theme.MindlayerColors
 import com.mindlayer.service.ui.theme.MindlayerTheme
+import com.mindlayer.service.ui.theme.MindlayerType
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-
-private val WarningAmber = Color(0xFFB26A00)
-
-private val ThermalCool = Color(0xFF2E7D32)
-private val ThermalWarm = Color(0xFFB26A00)
-private val ThermalHot = Color(0xFFE65100)
-private val ThermalCritical = Color(0xFFC62828)
-
-private val PressureNormal = Color(0xFF2E7D32)
-private val PressureWarning = Color(0xFFB26A00)
-private val PressureCritical = Color(0xFFE65100)
-private val PressureEmergency = Color(0xFFC62828)
 
 private val CategoryInference = Color(0xFF1565C0)
 private val CategoryThermal = Color(0xFFE65100)
@@ -89,21 +97,11 @@ private val CategoryMemory = Color(0xFF7B1FA2)
 private val CategoryError = Color(0xFFC62828)
 private val CategoryDefault = Color(0xFF616161)
 
-private fun thermalColor(band: String): Color = when (band.uppercase()) {
-    "COOL" -> ThermalCool
-    "WARM" -> ThermalWarm
-    "HOT" -> ThermalHot
-    "CRITICAL" -> ThermalCritical
-    else -> CategoryDefault
-}
+@Composable
+private fun thermalColor(band: String): Color = MindlayerColors.Thermal.color(band)
 
-private fun pressureColor(pressure: String): Color = when (pressure.uppercase()) {
-    "NORMAL" -> PressureNormal
-    "WARNING" -> PressureWarning
-    "CRITICAL" -> PressureCritical
-    "EMERGENCY" -> PressureEmergency
-    else -> CategoryDefault
-}
+@Composable
+private fun pressureColor(pressure: String): Color = MindlayerColors.Pressure.color(pressure)
 
 private fun categoryColor(category: String): Color = when (category.uppercase()) {
     "INFERENCE" -> CategoryInference
@@ -126,7 +124,7 @@ private fun backendColor(backend: String): Color = when (backend.uppercase()) {
 private fun healthColor(level: DashboardHealthLevel): Color = when (level) {
     DashboardHealthLevel.CONNECTING -> MaterialTheme.colorScheme.secondary
     DashboardHealthLevel.HEALTHY -> MaterialTheme.colorScheme.primary
-    DashboardHealthLevel.DEGRADED -> WarningAmber
+    DashboardHealthLevel.DEGRADED -> MindlayerColors.Warning.color
     DashboardHealthLevel.ERROR -> MaterialTheme.colorScheme.error
 }
 
@@ -135,7 +133,7 @@ private fun toneColor(tone: DashboardMessageTone): Color = when (tone) {
     DashboardMessageTone.NEUTRAL -> MaterialTheme.colorScheme.onSurfaceVariant
     DashboardMessageTone.INFO -> MaterialTheme.colorScheme.secondary
     DashboardMessageTone.SUCCESS -> MaterialTheme.colorScheme.primary
-    DashboardMessageTone.WARNING -> WarningAmber
+    DashboardMessageTone.WARNING -> MindlayerColors.Warning.color
     DashboardMessageTone.ERROR -> MaterialTheme.colorScheme.error
 }
 
@@ -150,7 +148,7 @@ private fun connectionColor(connectionState: DashboardConnectionState): Color = 
 private fun freshnessColor(freshness: DashboardFreshness): Color = when (freshness) {
     DashboardFreshness.UNKNOWN -> MaterialTheme.colorScheme.onSurfaceVariant
     DashboardFreshness.FRESH -> MaterialTheme.colorScheme.primary
-    DashboardFreshness.STALE -> WarningAmber
+    DashboardFreshness.STALE -> MindlayerColors.Warning.color
 }
 
 private fun formatUptime(ms: Long): String {
@@ -237,6 +235,11 @@ private fun testBadgeLabel(state: DashboardUiState): String = when {
     else -> "READY"
 }
 
+private fun accessibilityBandLabel(value: String): String =
+    value.lowercase().replaceFirstChar {
+        if (it.isLowerCase()) it.titlecase() else it.toString()
+    }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(
@@ -267,16 +270,22 @@ fun DashboardScreen(
             },
             state = pullState,
         ) {
+            val safeInsets = WindowInsets.safeDrawing.asPaddingValues()
             LazyColumn(
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                contentPadding = PaddingValues(
+                    start = safeInsets.calculateLeftPadding(androidx.compose.ui.unit.LayoutDirection.Ltr) + 16.dp,
+                    end = safeInsets.calculateRightPadding(androidx.compose.ui.unit.LayoutDirection.Ltr) + 16.dp,
+                    top = safeInsets.calculateTopPadding() + 12.dp,
+                    bottom = safeInsets.calculateBottomPadding() + 12.dp,
+                ),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                item { DashboardHero(state) }
-                item { StatusSection(state) }
-                item { ThermalMemoryRow(state) }
-                item { ActiveSessionsCard(state) }
-                item { ActivityNavigationCard(onNavigateToHistory, onNavigateToLogs) }
-                item { TestInferenceCard(state, onTestInference) }
+                item { CardEnterAnimation(0) { DashboardHero(state) } }
+                item { CardEnterAnimation(1) { StatusSection(state) } }
+                item { CardEnterAnimation(2) { ThermalMemoryRow(state) } }
+                item { CardEnterAnimation(3) { ActiveSessionsCard(state) } }
+                item { CardEnterAnimation(4) { ActivityNavigationCard(onNavigateToHistory, onNavigateToLogs) } }
+                item { CardEnterAnimation(5) { TestInferenceCard(state, onTestInference) } }
                 item { Spacer(Modifier.height(8.dp)) }
             }
         }
@@ -290,6 +299,7 @@ private fun DashboardHero(state: DashboardUiState) {
     val nowMs = System.currentTimeMillis()
     val health = state.serviceHealth(nowMs)
     val healthTint = healthColor(health)
+    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.3f
     val showBanner = health == DashboardHealthLevel.DEGRADED || health == DashboardHealthLevel.ERROR
 
     Column(
@@ -305,12 +315,18 @@ private fun DashboardHero(state: DashboardUiState) {
         ) {
             Text(
                 text = "Mindlayer",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.headlineLarge.copy(
+                    letterSpacing = 1.2.sp,
+                ),
+                fontWeight = FontWeight.ExtraBold,
                 color = MaterialTheme.colorScheme.primary,
             )
             if (!showBanner) {
                 Row(
+                    modifier = Modifier.semantics(mergeDescendants = true) {
+                        contentDescription = "Service health"
+                        stateDescription = accessibilityBandLabel(health.name)
+                    },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
@@ -320,7 +336,7 @@ private fun DashboardHero(state: DashboardUiState) {
                         color = healthTint,
                         fontWeight = FontWeight.SemiBold,
                     )
-                    StatusDot(healthTint)
+                    StatusDot(healthTint, description = "Service health ${health.name.lowercase()}")
                 }
             }
         }
@@ -328,31 +344,44 @@ private fun DashboardHero(state: DashboardUiState) {
         if (showBanner) {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
-                color = healthTint.copy(alpha = 0.15f),
+                shape = RoundedCornerShape(16.dp),
+                color = healthTint.copy(alpha = if (darkTheme) 0.15f else 0.10f),
+                border = androidx.compose.foundation.BorderStroke(
+                    width = 1.dp,
+                    color = healthTint.copy(alpha = 0.25f),
+                ),
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    StatusDot(healthTint)
-                    Text(
-                        text = health.name,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = healthTint,
+                    Icon(
+                        imageVector = Icons.Filled.Warning,
+                        contentDescription = "Service health alert",
+                        modifier = Modifier.size(20.dp),
+                        tint = healthTint,
                     )
-                    Text(
-                        text = "—",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = healthTint,
-                    )
-                    Text(
-                        text = healthHeadline(state, health),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = healthTint,
+                    Column(
                         modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = health.name,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = healthTint,
+                        )
+                        Text(
+                            text = healthHeadline(state, health),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = healthTint,
+                        )
+                    }
+                    StatusDot(
+                        color = healthTint,
+                        pulse = true,
+                        description = "Service health ${health.name.lowercase()}",
                     )
                 }
             }
@@ -371,7 +400,7 @@ private fun DashboardHero(state: DashboardUiState) {
                 leadingIcon = {
                     Icon(
                         imageVector = Icons.Filled.Build,
-                        contentDescription = null,
+                        contentDescription = "Loaded model",
                         modifier = Modifier.size(AssistChipDefaults.IconSize),
                     )
                 },
@@ -398,7 +427,12 @@ private fun StatusSection(state: DashboardUiState) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             // Health headline row
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = "Service health"
+                        stateDescription = accessibilityBandLabel(health.name)
+                    },
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.Top,
             ) {
@@ -419,7 +453,11 @@ private fun StatusSection(state: DashboardUiState) {
                     )
                 }
                 Spacer(Modifier.width(12.dp))
-                StatusDot(healthTint)
+                StatusDot(
+                    healthTint,
+                    pulse = health == DashboardHealthLevel.DEGRADED || health == DashboardHealthLevel.ERROR,
+                    description = "Service health ${health.name.lowercase()}",
+                )
             }
 
             // Key badges — only show what adds information; suppress redundant ones
@@ -510,10 +548,17 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
     val tint = thermalColor(state.thermalBand)
     val isHot = state.thermalBand.equals("HOT", ignoreCase = true) ||
         state.thermalBand.equals("CRITICAL", ignoreCase = true)
+    val headroomDescription = state.headroom?.let { "Headroom ${"%.0f".format(it * 100)} percent" }
+        ?: "Headroom not reported"
 
     ElevatedCard(modifier = modifier) {
         Column(
-            modifier = Modifier.padding(12.dp),
+            modifier = Modifier
+                .padding(12.dp)
+                .semantics(mergeDescendants = true) {
+                    contentDescription = "Thermal status"
+                    stateDescription = "${accessibilityBandLabel(state.thermalBand)}. $headroomDescription"
+                },
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
@@ -526,7 +571,7 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                StatusDot(tint)
+                StatusDot(tint, description = "Thermal band ${state.thermalBand.lowercase()}")
                 Text(
                     text = state.thermalBand.uppercase(),
                     style = MaterialTheme.typography.titleSmall,
@@ -535,17 +580,32 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
                 )
             }
             state.headroom?.let {
+                val headroomFraction = it.coerceIn(0f, 1f)
                 Text(
                     text = "Headroom",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                LinearProgressIndicator(
+                    progress = { headroomFraction },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp)),
+                    color = tint,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                )
                 Text(
-                    text = "%.2f".format(it),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontFamily = FontFamily.Monospace,
+                    text = "%.0f%%".format(it * 100),
+                    style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Medium,
                     color = tint,
+                )
+            } ?: run {
+                Text(
+                    text = "Headroom not reported",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                 )
             }
             if (isHot) {
@@ -563,8 +623,9 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
 @Composable
 private fun MemoryMiniCard(state: DashboardUiState, modifier: Modifier = Modifier) {
     val tint = pressureColor(state.memoryPressure)
-    val fraction = if (state.totalRamMb > 0) {
-        state.availableRamMb.toFloat() / state.totalRamMb.toFloat()
+    val usedMb = (state.totalRamMb - state.availableRamMb).coerceAtLeast(0)
+    val usedFraction = if (state.totalRamMb > 0) {
+        usedMb.toFloat() / state.totalRamMb.toFloat()
     } else {
         0f
     }
@@ -573,7 +634,13 @@ private fun MemoryMiniCard(state: DashboardUiState, modifier: Modifier = Modifie
 
     ElevatedCard(modifier = modifier) {
         Column(
-            modifier = Modifier.padding(12.dp),
+            modifier = Modifier
+                .padding(12.dp)
+                .semantics(mergeDescendants = true) {
+                    contentDescription = "Memory pressure"
+                    stateDescription =
+                        "${accessibilityBandLabel(state.memoryPressure)}. ${formatWholeNumber(state.availableRamMb)} megabytes available"
+                },
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Row(
@@ -597,7 +664,7 @@ private fun MemoryMiniCard(state: DashboardUiState, modifier: Modifier = Modifie
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                StatusDot(tint)
+                StatusDot(tint, description = "Memory pressure ${state.memoryPressure.lowercase()}")
                 Text(
                     text = state.memoryPressure.uppercase(),
                     style = MaterialTheme.typography.titleSmall,
@@ -606,17 +673,37 @@ private fun MemoryMiniCard(state: DashboardUiState, modifier: Modifier = Modifie
                 )
             }
             if (state.totalRamMb > 0) {
-                LinearProgressIndicator(
-                    progress = { fraction.coerceIn(0f, 1f) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp)),
-                    color = tint,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                val usedPct = (usedFraction * 100).toInt()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    LinearProgressIndicator(
+                        progress = { usedFraction.coerceIn(0f, 1f) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp)),
+                        color = tint,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "$usedPct%",
+                        style = MindlayerType.Mono.LabelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = tint,
+                    )
+                }
+                Text(
+                    text = "Available: ${formatWholeNumber(state.availableRamMb)} MB",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
                 Text(
-                    text = "Available: ${state.availableRamMb} MB / ${state.totalRamMb} MB",
+                    text = "Used: ${formatWholeNumber(usedMb)} MB / ${formatWholeNumber(state.totalRamMb)} MB",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -641,7 +728,7 @@ private fun ActiveSessionsCard(state: DashboardUiState) {
 
     DashboardCard(
         title = "Active Sessions (${state.activeSessions.size})",
-        icon = Icons.Filled.Info,
+        icon = Icons.Filled.Person,
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             when {
@@ -662,16 +749,39 @@ private fun ActiveSessionsCard(state: DashboardUiState) {
                 }
 
                 state.activeSessions.isEmpty() -> {
-                    Text(
-                        text = "No active sessions in the latest status sample.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(
-                        text = "Last sampled ${formatSampleTime(state.lastStatusUpdateMs, nowMs, "never")}.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Info,
+                            contentDescription = "No active sessions",
+                            modifier = Modifier.size(28.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        )
+                        Text(
+                            text = "No active sessions",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                        )
+                        Text(
+                            text = "Sessions will appear here when client apps connect and start inference.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            textAlign = TextAlign.Center,
+                        )
+                        Text(
+                            text = "Last sampled ${formatSampleTime(state.lastStatusUpdateMs, nowMs, "never")}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                            textAlign = TextAlign.Center,
+                        )
+                    }
                 }
 
                 else -> {
@@ -716,8 +826,7 @@ private fun SessionRow(session: SessionUiItem) {
         ) {
             Text(
                 text = session.backend.take(1).uppercase(),
-                style = MaterialTheme.typography.titleSmall,
-                fontFamily = FontFamily.Monospace,
+                style = MindlayerType.Mono.LabelMedium,
                 fontWeight = FontWeight.Bold,
                 color = backendTint,
             )
@@ -735,8 +844,7 @@ private fun SessionRow(session: SessionUiItem) {
                 Text(
                     text = session.sessionId,
                     modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontFamily = FontFamily.Monospace,
+                    style = MindlayerType.Mono.LabelMedium,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -762,8 +870,7 @@ private fun SessionRow(session: SessionUiItem) {
                 )
                 Text(
                     text = "${session.tokenCount}/${session.maxTokens} tok",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
+                    style = MindlayerType.Mono.LabelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -787,7 +894,13 @@ private fun ActivityNavigationCard(
     onNavigateToHistory: () -> Unit,
     onNavigateToLogs: () -> Unit,
 ) {
-    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.3f
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (darkTheme) 0.45f else 0.35f),
+    ) {
         Column {
             ListItem(
                 headlineContent = {
@@ -805,8 +918,8 @@ private fun ActivityNavigationCard(
                 },
                 leadingContent = {
                     Icon(
-                        imageVector = Icons.Filled.List,
-                        contentDescription = null,
+                        imageVector = Icons.Filled.DateRange,
+                        contentDescription = "Session history",
                         tint = MaterialTheme.colorScheme.primary,
                     )
                 },
@@ -822,7 +935,7 @@ private fun ActivityNavigationCard(
             )
             HorizontalDivider(
                 modifier = Modifier.padding(horizontal = 16.dp),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
             )
             ListItem(
                 headlineContent = {
@@ -840,8 +953,8 @@ private fun ActivityNavigationCard(
                 },
                 leadingContent = {
                     Icon(
-                        imageVector = Icons.Filled.Info,
-                        contentDescription = null,
+                        imageVector = Icons.AutoMirrored.Filled.List,
+                        contentDescription = "Recent logs",
                         tint = MaterialTheme.colorScheme.primary,
                     )
                 },
@@ -864,7 +977,12 @@ private fun ActivityNavigationCard(
 @Composable
 private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Unit) {
     val nowMs = System.currentTimeMillis()
-    val displayTone = if (state.isTestRunning) DashboardMessageTone.INFO else state.testStatusTone
+    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.3f
+    val displayTone = when {
+        state.isTestRunning -> DashboardMessageTone.INFO
+        state.testStatus.isBlank() -> DashboardMessageTone.NEUTRAL
+        else -> state.testStatusTone
+    }
 
     DashboardCard(title = "Test Inference", icon = Icons.Filled.PlayArrow) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -873,7 +991,7 @@ private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Un
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Button(
+                FilledTonalButton(
                     onClick = onTestInference,
                     enabled = !state.isTestRunning,
                 ) {
@@ -881,7 +999,7 @@ private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Un
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
                             strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
                         )
                         Spacer(Modifier.width(8.dp))
                     }
@@ -919,45 +1037,64 @@ private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Un
                 )
             }
 
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .animateContentSize(),
-                shape = RoundedCornerShape(8.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-            ) {
-                Column(
+            val hasOutput = state.testOutput.isNotBlank()
+            if (hasOutput || state.isTestRunning) {
+                Surface(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                        .animateContentSize(),
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (darkTheme) 0.45f else 0.35f),
                 ) {
-                    Text(
-                        text = "Output",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    val hasOutput = state.testOutput.isNotBlank()
-                    Text(
-                        text = if (hasOutput) state.testOutput else "No output captured yet.",
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .then(
-                                if (hasOutput) {
-                                    Modifier.heightIn(min = 48.dp, max = 200.dp)
-                                        .verticalScroll(rememberScrollState())
-                                } else {
-                                    Modifier
-                                }
-                            ),
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            fontFamily = FontFamily.Monospace,
-                        ),
-                    )
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            text = "Output",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            text = if (hasOutput) state.testOutput else "Waiting for output…",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .then(
+                                    if (hasOutput) {
+                                        Modifier.heightIn(min = 48.dp, max = 200.dp)
+                                            .verticalScroll(rememberScrollState())
+                                    } else {
+                                        Modifier
+                                    }
+                                ),
+                            style = MindlayerType.Mono.BodySmall,
+                        )
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CardEnterAnimation(
+    index: Int,
+    content: @Composable () -> Unit,
+) {
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { visible = true }
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(animationSpec = tween(durationMillis = 300, delayMillis = index * 60)) +
+            slideInVertically(
+                animationSpec = tween(durationMillis = 300, delayMillis = index * 60),
+                initialOffsetY = { it / 5 },
+            ),
+    ) {
+        content()
     }
 }
 
@@ -971,8 +1108,8 @@ private fun DiagnosticCallout(message: String, tone: DashboardMessageTone) {
     ) {
         Text(
             text = message,
-            modifier = Modifier.padding(12.dp),
-            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.labelSmall,
             color = accent,
         )
     }
@@ -993,7 +1130,7 @@ private fun DashboardCard(
                 if (icon != null) {
                     Icon(
                         imageVector = icon,
-                        contentDescription = null,
+                        contentDescription = "$title section",
                         modifier = Modifier.size(18.dp),
                         tint = MaterialTheme.colorScheme.primary,
                     )
@@ -1029,8 +1166,7 @@ private fun LabelValue(label: String, value: String) {
         Text(
             text = value.ifBlank { "—" },
             modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyMedium,
-            fontFamily = FontFamily.Monospace,
+            style = MindlayerType.Mono.LabelMedium,
             fontWeight = FontWeight.Medium,
             textAlign = TextAlign.End,
             maxLines = 2,
@@ -1040,10 +1176,37 @@ private fun LabelValue(label: String, value: String) {
 }
 
 @Composable
-private fun StatusDot(color: Color) {
+private fun StatusDot(
+    color: Color,
+    pulse: Boolean = false,
+    description: String? = null,
+) {
+    val alpha = if (pulse) {
+        val infiniteTransition = rememberInfiniteTransition(label = "statusDotPulse")
+        val animatedAlpha by infiniteTransition.animateFloat(
+            initialValue = 1f,
+            targetValue = 0.3f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 800),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "pulseAlpha",
+        )
+        animatedAlpha
+    } else {
+        1f
+    }
     Box(
         modifier = Modifier
             .size(12.dp)
+            .alpha(alpha)
+            .then(
+                if (description != null) {
+                    Modifier.semantics { contentDescription = description }
+                } else {
+                    Modifier
+                },
+            )
             .clip(CircleShape)
             .background(color),
     )
@@ -1053,16 +1216,15 @@ private fun StatusDot(color: Color) {
 private fun Badge(text: String, color: Color) {
     Text(
         text = text,
+        modifier = Modifier
+            .background(
+                color = color.copy(alpha = 0.12f),
+                shape = RoundedCornerShape(12.dp),
+            )
+            .padding(horizontal = 10.dp, vertical = 4.dp),
         style = MaterialTheme.typography.labelSmall,
         color = color,
         fontWeight = FontWeight.Bold,
-        fontSize = 10.sp,
-        modifier = Modifier
-            .background(
-                color = color.copy(alpha = 0.15f),
-                shape = RoundedCornerShape(4.dp),
-            )
-            .padding(horizontal = 6.dp, vertical = 2.dp),
     )
 }
 

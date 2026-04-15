@@ -1,7 +1,6 @@
 package com.mindlayer.service.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,30 +11,38 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
+import androidx.compose.material3.MediumTopAppBar
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.mindlayer.service.ui.theme.MindlayerTheme
+import com.mindlayer.service.ui.theme.MindlayerType
 
 data class SessionHistoryUiState(
     val sessions: List<SessionHistoryItem> = emptyList(),
@@ -53,17 +60,7 @@ data class SessionHistoryItem(
     val totalTokens: Int,
 )
 
-private val BackendGpu = Color(0xFF42A5F5)
-private val BackendCpu = Color(0xFF9E9E9E)
-private val BackendNpu = Color(0xFF66BB6A)
-
-private fun backendColor(backend: String?): Color = when (backend?.uppercase()) {
-    "GPU" -> BackendGpu
-    "CPU" -> BackendCpu
-    "NPU" -> BackendNpu
-    else -> BackendCpu
-}
-
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SessionHistoryScreen(
     state: SessionHistoryUiState,
@@ -71,42 +68,48 @@ fun SessionHistoryScreen(
     onBack: () -> Unit = {},
     onRetry: () -> Unit = {},
 ) {
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background,
-    ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 4.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = onBack) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                    )
-                }
-                Column(modifier = Modifier.padding(start = 4.dp)) {
-                    Text(
-                        text = "Session history",
-                        style = MaterialTheme.typography.headlineLarge,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Text(
-                        text = "Recent diagnostics sessions stored in the local log database.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-
+    Scaffold(
+        topBar = {
+            MediumTopAppBar(
+                title = {
+                    Column {
+                        Text("Session History")
+                        val subtitle = when {
+                            state.isLoading -> "Loading…"
+                            state.errorMessage != null -> "Error"
+                            else -> "${state.sessions.size} sessions"
+                        }
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.mediumTopAppBarColors(
+                    scrolledContainerColor = MaterialTheme.colorScheme.surface,
+                ),
+            )
+        },
+        containerColor = MaterialTheme.colorScheme.background,
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+        ) {
             when {
                 state.isLoading -> {
                     HistoryStatusPane(
                         title = "Loading session history",
-                        message = "Reading the most recent session summaries from the diagnostics log.",
                         showProgress = true,
                     )
                 }
@@ -115,6 +118,14 @@ fun SessionHistoryScreen(
                     HistoryStatusPane(
                         title = "Couldn't load session history",
                         message = state.errorMessage,
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Filled.Warning,
+                                contentDescription = "Session history load error",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(40.dp),
+                            )
+                        },
                         actionLabel = "Retry",
                         onAction = onRetry,
                     )
@@ -123,17 +134,19 @@ fun SessionHistoryScreen(
                 state.sessions.isEmpty() -> {
                     HistoryStatusPane(
                         title = "No sessions recorded yet",
-                        message = "Run a dashboard test inference or wait for a client request to create session log entries.",
+                        message = "Run a test inference or wait for a client request.",
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Filled.Info,
+                                contentDescription = "No session history",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(40.dp),
+                            )
+                        },
                     )
                 }
 
                 else -> {
-                    Text(
-                        text = "Showing ${formatWholeNumber(state.sessions.size)} recent sessions. Tap a card to inspect the full event timeline.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                    )
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(16.dp),
@@ -155,9 +168,8 @@ fun SessionHistoryScreen(
 @Composable
 private fun SessionCard(item: SessionHistoryItem, onClick: () -> Unit) {
     ElevatedCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(
@@ -167,10 +179,10 @@ private fun SessionCard(item: SessionHistoryItem, onClick: () -> Unit) {
             ) {
                 Text(
                     text = item.displayId,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    fontFamily = FontFamily.Monospace,
+                    style = MindlayerType.Mono.LabelMedium.copy(fontWeight = FontWeight.SemiBold),
                     modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 item.backend?.let { backend ->
                     Spacer(modifier = Modifier.width(8.dp))
@@ -182,19 +194,18 @@ private fun SessionCard(item: SessionHistoryItem, onClick: () -> Unit) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = item.sessionId,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
+                    style = MindlayerType.Mono.BodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
             Spacer(modifier = Modifier.height(10.dp))
-            HistoryLabelValue(label = "Created", value = item.createdLabel)
-            HistoryLabelValue(label = "Last active", value = item.lastActiveLabel)
+            HistoryLabelValue(icon = Icons.Filled.DateRange, label = "Created", value = item.createdLabel)
+            HistoryLabelValue(icon = null, label = "Last active", value = item.lastActiveLabel)
 
             Spacer(modifier = Modifier.height(10.dp))
             Text(
-                text = "${formatWholeNumber(item.inferenceCount)} requests • ${formatWholeNumber(item.totalTokens)} tokens",
+                text = "${formatWholeNumber(item.inferenceCount)} requests · ${formatWholeNumber(item.totalTokens)} tokens",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.primary,
                 fontWeight = FontWeight.Medium,
@@ -204,17 +215,29 @@ private fun SessionCard(item: SessionHistoryItem, onClick: () -> Unit) {
 }
 
 @Composable
-private fun HistoryLabelValue(label: String, value: String) {
+private fun HistoryLabelValue(icon: ImageVector?, label: String, value: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 1.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (icon != null) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+        } else {
+            Spacer(modifier = Modifier.width(18.dp))
+        }
         Text(
             text = label,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
         )
         Text(
             text = value,
@@ -226,19 +249,21 @@ private fun HistoryLabelValue(label: String, value: String) {
 
 @Composable
 private fun BackendBadge(backend: String) {
-    val color = backendColor(backend)
+    val (bgColor, textColor) = when (backend.uppercase()) {
+        "GPU" -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
+        "NPU" -> MaterialTheme.colorScheme.secondaryContainer to MaterialTheme.colorScheme.onSecondaryContainer
+        else  -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
+    }
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(4.dp))
-            .background(color.copy(alpha = 0.15f))
-            .padding(horizontal = 8.dp, vertical = 2.dp),
+            .background(bgColor, RoundedCornerShape(6.dp))
+            .padding(horizontal = 8.dp, vertical = 3.dp),
     ) {
         Text(
             text = backend.uppercase(),
             style = MaterialTheme.typography.labelSmall,
-            color = color,
+            color = textColor,
             fontWeight = FontWeight.Bold,
-            fontSize = 11.sp,
         )
     }
 }
@@ -246,8 +271,9 @@ private fun BackendBadge(backend: String) {
 @Composable
 private fun HistoryStatusPane(
     title: String,
-    message: String,
+    message: String? = null,
     showProgress: Boolean = false,
+    icon: (@Composable () -> Unit)? = null,
     actionLabel: String? = null,
     onAction: () -> Unit = {},
 ) {
@@ -261,21 +287,28 @@ private fun HistoryStatusPane(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (showProgress) {
-                CircularProgressIndicator()
-            }
+            if (showProgress) CircularProgressIndicator()
+            icon?.invoke()
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
-            Text(
-                text = message,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (message != null) {
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             actionLabel?.let { label ->
                 FilledTonalButton(onClick = onAction) {
+                    Icon(
+                        imageVector = Icons.Filled.Refresh,
+                        contentDescription = "Retry",
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text(text = label)
                 }
             }
@@ -286,7 +319,7 @@ private fun HistoryStatusPane(
 @Preview(showBackground = true)
 @Composable
 private fun SessionHistoryScreenPreview() {
-    MaterialTheme {
+    MindlayerTheme {
         SessionHistoryScreen(
             state = SessionHistoryUiState(
                 isLoading = false,
@@ -318,7 +351,7 @@ private fun SessionHistoryScreenPreview() {
 @Preview(showBackground = true, name = "Error")
 @Composable
 private fun SessionHistoryErrorPreview() {
-    MaterialTheme {
+    MindlayerTheme {
         SessionHistoryScreen(
             state = SessionHistoryUiState(
                 isLoading = false,

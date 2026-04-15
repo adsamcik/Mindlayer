@@ -11,32 +11,43 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MediumTopAppBar
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.mindlayer.service.ui.theme.MindlayerTheme
+import com.mindlayer.service.ui.theme.MindlayerType
 
 data class SessionDetailUiState(
     val sessionId: String = "",
@@ -63,29 +74,69 @@ data class SessionEventItem(
     val detail: String,
 )
 
+@Composable
 private fun categoryColor(category: String): Color = when (category.uppercase()) {
-    "INFERENCE" -> Color(0xFF2196F3)
-    "THERMAL" -> Color(0xFFFF9800)
-    "SESSION" -> Color(0xFF4CAF50)
-    "MEMORY" -> Color(0xFF9C27B0)
-    "ENGINE" -> Color(0xFF00BCD4)
-    "ERROR" -> Color(0xFFF44336)
-    else -> Color.Gray
+    "INFERENCE" -> MaterialTheme.colorScheme.primary
+    "THERMAL"   -> MaterialTheme.colorScheme.tertiary
+    "SESSION"   -> MaterialTheme.colorScheme.secondary
+    "MEMORY"    -> MaterialTheme.colorScheme.inversePrimary
+    "ENGINE"    -> MaterialTheme.colorScheme.secondary
+    "ERROR"     -> MaterialTheme.colorScheme.error
+    else        -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 
+private fun categoryIcon(category: String): ImageVector = when (category.uppercase()) {
+    "INFERENCE" -> Icons.Filled.PlayArrow
+    "THERMAL"   -> Icons.Filled.Warning
+    "ENGINE"    -> Icons.Filled.Settings
+    "ERROR"     -> Icons.Filled.Warning
+    else        -> Icons.Filled.Info
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SessionDetailScreen(
     state: SessionDetailUiState,
     onBack: () -> Unit = {},
     onRetry: () -> Unit = {},
 ) {
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background,
-    ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            HeaderBar(displayId = state.displayId, onBack = onBack)
-
+    Scaffold(
+        topBar = {
+            MediumTopAppBar(
+                title = {
+                    Column {
+                        Text("Session Detail")
+                        if (state.displayId.isNotBlank()) {
+                            Text(
+                                text = state.displayId,
+                                style = MindlayerType.Mono.BodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.mediumTopAppBarColors(
+                    scrolledContainerColor = MaterialTheme.colorScheme.surface,
+                ),
+            )
+        },
+        containerColor = MaterialTheme.colorScheme.background,
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+        ) {
             when {
                 state.isLoading -> {
                     DetailStatusPane(
@@ -103,6 +154,14 @@ fun SessionDetailScreen(
                     DetailStatusPane(
                         title = "Couldn't load session",
                         message = state.errorMessage,
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Filled.Warning,
+                                contentDescription = "Session load error",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(40.dp),
+                            )
+                        },
                         actionLabel = state.sessionId.takeIf { it.isNotBlank() }?.let { "Retry" },
                         onAction = onRetry,
                     )
@@ -113,6 +172,14 @@ fun SessionDetailScreen(
                         title = "No events recorded",
                         message = state.emptyMessage
                             ?: "No retained log entries were found for this session.",
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Filled.Info,
+                                contentDescription = "No session events",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(40.dp),
+                            )
+                        },
                     )
                 }
 
@@ -125,7 +192,7 @@ fun SessionDetailScreen(
                         item { SummaryCard(state) }
                         item {
                             Text(
-                                text = "Showing ${formatWholeNumber(state.eventCount)} log entries, newest event first.",
+                                text = "${formatWholeNumber(state.eventCount)} log entries · newest first",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -147,67 +214,37 @@ fun SessionDetailScreen(
 }
 
 @Composable
-private fun HeaderBar(displayId: String, onBack: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        IconButton(onClick = onBack) {
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = "Back",
-            )
-        }
-        Spacer(Modifier.width(4.dp))
-        Column {
-            Text(
-                text = "Session detail",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
-            )
-            Text(
-                text = "Timeline for a single diagnostics session.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (displayId.isNotBlank()) {
-                Text(
-                    text = displayId,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-    }
-}
-
-@Composable
 private fun SummaryCard(state: SessionDetailUiState) {
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = "Session summary",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.DateRange,
+                    contentDescription = "Session summary",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(16.dp),
+                )
+                Text(
+                    text = "Session summary",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
             Spacer(Modifier.height(8.dp))
-
             SelectionContainer {
                 Text(
                     text = state.sessionId,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
+                    style = MindlayerType.Mono.BodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(8.dp))
             SummaryLabelValue(label = "Started", value = state.startedLabel.ifBlank { "—" })
             SummaryLabelValue(label = "Last event", value = state.lastEventLabel.ifBlank { "—" })
             SummaryLabelValue(label = "Backend", value = state.backend ?: "—")
@@ -258,8 +295,7 @@ private fun MessageEventRow(event: SessionEventItem) {
         ) {
             Text(
                 text = event.timestampLabel,
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
+                style = MindlayerType.Mono.LabelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
@@ -280,7 +316,7 @@ private fun MessageEventRow(event: SessionEventItem) {
                     text = event.detail,
                     style = MaterialTheme.typography.bodyMedium,
                     color = textColor,
-                    modifier = Modifier.padding(12.dp),
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
                 )
             }
         }
@@ -289,6 +325,7 @@ private fun MessageEventRow(event: SessionEventItem) {
 
 @Composable
 private fun EventRow(event: SessionEventItem) {
+    val catColor = categoryColor(event.category)
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(
@@ -297,11 +334,10 @@ private fun EventRow(event: SessionEventItem) {
             ) {
                 Text(
                     text = event.timestampLabel,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
+                    style = MindlayerType.Mono.LabelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Badge(text = event.category.uppercase(), color = categoryColor(event.category))
+                CategoryChip(category = event.category, color = catColor)
             }
             Spacer(Modifier.height(4.dp))
             Text(
@@ -314,8 +350,7 @@ private fun EventRow(event: SessionEventItem) {
                 SelectionContainer {
                     Text(
                         text = "Request ${event.requestIdLabel}",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
+                        style = MindlayerType.Mono.BodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -331,6 +366,33 @@ private fun EventRow(event: SessionEventItem) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CategoryChip(category: String, color: Color) {
+    Row(
+        modifier = Modifier
+            .background(
+                color = color.copy(alpha = 0.12f),
+                shape = RoundedCornerShape(6.dp),
+            )
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Icon(
+            imageVector = categoryIcon(category),
+            contentDescription = "$category category",
+            tint = color,
+            modifier = Modifier.size(11.dp),
+        )
+        Text(
+            text = category.uppercase(),
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
+            fontWeight = FontWeight.Bold,
+        )
     }
 }
 
@@ -360,27 +422,11 @@ private fun SummaryLabelValue(label: String, value: String) {
 }
 
 @Composable
-private fun Badge(text: String, color: Color) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelSmall,
-        color = color,
-        fontWeight = FontWeight.Bold,
-        fontSize = 10.sp,
-        modifier = Modifier
-            .background(
-                color = color.copy(alpha = 0.15f),
-                shape = RoundedCornerShape(4.dp),
-            )
-            .padding(horizontal = 6.dp, vertical = 2.dp),
-    )
-}
-
-@Composable
 private fun DetailStatusPane(
     title: String,
     message: String,
     showProgress: Boolean = false,
+    icon: (@Composable () -> Unit)? = null,
     actionLabel: String? = null,
     onAction: () -> Unit = {},
 ) {
@@ -394,9 +440,8 @@ private fun DetailStatusPane(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (showProgress) {
-                CircularProgressIndicator()
-            }
+            if (showProgress) CircularProgressIndicator()
+            icon?.invoke()
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleMedium,
@@ -471,7 +516,7 @@ private val PreviewState = SessionDetailUiState(
 @Preview(showBackground = true, widthDp = 400, heightDp = 900)
 @Composable
 private fun SessionDetailScreenPreview() {
-    MaterialTheme {
+    MindlayerTheme {
         SessionDetailScreen(state = PreviewState)
     }
 }
@@ -479,7 +524,7 @@ private fun SessionDetailScreenPreview() {
 @Preview(showBackground = true, widthDp = 400, heightDp = 400, name = "Loading")
 @Composable
 private fun SessionDetailLoadingPreview() {
-    MaterialTheme {
+    MindlayerTheme {
         SessionDetailScreen(state = SessionDetailUiState(displayId = "abc123de…ghi789"))
     }
 }
@@ -487,7 +532,7 @@ private fun SessionDetailLoadingPreview() {
 @Preview(showBackground = true, widthDp = 400, heightDp = 400, name = "Error")
 @Composable
 private fun SessionDetailErrorPreview() {
-    MaterialTheme {
+    MindlayerTheme {
         SessionDetailScreen(
             state = SessionDetailUiState(
                 isLoading = false,
