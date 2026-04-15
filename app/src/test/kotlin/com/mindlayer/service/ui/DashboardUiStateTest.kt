@@ -20,6 +20,7 @@ class DashboardUiStateTest {
         assertNull(state.statusErrorMessage)
         assertNull(state.logsErrorMessage)
         assertEquals("NONE", state.backend)
+        assertNull(state.gpuFailureReason)
         assertEquals(DashboardMessageTone.NEUTRAL, state.testStatusTone)
         assertNull(state.lastTestCompletedAtMs)
         assertTrue(state.activeSessions.isEmpty())
@@ -135,6 +136,7 @@ class DashboardUiStateTest {
             isStatusLoading = false,
             lastStatusUpdateMs = 10_000L,
             statusErrorMessage = "Status polling failed",
+            gpuFailureReason = "RuntimeException: GPU driver crash",
             activeSessions = listOf(session),
             recentLogs = listOf(log),
         )
@@ -148,8 +150,20 @@ class DashboardUiStateTest {
         assertEquals(10_000L, copied.lastStatusUpdateMs)
         assertEquals("Status polling failed", copied.statusErrorMessage)
         assertEquals("Log polling failed", copied.logsErrorMessage)
+        assertEquals("RuntimeException: GPU driver crash", copied.gpuFailureReason)
         assertEquals(DashboardMessageTone.ERROR, copied.testStatusTone)
         assertEquals(listOf(session), copied.activeSessions)
         assertEquals(listOf(log), copied.recentLogs)
+    }
+
+    @Test
+    fun `gpuFailureReason is set when backend is CPU`() {
+        val state = DashboardUiState(
+            backend = "CPU",
+            gpuFailureReason = "IllegalStateException: GPU not available",
+        )
+
+        assertEquals("CPU", state.backend)
+        assertEquals("IllegalStateException: GPU not available", state.gpuFailureReason)
     }
 }
