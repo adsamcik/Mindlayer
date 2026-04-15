@@ -66,6 +66,11 @@ class EngineManager(
     var currentModel: ModelInfo? = null
         private set
 
+    /** Detail string from the most recent GPU init failure, or `null` if GPU never failed (or succeeded). */
+    @Volatile
+    var lastGpuFailureReason: String? = null
+        private set
+
     /** All model files detected on the device for internal selection purposes. */
     private val installedModels: List<ModelInfo> by lazy {
         ModelRegistry.discoverModels(context)
@@ -147,8 +152,11 @@ class EngineManager(
 
                 val elapsed = (System.nanoTime() - startNs) / 1_000_000_000f
                 val durationMs = ((System.nanoTime() - startNs) / 1_000_000)
-                Log.i(TAG, "Engine initialized: model=${target.id}, backend=$name, time=${elapsed}s")
+                Log.i(TAG, "Engine initialized: model=${target.id}, backend=$name, time=${elapsed}s (tried ${backends.map { backendName(it) }})")
 
+                if (name == "GPU") {
+                    lastGpuFailureReason = null
+                }
                 engine = eng
                 currentBackend = name
                 currentModel = target
@@ -158,14 +166,19 @@ class EngineManager(
                 return eng
 
             } catch (t: Throwable) {
-                Log.w(TAG, "Backend $name failed: ${t.message}", t)
+                val errorDetail = "${t::class.simpleName}: ${t.message}" +
+                    (t.cause?.let { " caused by ${it::class.simpleName}: ${it.message}" } ?: "")
+                Log.w(TAG, "Backend $name failed: $errorDetail", t)
+                if (name == "GPU") {
+                    lastGpuFailureReason = errorDetail
+                }
                 lastError = t
                 logRepository?.log(com.mindlayer.service.logging.LogEntry(
                     timestampMs = System.currentTimeMillis(),
                     category = com.mindlayer.service.logging.LogCategory.ENGINE,
                     event = com.mindlayer.service.logging.LogEvent.ENGINE_FALLBACK,
                     backend = name,
-                    errorMessage = t.message,
+                    errorMessage = errorDetail,
                 ))
             }
         }
@@ -231,6 +244,7 @@ class EngineManager(
             currentModel = null
             isInitialized = false
             initTimeSeconds = 0f
+            lastGpuFailureReason = null
             logRepository?.logEngineShutdown(backend)
             Log.i(TAG, "Engine shutdown complete")
         }

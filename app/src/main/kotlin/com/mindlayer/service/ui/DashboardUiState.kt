@@ -42,6 +42,7 @@ data class DashboardUiState(
     // Engine
     val isEngineLoaded: Boolean = false,
     val backend: String = "NONE",
+    val gpuFailureReason: String? = null,
     val initTimeSeconds: Float = 0f,
     val uptimeMs: Long = 0,
     val modelId: String = "",

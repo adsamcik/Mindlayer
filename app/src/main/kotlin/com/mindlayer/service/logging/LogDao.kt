@@ -74,6 +74,9 @@ interface LogDao {
 
     @Query("SELECT COUNT(DISTINCT sessionId) FROM usage_logs WHERE sessionId IS NOT NULL")
     suspend fun countDistinctSessions(): Int
+
+    @Query("SELECT errorMessage FROM usage_logs WHERE event = 'engine_fallback' AND backend = 'GPU' ORDER BY timestampMs DESC LIMIT 1")
+    suspend fun latestGpuFallbackMessage(): String?
 }
 
 data class ThermalBandCount(
