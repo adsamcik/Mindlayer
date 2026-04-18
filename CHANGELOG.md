@@ -4,6 +4,16 @@ All notable changes to Mindlayer are documented in this file.
 
 The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Tests
+- Added instrumented androidTest coverage for DbKeyProvider (:app, :sdk) and
+  EncryptedDbWiring (:sdk). Closes #1.
+
+### CI
+- Added emulator-backed `instrumented-tests` job running
+  `connectedDebugAndroidTest` on API 33.
+
 ## [0.3.0] — 2026-04-18
 
 ### Added
