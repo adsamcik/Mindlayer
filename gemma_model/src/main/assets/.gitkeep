@@ -1,0 +1,12 @@
+# AI Pack assets directory
+
+The Gemma `.litertlm` model file (~2.4 GB) is **deliberately not committed**
+(see `.gitignore`). It is delivered to devices via Play Asset Delivery
+(install-time pack) or sideloaded with `adb push`.
+
+This `.gitkeep` exists so that the `gemma_model` AI Pack module produces a
+valid (empty) asset pack at build time. Without it, AGP's
+`:app:assetPackReleasePreBundleTask` fails with *"path does not exist"* and
+breaks the release AAB build in CI.
+
+Do not commit any `.litertlm` files here.
