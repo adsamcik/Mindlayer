@@ -138,7 +138,7 @@ class InferenceOrchestrator(
     fun cancelInference(requestId: String) {
         val handle = sessionManager.findSessionByActiveRequest(requestId)
         if (handle != null) {
-            MindlayerLog.i(TAG, "Cancelling native inference for request $requestId", requestId = requestId, sessionId = handle?.sessionId)
+            MindlayerLog.i(TAG, "Cancelling native inference for request $requestId", requestId = requestId, sessionId = handle.sessionId)
             try {
                 handle.conversation.cancelProcess()
             } catch (t: Throwable) {
@@ -301,7 +301,7 @@ class InferenceOrchestrator(
                 }
 
                 // --- Structured output: PROMPT_AND_VALIDATE retry -----------
-                if (isPromptValidate && responseBuffer != null && soConfig != null) {
+                if (isPromptValidate && responseBuffer != null) {
                     var output = responseBuffer.toString()
                     for (attempt in 0..soConfig.maxRetries) {
                         when (val result = StructuredOutputHelper.validateJsonOutput(

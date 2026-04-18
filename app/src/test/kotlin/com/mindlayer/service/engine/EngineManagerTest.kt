@@ -343,19 +343,19 @@ class EngineManagerTest {
     @Test
     fun `Backend CPU class identity check`() {
         val cpu = Backend.CPU()
-        assertTrue(cpu is Backend.CPU)
+        assertNotNull(cpu)
     }
 
     @Test
     fun `Backend GPU class identity check`() {
         val gpu = Backend.GPU()
-        assertTrue(gpu is Backend.GPU)
+        assertNotNull(gpu)
     }
 
     @Test
     fun `Backend NPU class identity check`() {
         val npu = Backend.NPU(nativeLibraryDir = "/fake")
-        assertTrue(npu is Backend.NPU)
+        assertNotNull(npu)
     }
 
     // ---- isNpuLikelySupported (tested via buildBackendChain behavior) -------

@@ -182,7 +182,7 @@ class InferencePipelineTest {
         val textParts: List<Content> = if (text.isNullOrEmpty()) {
             emptyList()
         } else {
-            listOf(mockk<Content.Text> { every { this@mockk.text } returns text })
+            listOf(mockk<Content.Text> inner@{ every { this@inner.text } returns text })
         }
         every { contents } returns mockk {
             every { contents } returns textParts
@@ -618,7 +618,7 @@ class InferencePipelineTest {
         )
         assertFalse(
             "Error must NOT leak the raw exception message (could contain prompt content)",
-            errorEvent.errorMessage!!.contains("GPU out of memory"),
+            errorEvent.errorMessage.contains("GPU out of memory"),
         )
 
         // Active job should be cleaned up (invokeOnCompletion removes it)

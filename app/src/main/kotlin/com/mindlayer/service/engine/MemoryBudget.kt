@@ -134,6 +134,7 @@ class MemoryBudget(
      * Force an immediate re-evaluation.  Called from
      * [MindlayerMlService.onTrimMemory] so we don't wait for the next poll.
      */
+    @Suppress("DEPRECATION")
     fun onTrimMemory(level: Int) {
         // Map high-severity trim levels straight to at least CRITICAL so the
         // system can react before the next polling cycle.

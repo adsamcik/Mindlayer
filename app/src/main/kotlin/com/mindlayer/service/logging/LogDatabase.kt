@@ -1,6 +1,7 @@
 package com.mindlayer.service.logging
 
 import android.content.Context
+import androidx.annotation.VisibleForTesting
 import androidx.room.*
 import com.mindlayer.service.security.DbKeyProvider
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
@@ -27,6 +28,18 @@ abstract class LogDatabase : RoomDatabase() {
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: build(context.applicationContext).also { INSTANCE = it }
             }
+
+        /** Test-only seam: inject a Room in-memory [LogDatabase] in place of the encrypted singleton. */
+        @VisibleForTesting
+        fun setInstance(db: LogDatabase) {
+            synchronized(this) { INSTANCE = db }
+        }
+
+        /** Test-only seam: clear the cached singleton so the next [getInstance] call rebuilds it. */
+        @VisibleForTesting
+        fun clearInstance() {
+            synchronized(this) { INSTANCE = null }
+        }
 
         private fun build(appContext: Context): LogDatabase {
             migrateFromPlaintextIfNeeded(appContext)
