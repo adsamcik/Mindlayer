@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
@@ -289,7 +290,7 @@ class ConversationTest {
             systemPrompt("Test")
         }
         // Just verify it returns without error and is the right type
-        assert(conv is Conversation)
+        assertNotNull(conv)
     }
 
     // ═════════════════════════════════════════════════════════════════════

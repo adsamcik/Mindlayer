@@ -405,7 +405,7 @@ class HistoryStoreTest {
         val replay = store.getReplayHistory("sess-1", 10000)!!
         assertNotNull(replay.pendingUserTurn)
         assertEquals(u2, replay.pendingUserTurn!!.turnId)
-        assertEquals("Another message", replay.pendingUserTurn!!.textContent)
+        assertEquals("Another message", replay.pendingUserTurn.textContent)
     }
 
     @Test

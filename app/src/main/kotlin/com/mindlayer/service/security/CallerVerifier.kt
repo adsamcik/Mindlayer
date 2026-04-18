@@ -40,7 +40,7 @@ object CallerVerifier {
 
         val displayName = try {
             val appInfo = pm.getApplicationInfo(pkg, 0)
-            pm.getApplicationLabel(appInfo)?.toString()
+            pm.getApplicationLabel(appInfo).toString()
         } catch (_: Throwable) {
             null
         }

@@ -208,7 +208,7 @@ class MultimodalInferenceTest {
         val textParts: List<Content> = if (text.isNullOrEmpty()) {
             emptyList()
         } else {
-            listOf(mockk<Content.Text> { every { this@mockk.text } returns text })
+            listOf(mockk<Content.Text> inner@{ every { this@inner.text } returns text })
         }
         every { contents } returns mockk {
             every { contents } returns textParts

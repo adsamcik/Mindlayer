@@ -141,7 +141,7 @@ class LogRepositoryTest {
         assertEquals("GPU", e.backend)
         assertNotNull(e.extraJson)
         assertTrue(e.extraJson!!.contains("COOL"))
-        assertTrue(e.extraJson!!.contains("WARM"))
+        assertTrue(e.extraJson.contains("WARM"))
     }
 
     // --- logSessionCreated ---
