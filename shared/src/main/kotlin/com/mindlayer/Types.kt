@@ -8,7 +8,10 @@ import kotlinx.parcelize.Parcelize
 data class HistoryTurn(
     val role: String,   // "user" | "model" | "tool"
     val text: String,
-) : Parcelable
+) : Parcelable {
+    override fun toString(): String =
+        "HistoryTurn(role=$role, text=<redacted:${text.length}>)"
+}
 
 @Parcelize
 data class SessionConfig(
@@ -24,7 +27,14 @@ data class SessionConfig(
     val initialHistory: List<HistoryTurn>? = null,
     /** Session expiration in milliseconds. Default: 14 days. */
     val expirationMs: Long = 14L * 24 * 60 * 60 * 1000,
-) : Parcelable
+) : Parcelable {
+    override fun toString(): String =
+        "SessionConfig(sessionId=$sessionId, systemPrompt=${if (systemPrompt == null) "null" else "<redacted:${systemPrompt.length}>"}, " +
+            "maxTokens=$maxTokens, backend=$backend, samplerTopK=$samplerTopK, samplerTopP=$samplerTopP, " +
+            "samplerTemperature=$samplerTemperature, toolsJson=${if (toolsJson == null) "null" else "<redacted:${toolsJson.length}>"}, " +
+            "extraContextJson=${if (extraContextJson == null) "null" else "<redacted:${extraContextJson.length}>"}, " +
+            "initialHistoryCount=${initialHistory?.size ?: 0}, expirationMs=$expirationMs)"
+}
 
 @Parcelize
 data class RequestMeta(
@@ -33,7 +43,11 @@ data class RequestMeta(
     val textContent: String? = null,
     val role: String = "user",
     val priority: Int = 0,
-) : Parcelable
+) : Parcelable {
+    override fun toString(): String =
+        "RequestMeta(requestId=$requestId, sessionId=$sessionId, role=$role, " +
+            "textContent=${if (textContent == null) "null" else "<redacted:${textContent.length}>"}, priority=$priority)"
+}
 
 @Parcelize
 data class ImageTransfer(
@@ -62,7 +76,10 @@ data class ToolResult(
     val requestId: String,
     val toolName: String,
     val resultJson: String,
-) : Parcelable
+) : Parcelable {
+    override fun toString(): String =
+        "ToolResult(requestId=$requestId, toolName=$toolName, resultJson=<redacted:${resultJson.length}>)"
+}
 
 @Parcelize
 data class ServiceStatus(

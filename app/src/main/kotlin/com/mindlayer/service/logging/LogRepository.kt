@@ -116,27 +116,35 @@ class LogRepository(private val dao: LogDao) {
         ))
     }
 
-    fun logUserMessage(requestId: String, sessionId: String, text: String) {
-        val truncated = if (text.length > 4000) text.take(4000) + "…" else text
+    /**
+     * Log a user-message event. Persists metadata ONLY — never the user's
+     * prompt text. This class of content is private to the caller app and
+     * must not end up in the service's Room database.
+     */
+    fun logUserMessage(requestId: String, sessionId: String, tokenCount: Int) {
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
             event = LogEvent.USER_MESSAGE,
             requestId = requestId,
             sessionId = sessionId,
-            extraJson = truncated,
+            extraJson = """{"tokenCount":$tokenCount}""",
         ))
     }
 
-    fun logModelResponse(requestId: String, sessionId: String, text: String) {
-        val truncated = if (text.length > 4000) text.take(4000) + "…" else text
+    /**
+     * Log a model-response event. Persists metadata ONLY — never the model
+     * output text. Model output can echo or paraphrase the prompt and is
+     * treated as equally sensitive.
+     */
+    fun logModelResponse(requestId: String, sessionId: String, tokenCount: Int) {
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
             event = LogEvent.MODEL_RESPONSE,
             requestId = requestId,
             sessionId = sessionId,
-            extraJson = truncated,
+            extraJson = """{"tokenCount":$tokenCount}""",
         ))
     }
 

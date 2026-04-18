@@ -9,11 +9,21 @@ import android.util.Log
 import androidx.annotation.RequiresApi
 import com.mindlayer.AudioTransfer
 import com.mindlayer.ImageTransfer
+import com.mindlayer.service.logging.MindlayerLog
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Hard upper bound on a single media payload accepted from a client.
+ *
+ * Prevents a malicious or buggy client from requesting multi-gigabyte
+ * allocations via SharedMemory or streaming an unbounded PFD into the
+ * staging directory.
+ */
+private const val MAX_MEDIA_BYTES: Int = 100 * 1024 * 1024
 
 /**
  * Staged media ready for LiteRT-LM consumption.
@@ -69,6 +79,13 @@ class SharedMemoryPool(cacheDir: File) {
         val requestId = transfer.requestId
         val isRawPixels = transfer.isSharedMemory && transfer.mimeType == null
         val mime = transfer.mimeType ?: "image/png"
+        // For SharedMemory transfers the client declares payloadBytes up-front;
+        // reject anything outside (0, MAX_MEDIA_BYTES] before any allocation.
+        if (transfer.isSharedMemory) {
+            require(transfer.payloadBytes in 1..MAX_MEDIA_BYTES) {
+                "Media payload size out of bounds: ${transfer.payloadBytes}"
+            }
+        }
         val staged = createStagingFile(requestId, "img", extensionForMime(mime))
 
         try {
@@ -171,7 +188,11 @@ class SharedMemoryPool(cacheDir: File) {
         } finally {
             buffer?.let { SharedMemory.unmap(it) }
             shm?.close()
-            try { pfd.close() } catch (_: Throwable) {}
+            try {
+                pfd.close()
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "Failed to close ParcelFileDescriptor", throwable = t)
+            }
         }
     }
 
@@ -211,12 +232,15 @@ class SharedMemoryPool(cacheDir: File) {
     private fun stageFromPfd(pfd: ParcelFileDescriptor, outFile: File, knownSize: Int?) {
         try {
             if (knownSize != null) {
+                require(knownSize in 1..MAX_MEDIA_BYTES) {
+                    "Media payload size out of bounds: $knownSize"
+                }
                 val bytes = readExactly(pfd, knownSize)
                 outFile.writeBytes(bytes)
             } else {
                 ParcelFileDescriptor.AutoCloseInputStream(pfd).use { input ->
                     FileOutputStream(outFile).use { output ->
-                        input.copyTo(output, COPY_BUFFER_SIZE)
+                        copyBounded(input, output, MAX_MEDIA_BYTES)
                     }
                 }
             }
@@ -226,8 +250,30 @@ class SharedMemoryPool(cacheDir: File) {
         }
     }
 
+    /**
+     * Copy bytes from [input] to [output], aborting if the total exceeds
+     * [maxBytes]. Throws [IllegalArgumentException] on overflow so callers
+     * treat it uniformly with the up-front `require(...)` bounds.
+     */
+    private fun copyBounded(input: java.io.InputStream, output: java.io.OutputStream, maxBytes: Int) {
+        val buf = ByteArray(COPY_BUFFER_SIZE)
+        var total = 0L
+        while (true) {
+            val n = input.read(buf)
+            if (n == -1) break
+            total += n
+            require(total <= maxBytes) {
+                "Media payload size out of bounds: >$maxBytes"
+            }
+            output.write(buf, 0, n)
+        }
+    }
+
     /** Read exactly [size] bytes from [pfd], closing it when done. */
     private fun readExactly(pfd: ParcelFileDescriptor, size: Int): ByteArray {
+        require(size in 1..MAX_MEDIA_BYTES) {
+            "Media payload size out of bounds: $size"
+        }
         val bytes = ByteArray(size)
         ParcelFileDescriptor.AutoCloseInputStream(pfd).use { input ->
             var offset = 0

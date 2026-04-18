@@ -10,6 +10,11 @@ import com.mindlayer.EngineInfo;
 import com.mindlayer.SessionInfo;
 
 interface IMindlayerService {
+    // Client liveness — caller passes a Binder token; service linkToDeath's on it
+    // so that if the calling process dies, all sessions it owns are torn down.
+    // Idempotent per calling UID; clients should call this once after connect.
+    void registerClient(IBinder clientToken);
+
     // Session management
     String createSession(in SessionConfig config);
     void destroySession(String sessionId);

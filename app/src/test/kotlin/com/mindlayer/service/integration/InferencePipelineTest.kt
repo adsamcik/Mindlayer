@@ -38,6 +38,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -606,12 +607,18 @@ class InferencePipelineTest {
         val sessionId = createSession()
         val events = inferAndCollect(sessionId, "Hello", requestId = "req-throw")
 
-        // Should produce an error event mentioning the exception
+        // Should produce an error event with a sanitised class-name label.
+        // Exception messages are NOT forwarded because native LiteRT-LM errors
+        // can embed prompt content in them.
         val errorEvent = events.find { it.kind == "error" }
         assertNotNull("Should contain an error event", errorEvent)
         assertTrue(
-            "Error should mention the exception",
-            errorEvent!!.errorMessage!!.contains("GPU out of memory"),
+            "Error should carry the sanitised exception class name, not its message",
+            errorEvent!!.errorMessage!!.contains("RuntimeException"),
+        )
+        assertFalse(
+            "Error must NOT leak the raw exception message (could contain prompt content)",
+            errorEvent.errorMessage!!.contains("GPU out of memory"),
         )
 
         // Active job should be cleaned up (invokeOnCompletion removes it)

@@ -308,4 +308,50 @@ class TokenStreamWriterTest {
         val event = json.decodeFromString<StreamEvent>(frameJson)
         assertEquals("test", event.payload["text"]?.jsonPrimitive?.contentOrNull)
     }
+
+    // =========================================================================
+    // IPC hardening — max frame size
+    // =========================================================================
+
+    @Test(expected = IllegalStateException::class)
+    fun `writeTokenDelta rejects payload exceeding MAX_FRAME_BYTES`() {
+        val baos = ByteArrayOutputStream()
+        val writer = TokenStreamWriter.forTesting(baos)
+        // 1 MiB cap → generate a string well above it.
+        val huge = "x".repeat(1_048_576 + 64)
+        writer.writeTokenDelta(seq = 1, text = huge)
+    }
+
+    // =========================================================================
+    // IPC hardening — IOException becomes CancellationException
+    // =========================================================================
+
+    @Test
+    fun `writeFrame re-raises pipe IOException as CancellationException`() {
+        val failing = object : java.io.OutputStream() {
+            override fun write(b: Int) { throw java.io.IOException("broken pipe") }
+            override fun write(b: ByteArray, off: Int, len: Int) { throw java.io.IOException("broken pipe") }
+        }
+        val writer = TokenStreamWriter.forTesting(failing)
+        try {
+            writer.writeTokenDelta(seq = 1, text = "hello")
+            org.junit.Assert.fail("Expected CancellationException")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            assertTrue(
+                "Cause should be the original IOException",
+                e.cause is java.io.IOException,
+            )
+        }
+    }
+
+    @Test
+    fun `closeWithError swallows pipe failure and still closes`() {
+        val failing = object : java.io.OutputStream() {
+            override fun write(b: Int) { throw java.io.IOException("broken pipe") }
+            override fun write(b: ByteArray, off: Int, len: Int) { throw java.io.IOException("broken pipe") }
+        }
+        val writer = TokenStreamWriter.forTesting(failing)
+        // Must not throw — closeWithError is terminal, best-effort.
+        writer.closeWithError(seq = 0, message = "gone")
+    }
 }

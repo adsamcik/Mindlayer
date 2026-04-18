@@ -48,9 +48,20 @@ class DashboardViewModel : ViewModel() {
     private var statusPollingJob: Job? = null
     private var logPollingJob: Job? = null
 
+    /**
+     * Stable liveness token passed to `registerClient` so the service's death
+     * recipient can tear down dashboard-owned sessions if this process dies.
+     * Must be held for the whole lifetime of the connection.
+     */
+    private val livenessToken = android.os.Binder()
+
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            service = com.mindlayer.IMindlayerService.Stub.asInterface(binder)
+            val svc = com.mindlayer.IMindlayerService.Stub.asInterface(binder)
+            service = svc
+            // Dashboard shares this UID with the service — authorizeCall()
+            // self-UID-bypasses, so this call always succeeds.
+            try { svc.registerClient(livenessToken) } catch (_: Throwable) { }
             _uiState.update {
                 it.copy(
                     connectionState = DashboardConnectionState.CONNECTED,

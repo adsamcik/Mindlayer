@@ -39,7 +39,7 @@ class ThermalBandTest {
         mockkStatic(Log::class)
         mockkStatic(Build.VERSION::class)
 
-        every { SystemClock.elapsedRealtime() } returns 100_000L
+        every { SystemClock.uptimeMillis() } returns 100_000L
         every { Log.d(any(), any()) } returns 0
         every { Log.i(any(), any()) } returns 0
         every { Log.w(any(), any<String>()) } returns 0
@@ -298,65 +298,65 @@ class ThermalBandTest {
     @Test
     fun `canReenableGpu returns false within 30s of recordGpuDisabled`() {
         val disableTime = 100_000L
-        every { SystemClock.elapsedRealtime() } returns disableTime
+        every { SystemClock.uptimeMillis() } returns disableTime
         monitor.recordGpuDisabled()
 
         // 10s later — still within 30s cooldown
-        every { SystemClock.elapsedRealtime() } returns disableTime + 10_000L
+        every { SystemClock.uptimeMillis() } returns disableTime + 10_000L
         assertFalse(monitor.canReenableGpu())
     }
 
     @Test
     fun `canReenableGpu returns false at exactly 29s after disable`() {
         val disableTime = 100_000L
-        every { SystemClock.elapsedRealtime() } returns disableTime
+        every { SystemClock.uptimeMillis() } returns disableTime
         monitor.recordGpuDisabled()
 
-        every { SystemClock.elapsedRealtime() } returns disableTime + 29_999L
+        every { SystemClock.uptimeMillis() } returns disableTime + 29_999L
         assertFalse(monitor.canReenableGpu())
     }
 
     @Test
     fun `canReenableGpu returns true at exactly 30s after disable`() {
         val disableTime = 100_000L
-        every { SystemClock.elapsedRealtime() } returns disableTime
+        every { SystemClock.uptimeMillis() } returns disableTime
         monitor.recordGpuDisabled()
 
-        every { SystemClock.elapsedRealtime() } returns disableTime + 30_000L
+        every { SystemClock.uptimeMillis() } returns disableTime + 30_000L
         assertTrue(monitor.canReenableGpu())
     }
 
     @Test
     fun `canReenableGpu returns true well after 30s cooldown`() {
         val disableTime = 100_000L
-        every { SystemClock.elapsedRealtime() } returns disableTime
+        every { SystemClock.uptimeMillis() } returns disableTime
         monitor.recordGpuDisabled()
 
-        every { SystemClock.elapsedRealtime() } returns disableTime + 60_000L
+        every { SystemClock.uptimeMillis() } returns disableTime + 60_000L
         assertTrue(monitor.canReenableGpu())
     }
 
     @Test
     fun `recordGpuDisabled updates cooldown timestamp`() {
         val time1 = 100_000L
-        every { SystemClock.elapsedRealtime() } returns time1
+        every { SystemClock.uptimeMillis() } returns time1
         monitor.recordGpuDisabled()
 
         // After 30s from first disable, can re-enable
-        every { SystemClock.elapsedRealtime() } returns time1 + 30_000L
+        every { SystemClock.uptimeMillis() } returns time1 + 30_000L
         assertTrue(monitor.canReenableGpu())
 
         // Disable again at a later time
         val time2 = time1 + 50_000L
-        every { SystemClock.elapsedRealtime() } returns time2
+        every { SystemClock.uptimeMillis() } returns time2
         monitor.recordGpuDisabled()
 
         // 10s after second disable — still in cooldown
-        every { SystemClock.elapsedRealtime() } returns time2 + 10_000L
+        every { SystemClock.uptimeMillis() } returns time2 + 10_000L
         assertFalse(monitor.canReenableGpu())
 
         // 30s after second disable — can re-enable
-        every { SystemClock.elapsedRealtime() } returns time2 + 30_000L
+        every { SystemClock.uptimeMillis() } returns time2 + 30_000L
         assertTrue(monitor.canReenableGpu())
     }
 

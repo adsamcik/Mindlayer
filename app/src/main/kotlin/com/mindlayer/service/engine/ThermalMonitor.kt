@@ -47,7 +47,7 @@ class ThermalMonitor(
     context: Context,
     private val scope: CoroutineScope,
     private val logRepository: com.mindlayer.service.logging.LogRepository? = null,
-    private val clock: () -> Long = { SystemClock.elapsedRealtime() },
+    private val clock: () -> Long = { SystemClock.uptimeMillis() },
 ) {
 
     companion object {

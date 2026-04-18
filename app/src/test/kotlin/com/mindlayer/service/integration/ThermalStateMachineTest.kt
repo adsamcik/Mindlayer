@@ -31,7 +31,7 @@ class ThermalStateMachineTest {
     fun setUp() {
         mockkStatic(SystemClock::class)
         mockkStatic(Log::class)
-        every { SystemClock.elapsedRealtime() } answers { mockElapsedRealtime }
+        every { SystemClock.uptimeMillis() } answers { mockElapsedRealtime }
         every { Log.d(any(), any()) } returns 0
         every { Log.i(any(), any()) } returns 0
         every { Log.w(any(), any<String>()) } returns 0

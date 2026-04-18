@@ -21,6 +21,9 @@ import com.mindlayer.service.engine.ThermalSample
 import com.mindlayer.service.engine.ToolCallBridge
 import com.mindlayer.service.logging.DiagnosticExporter
 import com.mindlayer.service.logging.MindlayerLog
+import com.mindlayer.service.security.AllowlistStore
+import com.mindlayer.service.security.CallerIdentity
+import com.mindlayer.service.security.RateLimiter
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -132,6 +135,19 @@ class ServiceBinderTest {
             diagnosticExporter = diagnosticExporter,
             thermalMonitor = thermalMonitor,
             memoryBudget = memoryBudget,
+            callerVerifier = { _, uid ->
+                CallerIdentity(
+                    packageName = "test.caller",
+                    signingCertSha256 = "testsig",
+                    displayName = "Test Caller",
+                )
+            },
+            // Use a null store so the binder skips the allowlist gate in unit tests.
+            allowlistStore = null,
+            rateLimiter = RateLimiter(
+                maxRequestsPerMinute = 100_000,
+                maxConcurrent = 1_000,
+            ),
         )
     }
 
@@ -145,12 +161,12 @@ class ServiceBinderTest {
     @Test
     fun `createSession delegates to orchestrator`() {
         val config = SessionConfig(sessionId = "s1", maxTokens = 2048)
-        every { orchestrator.createSession(config) } returns "s1"
+        every { orchestrator.createSession(config, any()) } returns "s1"
 
         val result = binder.createSession(config)
 
         assertEquals("s1", result)
-        verify { orchestrator.createSession(config) }
+        verify { orchestrator.createSession(config, any()) }
     }
 
     @Test
@@ -210,7 +226,7 @@ class ServiceBinderTest {
 
         binder.infer(meta, null, null, pfd)
 
-        verify { orchestrator.infer(meta, null, null, pfd) }
+        verify { orchestrator.infer(meta, null, null, pfd, any()) }
     }
 
     @Test
@@ -222,7 +238,7 @@ class ServiceBinderTest {
 
         binder.infer(meta, image, audio, pfd)
 
-        verify { orchestrator.infer(meta, image, audio, pfd) }
+        verify { orchestrator.infer(meta, image, audio, pfd, any()) }
     }
 
     @Test

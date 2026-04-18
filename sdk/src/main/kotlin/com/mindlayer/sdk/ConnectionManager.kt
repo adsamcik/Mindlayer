@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.os.Binder
 import android.os.IBinder
 import android.util.Log
 import com.mindlayer.IMindlayerService
@@ -35,6 +36,16 @@ enum class ConnectionState {
 
     /** Lost connection, attempting auto-reconnect. */
     RECOVERING,
+
+    /**
+     * Service rejected our `registerClient` call — the calling app is not on
+     * the user-approved allowlist. The binding is torn down. The client must
+     * wait for user approval in the Mindlayer dashboard and call [connect]
+     * again. This is a terminal state until the caller explicitly retries;
+     * we do not auto-reconnect because that would poll the service and hit
+     * the rate limit.
+     */
+    REJECTED_NOT_APPROVED,
 }
 
 /**
@@ -85,6 +96,13 @@ class ConnectionManager {
     private var currentConnection: ServiceConnection? = null
     private var deathRecipient: IBinder.DeathRecipient? = null
 
+    /**
+     * Stable Binder token passed to [IMindlayerService.registerClient] so the
+     * service can [linkToDeath] on it and tear down our sessions if this
+     * process dies. Lives for the lifetime of this ConnectionManager.
+     */
+    private val livenessToken: IBinder = Binder()
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var backoffMs = INITIAL_BACKOFF_MS
 
@@ -131,7 +149,10 @@ class ConnectionManager {
         timeoutMs: Long = DEFAULT_CONNECT_TIMEOUT_MS,
     ): IMindlayerService = withTimeout(timeoutMs) {
         while (true) {
-            _state.first { it == ConnectionState.CONNECTED }
+            _state.first { it == ConnectionState.CONNECTED || it == ConnectionState.REJECTED_NOT_APPROVED }
+            if (_state.value == ConnectionState.REJECTED_NOT_APPROVED) {
+                throw SecurityException("Mindlayer rejected this app — user approval required in the Mindlayer dashboard")
+            }
             val service = binderRef.get()
             if (service != null) return@withTimeout service
             // Binder invalidated between state transition and our read.
@@ -169,6 +190,27 @@ class ConnectionManager {
                     return
                 }
                 deathRecipient = recipient
+
+                // Register a liveness token so the service can tear down our
+                // sessions if this process dies (service-side linkToDeath).
+                // If the service rejects us (caller not on allowlist), do NOT
+                // publish CONNECTED — that would lie about the binding being
+                // usable and every subsequent RPC would throw SecurityException.
+                try {
+                    service.registerClient(livenessToken)
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "registerClient rejected — caller not approved", e)
+                    try { binder.unlinkToDeath(recipient, 0) } catch (_: Throwable) { }
+                    deathRecipient = null
+                    invalidateBinder()
+                    _state.value = ConnectionState.REJECTED_NOT_APPROVED
+                    doUnbind()
+                    return
+                } catch (e: Exception) {
+                    Log.w(TAG, "registerClient failed (transient)", e)
+                    // Non-security failure (e.g. RemoteException mid-bind) — fall
+                    // through to CONNECTED; the next RPC will surface any issue.
+                }
 
                 _state.value = ConnectionState.CONNECTED
             }

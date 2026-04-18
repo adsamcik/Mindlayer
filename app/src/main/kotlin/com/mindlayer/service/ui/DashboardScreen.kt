@@ -286,6 +286,7 @@ fun DashboardScreen(
                 item { CardEnterAnimation(3) { ActiveSessionsCard(state) } }
                 item { CardEnterAnimation(4) { ActivityNavigationCard(onNavigateToHistory, onNavigateToLogs) } }
                 item { CardEnterAnimation(5) { TestInferenceCard(state, onTestInference) } }
+                item { CardEnterAnimation(6) { AllowedAppsCard() } }
                 item { Spacer(Modifier.height(8.dp)) }
             }
         }

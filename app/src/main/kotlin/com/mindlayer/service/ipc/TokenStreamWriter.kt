@@ -8,12 +8,23 @@ import com.mindlayer.shared.StreamHeader
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.IOException
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+
+/**
+ * Hard upper bound on a single framed JSON payload sent through the pipe.
+ *
+ * Mirrors `TokenStreamReader.MAX_FRAME_BYTES` on the SDK side — duplicated
+ * intentionally because the shared module is off-limits this pass. A frame
+ * exceeding this bound indicates a programmer error (runaway payload) and
+ * must fail fast rather than be truncated or streamed.
+ */
+private const val MAX_FRAME_BYTES = 1_048_576
 
 /**
  * Writes length-prefixed JSON events to a [ParcelFileDescriptor] pipe.
@@ -93,6 +104,10 @@ class TokenStreamWriter private constructor(
             writeError(seq, "internal_error", message)
         } catch (_: IOException) {
             // Best-effort
+        } catch (_: CancellationException) {
+            // writeFrame re-throws pipe IOExceptions as CancellationException
+            // so that live inference is cancelled. For closeWithError the
+            // call is already terminal — swallow and continue to close().
         }
         close()
     }
@@ -111,8 +126,11 @@ class TokenStreamWriter private constructor(
 
     private fun writeFrame(payload: String) {
         if (closed) return
+        val bytes = payload.encodeToByteArray()
+        check(bytes.size <= MAX_FRAME_BYTES) {
+            "Frame too large: ${bytes.size} bytes (max=$MAX_FRAME_BYTES)"
+        }
         try {
-            val bytes = payload.encodeToByteArray()
             val header = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
                 .putInt(bytes.size)
                 .array()
@@ -122,6 +140,11 @@ class TokenStreamWriter private constructor(
         } catch (e: IOException) {
             MindlayerLog.w(TAG, "IOException writing frame (client may have disconnected)", throwable = e)
             closed = true
+            // Re-raise as CancellationException so the enclosing inference
+            // coroutine unwinds promptly and native cancelProcess() fires.
+            // Callers outside a coroutine context (e.g. closeWithError) catch
+            // CancellationException explicitly.
+            throw CancellationException("Pipe write failed; client likely disconnected").apply { initCause(e) }
         }
     }
 }
