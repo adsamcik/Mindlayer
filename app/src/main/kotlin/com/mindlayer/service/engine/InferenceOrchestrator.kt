@@ -3,6 +3,7 @@ package com.mindlayer.service.engine
 import android.os.ParcelFileDescriptor
 import com.mindlayer.service.logging.MindlayerLog
 import com.mindlayer.service.logging.RequestTrace
+import com.mindlayer.service.logging.safeLabel
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Message
@@ -68,6 +69,18 @@ class InferenceOrchestrator(
     fun createSession(config: SessionConfig): String =
         sessionManager.createSession(config)
 
+    fun createSession(config: SessionConfig, ownerToken: Any?): String =
+        sessionManager.createSession(config, ownerToken)
+
+    fun closeAllOwnedBy(ownerToken: Any): List<String> =
+        sessionManager.closeAllOwnedBy(ownerToken)
+
+    fun getSessionOwner(sessionId: String): Any? =
+        sessionManager.getSessionOwner(sessionId)
+
+    fun listSessionsOwnedBy(ownerToken: Any): List<SessionInfo> =
+        sessionManager.listSessionsOwnedBy(ownerToken)
+
     fun destroySession(sessionId: String) =
         sessionManager.destroySession(sessionId)
 
@@ -96,11 +109,30 @@ class InferenceOrchestrator(
         audio: AudioTransfer?,
         pipeWriteEnd: ParcelFileDescriptor,
     ) {
+        infer(meta, image, audio, pipeWriteEnd, onComplete = null)
+    }
+
+    /**
+     * Launch an inference with an optional [onComplete] callback invoked on
+     * the orchestrator's coroutine scope when the request finishes (success,
+     * error, or cancellation). Used by [ServiceBinder] to release per-UID
+     * rate-limit concurrency slots.
+     */
+    fun infer(
+        meta: RequestMeta,
+        image: ImageTransfer?,
+        audio: AudioTransfer?,
+        pipeWriteEnd: ParcelFileDescriptor,
+        onComplete: (() -> Unit)?,
+    ) {
         val job = scope.launch {
             runInference(meta, image, audio, pipeWriteEnd)
         }
         activeJobs[meta.requestId] = job
-        job.invokeOnCompletion { activeJobs.remove(meta.requestId) }
+        job.invokeOnCompletion {
+            activeJobs.remove(meta.requestId)
+            onComplete?.invoke()
+        }
     }
 
     fun cancelInference(requestId: String) {
@@ -110,7 +142,7 @@ class InferenceOrchestrator(
             try {
                 handle.conversation.cancelProcess()
             } catch (t: Throwable) {
-                MindlayerLog.w(TAG, "cancelProcess() failed", requestId = requestId, throwable = t)
+                MindlayerLog.w(TAG, "cancelProcess() failed: ${t.safeLabel()}", requestId = requestId)
             }
         }
         toolCallBridge.cancel(requestId)
@@ -162,10 +194,10 @@ class InferenceOrchestrator(
                 MindlayerLog.d(TAG, "Staged audio: ${stagedAudio.filePath}", requestId = meta.requestId, sessionId = meta.sessionId)
             }
         } catch (t: Throwable) {
-            MindlayerLog.e(TAG, "Media staging failed for request ${meta.requestId}", requestId = meta.requestId, sessionId = meta.sessionId, throwable = t)
+            MindlayerLog.e(TAG, "Media staging failed for request ${meta.requestId}: ${t.safeLabel()}", requestId = meta.requestId, sessionId = meta.sessionId)
             sharedMemoryPool.cleanup(meta.requestId)
             val writer = writerFactory(pipeWriteEnd)
-            writer.closeWithError(0, "media_staging_failed: ${t.message}")
+            writer.closeWithError(0, "media_staging_failed: ${t.safeLabel()}")
             return
         }
 
@@ -179,7 +211,11 @@ class InferenceOrchestrator(
             logRepository?.logInferenceStart(
                 meta.requestId, meta.sessionId, service.engineManager.currentBackend
             )
-            logRepository?.logUserMessage(meta.requestId, meta.sessionId, meta.textContent ?: "")
+            logRepository?.logUserMessage(
+                meta.requestId,
+                meta.sessionId,
+                tokenCount = ((meta.textContent?.length ?: 0) / 4).coerceAtLeast(if (meta.textContent.isNullOrEmpty()) 0 else 1),
+            )
             try {
                 writer.writeHeader(meta.requestId)
 
@@ -213,7 +249,6 @@ class InferenceOrchestrator(
                 var toolCallRound = 0
                 var requestTokenCount = 0
                 var firstTokenSeen = false
-                val responseTextBuilder = StringBuilder()
                 val accumulatedToolCalls = mutableListOf<Pair<String, String>>()
 
                 val soConfig = handle.structuredOutputConfig
@@ -231,7 +266,6 @@ class InferenceOrchestrator(
                 handle.conversation.sendMessageAsync(contents).collect { chunk ->
                     val text = chunk.text()
                     if (!text.isNullOrEmpty()) {
-                        responseTextBuilder.append(text)
                         if (isPromptValidate) {
                             responseBuffer!!.append(text)
                         } else {
@@ -385,7 +419,7 @@ class InferenceOrchestrator(
                 val tokensGenerated = handle.estimatedTokens
                 val tokPerSec = if (durationMs > 0) tokensGenerated * 1000f / durationMs else 0f
                 logRepository?.logModelResponse(
-                    meta.requestId, meta.sessionId, responseTextBuilder.toString()
+                    meta.requestId, meta.sessionId, tokenCount = requestTokenCount,
                 )
                 logRepository?.logInferenceComplete(
                     requestId = meta.requestId,
@@ -400,18 +434,28 @@ class InferenceOrchestrator(
 
             } catch (e: CancellationException) {
                 toolCallBridge.cancel(meta.requestId)
+                // Flow cancellation does NOT cancel native generation — the LiteRT-LM
+                // engine keeps decoding in the background unless we ask it to stop.
+                // This matters on broken-pipe (client died mid-stream) because the
+                // writer raises CancellationException to unwind the coroutine.
+                try {
+                    handle.conversation.cancelProcess()
+                } catch (t: Throwable) {
+                    MindlayerLog.w(TAG, "cancelProcess() after CancellationException raised ${t.safeLabel()}", requestId = meta.requestId, sessionId = meta.sessionId)
+                }
                 trace.markError("cancelled")
                 MindlayerLog.i(TAG, "Inference cancelled for request ${meta.requestId}", requestId = meta.requestId, sessionId = meta.sessionId)
                 writer.writeDone(0, "cancelled")
                 throw e
             } catch (t: Throwable) {
                 toolCallBridge.cancel(meta.requestId)
-                trace.markError(t.message ?: "inference_failed")
-                MindlayerLog.e(TAG, "Inference failed for request ${meta.requestId}", requestId = meta.requestId, sessionId = meta.sessionId, throwable = t)
+                val safe = t.safeLabel()
+                trace.markError(safe)
+                MindlayerLog.e(TAG, "Inference failed for request ${meta.requestId}: $safe", requestId = meta.requestId, sessionId = meta.sessionId)
                 logRepository?.logInferenceError(
-                    meta.requestId, meta.sessionId, t.message ?: "inference_failed"
+                    meta.requestId, meta.sessionId, safe
                 )
-                writer.closeWithError(0, t.message ?: "inference_failed")
+                writer.closeWithError(0, safe)
                 return
             } finally {
                 writer.close()

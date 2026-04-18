@@ -46,3 +46,23 @@ object MindlayerLog {
         return "$ctx $message"
     }
 }
+
+/**
+ * Returns a log-safe description of a throwable with no user content.
+ *
+ * Use this anywhere a native LiteRT-LM or inference-path exception could
+ * embed prompt text, tool arguments, or model output in its message
+ * (e.g., tokenizer errors, template errors, validation errors). Pass the
+ * result as part of the log message and `throwable = null` so the stack
+ * trace (which can also contain inlined strings) is not emitted.
+ */
+fun Throwable.safeLabel(): String =
+    "${this::class.simpleName}${cause?.let { " -> ${it::class.simpleName}" } ?: ""}"
+
+/**
+ * Shorten an id for logcat so correlation is possible without dumping full
+ * UUIDs. NOT auto-applied to existing callsites — intended for new log
+ * lines where brevity matters. Callers that need exact correlation (tests,
+ * traces, database entries) should keep the full id.
+ */
+fun String.loggable(): String = take(8) + "…"

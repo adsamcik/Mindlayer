@@ -71,6 +71,30 @@ val mindlayer = Mindlayer.connect(context)
 mindlayer.awaitConnected()
 ```
 
+### First-run user approval
+
+Mindlayer is default-deny: the first time your app binds, the service records
+a **pending approval** for your package + signing-cert SHA and rejects the
+call with `SecurityException`. The user must then open the Mindlayer dashboard
+and approve your app explicitly — Mindlayer pins the SHA-256 of your current
+signing certificate at approval time, so a re-signed APK is rejected.
+
+- During the pending window, `ConnectionManager.state` transitions to
+  `REJECTED_NOT_APPROVED` and `awaitConnected()` throws `SecurityException`.
+  This is a **terminal state** — the SDK will not auto-reconnect (that would
+  poll the service and tip the rate limit). Your app should surface a "please
+  approve Mindlayer access" prompt and retry `connect()` when the user asks.
+- Once approved, the next `connect()` succeeds.
+- The user can revoke access at any time from the dashboard.
+
+### Encrypted on-device storage
+
+Both the service's log DB and the SDK's conversation-history DB are encrypted
+with SQLCipher. The passphrases are random 32-byte blobs wrapped in an
+`AndroidKeystore` AES/GCM key. **Cross-install backup/restore produces an
+unreadable DB** — the Keystore key doesn't move with a system backup. If
+you ship a restore flow, treat the conversation history as ephemeral.
+
 ### Create a session
 
 ```kotlin

@@ -226,4 +226,51 @@ class SharedMemoryPoolTest {
         result.cleanup()
         assertFalse("Cleanup callable should delete the file", staged.exists())
     }
+
+    // =========================================================================
+    // IPC hardening — payload size bounds
+    // =========================================================================
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `stageImage rejects SharedMemory transfer exceeding MAX_MEDIA_BYTES`() {
+        // payloadBytes above the 100 MiB cap must be rejected before any alloc.
+        val pfd = createPfdFromBytes(byteArrayOf(0), "bin")
+        val transfer = ImageTransfer(
+            requestId = "req-oversized",
+            width = 1,
+            height = 1,
+            pixelFormat = 0,
+            rowStride = 0,
+            payloadBytes = 200 * 1024 * 1024,
+            source = pfd,
+            isSharedMemory = true,
+            mimeType = "image/png",
+        )
+        try {
+            pool.stageImage(transfer)
+        } finally {
+            try { pfd.close() } catch (_: Throwable) {}
+        }
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `stageImage rejects zero-byte SharedMemory payload`() {
+        val pfd = createPfdFromBytes(byteArrayOf(0), "bin")
+        val transfer = ImageTransfer(
+            requestId = "req-zero",
+            width = 1,
+            height = 1,
+            pixelFormat = 0,
+            rowStride = 0,
+            payloadBytes = 0,
+            source = pfd,
+            isSharedMemory = true,
+            mimeType = "image/png",
+        )
+        try {
+            pool.stageImage(transfer)
+        } finally {
+            try { pfd.close() } catch (_: Throwable) {}
+        }
+    }
 }

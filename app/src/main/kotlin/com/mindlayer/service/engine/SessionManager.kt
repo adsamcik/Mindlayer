@@ -62,7 +62,15 @@ class SessionManager(
      * [config] is clamped to the device budget *and* the current runtime
      * memory-pressure recommendation.
      */
-    fun createSession(config: SessionConfig): String {
+    fun createSession(config: SessionConfig): String = createSession(config, ownerToken = null)
+
+    /**
+     * Create a session, optionally attributing ownership to [ownerToken] so
+     * that [closeAllOwnedBy] can tear down all of a caller's sessions when
+     * its binder dies.
+     */
+    fun createSession(config: SessionConfig, ownerToken: Any?): String {
+        validateSessionConfig(config)
         cleanupExpiredSessions()
         val tier = memoryBudget.deviceTier
         val snap = memoryBudget.currentSnapshot()
@@ -159,6 +167,7 @@ class SessionManager(
             createdAtMs = now,
             effectiveMaxTokens = effectiveMaxTokens,
             structuredOutputConfig = structuredOutputConfig,
+            ownerToken = ownerToken,
         )
 
         MindlayerLog.i(
@@ -209,9 +218,20 @@ class SessionManager(
         return handle.toSessionInfo(engineManager.currentBackend)
     }
 
+    /** Returns the owner token attached at creation, or `null` if unowned / unknown. */
+    fun getSessionOwner(id: String): Any? = sessions[id]?.ownerToken
+
     fun listSessions(): List<SessionInfo> {
         val backend = engineManager.currentBackend
         return sessions.values.map { it.toSessionInfo(backend) }
+    }
+
+    /** Subset of [listSessions] attributed to [ownerToken]. */
+    fun listSessionsOwnedBy(ownerToken: Any): List<SessionInfo> {
+        val backend = engineManager.currentBackend
+        return sessions.values
+            .filter { it.ownerToken != null && it.ownerToken == ownerToken }
+            .map { it.toSessionInfo(backend) }
     }
 
     /**
@@ -354,6 +374,31 @@ class SessionManager(
         }
     }
 
+    /**
+     * Destroy every session attributed to [ownerToken]. Used by the service
+     * binder's death-recipient to reclaim state when a client process dies.
+     * Returns the list of sessionIds that were torn down.
+     */
+    fun closeAllOwnedBy(ownerToken: Any): List<String> {
+        val ids = sessions.values
+            .filter { it.ownerToken != null && it.ownerToken == ownerToken }
+            .map { it.sessionId }
+        for (id in ids) destroySession(id)
+        return ids
+    }
+
+    /**
+     * Validate client-supplied sampler + token parameters. Throws
+     * [IllegalArgumentException] for out-of-range values — callers at the
+     * AIDL boundary translate this into a [SecurityException].
+     */
+    private fun validateSessionConfig(config: SessionConfig) {
+        require(config.samplerTopK > 0) { "samplerTopK must be > 0" }
+        require(config.samplerTopP in 0.0f..1.0f) { "samplerTopP must be in [0.0, 1.0]" }
+        require(config.samplerTemperature in 0.0f..5.0f) { "samplerTemperature out of range" }
+        require(config.maxTokens in 1..32_768) { "maxTokens out of range" }
+    }
+
     /** Destroy all sessions. Called during service teardown. */
     fun shutdown() {
         val ids = sessions.keys.toList()
@@ -422,6 +467,7 @@ class SessionManager(
         val effectiveMaxTokens: Int,
         val expirationMs: Long = config.expirationMs,
         val structuredOutputConfig: StructuredOutputConfig? = null,
+        val ownerToken: Any? = null,
     ) {
         val mutex = Mutex()
 

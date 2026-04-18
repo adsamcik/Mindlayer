@@ -79,6 +79,7 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
+    implementation(libs.sqlcipher.android)
     ksp(libs.room.compiler)
 
     testImplementation(libs.junit)
