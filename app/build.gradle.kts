@@ -59,6 +59,9 @@ tasks.withType<Test> {
     javaLauncher.set(javaToolchains.launcherFor {
         languageVersion.set(JavaLanguageVersion.of(21))
     })
+    // Workaround for Temurin 21.0.10 G1 + AppCDS SIGSEGV in
+    // G1SATBMarkQueueSet::filter during Robolectric class loading on Linux CI.
+    jvmArgs("-Xshare:off")
 }
 
 dependencies {
