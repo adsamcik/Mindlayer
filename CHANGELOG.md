@@ -6,6 +6,27 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+### Added
+- **Launcher icon** — adaptive icon (foreground + background + monochrome)
+  with a stylized "M" glyph on the Indigo40 brand background.
+- **Release signing wiring** — `app/build.gradle.kts` reads a local
+  `keystore.properties` to drive the `release` signingConfig; releases are
+  produced unsigned when the keystore is absent (CI fallback).
+- **R8 / resource shrinking** on release builds, with comprehensive keep
+  rules in `app/proguard-rules.pro` (AIDL, Room, SQLCipher, kotlinx.serialization,
+  Parcelables, LiteRT-LM JNI) and consumer rules in `sdk/consumer-rules.pro`
+  and `shared/consumer-rules.pro` for downstream apps.
+- **Backup / data-extraction rules** — `allowBackup=false` with XML fallback
+  policies that exclude the encrypted logs DB, shared prefs, and files from
+  cloud backup + device transfer.
+- **App theme** — `Theme.Mindlayer` declared in `res/values/themes.xml`,
+  replacing the platform theme override on `MainActivity`.
+- `RELEASE.md` — complete local build + sign + upload flow for Play.
+- `keystore.properties.example` template (gitignored real file).
+
+### CI
+- `.gitignore` now excludes `keystore.properties`.
+
 ### Tests
 - Added instrumented androidTest coverage for DbKeyProvider (:app, :sdk) and
   EncryptedDbWiring (:sdk). Closes #1.

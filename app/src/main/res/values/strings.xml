@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name" translatable="false">Mindlayer</string>
+    <string name="fgs_special_use_description" translatable="false">On-device LLM inference for active, user-visible requests initiated from authorized apps on the same device.</string>
+</resources>
