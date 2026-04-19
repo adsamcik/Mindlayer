@@ -85,6 +85,10 @@ adb shell am start -n com.adsamcik.mindlayer.service/.ui.MainActivity
 | `shared/` | Shared Parcelable types + streaming protocol |
 | `gemma_model/` | Play for On-device AI pack (install-time delivery) |
 
+## Caller Authorization
+
+Every AIDL entry point is gated by a default-deny user-approved allowlist. The first time a client app tries to bind, Mindlayer records it as pending and rejects the call; the user approves the app explicitly from the dashboard, pinning its signing-cert SHA-256 at approval time. See [`docs/AUTHORIZATION.md`](docs/AUTHORIZATION.md) for the full flow, failure modes, and threat model, and [`SDK_INTEGRATION.md`](SDK_INTEGRATION.md#first-run-user-approval) for the client-side API.
+
 ## Model Deployment
 
 The Gemma 4 E2B model (~2.4GB) is delivered via **Play for On-device AI** as an install-time AI pack. For development, push manually via `adb`.

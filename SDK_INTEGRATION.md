@@ -87,6 +87,8 @@ signing certificate at approval time, so a re-signed APK is rejected.
 - Once approved, the next `connect()` succeeds.
 - The user can revoke access at any time from the dashboard.
 
+See [`docs/AUTHORIZATION.md`](docs/AUTHORIZATION.md) for the full authorization model, including signing-cert rotation semantics, rate limiting, session ownership, and rejection-path failure modes.
+
 ### Encrypted on-device storage
 
 Both the service's log DB and the SDK's conversation-history DB are encrypted
