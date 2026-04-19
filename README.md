@@ -93,6 +93,10 @@ Every AIDL entry point is gated by a default-deny user-approved allowlist. The f
 
 The Gemma 4 E2B model (~2.4GB) is delivered via **Play for On-device AI** as an install-time AI pack. For development, push manually via `adb`.
 
+## Releasing
+
+Production builds for the Play Store are **signed locally**. See [`RELEASE.md`](RELEASE.md) for the full keystore setup, `:app:bundleRelease` flow, R8 troubleshooting, and Play Console upload steps.
+
 ## License
 
 [Add your license here]

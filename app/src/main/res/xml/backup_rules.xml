@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Backup is disabled via android:allowBackup="false". This file exists so
+  that if backup is ever re-enabled, the default is safe: exclude everything.
+  The encrypted logs DB is protected by an Android Keystore-wrapped key, and
+  Keystore material is device-bound (does NOT survive backup/restore), so the
+  DB would be unreadable after restore anyway. Session logs also contain user
+  prompts, which we do not want to ship off-device without explicit intent.
+-->
+<full-backup-content>
+    <exclude domain="database" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="sharedpref" path="." />
+</full-backup-content>

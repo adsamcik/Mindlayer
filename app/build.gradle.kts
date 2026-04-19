@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -5,6 +7,21 @@ plugins {
     alias(libs.plugins.ksp)
     id("org.jetbrains.kotlin.plugin.compose") version libs.versions.kotlin.get()
 }
+
+// ── Release signing (local-only) ──────────────────────────────────────────────
+// If keystore.properties is present at the repo root, wire a release signing
+// config that reads from it. If absent, release builds are produced unsigned —
+// useful for CI (`:app:bundleRelease` artifact) and for developers who haven't
+// set up a key yet. See RELEASE.md for the full signing flow.
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        keystorePropertiesFile.inputStream().use { load(it) }
+    }
+}
+val hasReleaseKeystore = keystoreProperties.getProperty("storeFile")?.let {
+    rootProject.file(it).exists()
+} ?: false
 
 android {
     namespace = "com.adsamcik.mindlayer.service"
@@ -17,11 +34,39 @@ android {
         versionCode = 3
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Only bundle resources for the locales we actually ship.
+        // Expand this list when translations are added.
+        resourceConfigurations += listOf("en")
+    }
+
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
-        release {
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
             isMinifyEnabled = false
+        }
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            if (hasReleaseKeystore) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -46,6 +91,18 @@ android {
                 "META-INF/LGPL2.1",
             )
         }
+    }
+
+    lint {
+        // Treat these as build-breaking on release.
+        warningsAsErrors = false
+        abortOnError = true
+        checkReleaseBuilds = true
+        // Play Store-critical checks that must not regress.
+        // NOTE: InlinedApi is intentionally NOT fatal — inlined integer
+        // constants (e.g. PowerManager.THERMAL_STATUS_NONE) are always safe
+        // when used as a fallback behind a proper SDK_INT check.
+        fatal += setOf("NewApi", "MissingTranslation")
     }
 }
 
