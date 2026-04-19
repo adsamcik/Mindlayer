@@ -763,6 +763,30 @@ class SessionConfigBuilder {
     fun extraContext(json: String) { extraContextJson = json }
 
     /**
+     * Request structured JSON output that conforms to a schema.
+     *
+     * The service validates the model's response against the supplied schema
+     * and (for [JsonOutputStrategy.PromptAndValidate]) retries on mismatch.
+     * If the connected Mindlayer service predates this feature, the config
+     * is silently ignored and generation proceeds normally — making this a
+     * zero-risk opt-in.
+     *
+     * Merges with any `structured_output` key already present on
+     * [extraContext]; other keys on [extraContext] are preserved.
+     *
+     * ```kotlin
+     * jsonOutput {
+     *     schema("""{"type":"object","properties":{"name":{"type":"string"}}}""")
+     *     strategy(JsonOutputStrategy.PromptAndValidate)
+     * }
+     * ```
+     */
+    fun jsonOutput(block: JsonOutputBuilder.() -> Unit) {
+        val envelope = JsonOutputBuilder().apply(block).build()
+        extraContextJson = mergeExtraContext(extraContextJson, envelope)
+    }
+
+    /**
      * Pre-populate conversation history for session recovery.
      * Turns are injected into the model's context at creation time.
      */

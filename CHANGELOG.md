@@ -7,6 +7,12 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 ## [Unreleased]
 
 ### Added
+- **Structured output DSL** — `SessionConfigBuilder.jsonOutput { ... }` wraps
+  the existing `extraContextJson` structured-output contract with a typed,
+  discoverable API. Supports `PromptAndValidate` (default) and `ToolRouting`
+  strategies. Zero-risk opt-in: services that predate the structured-output
+  feature ignore the envelope and degrade to unstructured generation. See
+  `JsonOutputBuilder` KDoc for usage.
 - **Launcher icon** — adaptive icon (foreground + background + monochrome)
   with a stylized "M" glyph on the Indigo40 brand background.
 - **Release signing wiring** — `app/build.gradle.kts` reads a local
@@ -30,6 +36,8 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 ### Tests
 - Added instrumented androidTest coverage for DbKeyProvider (:app, :sdk) and
   EncryptedDbWiring (:sdk). Closes #1.
+- Added `JsonOutputBuilderTest` covering schema parsing, strategy wire
+  format, validation failures, and `extraContext` merge semantics.
 
 ### CI
 - Added emulator-backed `instrumented-tests` job running
