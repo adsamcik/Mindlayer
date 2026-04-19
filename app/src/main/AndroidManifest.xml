@@ -5,7 +5,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <permission
-        android:name="com.mindlayer.permission.BIND_ML_SERVICE"
+        android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE"
         android:protectionLevel="signature" />
 
     <application
@@ -28,7 +28,7 @@
             android:name=".MindlayerMlService"
             android:process=":ml"
             android:exported="true"
-            android:permission="com.mindlayer.permission.BIND_ML_SERVICE"
+            android:permission="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
