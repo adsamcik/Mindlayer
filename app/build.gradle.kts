@@ -56,14 +56,10 @@ kotlin {
 }
 
 tasks.withType<Test> {
-    javaLauncher.set(javaToolchains.launcherFor {
-        languageVersion.set(JavaLanguageVersion.of(21))
-    })
-    // Workaround for Temurin 21.0.10 G1 SIGSEGV in G1SATBMarkQueueSet::filter
-    // hit deterministically on Linux CI during Robolectric class loading.
-    // Using SerialGC sidesteps the buggy G1 write-barrier path; test heap is
-    // small and forked so throughput is not meaningful.
-    jvmArgs("-Xshare:off", "-XX:+UseSerialGC")
+    // Tests inherit the Gradle JVM (Java 21 from the CI setup-java step) to
+    // avoid Gradle's toolchain resolver auto-provisioning Temurin 21.0.10,
+    // which has a deterministic SIGSEGV in G1SATBMarkQueueSet::filter under
+    // Robolectric's classloading pattern.
 }
 
 dependencies {
