@@ -70,10 +70,10 @@ mindlayer.chat(sessionId, "Hello!").collect { event ->
 ```bash
 # Push model to device
 adb push gemma-4-E2B-it.litertlm /data/local/tmp/
-adb shell "run-as com.mindlayer.service cp /data/local/tmp/gemma-4-E2B-it.litertlm files/"
+adb shell "run-as com.adsamcik.mindlayer.service cp /data/local/tmp/gemma-4-E2B-it.litertlm files/"
 
 # Launch
-adb shell am start -n com.mindlayer.service/.ui.MainActivity
+adb shell am start -n com.adsamcik.mindlayer.service/.ui.MainActivity
 ```
 
 ## Project Structure

@@ -8,7 +8,7 @@ plugins {
 }
 
 android {
-    namespace = "com.mindlayer.sdk"
+    namespace = "com.adsamcik.mindlayer.sdk"
     compileSdk = 36
 
     defaultConfig {
@@ -60,7 +60,7 @@ afterEvaluate {
         publications {
             create<MavenPublication>("release") {
                 from(components["release"])
-                groupId = "com.mindlayer"
+                groupId = "com.adsamcik.mindlayer"
                 artifactId = "sdk"
                 version = rootProject.extra.get("publishVersion") as String
 

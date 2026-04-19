@@ -7,11 +7,11 @@ plugins {
 }
 
 android {
-    namespace = "com.mindlayer.service"
+    namespace = "com.adsamcik.mindlayer.service"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.mindlayer.service"
+        applicationId = "com.adsamcik.mindlayer.service"
         minSdk = 26
         targetSdk = 36
         versionCode = 3
@@ -59,9 +59,11 @@ tasks.withType<Test> {
     javaLauncher.set(javaToolchains.launcherFor {
         languageVersion.set(JavaLanguageVersion.of(21))
     })
-    // Workaround for Temurin 21.0.10 G1 + AppCDS SIGSEGV in
-    // G1SATBMarkQueueSet::filter during Robolectric class loading on Linux CI.
-    jvmArgs("-Xshare:off")
+    // Workaround for Temurin 21.0.10 G1 SIGSEGV in G1SATBMarkQueueSet::filter
+    // hit deterministically on Linux CI during Robolectric class loading.
+    // Using SerialGC sidesteps the buggy G1 write-barrier path; test heap is
+    // small and forked so throughput is not meaningful.
+    jvmArgs("-Xshare:off", "-XX:+UseSerialGC")
 }
 
 dependencies {

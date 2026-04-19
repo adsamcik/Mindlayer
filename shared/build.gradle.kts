@@ -7,7 +7,7 @@ plugins {
 }
 
 android {
-    namespace = "com.mindlayer.shared"
+    namespace = "com.adsamcik.mindlayer.shared"
     compileSdk = 36
 
     defaultConfig {
@@ -43,7 +43,7 @@ afterEvaluate {
         publications {
             create<MavenPublication>("release") {
                 from(components["release"])
-                groupId = "com.mindlayer"
+                groupId = "com.adsamcik.mindlayer"
                 artifactId = "shared"
                 version = rootProject.extra.get("publishVersion") as String
 

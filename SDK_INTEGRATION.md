@@ -37,7 +37,7 @@ In your client app's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.mindlayer:sdk:0.1.0")
+    implementation("com.adsamcik.mindlayer:sdk:0.1.0")
     // 'shared' types are included transitively via 'api' dependency
 }
 ```
@@ -48,7 +48,7 @@ In your client app's `AndroidManifest.xml`:
 
 ```xml
 <!-- Required to bind to Mindlayer service (signature-level) -->
-<uses-permission android:name="com.mindlayer.permission.BIND_ML_SERVICE" />
+<uses-permission android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE" />
 ```
 
 > **Important:** Your client app must be signed with the **same signing key** as the
@@ -61,8 +61,8 @@ In your client app's `AndroidManifest.xml`:
 ### Connect to the service
 
 ```kotlin
-import com.mindlayer.sdk.Mindlayer
-import com.mindlayer.sdk.MindlayerEvent
+import com.adsamcik.mindlayer.sdk.Mindlayer
+import com.adsamcik.mindlayer.sdk.MindlayerEvent
 
 // Connect (binds to the Mindlayer service in the background)
 val mindlayer = Mindlayer.connect(context)
