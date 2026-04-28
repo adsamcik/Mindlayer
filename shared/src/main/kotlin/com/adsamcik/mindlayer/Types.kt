@@ -69,6 +69,7 @@ data class AudioTransfer(
     val source: ParcelFileDescriptor,
     val isSharedMemory: Boolean = false,
     val durationMs: Long? = null,
+    val payloadBytes: Int = 0,
 ) : Parcelable
 
 @Parcelize

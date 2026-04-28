@@ -8,8 +8,11 @@ import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.adsamcik.mindlayer.EngineInfo
 import com.adsamcik.mindlayer.RequestMeta
+import com.adsamcik.mindlayer.ServiceStatus
 import com.adsamcik.mindlayer.SessionConfig
+import com.adsamcik.mindlayer.SessionInfo
 import com.adsamcik.mindlayer.service.logging.LogDao
 import com.adsamcik.mindlayer.service.logging.LogDatabase
 import com.adsamcik.mindlayer.service.logging.LogEntry
@@ -61,7 +64,9 @@ class DashboardViewModel : ViewModel() {
             service = svc
             // Dashboard shares this UID with the service — authorizeCall()
             // self-UID-bypasses, so this call always succeeds.
-            try { svc.registerClient(livenessToken) } catch (_: Throwable) { }
+            viewModelScope.launch(Dispatchers.IO) {
+                try { svc.registerClient(livenessToken) } catch (_: Throwable) { }
+            }
             _uiState.update {
                 it.copy(
                     connectionState = DashboardConnectionState.CONNECTED,
@@ -152,10 +157,14 @@ class DashboardViewModel : ViewModel() {
                 }
 
                 try {
-                    val status = svc.status
-                    val engineInfo = svc.engineInfo
-                    val sessions = svc.listSessions()
-                    val now = System.currentTimeMillis()
+                    val (status, engineInfo, sessions, now) = withContext(Dispatchers.IO) {
+                        DashboardStatusSample(
+                            status = svc.status,
+                            engineInfo = svc.engineInfo,
+                            sessions = svc.listSessions().orEmpty(),
+                            sampledAtMs = System.currentTimeMillis(),
+                        )
+                    }
 
                     _uiState.update { current ->
                         current.copy(
@@ -172,7 +181,7 @@ class DashboardViewModel : ViewModel() {
                             availableRamMb = status.availableRamMb,
                             totalRamMb = status.totalRamMb,
                             maxSessions = status.maxSessions,
-                            activeSessions = sessions?.map { session ->
+                            activeSessions = sessions.map { session ->
                                 SessionUiItem(
                                     sessionId = session.sessionId.take(8) + "…",
                                     backend = session.backend,
@@ -184,7 +193,7 @@ class DashboardViewModel : ViewModel() {
                                         now,
                                     ),
                                 )
-                            } ?: emptyList(),
+                            },
                             initTimeSeconds = engineInfo?.initTimeSeconds ?: 0f,
                             modelId = engineInfo?.modelId ?: "",
                         )
@@ -224,9 +233,13 @@ class DashboardViewModel : ViewModel() {
                 }
 
                 try {
-                    val now = System.currentTimeMillis()
-                    val recent = dao.getRecent(20)
-                    val gpuFailure = dao.latestGpuFallbackMessage()
+                    val (recent, gpuFailure, now) = withContext(Dispatchers.IO) {
+                        DashboardLogSample(
+                            recent = dao.getRecent(20),
+                            gpuFailure = dao.latestGpuFallbackMessage(),
+                            sampledAtMs = System.currentTimeMillis(),
+                        )
+                    }
                     _uiState.update { current ->
                         current.copy(
                             isLogsLoading = false,
@@ -307,10 +320,12 @@ class DashboardViewModel : ViewModel() {
                 testService = svc
 
                 _uiState.update { it.copy(testStatus = "Creating test session") }
-                sessionId = svc.createSession(SessionConfig(
-                    systemPrompt = "You are a helpful assistant. Be concise.",
-                    maxTokens = 2048,
-                ))
+                sessionId = withContext(Dispatchers.IO) {
+                    svc.createSession(SessionConfig(
+                        systemPrompt = "You are a helpful assistant. Be concise.",
+                        maxTokens = 2048,
+                    ))
+                }
                 val activeSessionId = requireNotNull(sessionId) {
                     "Service returned a null session id"
                 }
@@ -329,8 +344,16 @@ class DashboardViewModel : ViewModel() {
                     textContent = prompt,
                 )
 
-                svc.infer(meta, null, null, writeEnd)
-                writeEnd.close()
+                try {
+                    withContext(Dispatchers.IO) {
+                        svc.infer(meta, null, null, writeEnd)
+                    }
+                } catch (e: Exception) {
+                    readEnd.close()
+                    throw e
+                } finally {
+                    writeEnd.close()
+                }
 
                 _uiState.update { it.copy(testStatus = "Streaming response") }
 
@@ -458,7 +481,9 @@ class DashboardViewModel : ViewModel() {
             } finally {
                 sessionId?.let { activeSessionId ->
                     try {
-                        testService?.destroySession(activeSessionId)
+                        withContext(Dispatchers.IO) {
+                            testService?.destroySession(activeSessionId)
+                        }
                     } catch (_: Exception) {
                     }
                 }
@@ -476,4 +501,17 @@ class DashboardViewModel : ViewModel() {
         val summary = message?.lineSequence()?.firstOrNull()?.trim().orEmpty()
         return summary.ifBlank { javaClass.simpleName }
     }
+
+    private data class DashboardStatusSample(
+        val status: ServiceStatus,
+        val engineInfo: EngineInfo?,
+        val sessions: List<SessionInfo>,
+        val sampledAtMs: Long,
+    )
+
+    private data class DashboardLogSample(
+        val recent: List<LogEntry>,
+        val gpuFailure: String?,
+        val sampledAtMs: Long,
+    )
 }

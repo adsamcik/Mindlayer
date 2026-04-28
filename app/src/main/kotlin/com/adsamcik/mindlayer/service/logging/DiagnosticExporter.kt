@@ -46,7 +46,10 @@ class DiagnosticExporter(
                 put("backend", engineManager.currentBackend)
                 put("initTimeSeconds", engineManager.initTimeSeconds)
                 put("lastGpuFailureReason", engineManager.lastGpuFailureReason)
-                try { put("modelPath", engineManager.modelPath) } catch (_: Exception) {}
+                val loadedModelPath = engineManager.currentModel?.path
+                if (loadedModelPath != null) {
+                    put("modelPath", loadedModelPath.redactedFileName())
+                }
             }
 
             // Thermal

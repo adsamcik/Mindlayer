@@ -72,12 +72,23 @@ class SessionManager(
     fun createSession(config: SessionConfig, ownerToken: Any?): String {
         validateSessionConfig(config)
         cleanupExpiredSessions()
+        val sessionId = config.sessionId ?: UUID.randomUUID().toString()
+        if (sessions.containsKey(sessionId)) {
+            throw IllegalArgumentException("Session ID already in use")
+        }
         val tier = memoryBudget.deviceTier
         val snap = memoryBudget.currentSnapshot()
 
         if (sessions.size >= tier.maxSessions) {
             MindlayerLog.w(TAG, "At session limit (${tier.maxSessions}), evicting lowest priority")
-            evictLowestPriority()
+            val evicted = if (ownerToken == null) {
+                evictLowestPriority()
+            } else {
+                evictLowestPriorityOwnedBy(ownerToken)
+            }
+            if (!evicted) {
+                throw IllegalStateException("Session limit reached for caller")
+            }
         }
 
         // Under CRITICAL/EMERGENCY pressure, refuse new sessions if any exist
@@ -89,19 +100,13 @@ class SessionManager(
             )
         }
 
-        // Auto-initialize engine if not yet loaded
         if (!engineManager.isInitialized) {
-            MindlayerLog.i(TAG, "Engine not initialized — triggering lazy init for session creation")
-            kotlinx.coroutines.runBlocking {
-                engineManager.initialize(
-                    preferredBackend = config.backend,
-                    maxTokens = config.maxTokens,
-                )
-            }
+            throw IllegalStateException(
+                "Engine is not initialized; call prewarm before creating sessions"
+            )
         }
 
         val engine = engineManager.requireEngine()
-        val sessionId = config.sessionId ?: UUID.randomUUID().toString()
 
         // Clamp to the lesser of the static tier ceiling and runtime recommendation
         val runtimeCeiling = snap.recommendedMaxTokens.coerceAtMost(tier.maxMaxTokens)
@@ -157,10 +162,9 @@ class SessionManager(
             initialMessages = initialMessages,
         )
 
-        val conversation = engine.createConversation(conversationConfig)
-
         val now = System.currentTimeMillis()
-        sessions[sessionId] = SessionHandle(
+        val conversation = engine.createConversation(conversationConfig)
+        val handle = SessionHandle(
             sessionId = sessionId,
             conversation = conversation,
             config = config,
@@ -169,6 +173,14 @@ class SessionManager(
             structuredOutputConfig = structuredOutputConfig,
             ownerToken = ownerToken,
         )
+        if (sessions.putIfAbsent(sessionId, handle) != null) {
+            try {
+                conversation.close()
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "Error closing duplicate session conversation", throwable = t)
+            }
+            throw IllegalArgumentException("Session ID already in use")
+        }
 
         MindlayerLog.i(
             TAG, "Session created: $sessionId " +
@@ -290,6 +302,22 @@ class SessionManager(
         return true
     }
 
+    private fun evictLowestPriorityOwnedBy(ownerToken: Any): Boolean {
+        val victim = sessions.values
+            .filter { !it.isStreaming && it.ownerToken == ownerToken }
+            .minByOrNull { calculatePriority(it) }
+            ?: return false
+
+        MindlayerLog.w(
+            TAG, "Evicting owned session ${victim.sessionId} " +
+                "(priority=${calculatePriority(victim)})",
+            sessionId = victim.sessionId,
+        )
+        logRepository?.logSessionEvicted(victim.sessionId, "owner_session_limit")
+        destroySession(victim.sessionId)
+        return true
+    }
+
     /**
      * Evict sessions under memory pressure.
      *
@@ -397,6 +425,8 @@ class SessionManager(
         require(config.samplerTopP in 0.0f..1.0f) { "samplerTopP must be in [0.0, 1.0]" }
         require(config.samplerTemperature in 0.0f..5.0f) { "samplerTemperature out of range" }
         require(config.maxTokens in 1..32_768) { "maxTokens out of range" }
+        val sessionId = config.sessionId
+        require(sessionId == null || sessionId.isNotBlank()) { "sessionId must not be blank" }
     }
 
     /** Destroy all sessions. Called during service teardown. */

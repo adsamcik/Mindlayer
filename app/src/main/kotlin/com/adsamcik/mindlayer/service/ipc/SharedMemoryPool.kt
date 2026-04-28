@@ -5,14 +5,15 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.SharedMemory
-import android.util.Log
 import androidx.annotation.RequiresApi
 import com.adsamcik.mindlayer.AudioTransfer
 import com.adsamcik.mindlayer.ImageTransfer
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import java.io.File
 import java.io.FileOutputStream
+import java.io.EOFException
 import java.nio.ByteBuffer
+import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -60,6 +61,7 @@ class SharedMemoryPool(cacheDir: File) {
         private const val TAG = "SharedMemoryPool"
         private const val STAGING_DIR = "media_staging"
         private const val COPY_BUFFER_SIZE = 8192
+        private val UnsafeFilenameChars = Regex("[^A-Za-z0-9-]")
     }
 
     private val stagingDir = File(cacheDir, STAGING_DIR).also { it.mkdirs() }
@@ -100,7 +102,7 @@ class SharedMemoryPool(cacheDir: File) {
         }
 
         trackFile(requestId, staged)
-        Log.d(TAG, "Staged image for $requestId → ${staged.name} ($mime)")
+        MindlayerLog.d(TAG, "Staged image → ${staged.name} ($mime)", requestId = requestId)
 
         return StagedMedia(
             requestId = requestId,
@@ -118,17 +120,22 @@ class SharedMemoryPool(cacheDir: File) {
      */
     fun stageAudio(transfer: AudioTransfer): StagedMedia {
         val requestId = transfer.requestId
+        val knownSize = declaredPayloadSize(transfer.payloadBytes)
+            ?: transfer.source.statSize
+                .takeIf { transfer.isSharedMemory && it >= 0L }
+                ?.also(::requireMediaSize)
+                ?.toInt()
         val staged = createStagingFile(requestId, "aud", extensionForMime(transfer.mimeType))
 
         try {
-            stageFromPfd(transfer.source, staged, knownSize = null)
+            stageFromPfd(transfer.source, staged, knownSize = knownSize)
         } catch (t: Throwable) {
             staged.delete()
             throw t
         }
 
         trackFile(requestId, staged)
-        Log.d(TAG, "Staged audio for $requestId → ${staged.name} (${transfer.mimeType})")
+        MindlayerLog.d(TAG, "Staged audio → ${staged.name} (${transfer.mimeType})", requestId = requestId)
 
         return StagedMedia(
             requestId = requestId,
@@ -141,11 +148,12 @@ class SharedMemoryPool(cacheDir: File) {
     /** Delete all staged files for [requestId]. Safe to call multiple times. */
     fun cleanup(requestId: String) {
         val files = stagedFiles.remove(requestId) ?: return
+        val snapshot = synchronized(files) { files.toList() }
         var deleted = 0
-        for (file in files) {
+        for (file in snapshot) {
             if (file.delete()) deleted++
         }
-        Log.d(TAG, "Cleaned up $deleted/${files.size} staged file(s) for $requestId")
+        MindlayerLog.d(TAG, "Cleaned up $deleted/${snapshot.size} staged file(s)", requestId = requestId)
     }
 
     /** Delete every staged file. Called on service destroy. */
@@ -162,7 +170,7 @@ class SharedMemoryPool(cacheDir: File) {
         } else {
             // API 26: isSharedMemory should never be true (SDK guards this),
             // but handle defensively by treating source as a regular fd.
-            Log.w(TAG, "SharedMemory on API ${Build.VERSION.SDK_INT} — falling back to stream copy")
+            MindlayerLog.w(TAG, "SharedMemory on API ${Build.VERSION.SDK_INT} — falling back to stream copy")
             stageFromPfd(transfer.source, outFile, knownSize = null)
         }
     }
@@ -216,7 +224,7 @@ class SharedMemoryPool(cacheDir: File) {
                 parcel.recycle()
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "SharedMemory reconstruction failed, using stream fallback", t)
+            MindlayerLog.w(TAG, "SharedMemory reconstruction failed, using stream fallback", throwable = t)
             null
         }
     }
@@ -235,8 +243,7 @@ class SharedMemoryPool(cacheDir: File) {
                 require(knownSize in 1..MAX_MEDIA_BYTES) {
                     "Media payload size out of bounds: $knownSize"
                 }
-                val bytes = readExactly(pfd, knownSize)
-                outFile.writeBytes(bytes)
+                writeExactly(pfd, knownSize, outFile)
             } else {
                 ParcelFileDescriptor.AutoCloseInputStream(pfd).use { input ->
                     FileOutputStream(outFile).use { output ->
@@ -245,8 +252,20 @@ class SharedMemoryPool(cacheDir: File) {
                 }
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "Failed to stage PFD to ${outFile.name}", t)
+            MindlayerLog.e(TAG, "Failed to stage PFD to ${outFile.name}", throwable = t)
             throw t
+        }
+    }
+
+    /** Stream exactly [size] bytes from [pfd] to [outFile], closing the PFD when done. */
+    private fun writeExactly(pfd: ParcelFileDescriptor, size: Int, outFile: File) {
+        require(size in 1..MAX_MEDIA_BYTES) {
+            "Media payload size out of bounds: $size"
+        }
+        ParcelFileDescriptor.AutoCloseInputStream(pfd).use { input ->
+            FileOutputStream(outFile).use { output ->
+                copyExactly(input, output, size)
+            }
         }
     }
 
@@ -269,6 +288,31 @@ class SharedMemoryPool(cacheDir: File) {
         }
     }
 
+    private fun copyExactly(input: java.io.InputStream, output: java.io.OutputStream, expectedBytes: Int) {
+        val buf = ByteArray(COPY_BUFFER_SIZE)
+        var remaining = expectedBytes
+        while (remaining > 0) {
+            val n = input.read(buf, 0, minOf(buf.size, remaining))
+            if (n == -1) {
+                throw EOFException("Expected $expectedBytes bytes, missing $remaining")
+            }
+            output.write(buf, 0, n)
+            remaining -= n
+        }
+    }
+
+    private fun declaredPayloadSize(payloadBytes: Int): Int? {
+        if (payloadBytes == 0) return null
+        requireMediaSize(payloadBytes.toLong())
+        return payloadBytes
+    }
+
+    private fun requireMediaSize(size: Long) {
+        require(size in 1..MAX_MEDIA_BYTES.toLong()) {
+            "Media payload size out of bounds: $size"
+        }
+    }
+
     /** Read exactly [size] bytes from [pfd], closing it when done. */
     private fun readExactly(pfd: ParcelFileDescriptor, size: Int): ByteArray {
         require(size in 1..MAX_MEDIA_BYTES) {
@@ -279,7 +323,9 @@ class SharedMemoryPool(cacheDir: File) {
             var offset = 0
             while (offset < size) {
                 val n = input.read(bytes, offset, size - offset)
-                if (n == -1) break
+                if (n == -1) {
+                    throw EOFException("Expected $size bytes, missing ${size - offset}")
+                }
                 offset += n
             }
         }
@@ -311,12 +357,19 @@ class SharedMemoryPool(cacheDir: File) {
 
     private fun createStagingFile(requestId: String, prefix: String, extension: String): File {
         val short = UUID.randomUUID().toString().take(8)
-        return File(stagingDir, "${prefix}_${requestId}_$short.$extension")
+        val safeRequestId = sanitizeRequestIdForFilename(requestId)
+        return File(stagingDir, "${prefix}_${safeRequestId}_$short.$extension")
     }
 
     private fun trackFile(requestId: String, file: File) {
-        stagedFiles.getOrPut(requestId) { mutableListOf() }.add(file)
+        val files = stagedFiles.computeIfAbsent(requestId) {
+            Collections.synchronizedList(mutableListOf())
+        }
+        files.add(file)
     }
+
+    private fun sanitizeRequestIdForFilename(requestId: String): String =
+        requestId.replace(UnsafeFilenameChars, "_").ifBlank { "request" }
 
     private fun pixelFormatToBitmapConfig(pixelFormat: Int): Bitmap.Config = when (pixelFormat) {
         PixelFormat.RGBA_8888 -> Bitmap.Config.ARGB_8888

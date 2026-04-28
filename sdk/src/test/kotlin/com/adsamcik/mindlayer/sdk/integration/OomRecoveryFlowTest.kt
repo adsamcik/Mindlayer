@@ -64,12 +64,11 @@ class OomRecoveryFlowTest {
 
         val context = ApplicationProvider.getApplicationContext<Context>()
 
-        // Reset & inject in-memory Room DB
-        resetSingleton()
+        MindlayerDatabase.clearInstance()
         db = Room.inMemoryDatabaseBuilder(context, MindlayerDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        setSingleton(db)
+        MindlayerDatabase.setInstance(db)
 
         store = HistoryStore(context)
 
@@ -94,23 +93,11 @@ class OomRecoveryFlowTest {
     @After
     fun tearDown() {
         db.close()
-        resetSingleton()
+        MindlayerDatabase.clearInstance()
         unmockkAll()
     }
 
     // -- Helpers -------------------------------------------------------------
-
-    private fun resetSingleton() {
-        val field = MindlayerDatabase::class.java.getDeclaredField("instance")
-        field.isAccessible = true
-        field.set(null, null)
-    }
-
-    private fun setSingleton(database: MindlayerDatabase) {
-        val field = MindlayerDatabase::class.java.getDeclaredField("instance")
-        field.isAccessible = true
-        field.set(null, database)
-    }
 
     private fun buildMindlayer(conn: ConnectionManager, historyStore: HistoryStore): Mindlayer {
         val ctor = Mindlayer::class.java.getDeclaredConstructor(

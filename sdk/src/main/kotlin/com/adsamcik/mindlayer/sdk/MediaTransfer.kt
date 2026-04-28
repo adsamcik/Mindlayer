@@ -111,6 +111,7 @@ object MediaTransfer {
             mimeType = mime,
             source = pfd,
             isSharedMemory = false,
+            payloadBytes = declaredPayloadBytes(file.length()),
         )
     }
 
@@ -188,6 +189,7 @@ object MediaTransfer {
                 mimeType = mimeType,
                 source = pfd,
                 isSharedMemory = true,
+                payloadBytes = bytes.size,
             )
         } finally {
             shm.close()
@@ -250,6 +252,7 @@ object MediaTransfer {
             mimeType = mimeType,
             source = readEnd,
             isSharedMemory = false,
+            payloadBytes = bytes.size,
         )
     }
 
@@ -273,5 +276,11 @@ object MediaTransfer {
         "aac"         -> "audio/aac"
         "m4a"         -> "audio/mp4"
         else          -> "application/octet-stream"
+    }
+
+    private fun declaredPayloadBytes(size: Long): Int = when {
+        size <= 0L -> 0
+        size > Int.MAX_VALUE -> Int.MAX_VALUE
+        else -> size.toInt()
     }
 }

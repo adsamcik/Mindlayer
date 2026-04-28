@@ -25,13 +25,13 @@ import com.adsamcik.mindlayer.service.security.AllowlistStore
 import com.adsamcik.mindlayer.service.security.CallerIdentity
 import com.adsamcik.mindlayer.service.security.CallerVerifier
 import com.adsamcik.mindlayer.service.security.RateLimiter
+import com.adsamcik.mindlayer.service.logging.safeLabel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * AIDL binder implementation. Every entry point enforces:
@@ -58,6 +58,11 @@ class ServiceBinder(
 ) : IMindlayerService.Stub() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val diagnosticsRefreshInFlight = AtomicBoolean(false)
+    private val engineWarmupInFlight = AtomicBoolean(false)
+
+    @Volatile
+    private var diagnosticsSnapshot: String = """{"status":"warming"}"""
 
     /** requestId → UID that owns the concurrency slot. */
     private val activeInferenceUids = ConcurrentHashMap<String, Int>()
@@ -70,6 +75,10 @@ class ServiceBinder(
      */
     private val clientDeathRecipients =
         ConcurrentHashMap<Int, Pair<IBinder, IBinder.DeathRecipient>>()
+
+    init {
+        refreshDiagnosticsAsync()
+    }
 
     companion object {
         private const val TAG = "ServiceBinder"
@@ -200,11 +209,24 @@ class ServiceBinder(
         val identity = authorizeCall()
         val uid = Binder.getCallingUid()
         MindlayerLog.d(TAG, "createSession from ${identity.packageName}")
+        ensureEngineReadyOrStart(config)
         return try {
             orchestrator.createSession(config, uid)
         } catch (e: IllegalArgumentException) {
             throw SecurityException("Invalid SessionConfig: ${e.message}")
         }
+    }
+
+    private fun ensureEngineReadyOrStart(config: SessionConfig) {
+        if (engineManager.isInitialized) return
+        startEngineWarmup(
+            preferredBackend = config.backend,
+            maxTokens = config.maxTokens,
+        )
+        throw IllegalStateException(
+            "Engine is not initialized; initialization has been started. " +
+                "Retry createSession after service status reports engine loaded."
+        )
     }
 
     override fun destroySession(sessionId: String) {
@@ -335,14 +357,25 @@ class ServiceBinder(
     override fun prewarm(backend: String?) {
         authorizeCall()
         MindlayerLog.d(TAG, "prewarm: backend=${backend ?: "GPU"}")
-        scope.launch {
+        startEngineWarmup(
+            preferredBackend = backend ?: "GPU",
+            maxTokens = 4096,
+        )
+    }
+
+    private fun startEngineWarmup(preferredBackend: String, maxTokens: Int) {
+        if (engineManager.isInitialized) return
+        if (!engineWarmupInFlight.compareAndSet(false, true)) return
+        scope.launch(Dispatchers.IO) {
             try {
                 engineManager.initialize(
-                    preferredBackend = backend ?: "GPU",
-                    maxTokens = 4096,
+                    preferredBackend = preferredBackend,
+                    maxTokens = maxTokens,
                 )
             } catch (e: Exception) {
-                MindlayerLog.w(TAG, "Prewarm failed: ${e.message}")
+                MindlayerLog.w(TAG, "Engine warmup failed: ${e.safeLabel()}")
+            } finally {
+                engineWarmupInFlight.set(false)
             }
         }
     }
@@ -373,17 +406,30 @@ class ServiceBinder(
 
     override fun getDiagnostics(): String {
         authorizeCall()
-        return runBlocking { diagnosticExporter.export() }
+        if (Binder.getCallingUid() != Process.myUid()) {
+            throw SecurityException("Diagnostics are restricted to the Mindlayer dashboard")
+        }
+        refreshDiagnosticsAsync()
+        return diagnosticsSnapshot
+    }
+
+    private fun refreshDiagnosticsAsync() {
+        if (!diagnosticsRefreshInFlight.compareAndSet(false, true)) return
+        scope.launch(Dispatchers.IO) {
+            try {
+                diagnosticsSnapshot = diagnosticExporter.export()
+            } catch (e: Exception) {
+                MindlayerLog.w(TAG, "Diagnostics refresh failed: ${e.safeLabel()}")
+            } finally {
+                diagnosticsRefreshInFlight.set(false)
+            }
+        }
     }
 
     override fun getEngineInfo(): EngineInfo {
         authorizeCall()
         val currentModel = engineManager.currentModel
-        val modelPath = try {
-            engineManager.modelPath
-        } catch (_: Throwable) {
-            ""
-        }
+        val modelPath = currentModel?.path.orEmpty()
         val modelId = currentModel?.id
             ?.takeUnless { it.isBlank() }
             ?: modelPath
@@ -392,13 +438,7 @@ class ServiceBinder(
             .removeSuffix(".litertlm")
         val modelSize = currentModel?.sizeBytes
             ?.takeIf { it > 0 }
-            ?: if (modelPath.isNotEmpty()) {
-            try {
-                File(modelPath).length()
-            } catch (_: Throwable) {
-                0L
-            }
-        } else 0L
+            ?: 0L
 
         return EngineInfo(
             modelId = modelId,

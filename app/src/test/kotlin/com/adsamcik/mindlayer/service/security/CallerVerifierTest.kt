@@ -78,6 +78,35 @@ class CallerVerifierTest {
     }
 
     @Test
+    fun `sanitizes display name from package manager label`() {
+        val pm = mockk<PackageManager>(relaxed = true)
+        val sigBytes = byteArrayOf(9, 8, 7)
+        val signature = mockk<Signature>()
+        every { signature.toByteArray() } returns sigBytes
+
+        val signingInfo = mockk<SigningInfo>()
+        every { signingInfo.hasMultipleSigners() } returns false
+        every { signingInfo.signingCertificateHistory } returns arrayOf(signature)
+        every { signingInfo.apkContentsSigners } returns arrayOf(signature)
+
+        val pkgInfo = PackageInfo().apply {
+            this.signingInfo = signingInfo
+        }
+        every { pm.getPackagesForUid(1000) } returns arrayOf("com.example")
+        every {
+            pm.getPackageInfo("com.example", PackageManager.GET_SIGNING_CERTIFICATES)
+        } returns pkgInfo
+        val appInfo = ApplicationInfo().apply { packageName = "com.example" }
+        every { pm.getApplicationInfo("com.example", 0) } returns appInfo
+        every { pm.getApplicationLabel(appInfo) } returns "Trusted\u202EApp\n${"x".repeat(80)}"
+
+        val id = CallerVerifier.identifyCaller(makeContext(pm), 1000)
+
+        assertEquals("TrustedApp${"x".repeat(54)}", id!!.displayName)
+        assertEquals(64, id.displayName!!.length)
+    }
+
+    @Test
     fun `null when package info missing`() {
         val pm = mockk<PackageManager>(relaxed = true)
         every { pm.getPackagesForUid(1000) } returns arrayOf("com.example")

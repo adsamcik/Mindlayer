@@ -8,6 +8,7 @@ import com.adsamcik.mindlayer.service.engine.EngineManager
 import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.MemoryPressure
 import com.adsamcik.mindlayer.service.engine.MemorySnapshot
+import com.adsamcik.mindlayer.service.engine.ModelInfo
 import com.adsamcik.mindlayer.service.engine.SessionManager
 import com.adsamcik.mindlayer.service.engine.ThermalBand
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
@@ -94,7 +95,13 @@ class DiagnosticExporterTest {
             every { isInitialized } returns true
             every { currentBackend } returns "GPU"
             every { initTimeSeconds } returns 2.3f
-            every { modelPath } returns "/data/app/model.litertlm"
+            every { currentModel } returns ModelInfo(
+                id = "model",
+                displayName = "Model",
+                path = "/data/app/model.litertlm",
+                sizeBytes = 1L,
+                isDefault = true,
+            )
         }
         thermalMonitor = mockk(relaxed = true) {
             every { currentPolicy } returns MutableStateFlow(defaultPolicy)
@@ -195,7 +202,22 @@ class DiagnosticExporterTest {
     @Test
     fun `engine section has modelPath field`() = runTest {
         val engine = exportJson()["engine"]!!.jsonObject
-        assertEquals("/data/app/model.litertlm", engine["modelPath"]!!.jsonPrimitive.content)
+        assertEquals("model.litertlm", engine["modelPath"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `engine section redacts modelPath directories`() = runTest {
+        every { engineManager.currentModel } returns ModelInfo(
+            id = "model",
+            displayName = "Model",
+            path = "C:\\private\\models\\gemma\\model.litertlm",
+            sizeBytes = 1L,
+            isDefault = true,
+        )
+
+        val engine = exportJson()["engine"]!!.jsonObject
+
+        assertEquals("model.litertlm", engine["modelPath"]!!.jsonPrimitive.content)
     }
 
     @Test
@@ -219,8 +241,8 @@ class DiagnosticExporterTest {
     }
 
     @Test
-    fun `engine section omits modelPath when it throws`() = runTest {
-        every { engineManager.modelPath } throws IllegalStateException("not found")
+    fun `engine section omits modelPath when no model is loaded`() = runTest {
+        every { engineManager.currentModel } returns null
 
         val engine = exportJson()["engine"]!!.jsonObject
         assertFalse(engine.containsKey("modelPath"))
