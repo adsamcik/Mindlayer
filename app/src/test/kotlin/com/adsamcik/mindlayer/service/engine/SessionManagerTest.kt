@@ -6,8 +6,6 @@ import android.util.Log
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.Engine
 import com.adsamcik.mindlayer.SessionConfig
-import io.mockk.coEvery
-import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -17,6 +15,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 
@@ -49,6 +48,7 @@ class SessionManagerTest {
             every { createConversation(any()) } returns mockk<Conversation>(relaxed = true)
         }
         engineManager = mockk(relaxed = true) {
+            every { isInitialized } returns true
             every { requireEngine() } returns mockEngine
             every { currentBackend } returns "GPU"
         }
@@ -246,6 +246,18 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `createSession rejects duplicate explicit ID`() {
+        createDefaultSession(sessionId = "duplicate")
+
+        try {
+            createDefaultSession(sessionId = "duplicate")
+            fail("Expected duplicate session id to be rejected")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message.orEmpty().contains("already in use"))
+        }
+    }
+
+    @Test
     fun `createSession increments session count`() {
         assertEquals(0, sessionManager.sessionCount)
         createDefaultSession()
@@ -255,28 +267,21 @@ class SessionManagerTest {
     }
 
     @Test
-    fun `createSession passes backend and maxTokens during lazy init`() {
+    fun `createSession requires initialized engine instead of blocking for lazy init`() {
         every { engineManager.isInitialized } returns false
-        coEvery {
-            engineManager.initialize(
-                preferredBackend = "CPU",
-                maxTokens = 2048,
-            )
-        } returns mockEngine
 
-        val id = sessionManager.createSession(
-            SessionConfig(
-                sessionId = "single-model",
-                backend = "CPU",
-                maxTokens = 2048,
+        try {
+            sessionManager.createSession(
+                SessionConfig(
+                    sessionId = "single-model",
+                    backend = "CPU",
+                    maxTokens = 2048,
+                )
             )
-        )
-
-        assertEquals("single-model", id)
-        coVerify(exactly = 1) {
-            engineManager.initialize(
-                preferredBackend = "CPU",
-                maxTokens = 2048,
+            fail("Expected createSession to reject uninitialized engines")
+        } catch (e: IllegalStateException) {
+            assertTrue(
+                e.message.orEmpty().contains("Engine is not initialized")
             )
         }
     }
@@ -360,6 +365,42 @@ class SessionManagerTest {
         assertEquals(2, sessionManager.sessionCount)
         // s3 should exist
         assertNotNull(sessionManager.getSession("s3"))
+    }
+
+    @Test
+    fun `createSession at capacity evicts only sessions owned by same caller`() {
+        val tightTier = DeviceTier(2, 4096, 4096, 8 * 1024L)
+        every { memoryBudget.deviceTier } returns tightTier
+
+        sessionManager.createSession(SessionConfig(sessionId = "a1"), ownerToken = "owner-a")
+        sessionManager.createSession(SessionConfig(sessionId = "b1"), ownerToken = "owner-b")
+
+        sessionManager.createSession(SessionConfig(sessionId = "a2"), ownerToken = "owner-a")
+
+        assertNull(sessionManager.getSession("a1"))
+        assertNotNull(sessionManager.getSession("a2"))
+        assertNotNull(sessionManager.getSession("b1"))
+        assertEquals(2, sessionManager.sessionCount)
+    }
+
+    @Test
+    fun `createSession at capacity rejects caller with no owned eviction candidate`() {
+        val tightTier = DeviceTier(2, 4096, 4096, 8 * 1024L)
+        every { memoryBudget.deviceTier } returns tightTier
+
+        sessionManager.createSession(SessionConfig(sessionId = "a1"), ownerToken = "owner-a")
+        sessionManager.createSession(SessionConfig(sessionId = "b1"), ownerToken = "owner-b")
+
+        try {
+            sessionManager.createSession(SessionConfig(sessionId = "c1"), ownerToken = "owner-c")
+            fail("Expected session creation to fail rather than evict another owner")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message.orEmpty().contains("Session limit reached"))
+        }
+
+        assertNotNull(sessionManager.getSession("a1"))
+        assertNotNull(sessionManager.getSession("b1"))
+        assertNull(sessionManager.getSession("c1"))
     }
 
     @Test

@@ -255,19 +255,27 @@ class HistoryStore internal constructor(context: Context) {
      * List all past conversations with turn count and preview.
      */
     suspend fun listConversations(limit: Int = 50, offset: Int = 0): List<ConversationSummary> {
-        val conversations = db.conversationDao().listPaged(limit, offset)
-        return conversations.map { conv ->
-            val turnCount = db.turnDao().countCompleted(conv.conversationId)
-            val lastTurns = db.turnDao().lastNTurns(conv.conversationId, 3)
+        val conversations = conversationDao.listPagedWithCompletedTurnCounts(limit, offset)
+        if (conversations.isEmpty()) return emptyList()
+
+        val conversationIds = conversations.map { it.conversation.conversationId }
+        val previewsByConversation = turnDao
+            .completedForConversationsDescending(conversationIds)
+            .groupBy { it.conversationId }
+            .mapValues { (_, turns) -> turns.take(3) }
+
+        return conversations.map { row ->
+            val conv = row.conversation
+            val previewTurns = previewsByConversation[conv.conversationId].orEmpty().asReversed()
             ConversationSummary(
                 conversationId = conv.conversationId,
                 systemPrompt = conv.systemPrompt,
-                turnCount = turnCount,
+                turnCount = row.completedTurnCount,
                 tokenEstimate = conv.tokenEstimateTotal,
                 createdAt = conv.createdAtMs,
                 lastActiveAt = conv.updatedAtMs,
                 isActive = false, // Will be enriched by SDK
-                preview = lastTurns.reversed().map { turn ->
+                preview = previewTurns.map { turn ->
                     TurnPreview(
                         role = turn.role,
                         text = turn.textContent?.take(200),

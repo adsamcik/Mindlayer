@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.service.engine
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.util.Log
 import java.io.File
 import java.util.Locale
@@ -50,10 +51,12 @@ object ModelRegistry {
         scanDir(context.cacheDir)
 
         // 4: Debug sideload directory
-        try {
-            scanDir(File("/data/local/tmp"))
-        } catch (_: SecurityException) {
-            // Not accessible on non-debug builds — ignore
+        if ((context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            try {
+                scanDir(File("/data/local/tmp"))
+            } catch (_: SecurityException) {
+                // Not accessible on non-debug builds — ignore
+            }
         }
 
         // 5: Play AI Pack assets — extract any .litertlm assets not yet on disk

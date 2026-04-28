@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.sdk.db
 
 import android.content.Context
+import androidx.annotation.VisibleForTesting
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
@@ -15,7 +16,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
  */
 @Database(
     entities = [ConversationEntity::class, TurnEntity::class, TurnPartEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 abstract class MindlayerDatabase : RoomDatabase() {
@@ -37,10 +38,39 @@ abstract class MindlayerDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_conversations_updatedAtMs " +
+                        "ON conversations(updatedAtMs)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_turns_conversation_state_seq " +
+                        "ON turns(conversationId, state, seq)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_turns_conversation_role_state_seq " +
+                        "ON turns(conversationId, role, state, seq)",
+                )
+            }
+        }
+
         fun getInstance(context: Context): MindlayerDatabase =
             instance ?: synchronized(this) {
                 instance ?: build(context.applicationContext).also { instance = it }
             }
+
+        /** Test-only seam: inject an in-memory database in place of the encrypted singleton. */
+        @VisibleForTesting
+        fun setInstance(db: MindlayerDatabase) {
+            synchronized(this) { instance = db }
+        }
+
+        /** Test-only seam: clear the cached singleton so the next call rebuilds it. */
+        @VisibleForTesting
+        fun clearInstance() {
+            synchronized(this) { instance = null }
+        }
 
         private fun build(appContext: Context): MindlayerDatabase {
             migrateFromPlaintextIfNeeded(appContext)
@@ -50,7 +80,7 @@ abstract class MindlayerDatabase : RoomDatabase() {
                 val factory = SupportOpenHelperFactory(passphrase)
                 return Room.databaseBuilder(appContext, MindlayerDatabase::class.java, DB_NAME)
                     .openHelperFactory(factory)
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
             } finally {
@@ -72,4 +102,3 @@ abstract class MindlayerDatabase : RoomDatabase() {
         }
     }
 }
-

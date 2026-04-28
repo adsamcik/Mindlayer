@@ -8,8 +8,12 @@ import io.mockk.every
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -49,7 +53,7 @@ class LogRepositoryTest {
             .allowMainThreadQueries()
             .build()
         dao = db.logDao()
-        repo = LogRepository(dao)
+        repo = LogRepository(dao, Dispatchers.Unconfined)
     }
 
     @After
@@ -61,12 +65,13 @@ class LogRepositoryTest {
 
     /** Wait for fire-and-forget coroutines to complete and return the single inserted entry. */
     private suspend fun awaitSingleEntry(): LogEntry {
-        // Give the fire-and-forget coroutine time to complete
-        Thread.sleep(200)
         val entries = dao.getRecent(10)
         assertEquals("Expected exactly 1 log entry", 1, entries.size)
         return entries[0]
     }
+
+    private fun parsedExtra(entry: LogEntry) =
+        Json.parseToJsonElement(entry.extraJson!!).jsonObject
 
     // --- logInferenceStart ---
 
@@ -159,6 +164,14 @@ class LogRepositoryTest {
         assertTrue(e.extraJson!!.contains("2048"))
     }
 
+    @Test
+    fun `logSessionCreated writes parseable numeric extraJson`() = runTest {
+        repo.logSessionCreated("sess-json", "GPU", 2048)
+        val extra = parsedExtra(awaitSingleEntry())
+
+        assertEquals(2048, extra["maxTokens"]!!.jsonPrimitive.int)
+    }
+
     // --- logSessionDestroyed ---
 
     @Test
@@ -183,6 +196,16 @@ class LogRepositoryTest {
         assertEquals("sess-7", e.sessionId)
         assertNotNull(e.extraJson)
         assertTrue(e.extraJson!!.contains("memory_pressure"))
+    }
+
+    @Test
+    fun `logSessionEvicted escapes reason as valid JSON`() = runTest {
+        val reason = "memory \"pressure\" at C:\\models\\gemma"
+
+        repo.logSessionEvicted("sess-json", reason)
+        val extra = parsedExtra(awaitSingleEntry())
+
+        assertEquals(reason, extra["reason"]!!.jsonPrimitive.content)
     }
 
     // --- logMemoryPressure ---
@@ -213,6 +236,16 @@ class LogRepositoryTest {
         assertEquals(3500L, e.durationMs)
         assertNotNull(e.extraJson)
         assertTrue(e.extraJson!!.contains("/data/models/llama.bin"))
+    }
+
+    @Test
+    fun `logEngineInit escapes model path as valid JSON`() = runTest {
+        val modelPath = "C:\\models\\Gemma \"4\"\\model.litertlm"
+
+        repo.logEngineInit("GPU", 3500L, modelPath)
+        val extra = parsedExtra(awaitSingleEntry())
+
+        assertEquals(modelPath, extra["modelPath"]!!.jsonPrimitive.content)
     }
 
     // --- logEngineShutdown ---

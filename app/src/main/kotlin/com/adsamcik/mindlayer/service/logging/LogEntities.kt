@@ -2,7 +2,18 @@ package com.adsamcik.mindlayer.service.logging
 
 import androidx.room.*
 
-@Entity(tableName = "usage_logs", indices = [Index("category"), Index("sessionId"), Index("timestampMs")])
+@Entity(
+    tableName = "usage_logs",
+    indices = [
+        Index("category"),
+        Index("sessionId"),
+        Index("timestampMs"),
+        Index(value = ["requestId", "timestampMs"], name = "index_usage_logs_request_timestamp"),
+        Index(value = ["sessionId", "timestampMs"], name = "index_usage_logs_session_timestamp"),
+        Index(value = ["category", "event", "timestampMs"], name = "index_usage_logs_category_event_timestamp"),
+        Index(value = ["backend", "event", "timestampMs"], name = "index_usage_logs_backend_event_timestamp"),
+    ],
+)
 data class LogEntry(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val timestampMs: Long,

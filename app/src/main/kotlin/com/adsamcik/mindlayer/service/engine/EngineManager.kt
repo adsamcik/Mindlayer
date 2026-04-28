@@ -104,7 +104,7 @@ class EngineManager(
         preferredBackend: String? = null,
         maxTokens: Int = 4096,
     ): Engine = mutex.withLock {
-        val target = selectedModel
+        val target = withContext(Dispatchers.IO) { selectedModel }
 
         // Fast-path: the selected device model is already loaded.
         engine?.let { eng ->

@@ -3,6 +3,8 @@ package com.adsamcik.mindlayer.service.logging
 import android.content.Context
 import androidx.annotation.VisibleForTesting
 import androidx.room.*
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.adsamcik.mindlayer.service.security.DbKeyProvider
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
@@ -12,7 +14,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
  * unreadable DB; this is acceptable pre-release — logs are ephemeral and [fallbackToDestructiveMigration]
  * already allows resetting the table on schema changes.
  */
-@Database(entities = [LogEntry::class], version = 1, exportSchema = false)
+@Database(entities = [LogEntry::class], version = 2, exportSchema = false)
 abstract class LogDatabase : RoomDatabase() {
     abstract fun logDao(): LogDao
 
@@ -23,6 +25,27 @@ abstract class LogDatabase : RoomDatabase() {
 
         @Volatile
         private var INSTANCE: LogDatabase? = null
+
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_usage_logs_request_timestamp " +
+                        "ON usage_logs(requestId, timestampMs)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_usage_logs_session_timestamp " +
+                        "ON usage_logs(sessionId, timestampMs)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_usage_logs_category_event_timestamp " +
+                        "ON usage_logs(category, event, timestampMs)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_usage_logs_backend_event_timestamp " +
+                        "ON usage_logs(backend, event, timestampMs)",
+                )
+            }
+        }
 
         fun getInstance(context: Context): LogDatabase =
             INSTANCE ?: synchronized(this) {
@@ -51,6 +74,7 @@ abstract class LogDatabase : RoomDatabase() {
                 val factory = SupportOpenHelperFactory(passphrase)
                 return Room.databaseBuilder(appContext, LogDatabase::class.java, DB_NAME)
                     .openHelperFactory(factory)
+                    .addMigrations(MIGRATION_1_2)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
             } finally {
@@ -77,4 +101,3 @@ abstract class LogDatabase : RoomDatabase() {
         }
     }
 }
-

@@ -9,7 +9,6 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.adsamcik.mindlayer.service.engine.EngineManager
@@ -24,6 +23,7 @@ import com.adsamcik.mindlayer.service.logging.LogDatabase
 import com.adsamcik.mindlayer.service.logging.LogEntry
 import com.adsamcik.mindlayer.service.logging.LogEvent
 import com.adsamcik.mindlayer.service.logging.LogRepository
+import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -76,7 +76,7 @@ class MindlayerMlService : Service() {
     override fun onCreate() {
         super.onCreate()
         createdAtMs = android.os.SystemClock.elapsedRealtime()
-        Log.i(TAG, "Service created in process ${android.os.Process.myPid()}")
+        MindlayerLog.i(TAG, "Service created in process ${android.os.Process.myPid()}")
         createNotificationChannel()
 
         val logDb = LogDatabase.getInstance(this)
@@ -87,6 +87,7 @@ class MindlayerMlService : Service() {
         thermalMonitor = ThermalMonitor(this, serviceScope, logRepository)
         sessionManager = SessionManager(this, engineManager, memoryBudget, logRepository)
         sharedMemoryPool = SharedMemoryPool(cacheDir)
+        sharedMemoryPool.cleanupAll()
         orchestrator = InferenceOrchestrator(this, sessionManager, sharedMemoryPool, logRepository)
 
         val diagnosticExporter = DiagnosticExporter(
@@ -108,27 +109,27 @@ class MindlayerMlService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder {
-        Log.i(TAG, "Client bound: ${intent?.`package`}")
+        MindlayerLog.i(TAG, "Client bound: ${intent?.`package`}")
         return binder
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        Log.i(TAG, "Client unbound: ${intent?.`package`}")
+        MindlayerLog.i(TAG, "Client unbound: ${intent?.`package`}")
         return true
     }
 
     override fun onRebind(intent: Intent?) {
-        Log.i(TAG, "Client rebound: ${intent?.`package`}")
+        MindlayerLog.i(TAG, "Client rebound: ${intent?.`package`}")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.i(TAG, "onStartCommand, startId=$startId")
+        MindlayerLog.i(TAG, "onStartCommand, startId=$startId")
         // START_NOT_STICKY: don't auto-restart; recovery is client-driven
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        Log.i(TAG, "Service destroyed")
+        MindlayerLog.i(TAG, "Service destroyed")
         thermalMonitor.stop()
         memoryBudget.stop()
         orchestrator.shutdown()
@@ -139,7 +140,7 @@ class MindlayerMlService : Service() {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        Log.w(TAG, "onTrimMemory level=$level")
+        MindlayerLog.w(TAG, "onTrimMemory level=$level")
 
         logRepository.log(LogEntry(
             timestampMs = System.currentTimeMillis(),
@@ -160,7 +161,7 @@ class MindlayerMlService : Service() {
         serviceScope.launch {
             memoryBudget.pressure
                 .collect { pressure ->
-                    Log.i(TAG, "Memory pressure changed: $pressure")
+                    MindlayerLog.i(TAG, "Memory pressure changed: $pressure")
                     sessionManager.applyMemoryPressure(pressure)
                 }
         }
@@ -188,7 +189,7 @@ class MindlayerMlService : Service() {
                     return@collect
                 }
 
-                Log.i(TAG, "Thermal recommends $recommended, currently on $current")
+                MindlayerLog.i(TAG, "Thermal recommends $recommended, currently on $current")
                 pendingBackend = recommended
 
                 if (activeInferenceCount == 0) {
@@ -217,11 +218,11 @@ class MindlayerMlService : Service() {
 
         // For GPU re-enable, check cooldown
         if (target == "GPU" && !thermalMonitor.canReenableGpu()) {
-            Log.i(TAG, "GPU re-enable cooldown not elapsed, deferring")
+            MindlayerLog.i(TAG, "GPU re-enable cooldown not elapsed, deferring")
             return
         }
 
-        Log.i(TAG, "Applying backend switch: $current → $target")
+        MindlayerLog.i(TAG, "Applying backend switch: $current → $target")
         pendingBackend = null
 
         serviceScope.launch {
@@ -229,9 +230,9 @@ class MindlayerMlService : Service() {
                 // Destroy all sessions first — they hold Conversation refs to old engine
                 sessionManager.shutdown()
                 engineManager.switchBackend(target)
-                Log.i(TAG, "Backend switch complete: now on ${engineManager.currentBackend}")
+                MindlayerLog.i(TAG, "Backend switch complete: now on ${engineManager.currentBackend}")
             } catch (t: Throwable) {
-                Log.e(TAG, "Backend switch failed: ${t.message}", t)
+                MindlayerLog.e(TAG, "Backend switch failed: ${t.message}", throwable = t)
             }
         }
     }
@@ -256,9 +257,9 @@ class MindlayerMlService : Service() {
                     ServiceCompat.startForeground(
                         this, NOTIFICATION_ID, notification, fgsType
                     )
-                    Log.i(TAG, "Entered foreground")
+                    MindlayerLog.i(TAG, "Entered foreground")
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to enter foreground", e)
+                    MindlayerLog.e(TAG, "Failed to enter foreground", throwable = e)
                 }
             }
         }
@@ -270,11 +271,11 @@ class MindlayerMlService : Service() {
      */
     fun exitForeground() {
         synchronized(stateLock) {
-            activeInferenceCount = (activeInferenceCount - 1).coerceAtLeast(0)
-            if (activeInferenceCount == 0) {
-                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-                Log.i(TAG, "Exited foreground")
-                // Apply pending backend switch when idle
+                activeInferenceCount = (activeInferenceCount - 1).coerceAtLeast(0)
+                if (activeInferenceCount == 0) {
+                    ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                    MindlayerLog.i(TAG, "Exited foreground")
+                    // Apply pending backend switch when idle
                 applyPendingBackendSwitch()
             }
         }

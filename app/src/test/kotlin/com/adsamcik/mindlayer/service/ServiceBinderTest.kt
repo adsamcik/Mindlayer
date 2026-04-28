@@ -25,6 +25,7 @@ import com.adsamcik.mindlayer.service.security.AllowlistStore
 import com.adsamcik.mindlayer.service.security.CallerIdentity
 import com.adsamcik.mindlayer.service.security.RateLimiter
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
@@ -37,11 +38,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Unit tests for [ServiceBinder]: AIDL delegation, status assembly, and
@@ -119,6 +123,7 @@ class ServiceBinderTest {
             every { listSessions() } returns emptyList()
         }
         diagnosticExporter = mockk(relaxed = true)
+        coEvery { diagnosticExporter.export() } returns """{"status": "ready"}"""
         thermalMonitor = mockk(relaxed = true) {
             every { currentPolicy } returns MutableStateFlow(defaultPolicy)
             every { latestSample } returns MutableStateFlow(defaultSample)
@@ -128,11 +133,15 @@ class ServiceBinderTest {
             every { deviceTier } returns defaultTier
         }
 
-        binder = ServiceBinder(
+        binder = newBinder(diagnosticExporter)
+    }
+
+    private fun newBinder(exporter: DiagnosticExporter): ServiceBinder =
+        ServiceBinder(
             service = service,
             engineManager = engineManager,
             orchestrator = orchestrator,
-            diagnosticExporter = diagnosticExporter,
+            diagnosticExporter = exporter,
             thermalMonitor = thermalMonitor,
             memoryBudget = memoryBudget,
             callerVerifier = { _, uid ->
@@ -149,7 +158,6 @@ class ServiceBinderTest {
                 maxConcurrent = 1_000,
             ),
         )
-    }
 
     @After
     fun tearDown() {
@@ -167,6 +175,34 @@ class ServiceBinderTest {
 
         assertEquals("s1", result)
         verify { orchestrator.createSession(config, any()) }
+    }
+
+    @Test
+    fun `createSession starts engine warmup asynchronously when engine is not initialized`() {
+        every { engineManager.isInitialized } returns false
+        coEvery {
+            engineManager.initialize(
+                preferredBackend = "CPU",
+                maxTokens = 2048,
+            )
+        } returns mockk(relaxed = true)
+
+        val config = SessionConfig(sessionId = "s1", backend = "CPU", maxTokens = 2048)
+
+        try {
+            binder.createSession(config)
+            fail("Expected createSession to report that the engine is initializing")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message.orEmpty().contains("initialization has been started"))
+        }
+
+        verify(exactly = 0) { orchestrator.createSession(any(), any()) }
+        coVerify(timeout = 1_000) {
+            engineManager.initialize(
+                preferredBackend = "CPU",
+                maxTokens = 2048,
+            )
+        }
     }
 
     @Test
@@ -334,12 +370,22 @@ class ServiceBinderTest {
     // ---- getDiagnostics -----------------------------------------------------
 
     @Test
-    fun `getDiagnostics calls diagnosticExporter export`() {
-        coEvery { diagnosticExporter.export() } returns """{"test": true}"""
+    fun `getDiagnostics returns cached snapshot while refresh runs asynchronously`() {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val slowExporter = mockk<DiagnosticExporter>()
+        coEvery { slowExporter.export() } answers {
+            started.countDown()
+            release.await(1, TimeUnit.SECONDS)
+            """{"test": true}"""
+        }
+        val localBinder = newBinder(slowExporter)
+        assertTrue(started.await(1, TimeUnit.SECONDS))
 
-        val result = binder.getDiagnostics()
+        val result = localBinder.getDiagnostics()
 
-        assertEquals("""{"test": true}""", result)
+        assertEquals("""{"status":"warming"}""", result)
+        release.countDown()
     }
 
     // ---- getEngineInfo ------------------------------------------------------
@@ -354,7 +400,6 @@ class ServiceBinderTest {
             isDefault = true,
         )
         every { engineManager.currentModel } returns loadedModel
-        every { engineManager.modelPath } returns loadedModel.path
 
         val info = binder.getEngineInfo()
 
@@ -368,18 +413,25 @@ class ServiceBinderTest {
     }
 
     @Test
-    fun `getEngineInfo handles modelPath exception gracefully`() {
-        every { engineManager.modelPath } throws IllegalStateException("not found")
+    fun `getEngineInfo handles unloaded engine without modelPath lookup`() {
+        every { engineManager.currentModel } returns null
 
         val info = binder.getEngineInfo()
 
         assertEquals("", info.modelId)
         assertEquals(0L, info.modelSizeBytes)
+        verify(exactly = 0) { engineManager.modelPath }
     }
 
     @Test
     fun `getEngineInfo handles non-existent model file`() {
-        every { engineManager.modelPath } returns "/nonexistent/model.litertlm"
+        every { engineManager.currentModel } returns ModelInfo(
+            id = "",
+            displayName = "Model",
+            path = "/nonexistent/model.litertlm",
+            sizeBytes = 0L,
+            isDefault = true,
+        )
 
         val info = binder.getEngineInfo()
 

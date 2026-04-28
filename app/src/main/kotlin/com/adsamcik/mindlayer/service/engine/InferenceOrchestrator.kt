@@ -17,6 +17,9 @@ import com.adsamcik.mindlayer.service.MindlayerMlService
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.ipc.StagedMedia
 import com.adsamcik.mindlayer.service.ipc.TokenStreamWriter
+import com.adsamcik.mindlayer.service.logging.LogCategory
+import com.adsamcik.mindlayer.service.logging.LogEntry
+import com.adsamcik.mindlayer.service.logging.LogEvent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +27,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.put
+import com.adsamcik.mindlayer.service.logging.logExtraJson
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -187,11 +192,11 @@ class InferenceOrchestrator(
         try {
             if (image != null) {
                 stagedImage = sharedMemoryPool.stageImage(image)
-                MindlayerLog.d(TAG, "Staged image: ${stagedImage.filePath}", requestId = meta.requestId, sessionId = meta.sessionId)
+                MindlayerLog.d(TAG, "Staged image for request", requestId = meta.requestId, sessionId = meta.sessionId)
             }
             if (audio != null) {
                 stagedAudio = sharedMemoryPool.stageAudio(audio)
-                MindlayerLog.d(TAG, "Staged audio: ${stagedAudio.filePath}", requestId = meta.requestId, sessionId = meta.sessionId)
+                MindlayerLog.d(TAG, "Staged audio for request", requestId = meta.requestId, sessionId = meta.sessionId)
             }
         } catch (t: Throwable) {
             MindlayerLog.e(TAG, "Media staging failed for request ${meta.requestId}: ${t.safeLabel()}", requestId = meta.requestId, sessionId = meta.sessionId)
@@ -367,13 +372,16 @@ class InferenceOrchestrator(
                     for (call in pending) {
                         writer.writeToolCall(seq, call.callId, call.toolName, call.arguments)
                         seq++
-                        logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
+                        logRepository?.log(LogEntry(
                             timestampMs = System.currentTimeMillis(),
-                            category = com.adsamcik.mindlayer.service.logging.LogCategory.INFERENCE,
-                            event = com.adsamcik.mindlayer.service.logging.LogEvent.TOOL_CALL,
+                            category = LogCategory.INFERENCE,
+                            event = LogEvent.TOOL_CALL,
                             requestId = meta.requestId,
                             sessionId = meta.sessionId,
-                            extraJson = """{"tool":"${call.toolName}","round":$toolCallRound}""",
+                            extraJson = logExtraJson {
+                                put("tool", call.toolName)
+                                put("round", toolCallRound)
+                            },
                         ))
                     }
                     accumulatedToolCalls.clear()

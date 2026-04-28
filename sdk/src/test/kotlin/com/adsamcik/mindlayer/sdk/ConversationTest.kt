@@ -55,11 +55,11 @@ class ConversationTest {
 
         val context = ApplicationProvider.getApplicationContext<Context>()
 
-        resetDbSingleton()
+        MindlayerDatabase.clearInstance()
         db = Room.inMemoryDatabaseBuilder(context, MindlayerDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        setDbSingleton(db)
+        MindlayerDatabase.setInstance(db)
 
         mockService = mockk(relaxed = true) {
             every { createSession(any()) } returns "session-conv"
@@ -79,23 +79,11 @@ class ConversationTest {
     @After
     fun tearDown() {
         db.close()
-        resetDbSingleton()
+        MindlayerDatabase.clearInstance()
         unmockkAll()
     }
 
     // -- Helpers --------------------------------------------------------------
-
-    private fun resetDbSingleton() {
-        val field = MindlayerDatabase::class.java.getDeclaredField("instance")
-        field.isAccessible = true
-        field.set(null, null)
-    }
-
-    private fun setDbSingleton(database: MindlayerDatabase) {
-        val field = MindlayerDatabase::class.java.getDeclaredField("instance")
-        field.isAccessible = true
-        field.set(null, database)
-    }
 
     private fun buildMindlayer(conn: ConnectionManager, historyStore: HistoryStore?): Mindlayer {
         val ctor = Mindlayer::class.java.getDeclaredConstructor(

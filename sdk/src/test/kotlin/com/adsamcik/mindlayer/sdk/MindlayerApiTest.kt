@@ -75,16 +75,25 @@ class MindlayerApiTest {
 
         val context = ApplicationProvider.getApplicationContext<Context>()
 
-        resetDbSingleton()
+        MindlayerDatabase.clearInstance()
         db = Room.inMemoryDatabaseBuilder(context, MindlayerDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        setDbSingleton(db)
+        MindlayerDatabase.setInstance(db)
 
         store = HistoryStore(context)
 
         mockService = mockk(relaxed = true) {
             every { createSession(any()) } returns "session-abc"
+            every { status } returns ServiceStatus(
+                isEngineLoaded = true,
+                activeSessionCount = 0,
+                activeInferenceCount = 0,
+                backend = "GPU",
+                thermalBand = "COOL",
+                isForeground = false,
+                uptimeMs = 0L,
+            )
         }
 
         mockConnection = mockk(relaxed = true) {
@@ -102,23 +111,11 @@ class MindlayerApiTest {
     @After
     fun tearDown() {
         db.close()
-        resetDbSingleton()
+        MindlayerDatabase.clearInstance()
         unmockkAll()
     }
 
     // -- Helpers --------------------------------------------------------------
-
-    private fun resetDbSingleton() {
-        val field = MindlayerDatabase::class.java.getDeclaredField("instance")
-        field.isAccessible = true
-        field.set(null, null)
-    }
-
-    private fun setDbSingleton(database: MindlayerDatabase) {
-        val field = MindlayerDatabase::class.java.getDeclaredField("instance")
-        field.isAccessible = true
-        field.set(null, database)
-    }
 
     private fun buildMindlayer(conn: ConnectionManager, historyStore: HistoryStore?): Mindlayer {
         val ctor = Mindlayer::class.java.getDeclaredConstructor(

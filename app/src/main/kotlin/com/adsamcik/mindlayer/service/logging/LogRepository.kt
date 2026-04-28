@@ -1,10 +1,14 @@
 package com.adsamcik.mindlayer.service.logging
 
 import kotlinx.coroutines.*
+import kotlinx.serialization.json.put
 
-class LogRepository(private val dao: LogDao) {
+class LogRepository(
+    private val dao: LogDao,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
+) {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + dispatcher)
 
     // Fire-and-forget log (non-blocking)
     fun log(entry: LogEntry) {
@@ -53,7 +57,10 @@ class LogRepository(private val dao: LogDao) {
             category = LogCategory.THERMAL,
             event = LogEvent.BAND_CHANGE,
             thermalBand = toBand, backend = backend,
-            extraJson = """{"from":"$fromBand","to":"$toBand"}""",
+            extraJson = logExtraJson {
+                put("from", fromBand)
+                put("to", toBand)
+            },
         ))
     }
 
@@ -63,7 +70,7 @@ class LogRepository(private val dao: LogDao) {
             category = LogCategory.SESSION,
             event = LogEvent.SESSION_CREATED,
             sessionId = sessionId, backend = backend,
-            extraJson = """{"maxTokens":$maxTokens}""",
+            extraJson = logExtraJson { put("maxTokens", maxTokens) },
         ))
     }
 
@@ -82,7 +89,7 @@ class LogRepository(private val dao: LogDao) {
             category = LogCategory.SESSION,
             event = LogEvent.SESSION_EVICTED,
             sessionId = sessionId,
-            extraJson = """{"reason":"$reason"}""",
+            extraJson = logExtraJson { put("reason", reason) },
         ))
     }
 
@@ -93,7 +100,7 @@ class LogRepository(private val dao: LogDao) {
             event = LogEvent.PRESSURE_CHANGE,
             memoryAvailableMb = availableMb,
             memoryUsedMb = totalMb - availableMb,
-            extraJson = """{"pressure":"$pressure"}""",
+            extraJson = logExtraJson { put("pressure", pressure) },
         ))
     }
 
@@ -103,7 +110,7 @@ class LogRepository(private val dao: LogDao) {
             category = LogCategory.ENGINE,
             event = LogEvent.ENGINE_INIT,
             backend = backend, durationMs = durationMs,
-            extraJson = """{"modelPath":"$modelPath"}""",
+            extraJson = logExtraJson { put("modelPath", modelPath) },
         ))
     }
 
@@ -128,7 +135,7 @@ class LogRepository(private val dao: LogDao) {
             event = LogEvent.USER_MESSAGE,
             requestId = requestId,
             sessionId = sessionId,
-            extraJson = """{"tokenCount":$tokenCount}""",
+            extraJson = logExtraJson { put("tokenCount", tokenCount) },
         ))
     }
 
@@ -144,7 +151,7 @@ class LogRepository(private val dao: LogDao) {
             event = LogEvent.MODEL_RESPONSE,
             requestId = requestId,
             sessionId = sessionId,
-            extraJson = """{"tokenCount":$tokenCount}""",
+            extraJson = logExtraJson { put("tokenCount", tokenCount) },
         ))
     }
 

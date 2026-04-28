@@ -53,14 +53,11 @@ class HistoryStoreTest {
 
         val context = ApplicationProvider.getApplicationContext<Context>()
 
-        // Build in-memory database and inject via MindlayerDatabase singleton hack:
-        // We construct the HistoryStore with the same context, but to avoid the
-        // singleton returning a persistent DB, we reset the singleton field.
-        resetSingleton()
+        MindlayerDatabase.clearInstance()
         db = Room.inMemoryDatabaseBuilder(context, MindlayerDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        setSingleton(db)
+        MindlayerDatabase.setInstance(db)
 
         store = HistoryStore(context)
     }
@@ -68,22 +65,8 @@ class HistoryStoreTest {
     @After
     fun teardown() {
         db.close()
-        resetSingleton()
+        MindlayerDatabase.clearInstance()
         unmockkStatic(Log::class)
-    }
-
-    /** Clear the private `instance` field in MindlayerDatabase.Companion. */
-    private fun resetSingleton() {
-        val field = MindlayerDatabase::class.java.getDeclaredField("instance")
-        field.isAccessible = true
-        field.set(null, null)
-    }
-
-    /** Inject our in-memory DB into the singleton so HistoryStore picks it up. */
-    private fun setSingleton(database: MindlayerDatabase) {
-        val field = MindlayerDatabase::class.java.getDeclaredField("instance")
-        field.isAccessible = true
-        field.set(null, database)
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -455,6 +438,35 @@ class HistoryStoreTest {
         val replay = store.getReplayHistory("sess-1", 10000)!!
         assertTrue(replay.turns.isEmpty())
         assertNull(replay.pendingUserTurn)
+    }
+
+    @Test
+    fun `listConversations returns counts and chronological previews`() = runTest {
+        store.persistConversation("older", defaultConfig.copy(systemPrompt = "Old prompt"))
+        val oldTexts = listOf("one", "two", "three", "four")
+        oldTexts.forEach { text ->
+            val turnId = store.persistUserTurn("older", text)
+            store.markUserTurnCompleted(turnId)
+        }
+        store.persistUserTurn("older", "pending should not count")
+
+        store.persistConversation("newer", defaultConfig.copy(systemPrompt = "New prompt"))
+        val newerTurn = store.persistUserTurn("newer", "newest")
+        store.markUserTurnCompleted(newerTurn)
+
+        db.conversationDao().touch("older", nowMs = 1_000L)
+        db.conversationDao().touch("newer", nowMs = 2_000L)
+
+        val summaries = store.listConversations(limit = 10)
+
+        assertEquals(listOf("newer", "older"), summaries.map { it.conversationId })
+        assertEquals(1, summaries[0].turnCount)
+        assertEquals(listOf("newest"), summaries[0].preview.map { it.text })
+
+        val older = summaries[1]
+        assertEquals(4, older.turnCount)
+        assertEquals(listOf("two", "three", "four"), older.preview.map { it.text })
+        assertTrue(older.preview.all { it.role == TurnRole.USER })
     }
 
     // ═══════════════════════════════════════════════════════════════════
