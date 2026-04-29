@@ -266,14 +266,14 @@ class AllowlistStoreTest {
         val envelope = JSONObject(entriesFile.readText())
         val entry = envelope.getJSONArray("entries").getJSONObject(0)
         entriesFile.writeText(
-            """{"version":1,"entries":[{"displayName":"${entry.getString("displayName")}","grantedAtMs":${entry.getLong("grantedAtMs")},"sig":"${entry.getString("sig")}","pkg":"${entry.getString("pkg")}"}],"mac":"${envelope.getString("mac")}"}""",
+            """{"version":2,"entries":[{"displayName":"${entry.getString("displayName")}","grantedAtMs":${entry.getLong("grantedAtMs")},"sig":"${entry.getString("sig")}","pkg":"${entry.getString("pkg")}"}],"mac":"${envelope.getString("mac")}"}""",
         )
 
         assertTrue(store.isAllowed("com.example", "sig"))
     }
 
     @Test
-    fun `legacy arrays are migrated to signed envelopes`() {
+    fun `legacy arrays are quarantined on load`() {
         val legacyDirName = "${dirName}_legacy_entries"
         val legacyDir = File(context.filesDir, legacyDirName).also { it.mkdirs() }
         File(legacyDir, "entries.json").writeText(
@@ -281,17 +281,16 @@ class AllowlistStoreTest {
         )
 
         val migrated = AllowlistStore(context, legacyDirName)
-        val migratedRaw = File(legacyDir, "entries.json").readText()
-        val envelope = JSONObject(migratedRaw)
 
-        assertTrue(migrated.isAllowed("com.example", "sig"))
-        assertTrue(envelope.has("entries"))
-        assertTrue(envelope.has("mac"))
+        // Legacy unsigned entries are quarantined (not re-signed); caller must re-approve.
+        assertFalse(migrated.isAllowed("com.example", "sig"))
+        assertTrue(migrated.list().isEmpty())
+        assertFalse("entries.json must have been renamed", File(legacyDir, "entries.json").exists())
         legacyDir.deleteRecursively()
     }
 
     @Test
-    fun `legacy pending arrays are migrated to signed envelopes`() {
+    fun `legacy pending arrays are quarantined on load`() {
         val legacyDirName = "${dirName}_legacy_pending"
         val legacyDir = File(context.filesDir, legacyDirName).also { it.mkdirs() }
         File(legacyDir, "pending.json").writeText(
@@ -299,13 +298,10 @@ class AllowlistStoreTest {
         )
 
         val migrated = AllowlistStore(context, legacyDirName)
-        val migratedRaw = File(legacyDir, "pending.json").readText()
-        val envelope = JSONObject(migratedRaw)
 
-        assertEquals(1, migrated.listPending().size)
-        assertEquals("Example", migrated.listPending().single().displayName)
-        assertTrue(envelope.has("pending"))
-        assertTrue(envelope.has("mac"))
+        // Legacy unsigned pending entries are quarantined; caller must re-connect to appear in pending.
+        assertTrue(migrated.listPending().isEmpty())
+        assertFalse("pending.json must have been renamed", File(legacyDir, "pending.json").exists())
         legacyDir.deleteRecursively()
     }
 

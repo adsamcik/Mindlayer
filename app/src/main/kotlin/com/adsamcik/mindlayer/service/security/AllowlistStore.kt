@@ -75,6 +75,19 @@ class AllowlistStore(
     private val lockFile: File = File(baseDir, "allowlist.lock")
     private val hmacKeyFile: File = File(baseDir, "allowlist.hmac")
 
+    /**
+     * Tracks how many times the current thread is inside [withFileLock]. Java NIO
+     * [java.nio.channels.FileChannel.lock] does NOT support same-JVM re-entry on the
+     * same file region — a nested call throws [java.nio.channels.OverlappingFileLockException].
+     * [loadOrCreateHmacKey] uses this depth to skip the inner lock acquisition when
+     * it is invoked transitively from code that already holds the lock.
+     *
+     * Must be declared before [_entries] / [_pending] so it is initialised before
+     * the property initialisers call [readEntries] / [readPending], which transitively
+     * call [loadOrCreateHmacKey].
+     */
+    private val fileLockDepth = ThreadLocal.withInitial { 0 }
+
     private val _entries = MutableStateFlow(readEntries())
     val entries: StateFlow<List<AllowlistEntry>> = _entries.asStateFlow()
 
@@ -208,9 +221,11 @@ class AllowlistStore(
         RandomAccessFile(lockFile, "rw").use { raf ->
             raf.channel.use { ch ->
                 val lock: FileLock = ch.lock()
+                fileLockDepth.set(fileLockDepth.get() + 1)
                 try {
                     return block()
                 } finally {
+                    fileLockDepth.set(fileLockDepth.get() - 1)
                     try { lock.release() } catch (_: Throwable) { }
                 }
             }
@@ -465,28 +480,19 @@ class AllowlistStore(
     }
 
     /**
-     * Returns the HMAC key, generating one on first use. Wrapped in
-     * [withFileLock] so concurrent first-runs across the main and `:ml`
-     * processes (audit H8) can't generate divergent keys that would silently
-     * invalidate the allowlist.
+     * Returns the HMAC key. If the calling thread is already inside [withFileLock]
+     * the key is read directly without acquiring the lock again, avoiding
+     * [java.nio.channels.OverlappingFileLockException] on re-entrant calls from
+     * [hmac] / [verifyMac] invoked transitively during write operations.
      *
-     * If the key file exists but is unreadable / wrong size (corrupt), the
-     * bad file is **quarantined** to `<name>.bad-<ts>` and a fresh key is
-     * generated (audit M15). The user-visible effect is that approvals must
-     * be re-granted, but the failure is loud (logged at error level) rather
-     * than silent.
+     * Caching is intentionally omitted so that a corrupt key file is detected on
+     * every call — once the file is quarantined and a new key generated, subsequent
+     * HMAC verifications against entries signed with the old key will correctly fail,
+     * signalling that callers must be re-approved (audit H8 / M15).
      */
-    private fun loadOrCreateHmacKey(): ByteArray {
-        // Cache to avoid repeated disk reads + double-checked entry into the lock.
-        cachedHmacKey?.let { return it }
-        return withFileLock {
-            // Re-check inside the lock — another process may have written since.
-            cachedHmacKey?.let { return@withFileLock it }
-            val key = readOrCreateHmacKeyLocked()
-            cachedHmacKey = key
-            key
-        }
-    }
+    private fun loadOrCreateHmacKey(): ByteArray =
+        if (fileLockDepth.get() > 0) readOrCreateHmacKeyLocked()
+        else withFileLock { readOrCreateHmacKeyLocked() }
 
     private fun readOrCreateHmacKeyLocked(): ByteArray {
         if (hmacKeyFile.exists()) {
@@ -519,9 +525,6 @@ class AllowlistStore(
         atomicWrite(hmacKeyFile, Base64.getEncoder().encodeToString(key))
         return key
     }
-
-    @Volatile
-    private var cachedHmacKey: ByteArray? = null
 
     companion object {
         private const val TAG = "AllowlistStore"

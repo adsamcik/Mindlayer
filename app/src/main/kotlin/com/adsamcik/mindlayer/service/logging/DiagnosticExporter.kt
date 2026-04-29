@@ -117,7 +117,13 @@ class DiagnosticExporter(
                         entry.tokensGenerated?.let { put("tokensGenerated", it) }
                         entry.tokensPerSec?.let { put("tokensPerSec", it) }
                         entry.thermalBand?.let { put("thermalBand", it) }
-                        entry.errorMessage?.let { put("errorMessage", it) }
+                        entry.errorMessage?.let { msg ->
+                            // Sanitize at emit time (defence-in-depth: strips prompt
+                            // fragments, caps at 64 chars, then take up to 256 for JSON).
+                            sanitizeErrorClass(msg)?.take(256)?.let { safe ->
+                                put("errorClass", safe)
+                            }
+                        }
                     }
                 }
             }
