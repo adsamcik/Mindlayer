@@ -66,10 +66,14 @@ class ToolCallBridge {
     /**
      * Called from the AIDL binder thread when the client submits a tool result.
      *
-     * Completes the [CompletableDeferred] of the first unfinished pending call
-     * matching [toolName], unblocking the streaming coroutine in [awaitResults].
+     * When [callId] is provided, routes to the exact matching pending call (post-C1
+     * clients).  Falls back to first-unfinished by [toolName] for legacy clients that
+     * do not supply a callId.
+     *
+     * If no pending call matches, all remaining pending entries are failed immediately
+     * so [awaitResults] unblocks fast rather than waiting for the full timeout (H3).
      */
-    fun submitResult(requestId: String, toolName: String, resultJson: String) {
+    fun submitResult(requestId: String, callId: String?, toolName: String, resultJson: String) {
         val calls = pending[requestId]
         if (calls == null) {
             MindlayerLog.w(TAG, "submitResult: no pending calls for request $requestId", requestId = requestId)
@@ -77,17 +81,42 @@ class ToolCallBridge {
         }
 
         val match = synchronized(calls) {
+            // 1. Prefer exact callId match (post-C1 clients).
+            if (callId != null) {
+                val byId = calls.firstOrNull { it.callId == callId && !it.resultDeferred.isCompleted }
+                if (byId != null) return@synchronized byId
+            }
+            // 2. Fall back to first-unfinished by toolName (legacy clients).
             calls.firstOrNull { it.toolName == toolName && !it.resultDeferred.isCompleted }
         }
 
         if (match == null) {
-            MindlayerLog.w(TAG, "submitResult: no pending call for tool '$toolName' in request $requestId", requestId = requestId)
+            // H3 — surface mismatched submitResult IMMEDIATELY rather than letting awaitResults block.
+            MindlayerLog.w(
+                TAG,
+                "submitResult: no pending call matches (callId=$callId, tool='$toolName') for request $requestId — failing pending entries",
+                requestId = requestId,
+            )
+            // Fail every still-pending entry for this request so awaitResults unblocks fast.
+            synchronized(calls) {
+                calls.filter { !it.resultDeferred.isCompleted }.forEach {
+                    it.resultDeferred.completeExceptionally(
+                        IllegalStateException(
+                            "Client submitted result for unmatched tool call (callId=$callId, tool='$toolName')",
+                        ),
+                    )
+                }
+            }
             return
         }
 
         match.resultDeferred.complete(resultJson)
-        MindlayerLog.d(TAG, "Result submitted for tool '$toolName' in request $requestId", requestId = requestId)
+        MindlayerLog.d(TAG, "Result submitted for tool '${match.toolName}' (callId=${match.callId}) in request $requestId", requestId = requestId)
     }
+
+    /** Backwards-compat overload for callers that do not yet supply a [callId]. */
+    fun submitResult(requestId: String, toolName: String, resultJson: String) =
+        submitResult(requestId, callId = null, toolName = toolName, resultJson = resultJson)
 
     /**
      * Suspend until every pending tool call for [requestId] has a result, or

@@ -1,6 +1,9 @@
 package com.adsamcik.mindlayer.service
 
+import android.os.Binder
+import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import com.adsamcik.mindlayer.RequestMeta
@@ -298,6 +301,7 @@ class ServiceBinderTest {
         verify {
             toolCallBridge.submitResult(
                 requestId = "r1",
+                callId = null,
                 toolName = "calculator",
                 resultJson = """{"answer": 42}""",
             )
@@ -437,5 +441,389 @@ class ServiceBinderTest {
 
         assertEquals("model", info.modelId)
         assertEquals(0L, info.modelSizeBytes)
+    }
+
+    // ---- M1/M2: SessionConfig boundary validation --------------------------
+
+    @Test
+    fun `createSession rejects invalid backend with SecurityException`() {
+        val config = SessionConfig(sessionId = "s1", backend = "TPU")
+        try {
+            binder.createSession(config)
+            fail("Expected SecurityException")
+        } catch (e: SecurityException) {
+            assertEquals("Invalid SessionConfig", e.message)
+        }
+        // M1: validation must run before warmup, before orchestrator invocation
+        verify(exactly = 0) { orchestrator.createSession(any(), any()) }
+    }
+
+    @Test
+    fun `createSession rejects maxTokens=0`() {
+        val config = SessionConfig(sessionId = "s1", maxTokens = 0)
+        try {
+            binder.createSession(config)
+            fail("Expected SecurityException")
+        } catch (e: SecurityException) {
+            assertEquals("Invalid SessionConfig", e.message)
+        }
+    }
+
+    @Test
+    fun `createSession rejects maxTokens=Int_MAX_VALUE`() {
+        val config = SessionConfig(sessionId = "s1", maxTokens = Int.MAX_VALUE)
+        try {
+            binder.createSession(config)
+            fail("Expected SecurityException")
+        } catch (e: SecurityException) {
+            assertEquals("Invalid SessionConfig", e.message)
+        }
+    }
+
+    @Test
+    fun `createSession rejects oversize systemPrompt`() {
+        val tooLong = "x".repeat(
+            com.adsamcik.mindlayer.service.engine.SessionManager.MAX_SYSTEM_PROMPT_CHARS + 1,
+        )
+        val config = SessionConfig(sessionId = "s1", systemPrompt = tooLong)
+        try {
+            binder.createSession(config)
+            fail("Expected SecurityException")
+        } catch (e: SecurityException) {
+            assertEquals("Invalid SessionConfig", e.message)
+        }
+    }
+
+    @Test
+    fun `createSession rejects negative expirationMs`() {
+        val config = SessionConfig(sessionId = "s1", expirationMs = -1L)
+        try {
+            binder.createSession(config)
+            fail("Expected SecurityException")
+        } catch (e: SecurityException) {
+            assertEquals("Invalid SessionConfig", e.message)
+        }
+    }
+
+    @Test
+    fun `createSession rejects expirationMs=Long_MAX_VALUE`() {
+        val config = SessionConfig(sessionId = "s1", expirationMs = Long.MAX_VALUE)
+        try {
+            binder.createSession(config)
+            fail("Expected SecurityException")
+        } catch (e: SecurityException) {
+            assertEquals("Invalid SessionConfig", e.message)
+        }
+    }
+
+    @Test
+    fun `createSession rejects sessionId with newline (log-injection candidate)`() {
+        val config = SessionConfig(sessionId = "s1\nINJECT")
+        try {
+            binder.createSession(config)
+            fail("Expected SecurityException")
+        } catch (e: SecurityException) {
+            assertEquals("Invalid SessionConfig", e.message)
+        }
+    }
+
+    // L2: error redaction — e.message from internal validator MUST NOT leak
+    @Test
+    fun `createSession SecurityException does not echo internal exception message`() {
+        every { orchestrator.createSession(any(), any()) } throws
+            IllegalArgumentException("internal: KV cache size 1234 exceeds tier limit")
+        val config = SessionConfig(sessionId = "s1", maxTokens = 2048)
+        try {
+            binder.createSession(config)
+            fail("Expected SecurityException")
+        } catch (e: SecurityException) {
+            assertEquals("Invalid SessionConfig", e.message)
+            // No internal details leaked
+            assertFalse(e.message!!.contains("KV cache"))
+            assertFalse(e.message!!.contains("1234"))
+        }
+    }
+
+    // ---- M3: RequestMeta boundary validation -------------------------------
+
+    @Test
+    fun `infer rejects requestId containing newlines`() {
+        val meta = RequestMeta(requestId = "r1\nINJECT", sessionId = "s1")
+        val pfd = mockk<ParcelFileDescriptor>(relaxed = true)
+        try {
+            binder.infer(meta, null, null, pfd)
+            fail("Expected SecurityException")
+        } catch (e: SecurityException) {
+            assertEquals("Invalid request", e.message)
+        }
+        verify(exactly = 0) { orchestrator.infer(any(), any(), any(), any(), any()) }
+        // M11: PFD must be closed when validation rejects
+        verify { pfd.close() }
+    }
+
+    @Test
+    fun `infer rejects role outside ALLOWED_ROLES`() {
+        val meta = RequestMeta(requestId = "r1", sessionId = "s1", role = "admin")
+        val pfd = mockk<ParcelFileDescriptor>(relaxed = true)
+        try {
+            binder.infer(meta, null, null, pfd)
+            fail("Expected SecurityException")
+        } catch (e: SecurityException) {
+            assertEquals("Invalid request", e.message)
+        }
+    }
+
+    @Test
+    fun `infer rejects priority out of range`() {
+        val meta = RequestMeta(requestId = "r1", sessionId = "s1", priority = 9999)
+        val pfd = mockk<ParcelFileDescriptor>(relaxed = true)
+        try {
+            binder.infer(meta, null, null, pfd)
+            fail("Expected SecurityException")
+        } catch (e: SecurityException) {
+            assertEquals("Invalid request", e.message)
+        }
+    }
+
+    @Test
+    fun `infer rejects empty requestId`() {
+        val meta = RequestMeta(requestId = "", sessionId = "s1")
+        val pfd = mockk<ParcelFileDescriptor>(relaxed = true)
+        try {
+            binder.infer(meta, null, null, pfd)
+            fail("Expected SecurityException")
+        } catch (e: SecurityException) {
+            assertEquals("Invalid request", e.message)
+        }
+    }
+
+    @Test
+    fun `infer rejects blank sessionId`() {
+        val meta = RequestMeta(requestId = "r1", sessionId = "")
+        val pfd = mockk<ParcelFileDescriptor>(relaxed = true)
+        try {
+            binder.infer(meta, null, null, pfd)
+            fail("Expected SecurityException")
+        } catch (e: SecurityException) {
+            assertEquals("Invalid request", e.message)
+        }
+    }
+
+    // ---- M11: FD leak handling ---------------------------------------------
+
+    @Test
+    fun `infer closes image and audio PFDs on validation failure`() {
+        val meta = RequestMeta(requestId = "bad id with spaces!", sessionId = "s1")
+        val pfd = mockk<ParcelFileDescriptor>(relaxed = true)
+        val imgPfd = mockk<ParcelFileDescriptor>(relaxed = true)
+        val audPfd = mockk<ParcelFileDescriptor>(relaxed = true)
+        val image = com.adsamcik.mindlayer.ImageTransfer(
+            requestId = "r1",
+            width = 0,
+            height = 0,
+            pixelFormat = 0,
+            rowStride = 0,
+            payloadBytes = 0,
+            source = imgPfd,
+        )
+        val audio = com.adsamcik.mindlayer.AudioTransfer(
+            requestId = "r1",
+            source = audPfd,
+        )
+        try {
+            binder.infer(meta, image, audio, pfd)
+            fail("Expected SecurityException")
+        } catch (_: SecurityException) { /* expected */ }
+        verify { pfd.close() }
+        verify { imgPfd.close() }
+        verify { audPfd.close() }
+    }
+
+    @Test
+    fun `infer does not close PFD on successful handoff to orchestrator`() {
+        val meta = RequestMeta(requestId = "r1", sessionId = "s1", textContent = "hi")
+        val pfd = mockk<ParcelFileDescriptor>(relaxed = true)
+        binder.infer(meta, null, null, pfd)
+        verify(exactly = 0) { pfd.close() }
+        verify { orchestrator.infer(meta, null, null, pfd, any()) }
+    }
+
+    // ---- L1: getStatus scoping ---------------------------------------------
+
+    @Test
+    fun `getStatus self-caller sees full memory and headroom data`() {
+        // Default setup: Binder.getCallingUid() returns Process.myUid() → self-UID path
+        val status = binder.getStatus()
+        assertEquals(6000L, status.availableRamMb)
+        assertEquals(12000L, status.totalRamMb)
+        assertEquals(4.5f, status.headroom!!, 0.001f)
+        assertEquals(2, status.activeInferenceCount)
+    }
+
+    @Test
+    fun `getStatus non-self caller has memory headroom zeroed`() {
+        // Force getCallingUid to return a non-self uid
+        mockkStatic(android.os.Binder::class)
+        every { android.os.Binder.getCallingUid() } returns 99999
+        try {
+            val status = binder.getStatus()
+            assertEquals(0L, status.availableRamMb)
+            assertEquals(0L, status.totalRamMb)
+            assertNull(status.headroom)
+            assertEquals("NORMAL", status.memoryPressure)
+            // activeInferenceCount is replaced by caller's own count (0 here)
+            assertEquals(0, status.activeInferenceCount)
+            assertFalse(status.isForeground)
+        } finally {
+            io.mockk.unmockkStatic(android.os.Binder::class)
+        }
+    }
+
+    // ---- H2: rate-limit before allowlist; rejection bucket caps recordPending
+
+    @Test
+    fun `un-allowlisted UID hammered N times triggers bounded recordPending count`() {
+        val store = mockk<AllowlistStore>(relaxed = true)
+        every { store.isDenied(any(), any()) } returns false
+        every { store.isAllowed(any(), any()) } returns false
+
+        val rateLimiter = RateLimiter(
+            maxRequestsPerMinute = 10_000,    // don't trip the main bucket
+            maxConcurrent = 1_000,
+            maxRejectionsPerMinute = 6,
+        )
+        val externalUid = 99001
+        val localBinder = ServiceBinder(
+            service = service,
+            engineManager = engineManager,
+            orchestrator = orchestrator,
+            diagnosticExporter = diagnosticExporter,
+            thermalMonitor = thermalMonitor,
+            memoryBudget = memoryBudget,
+            callerVerifier = { _, _ ->
+                CallerIdentity(
+                    packageName = "evil.app",
+                    signingCertSha256 = "evilsig",
+                    displayName = "Evil",
+                )
+            },
+            allowlistStore = store,
+            rateLimiter = rateLimiter,
+        )
+
+        mockkStatic(android.os.Binder::class)
+        every { android.os.Binder.getCallingUid() } returns externalUid
+        try {
+            repeat(50) {
+                try { localBinder.getStatus() } catch (_: SecurityException) { /* expected */ }
+            }
+        } finally {
+            io.mockk.unmockkStatic(android.os.Binder::class)
+        }
+
+        // Only the first ~6 rejections in the minute should call recordPending.
+        // Looser upper bound (8) to absorb minor refill timing variance.
+        verify(atLeast = 1, atMost = 8) {
+            store.recordPending(any(), any(), any())
+        }
+    }
+
+    // ---- H4-binder: engineWarming in getStatus ----------------------------
+
+    @Test
+    fun `getStatus returns engineWarming true when warmup is in flight`() {
+        val warmupField = ServiceBinder::class.java.getDeclaredField("engineWarmupInFlight")
+        warmupField.isAccessible = true
+        val warmupAtomic = warmupField.get(binder) as java.util.concurrent.atomic.AtomicBoolean
+        warmupAtomic.set(true)
+        try {
+            val status = binder.getStatus()
+            assertTrue(status.engineWarming)
+        } finally {
+            warmupAtomic.set(false)
+        }
+    }
+
+    // ---- M9: getStatus session count scoped to calling UID -----------------
+
+    @Test
+    fun `getStatus scopes session count to calling UID for non-self callers`() {
+        mockkStatic(Binder::class)
+        every { Binder.getCallingUid() } returns 1001
+        try {
+            val ownedSession = SessionInfo("s1", "GPU", 4096, 0, 0, 0, 0, false)
+            every { orchestrator.listSessionsOwnedBy(1001) } returns listOf(ownedSession)
+
+            val status = binder.getStatus()
+
+            assertEquals(1, status.activeSessionCount)
+            verify(exactly = 0) { orchestrator.listSessions() }
+            verify { orchestrator.listSessionsOwnedBy(1001) }
+        } finally {
+            io.mockk.unmockkStatic(Binder::class)
+        }
+    }
+
+    // ---- M7: rate-limit token consumed before allowlist check --------------
+
+    @Test
+    fun `authorizeCall consumes rate-limit token even for allowlist-rejected callers`() {
+        mockkStatic(Binder::class)
+        every { Binder.getCallingUid() } returns 1001
+
+        val mockAllowlist = mockk<AllowlistStore>(relaxed = true)
+        every { mockAllowlist.isDenied(any(), any()) } returns false
+        every { mockAllowlist.isAllowed(any(), any()) } returns false
+
+        val mockRateLimiter = mockk<RateLimiter>(relaxed = true)
+        every { mockRateLimiter.tryAcquire(any()) } returns true
+
+        val testBinder = ServiceBinder(
+            service = service,
+            engineManager = engineManager,
+            orchestrator = orchestrator,
+            diagnosticExporter = diagnosticExporter,
+            thermalMonitor = thermalMonitor,
+            memoryBudget = memoryBudget,
+            callerVerifier = { _, _ ->
+                CallerIdentity(
+                    packageName = "test.caller",
+                    signingCertSha256 = "testsig",
+                    displayName = "Test Caller",
+                )
+            },
+            allowlistStore = mockAllowlist,
+            rateLimiter = mockRateLimiter,
+        )
+
+        try {
+            try {
+                testBinder.getStatus()
+                fail("Expected SecurityException from allowlist")
+            } catch (e: SecurityException) {
+                // expected
+            }
+            verify { mockRateLimiter.tryAcquire(1001) }
+        } finally {
+            io.mockk.unmockkStatic(Binder::class)
+        }
+    }
+
+    // ---- M10: registerClient atomicity (compute-based) ---------------------
+
+    @Test
+    fun `registerClient swaps prior token atomically without leaking DeathRecipient`() {
+        val first = mockk<IBinder>(relaxed = true)
+        val second = mockk<IBinder>(relaxed = true)
+        // Default mockk(relaxed=true) accepts linkToDeath/unlinkToDeath without error.
+
+        binder.registerClient(first)
+        binder.registerClient(second)
+
+        // The OLD recipient must be unlinked when replaced.
+        verify { first.unlinkToDeath(any(), 0) }
+        // Both tokens received linkToDeath exactly once.
+        verify(exactly = 1) { first.linkToDeath(any(), 0) }
+        verify(exactly = 1) { second.linkToDeath(any(), 0) }
     }
 }

@@ -57,6 +57,7 @@ class InferenceOrchestrator(
     companion object {
         private const val TAG = "InferenceOrchestrator"
         private const val MAX_TOOL_ROUNDS = 25
+        private const val INFERENCE_DEADLINE_MS = 5L * 60 * 1000   // 5 minutes
     }
 
     /** Extract concatenated text from a [Message]'s contents. */
@@ -245,6 +246,7 @@ class InferenceOrchestrator(
             return
         }
 
+        val deadlineNs = System.nanoTime() + INFERENCE_DEADLINE_MS * 1_000_000L
         // Single-writer: serialize sends for this session
         handle.mutex.withLock {
             handle.activeRequestId = meta.requestId
@@ -385,6 +387,18 @@ class InferenceOrchestrator(
 
                 // --- Tool call loop -----------------------------------------
                 while (accumulatedToolCalls.isNotEmpty() && toolCallRound < MAX_TOOL_ROUNDS) {
+                    if (System.nanoTime() > deadlineNs) {
+                        MindlayerLog.w(TAG, "Inference wallclock exceeded after $toolCallRound tool round(s)", requestId = meta.requestId, sessionId = meta.sessionId)
+                        writer.writeDone(seq, "wallclock_limit")
+                        seq++
+                        return@withLock
+                    }
+                    if (handle.estimatedTokens >= handle.effectiveMaxTokens) {
+                        MindlayerLog.w(TAG, "Inference token budget exceeded (${handle.estimatedTokens}/${handle.effectiveMaxTokens})", requestId = meta.requestId, sessionId = meta.sessionId)
+                        writer.writeDone(seq, "token_limit")
+                        seq++
+                        return@withLock
+                    }
                     // TOOL_ROUTING: intercept synthetic tool before forwarding
                     if (isToolRouting) {
                         val structuredResult = StructuredOutputHelper
@@ -452,6 +466,8 @@ class InferenceOrchestrator(
                 }
 
                 val finishReason = when {
+                    System.nanoTime() > deadlineNs -> "wallclock_limit"
+                    handle.estimatedTokens >= handle.effectiveMaxTokens -> "token_limit"
                     toolCallRound >= MAX_TOOL_ROUNDS -> "tool_call_limit"
                     else -> "stop"
                 }

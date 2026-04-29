@@ -159,14 +159,21 @@ val sessionId = mindlayer.createSession {
     }]""")
 }
 
-mindlayer.chat(sessionId, "What's the weather in Prague?").collect { event ->
+val handle = mindlayer.chat(sessionId, "What's the weather in Prague?")
+handle.events.collect { event ->
     when (event) {
         is MindlayerEvent.ToolCall -> {
             val result = fetchWeather(event.arguments) // your tool implementation
-            mindlayer.submitToolResult(event.callId, event.toolName, result)
+            mindlayer.submitToolResult(
+                requestId = handle.requestId,
+                callId = event.callId,
+                toolName = event.toolName,
+                resultJson = result,
+            )
         }
         is MindlayerEvent.TextDelta -> print(event.text)
         is MindlayerEvent.Done -> println()
+        else -> {}
     }
 }
 ```

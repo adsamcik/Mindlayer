@@ -458,6 +458,27 @@ class MindlayerApiTest {
         assertEquals("req-tool", captured.requestId)
         assertEquals("search", captured.toolName)
         assertEquals("""{"results":[]}""", captured.resultJson)
+        assertNull(captured.callId)
+    }
+
+    @Test
+    fun `submitToolResult_withCallId_forwardsCallIdToAidl`() = runTest {
+        val resultSlot = slot<ToolResult>()
+        every { mockService.submitToolResult(any(), capture(resultSlot)) } returns Unit
+
+        mindlayer.submitToolResult(
+            requestId = "req-tool-2",
+            callId = "call-abc123",
+            toolName = "weather",
+            resultJson = """{"temp":20}""",
+        )
+
+        verify(exactly = 1) { mockService.submitToolResult(eq("req-tool-2"), any()) }
+        val captured = resultSlot.captured
+        assertEquals("req-tool-2", captured.requestId)
+        assertEquals("call-abc123", captured.callId)
+        assertEquals("weather", captured.toolName)
+        assertEquals("""{"temp":20}""", captured.resultJson)
     }
 
     // ═════════════════════════════════════════════════════════════════════

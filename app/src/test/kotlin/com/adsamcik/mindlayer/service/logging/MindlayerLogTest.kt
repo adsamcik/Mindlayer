@@ -146,4 +146,51 @@ class MindlayerLogTest {
         MindlayerLog.i("Z", "plain message")
         verify { Log.i("Mindlayer.Z", "plain message") }
     }
+
+    // ── L11: sanitizeLogField ────────────────────────────────────────────
+
+    @Test
+    fun `sanitizeLogField returns 'null' for null input`() {
+        assertEquals("null", sanitizeLogField(null))
+    }
+
+    @Test
+    fun `sanitizeLogField passes through alphanumerics`() {
+        assertEquals("abc123XYZ", sanitizeLogField("abc123XYZ"))
+    }
+
+    @Test
+    fun `sanitizeLogField passes through allowed punctuation`() {
+        assertEquals("a.b_c-d:e/f", sanitizeLogField("a.b_c-d:e/f"))
+    }
+
+    @Test
+    fun `sanitizeLogField replaces newline and CR with underscore`() {
+        assertEquals("ab__cd", sanitizeLogField("ab\r\ncd"))
+    }
+
+    @Test
+    fun `sanitizeLogField replaces ESC and tab with underscore`() {
+        assertEquals("a__b", sanitizeLogField("a\u001b\tb"))
+    }
+
+    @Test
+    fun `sanitizeLogField caps at 64 chars`() {
+        val input = "a".repeat(200)
+        val out = sanitizeLogField(input)
+        assertEquals(64, out.length)
+        assertEquals("a".repeat(64), out)
+    }
+
+    @Test
+    fun `format sanitizes requestId with newline`() {
+        MindlayerLog.d("X", "msg", requestId = "r1\nINJECT")
+        verify { Log.d("Mindlayer.X", "[req=r1_INJECT] msg") }
+    }
+
+    @Test
+    fun `format sanitizes sessionId with control chars`() {
+        MindlayerLog.i("X", "msg", sessionId = "s\u001b1")
+        verify { Log.i("Mindlayer.X", "[sess=s_1] msg") }
+    }
 }
