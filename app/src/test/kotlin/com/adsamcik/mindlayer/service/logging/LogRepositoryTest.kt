@@ -1,4 +1,4 @@
-package com.adsamcik.mindlayer.service.logging
+﻿package com.adsamcik.mindlayer.service.logging
 
 import android.content.Context
 import android.util.Log
@@ -11,6 +11,7 @@ import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
@@ -67,7 +68,7 @@ class LogRepositoryTest {
     }
 
     /** Flush any pending drain-loop work, then return the single inserted entry. */
-    private suspend fun awaitSingleEntry(): LogEntry {
+    private suspend fun TestScope.awaitSingleEntry(): LogEntry {
         advanceUntilIdle()
         val entries = dao.getRecent(10)
         assertEquals("Expected exactly 1 log entry", 1, entries.size)
