@@ -5,6 +5,8 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.SharedMemory
+import android.system.Os
+import android.system.OsConstants
 import androidx.annotation.RequiresApi
 import com.adsamcik.mindlayer.AudioTransfer
 import com.adsamcik.mindlayer.ImageTransfer
@@ -90,6 +92,18 @@ class SharedMemoryPool(cacheDir: File) {
             require(transfer.payloadBytes in 1..MAX_MEDIA_BYTES) {
                 "Media payload size out of bounds: ${transfer.payloadBytes}"
             }
+        }
+        // H1 — validate dimensions, pixelFormat, and stride*height ≤ payloadBytes
+        // BEFORE any Bitmap allocation. This rejects unbounded width×height
+        // and unknown pixelFormat values that previously coerced to ARGB_8888.
+        if (isRawPixels) {
+            validatePixelBufferLayout(
+                width = transfer.width,
+                height = transfer.height,
+                pixelFormat = transfer.pixelFormat,
+                rowStride = transfer.rowStride,
+                bufferSize = transfer.payloadBytes,
+            )
         }
         val staged = createStagingFile(requestId, "img", extensionForMime(mime))
 
@@ -404,10 +418,16 @@ class SharedMemoryPool(cacheDir: File) {
 
 // ---- Pixel-layout helpers (internal for unit testing via Robolectric) ------
 
+/** Allowed raw pixel formats — anything else is rejected (H1). */
+private val ALLOWED_PIXEL_FORMATS = setOf(PixelFormat.RGBA_8888, PixelFormat.RGB_565)
+
 private fun pixelFormatToBitmapConfig(pixelFormat: Int): Bitmap.Config = when (pixelFormat) {
     PixelFormat.RGBA_8888 -> Bitmap.Config.ARGB_8888
-    PixelFormat.RGB_565  -> Bitmap.Config.RGB_565
-    else                 -> Bitmap.Config.ARGB_8888
+    PixelFormat.RGB_565   -> Bitmap.Config.RGB_565
+    // H1: caller-supplied unknown formats must NOT silently coerce to ARGB_8888 —
+    // that would let an attacker disagree with the buffer's actual layout and
+    // trigger an over-read in Bitmap.copyPixelsFromBuffer.
+    else                  -> throw IllegalArgumentException("Unsupported pixelFormat: $pixelFormat")
 }
 
 internal fun bytesPerPixel(config: Bitmap.Config): Int = when (config) {
@@ -430,6 +450,16 @@ internal fun validatePixelBufferLayout(
 ): Long {
     require(width in 1..MAX_IMAGE_DIM) { "Image width out of range: $width" }
     require(height in 1..MAX_IMAGE_DIM) { "Image height out of range: $height" }
+    require(pixelFormat in ALLOWED_PIXEL_FORMATS) {
+        "Unsupported pixelFormat: $pixelFormat"
+    }
+    // H1 — guard the megapixel product itself in Long arithmetic, independent
+    // of the per-dimension cap, so a future MAX_IMAGE_DIM bump can't accidentally
+    // re-open a 4-billion-pixel allocation window.
+    val pixels = width.toLong() * height.toLong()
+    require(pixels <= MAX_IMAGE_DIM.toLong() * MAX_IMAGE_DIM.toLong()) {
+        "Image pixel count out of range: $pixels"
+    }
     val bpp = bytesPerPixel(pixelFormatToBitmapConfig(pixelFormat))
     val tightRowBytes = width.toLong() * bpp.toLong()
     val expected = if (rowStride > 0 && rowStride.toLong() != tightRowBytes) {
