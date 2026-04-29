@@ -109,9 +109,11 @@ This is the file you upload to Play. It is:
 
 > ⚠️ The Gemma `.litertlm` model is **not** checked into git. For a Play
 > Store release, place the real model binary at the path expected by the
-> `:gemma_model` module before running `:app:bundleRelease`. If the model is
-> absent, the AAB will still build but the AI-Pack will ship empty and the
-> installed app won't find the model at runtime.
+> `:gemma_model` module before running `:app:bundleRelease`, and include a
+> SHA-256 sidecar named `<model>.litertlm.sha256`. Release builds reject model
+> files without matching integrity metadata. If the model is absent, the AAB
+> will still build but the AI-Pack will ship empty and the installed app won't
+> find the model at runtime.
 
 ### 2.3 (Optional) Build a signed universal APK for side-loading
 
@@ -180,12 +182,14 @@ bundletool dump manifest --bundle app\build\outputs\bundle\release\app-release.a
 | `:app:testDebugUnitTest`        | ✅ every push                 | ✅                                        |
 | `:app:connectedDebugAndroidTest`| ✅ every push (API 33 AVD)    | ✅ with connected device                  |
 | `lintDebug`                     | ✅ every push                 | ✅                                        |
-| `:app:bundleRelease` (unsigned) | ✅ on `main` only, for sanity | ✅                                        |
-| `:app:bundleRelease` (signed)   | ❌ never                      | ✅ only when `keystore.properties` is set |
+| `:app:bundleRelease` (unsigned) | ✅ on `main` when signing secrets are absent | ✅ |
+| `:app:bundleRelease` (signed)   | ✅ when CI signing secrets are configured | ✅ only when `keystore.properties` is set |
 
-CI's unsigned `app-release.aab` artifact on `main` is **not** uploadable to
-Play — it's just proof that R8 + resource shrinking still succeeds end-to-end
-before you cut a real release locally.
+CI can sign the release AAB when `ANDROID_KEYSTORE_BASE64`,
+`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`
+are configured as repository secrets. Without those secrets, CI still builds an
+unsigned `app-release.aab` on `main`; that artifact is **not** uploadable to
+Play and only proves that R8 + resource shrinking still succeeds end-to-end.
 
 ---
 

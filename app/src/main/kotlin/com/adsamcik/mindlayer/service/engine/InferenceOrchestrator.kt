@@ -7,7 +7,6 @@ import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Message
-import com.google.gson.Gson
 import com.adsamcik.mindlayer.AudioTransfer
 import com.adsamcik.mindlayer.ImageTransfer
 import com.adsamcik.mindlayer.RequestMeta
@@ -29,6 +28,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.put
 import com.adsamcik.mindlayer.service.logging.logExtraJson
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -52,7 +53,6 @@ class InferenceOrchestrator(
     companion object {
         private const val TAG = "InferenceOrchestrator"
         private const val MAX_TOOL_ROUNDS = 25
-        private val gson = Gson()
     }
 
     /** Extract concatenated text from a [Message]'s contents. */
@@ -60,6 +60,23 @@ class InferenceOrchestrator(
         val parts = contents.contents.filterIsInstance<Content.Text>()
         return if (parts.isEmpty()) null else parts.joinToString("") { it.text }
     }
+
+    private fun encodeToolArguments(arguments: Any?): String {
+        if (arguments == null) return "{}"
+        if (arguments is String) {
+            val trimmed = arguments.trim()
+            return if (trimmed.isEmpty()) "{}" else trimmed
+        }
+        if (arguments is JSONObject || arguments is JSONArray) return arguments.toString()
+        val wrapped = JSONObject.wrap(arguments)
+        if (wrapped == null || wrapped == JSONObject.NULL) {
+            return arguments.toString().trim().takeIf { it.looksLikeJson() } ?: "{}"
+        }
+        return wrapped.toString()
+    }
+
+    private fun String.looksLikeJson(): Boolean =
+        (startsWith("{") && endsWith("}")) || (startsWith("[") && endsWith("]"))
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -285,7 +302,7 @@ class InferenceOrchestrator(
                         }
                     }
                     for (tc in chunk.toolCalls) {
-                        accumulatedToolCalls.add(tc.name to gson.toJson(tc.arguments))
+                        accumulatedToolCalls.add(tc.name to encodeToolArguments(tc.arguments))
                     }
                 }
 
@@ -408,7 +425,7 @@ class InferenceOrchestrator(
 
                     // Check whether the model wants more tool calls
                     for (tc in response.toolCalls) {
-                        accumulatedToolCalls.add(tc.name to gson.toJson(tc.arguments))
+                        accumulatedToolCalls.add(tc.name to encodeToolArguments(tc.arguments))
                     }
                 }
 

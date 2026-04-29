@@ -3,7 +3,10 @@ package com.adsamcik.mindlayer.service.engine
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.util.Log
+import org.json.JSONObject
 import java.io.File
+import java.io.FileInputStream
+import java.security.MessageDigest
 import java.util.Locale
 
 /**
@@ -17,6 +20,8 @@ object ModelRegistry {
 
     private const val TAG = "ModelRegistry"
     private const val MODEL_EXTENSION = ".litertlm"
+    private const val INTEGRITY_MANIFEST = "model_integrity.json"
+    private val SHA256_REGEX = Regex("(?i)^[0-9a-f]{64}$")
 
     /**
      * Scan device directories for `.litertlm` model files.
@@ -30,17 +35,26 @@ object ModelRegistry {
      *
      * @return models sorted by size descending (largest first).
      */
-    fun discoverModels(context: Context): List<ModelInfo> {
+    fun discoverModels(
+        context: Context,
+        requireIntegrity: Boolean = !isDebuggable(context),
+    ): List<ModelInfo> {
         val seen = mutableSetOf<String>() // filenames already collected
         val models = mutableListOf<ModelInfo>()
+        val manifest = loadIntegrityManifest(context)
 
         fun scanDir(dir: File?) {
             if (dir == null || !dir.isDirectory) return
             dir.listFiles()?.filter { it.isFile && it.name.endsWith(MODEL_EXTENSION) }
                 ?.forEach { file ->
                     if (file.name !in seen) {
-                        seen += file.name
-                        models += buildModelInfo(file)
+                        val verification = verifyModelFile(file, manifest[file.name], requireIntegrity)
+                        if (verification.accepted) {
+                            seen += file.name
+                            models += buildModelInfo(file, verification.sha256)
+                        } else {
+                            Log.w(TAG, "Skipping model without valid integrity metadata: ${file.name}")
+                        }
                     }
                 }
         }
@@ -51,7 +65,7 @@ object ModelRegistry {
         scanDir(context.cacheDir)
 
         // 4: Debug sideload directory
-        if ((context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+        if (isDebuggable(context)) {
             try {
                 scanDir(File("/data/local/tmp"))
             } catch (_: SecurityException) {
@@ -65,6 +79,11 @@ object ModelRegistry {
             for (name in assetNames) {
                 if (!name.endsWith(MODEL_EXTENSION)) continue
                 if (name in seen) continue
+                val expected = manifest[name]
+                if (requireIntegrity && expected == null) {
+                    Log.w(TAG, "Skipping AI pack model without integrity metadata: $name")
+                    continue
+                }
 
                 val extracted = File(context.filesDir, name)
                 if (!extracted.exists()) {
@@ -76,8 +95,14 @@ object ModelRegistry {
                     }
                     Log.i(TAG, "Extracted: ${extracted.length() / 1_048_576}MB")
                 }
-                seen += name
-                models += buildModelInfo(extracted)
+                val verification = verifyModelFile(extracted, expected, requireIntegrity)
+                if (verification.accepted) {
+                    seen += name
+                    models += buildModelInfo(extracted, verification.sha256)
+                } else {
+                    extracted.delete()
+                    Log.w(TAG, "Skipping AI pack model with invalid integrity metadata: $name")
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "AI pack asset scan failed: ${e.message}")
@@ -130,13 +155,99 @@ object ModelRegistry {
 
     // -- Internal helpers -----------------------------------------------------
 
-    private fun buildModelInfo(file: File): ModelInfo {
+    private fun buildModelInfo(file: File, sha256: String?) : ModelInfo {
         val id = file.nameWithoutExtension
         return ModelInfo(
             id = id,
             displayName = deriveDisplayName(file.name),
             path = file.absolutePath,
             sizeBytes = file.length(),
+            sha256 = sha256,
         )
     }
+
+    private fun verifyModelFile(
+        file: File,
+        manifestEntry: IntegrityMetadata?,
+        requireIntegrity: Boolean,
+    ): VerificationResult {
+        val expected = manifestEntry ?: readSidecarIntegrity(file)
+        if (expected == null) {
+            return VerificationResult(accepted = !requireIntegrity, sha256 = null)
+        }
+        if (expected.sizeBytes != null && expected.sizeBytes != file.length()) {
+            return VerificationResult(accepted = false, sha256 = null)
+        }
+        val actualSha256 = sha256(file)
+        return VerificationResult(
+            accepted = actualSha256.equals(expected.sha256, ignoreCase = true),
+            sha256 = actualSha256,
+        )
+    }
+
+    private fun loadIntegrityManifest(context: Context): Map<String, IntegrityMetadata> {
+        val raw = try {
+            context.assets.open(INTEGRITY_MANIFEST).bufferedReader().use { it.readText() }
+        } catch (_: Exception) {
+            return emptyMap()
+        }
+        return try {
+            val root = JSONObject(raw)
+            val models = root.optJSONArray("models") ?: return emptyMap()
+            buildMap {
+                for (i in 0 until models.length()) {
+                    val model = models.getJSONObject(i)
+                    val filename = model.optString("filename").takeIf { it.endsWith(MODEL_EXTENSION) }
+                        ?: continue
+                    val sha256 = model.optString("sha256").lowercase(Locale.ROOT)
+                    if (!SHA256_REGEX.matches(sha256)) continue
+                    val size = model.optLong("sizeBytes", -1L).takeIf { it > 0L }
+                    put(filename, IntegrityMetadata(sha256, size))
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Model integrity manifest is invalid: ${e.message}")
+            emptyMap()
+        }
+    }
+
+    private fun readSidecarIntegrity(file: File): IntegrityMetadata? {
+        val candidates = listOf(
+            File(file.parentFile, "${file.name}.sha256"),
+            File(file.parentFile, "${file.nameWithoutExtension}.sha256"),
+        )
+        val sidecar = candidates.firstOrNull { it.isFile } ?: return null
+        val sha256 = sidecar.readText()
+            .lineSequence()
+            .map { it.trim().substringBefore(' ').lowercase(Locale.ROOT) }
+            .firstOrNull { SHA256_REGEX.matches(it) }
+            ?: return null
+        return IntegrityMetadata(sha256, sizeBytes = null)
+    }
+
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        FileInputStream(file).use { input ->
+            while (true) {
+                val read = input.read(buffer)
+                if (read == -1) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun isDebuggable(context: Context): Boolean =
+        (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+    private data class IntegrityMetadata(
+        val sha256: String,
+        val sizeBytes: Long?,
+    )
+
+    private data class VerificationResult(
+        val accepted: Boolean,
+        val sha256: String?,
+    )
 }
