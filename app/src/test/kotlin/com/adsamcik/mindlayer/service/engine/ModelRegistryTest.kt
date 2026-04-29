@@ -11,12 +11,14 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.nio.file.Files
 import java.security.MessageDigest
 
 @RunWith(RobolectricTestRunner::class)
@@ -314,6 +316,55 @@ class ModelRegistryTest {
 
         assertEquals(listOf("trusted-local"), models.map { it.id })
         assertEquals(local.absolutePath, models.single().path)
+    }
+
+    @Test
+    fun `discoverModels skips symlinks in model scan dirs`() {
+        Assume.assumeFalse(
+            "Symlink test skipped on Windows",
+            System.getProperty("os.name").lowercase().contains("win"),
+        )
+
+        val tempDir = Files.createTempDirectory("mindlayer-symlink-test").toFile()
+        val outsideFile = Files.createTempFile("outside-target", ".litertlm").toFile()
+        try {
+            // Real model file directly in the scan dir
+            val realFile = File(tempDir, "real-model.litertlm").apply { writeBytes(ByteArray(100)) }
+
+            // Symlink inside the dir pointing to a file outside it
+            val symlinkPath = tempDir.toPath().resolve("link.litertlm")
+            try {
+                Files.createSymbolicLink(symlinkPath, outsideFile.toPath())
+            } catch (e: Exception) {
+                when (e) {
+                    is UnsupportedOperationException,
+                    is java.nio.file.AccessDeniedException ->
+                        Assume.assumeTrue("Symlink creation not supported on this platform: ${e.message}", false)
+                    else -> throw e
+                }
+            }
+
+            val context = mockk<android.content.Context> {
+                every { filesDir } returns tempDir
+                every { getExternalFilesDir(null) } returns null
+                every { cacheDir } returns File(tempDir, "nonexistent-cache") // won't exist
+                every { applicationInfo } returns ApplicationInfo()
+                every { assets } returns mockk {
+                    every { list("") } returns emptyArray()
+                    every { open("model_integrity.json") } throws java.io.IOException("no manifest")
+                }
+            }
+
+            val models = ModelRegistry.discoverModels(context, requireIntegrity = false)
+
+            assertEquals("Only the real file should be discovered, not the symlink", 1, models.size)
+            assertEquals(realFile.absolutePath, models.single().path)
+            assertEquals("real-model", models.single().id)
+            assertTrue(models.none { it.id == "link" })
+        } finally {
+            tempDir.deleteRecursively()
+            outsideFile.delete()
+        }
     }
 
     private fun sha256(bytes: ByteArray): String =

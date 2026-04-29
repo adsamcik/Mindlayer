@@ -3,9 +3,11 @@ package com.adsamcik.mindlayer.service.engine
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.util.Log
+import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
+import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.Locale
 
@@ -45,8 +47,20 @@ object ModelRegistry {
 
         fun scanDir(dir: File?) {
             if (dir == null || !dir.isDirectory) return
+            val dirCanonical = try { dir.canonicalFile } catch (_: Exception) { dir.absoluteFile }
             dir.listFiles()?.filter { it.isFile && it.name.endsWith(MODEL_EXTENSION) }
                 ?.forEach { file ->
+                    // Reject symlinks — prevents attacker-controlled mmap targets via linked paths
+                    if (Files.isSymbolicLink(file.toPath())) {
+                        MindlayerLog.w(TAG, "Skipping symlink in model dir: ${file.name}")
+                        return@forEach
+                    }
+                    // Defense-in-depth: canonical path must still be a direct child of dir
+                    val canonical = try { file.canonicalFile } catch (_: Exception) { null }
+                    if (canonical == null || canonical.parentFile?.canonicalPath != dirCanonical.canonicalPath) {
+                        MindlayerLog.w(TAG, "Skipping model outside scan dir (path traversal?): ${file.name}")
+                        return@forEach
+                    }
                     if (file.name !in seen) {
                         val verification = verifyModelFile(file, manifest[file.name], requireIntegrity)
                         if (verification.accepted) {
