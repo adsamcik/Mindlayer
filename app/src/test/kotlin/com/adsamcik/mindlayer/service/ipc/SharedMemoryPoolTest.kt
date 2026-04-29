@@ -1,5 +1,6 @@
 package com.adsamcik.mindlayer.service.ipc
 
+import android.graphics.PixelFormat
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.test.core.app.ApplicationProvider
@@ -365,5 +366,103 @@ class SharedMemoryPoolTest {
         } finally {
             try { pfd.close() } catch (_: Throwable) {}
         }
+    }
+
+    // =========================================================================
+    // M4 — validatePixelBufferLayout dimension guard
+    // =========================================================================
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `validatePixelBufferLayout rejects width exceeding MAX_IMAGE_DIM`() {
+        // width=20000 > 8192 must throw before any Bitmap allocation
+        validatePixelBufferLayout(
+            width = 20000,
+            height = 1,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 0,
+            bufferSize = 20000 * 4,
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `validatePixelBufferLayout rejects height exceeding MAX_IMAGE_DIM`() {
+        validatePixelBufferLayout(
+            width = 1,
+            height = 20000,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 0,
+            bufferSize = 20000 * 4,
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `validatePixelBufferLayout rejects zero width`() {
+        validatePixelBufferLayout(
+            width = 0,
+            height = 4,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 0,
+            bufferSize = 16,
+        )
+    }
+
+    // =========================================================================
+    // C2 — validatePixelBufferLayout rowStride support
+    // =========================================================================
+
+    @Test
+    fun `validatePixelBufferLayout tight rowStride returns correct tight size`() {
+        // width=4, height=4, bpp=4 → tight = 16*4 = 64
+        val tightSize = validatePixelBufferLayout(
+            width = 4,
+            height = 4,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 0, // 0 means tight
+            bufferSize = 64,
+        )
+        assertEquals(64L, tightSize)
+    }
+
+    @Test
+    fun `validatePixelBufferLayout non-tight rowStride accepts padded buffer and returns tight size`() {
+        // width=4, height=4, bpp=4 → tightRowBytes=16, rowStride=20, buffer=20*4=80
+        val tightSize = validatePixelBufferLayout(
+            width = 4,
+            height = 4,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 20,
+            bufferSize = 80,
+        )
+        assertEquals(64L, tightSize) // tight = 16*4
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `validatePixelBufferLayout rejects buffer sized for tight layout when rowStride indicates padding`() {
+        // rowStride=20 means buffer must be 20*4=80, not 64
+        validatePixelBufferLayout(
+            width = 4,
+            height = 4,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 20,
+            bufferSize = 64,
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `validatePixelBufferLayout rejects rowStride smaller than width times bpp`() {
+        // rowStride=10 < tightRowBytes=16 is invalid
+        validatePixelBufferLayout(
+            width = 4,
+            height = 4,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 10,
+            bufferSize = 40,
+        )
+    }
+
+    @Test
+    fun `bytesPerPixel returns 4 for ARGB_8888 and 2 for RGB_565`() {
+        assertEquals(4, bytesPerPixel(android.graphics.Bitmap.Config.ARGB_8888))
+        assertEquals(2, bytesPerPixel(android.graphics.Bitmap.Config.RGB_565))
     }
 }

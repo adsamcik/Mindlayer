@@ -43,6 +43,11 @@ class SessionManager(
 
     companion object {
         private const val TAG = "SessionManager"
+        const val MAX_SYSTEM_PROMPT_CHARS = 64 * 1024
+        const val MAX_TOOLS_JSON_CHARS = 64 * 1024
+        const val MAX_EXTRA_CONTEXT_CHARS = 64 * 1024
+        const val MAX_INITIAL_HISTORY_TURNS = 200
+        const val MAX_HISTORY_TURN_CHARS = 16 * 1024
     }
 
     private val sessions = ConcurrentHashMap<String, SessionHandle>()
@@ -84,7 +89,7 @@ class SessionManager(
             val evicted = if (ownerToken == null) {
                 evictLowestPriority()
             } else {
-                evictLowestPriorityOwnedBy(ownerToken)
+                evictForOwnerWithFairShare(ownerToken, tier.maxSessions)
             }
             if (!evicted) {
                 throw IllegalStateException("Session limit reached for caller")
@@ -319,6 +324,48 @@ class SessionManager(
     }
 
     /**
+     * Evict a session to make room for [ownerToken], respecting per-UID fair share.
+     *
+     * If the caller currently owns fewer sessions than their fair share, a session
+     * from a UID that is ABOVE fair share (and has an idle non-streaming session)
+     * is evicted. Otherwise falls back to evicting the caller's own lowest-priority
+     * session — preserving the invariant that a well-behaved tenant cannot be
+     * displaced by a newcomer who already holds their fair share.
+     */
+    private fun evictForOwnerWithFairShare(ownerToken: Any, maxSessions: Int): Boolean {
+        val ownedByCaller = sessions.values.count { it.ownerToken == ownerToken }
+        val activeOwners = sessions.values.mapNotNull { it.ownerToken }.distinct()
+        // Fair share = floor((maxSessions + activeOwners) / (activeOwners + 1)), minimum 1.
+        // The +1 in denominator accounts for the caller about to join as a new owner.
+        val fairShare = ((maxSessions + activeOwners.size) / (activeOwners.size + 1)).coerceAtLeast(1)
+
+        if (ownedByCaller < fairShare) {
+            // Caller is below their fair share — may evict from a tenant ABOVE fair share.
+            val tenantOverFair = sessions.values
+                .filter { it.ownerToken != null && it.ownerToken != ownerToken }
+                .groupBy { it.ownerToken!! }
+                .mapNotNull { (_, list) ->
+                    val nonStreaming = list.filter { !it.isStreaming }
+                    if (list.size > fairShare && nonStreaming.isNotEmpty()) nonStreaming else null
+                }
+                .flatten()
+                .minByOrNull { calculatePriority(it) }
+            if (tenantOverFair != null) {
+                MindlayerLog.w(
+                    TAG,
+                    "Fair-share evicting ${tenantOverFair.sessionId} (owner above fair share)",
+                    sessionId = tenantOverFair.sessionId,
+                )
+                logRepository?.logSessionEvicted(tenantOverFair.sessionId, "fair_share")
+                destroySession(tenantOverFair.sessionId)
+                return true
+            }
+        }
+        // Fall back to evicting the caller's own lowest-priority session.
+        return evictLowestPriorityOwnedBy(ownerToken)
+    }
+
+    /**
      * Evict sessions under memory pressure.
      *
      * Keeps at most **one** non-streaming session (the highest-priority one).
@@ -327,10 +374,10 @@ class SessionManager(
      */
     fun evictUnderPressure() {
         val nonStreaming = sessions.values
-            .filter { !it.isStreaming }
+            .filter { !it.isStreaming && !it.isPinned }
             .sortedBy { calculatePriority(it) }
 
-        // Keep the single highest-priority non-streaming session
+        // Keep the single highest-priority non-streaming, non-pinned session
         val toEvict = if (nonStreaming.size > 1) nonStreaming.dropLast(1) else emptyList()
 
         for (handle in toEvict) {
@@ -374,16 +421,15 @@ class SessionManager(
             }
 
             MemoryPressure.EMERGENCY -> {
-                MindlayerLog.w(TAG, "EMERGENCY pressure — evicting all non-streaming sessions")
-                val nonStreaming = sessions.values.filter { !it.isStreaming }
+                MindlayerLog.w(TAG, "EMERGENCY pressure — evicting all non-streaming, non-pinned sessions")
+                val nonStreaming = sessions.values.filter { !it.isStreaming && !it.isPinned }
                 for (handle in nonStreaming) {
                     logRepository?.logSessionEvicted(handle.sessionId, "emergency_pressure")
                     destroySession(handle.sessionId)
                 }
                 if (nonStreaming.isNotEmpty()) {
                     MindlayerLog.w(
-                        TAG, "Emergency-evicted ${nonStreaming.size} session(s) " +
-                            "(remaining=${sessions.size})"
+                        TAG, "Emergency-evicted ${nonStreaming.size} session(s) (remaining=${sessions.size})"
                     )
                 }
             }
@@ -427,6 +473,17 @@ class SessionManager(
         require(config.maxTokens in 1..32_768) { "maxTokens out of range" }
         val sessionId = config.sessionId
         require(sessionId == null || sessionId.isNotBlank()) { "sessionId must not be blank" }
+        require(sessionId == null || sessionId.length <= 256) { "sessionId too long" }
+        config.systemPrompt?.let { require(it.length <= MAX_SYSTEM_PROMPT_CHARS) { "systemPrompt too long" } }
+        config.toolsJson?.let { require(it.length <= MAX_TOOLS_JSON_CHARS) { "toolsJson too long" } }
+        config.extraContextJson?.let { require(it.length <= MAX_EXTRA_CONTEXT_CHARS) { "extraContextJson too long" } }
+        config.initialHistory?.let { hist ->
+            require(hist.size <= MAX_INITIAL_HISTORY_TURNS) { "initialHistory too many turns" }
+            for (turn in hist) {
+                require(turn.text.length <= MAX_HISTORY_TURN_CHARS) { "initialHistory turn too long" }
+            }
+        }
+        require(config.expirationMs in 0..(365L * 24 * 60 * 60 * 1000)) { "expirationMs out of range" }
     }
 
     /** Destroy all sessions. Called during service teardown. */

@@ -385,6 +385,12 @@ class SessionManagerTest {
 
     @Test
     fun `createSession at capacity rejects caller with no owned eviction candidate`() {
+        // Fair-share analysis: tier=2, owner-A and owner-B each own 1 session.
+        // When owner-C arrives: activeOwners=[A,B] (size=2),
+        //   fairShare = floor((2+2)/(2+1)) = floor(4/3) = 1, coerceAtLeast(1) = 1.
+        // C owns 0 < fairShare=1 → enters fair-share path.
+        // A owns 1, B owns 1; neither is ABOVE fairShare (need > 1), so no candidate found.
+        // Falls through to evictLowestPriorityOwnedBy(C) → C owns nothing → returns false → throws.
         val tightTier = DeviceTier(2, 4096, 4096, 8 * 1024L)
         every { memoryBudget.deviceTier } returns tightTier
 
@@ -404,7 +410,36 @@ class SessionManagerTest {
     }
 
     @Test
-    fun `eviction targets lowest priority session`() {
+    fun `createSession fair-share evicts over-quota tenant for newcomer below quota`() {
+        // Scenario: tier=4. Owner-A acquires 3 sessions (above fair share), owner-B has 1.
+        // Owner-C arrives with 0 sessions.
+        //   activeOwners when C arrives = [A, B] (size=2)
+        //   fairShare = floor((4+2)/(2+1)) = floor(6/3) = 2
+        //   C owns 0 < fairShare=2 → enters fair-share path.
+        //   A owns 3 > fairShare=2 → A is above fair share; has idle sessions.
+        //   One of A's sessions is evicted, C's session is created.
+        val fourSessionTier = DeviceTier(4, 4096, 4096, 8 * 1024L)
+        every { memoryBudget.deviceTier } returns fourSessionTier
+
+        sessionManager.createSession(SessionConfig(sessionId = "a1"), ownerToken = "owner-a")
+        sessionManager.createSession(SessionConfig(sessionId = "a2"), ownerToken = "owner-a")
+        sessionManager.createSession(SessionConfig(sessionId = "a3"), ownerToken = "owner-a")
+        sessionManager.createSession(SessionConfig(sessionId = "b1"), ownerToken = "owner-b")
+        assertEquals(4, sessionManager.sessionCount)
+
+        // Owner-C arrives — should succeed by evicting one of A's sessions
+        sessionManager.createSession(SessionConfig(sessionId = "c1"), ownerToken = "owner-c")
+
+        assertEquals(4, sessionManager.sessionCount)
+        assertNotNull(sessionManager.getSession("c1")) // newcomer admitted
+
+        // B's sole session must be untouched
+        assertNotNull(sessionManager.getSession("b1"))
+
+        // Exactly one of A's three sessions was evicted
+        val aRemaining = listOf("a1", "a2", "a3").count { sessionManager.getSession(it) != null }
+        assertEquals(2, aRemaining)
+    }
         val tightTier = DeviceTier(2, 4096, 4096, 8 * 1024L)
         every { memoryBudget.deviceTier } returns tightTier
 
@@ -649,8 +684,176 @@ class SessionManagerTest {
 
     // ---- SessionHandle data tests ------------------------------------------
 
+    // ---- validateSessionConfig bounds (H2) ---------------------------------
+
     @Test
-    fun `SessionHandle records effectiveMaxTokens`() {
+    fun `validateSessionConfig accepts sessionId exactly 256 chars`() {
+        val id = "a".repeat(256)
+        sessionManager.createSession(SessionConfig(sessionId = id))
+        assertNotNull(sessionManager.getSession(id))
+    }
+
+    @Test
+    fun `validateSessionConfig rejects sessionId over 256 chars`() {
+        try {
+            sessionManager.createSession(SessionConfig(sessionId = "a".repeat(257)))
+            fail("Expected sessionId too long to be rejected")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message.orEmpty().contains("sessionId too long"))
+        }
+    }
+
+    @Test
+    fun `validateSessionConfig accepts systemPrompt at exactly MAX_SYSTEM_PROMPT_CHARS`() {
+        val prompt = "x".repeat(SessionManager.MAX_SYSTEM_PROMPT_CHARS)
+        sessionManager.createSession(SessionConfig(systemPrompt = prompt))
+    }
+
+    @Test
+    fun `validateSessionConfig rejects systemPrompt over MAX_SYSTEM_PROMPT_CHARS`() {
+        val prompt = "x".repeat(SessionManager.MAX_SYSTEM_PROMPT_CHARS + 1)
+        try {
+            sessionManager.createSession(SessionConfig(systemPrompt = prompt))
+            fail("Expected systemPrompt too long to be rejected")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message.orEmpty().contains("systemPrompt too long"))
+        }
+    }
+
+    @Test
+    fun `validateSessionConfig accepts toolsJson at exactly MAX_TOOLS_JSON_CHARS`() {
+        val json = "x".repeat(SessionManager.MAX_TOOLS_JSON_CHARS)
+        // toolsJson is parsed — pass something that fails JSON parse; validate only checks length
+        // We only check that validation itself does not throw an IAE about length.
+        try {
+            sessionManager.createSession(SessionConfig(toolsJson = json))
+        } catch (e: IllegalArgumentException) {
+            // Only re-throw if it's the length rejection we're testing against
+            if (e.message.orEmpty().contains("toolsJson too long")) throw e
+        }
+    }
+
+    @Test
+    fun `validateSessionConfig rejects toolsJson over MAX_TOOLS_JSON_CHARS`() {
+        val json = "x".repeat(SessionManager.MAX_TOOLS_JSON_CHARS + 1)
+        try {
+            sessionManager.createSession(SessionConfig(toolsJson = json))
+            fail("Expected toolsJson too long to be rejected")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message.orEmpty().contains("toolsJson too long"))
+        }
+    }
+
+    @Test
+    fun `validateSessionConfig accepts extraContextJson at exactly MAX_EXTRA_CONTEXT_CHARS`() {
+        val ctx = "x".repeat(SessionManager.MAX_EXTRA_CONTEXT_CHARS)
+        try {
+            sessionManager.createSession(SessionConfig(extraContextJson = ctx))
+        } catch (e: IllegalArgumentException) {
+            if (e.message.orEmpty().contains("extraContextJson too long")) throw e
+        }
+    }
+
+    @Test
+    fun `validateSessionConfig rejects extraContextJson over MAX_EXTRA_CONTEXT_CHARS`() {
+        val ctx = "x".repeat(SessionManager.MAX_EXTRA_CONTEXT_CHARS + 1)
+        try {
+            sessionManager.createSession(SessionConfig(extraContextJson = ctx))
+            fail("Expected extraContextJson too long to be rejected")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message.orEmpty().contains("extraContextJson too long"))
+        }
+    }
+
+    @Test
+    fun `validateSessionConfig accepts initialHistory at exactly MAX_INITIAL_HISTORY_TURNS`() {
+        val hist = List(SessionManager.MAX_INITIAL_HISTORY_TURNS) {
+            com.adsamcik.mindlayer.HistoryTurn(role = "user", text = "hi")
+        }
+        sessionManager.createSession(SessionConfig(initialHistory = hist))
+    }
+
+    @Test
+    fun `validateSessionConfig rejects initialHistory over MAX_INITIAL_HISTORY_TURNS`() {
+        val hist = List(SessionManager.MAX_INITIAL_HISTORY_TURNS + 1) {
+            com.adsamcik.mindlayer.HistoryTurn(role = "user", text = "hi")
+        }
+        try {
+            sessionManager.createSession(SessionConfig(initialHistory = hist))
+            fail("Expected too many history turns to be rejected")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message.orEmpty().contains("initialHistory too many turns"))
+        }
+    }
+
+    @Test
+    fun `validateSessionConfig accepts history turn text at exactly MAX_HISTORY_TURN_CHARS`() {
+        val hist = listOf(
+            com.adsamcik.mindlayer.HistoryTurn(role = "user", text = "x".repeat(SessionManager.MAX_HISTORY_TURN_CHARS))
+        )
+        sessionManager.createSession(SessionConfig(initialHistory = hist))
+    }
+
+    @Test
+    fun `validateSessionConfig rejects history turn text over MAX_HISTORY_TURN_CHARS`() {
+        val hist = listOf(
+            com.adsamcik.mindlayer.HistoryTurn(role = "user", text = "x".repeat(SessionManager.MAX_HISTORY_TURN_CHARS + 1))
+        )
+        try {
+            sessionManager.createSession(SessionConfig(initialHistory = hist))
+            fail("Expected history turn too long to be rejected")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message.orEmpty().contains("initialHistory turn too long"))
+        }
+    }
+
+    @Test
+    fun `validateSessionConfig accepts expirationMs at exactly 365 days`() {
+        val maxExpiry = 365L * 24 * 60 * 60 * 1000
+        sessionManager.createSession(SessionConfig(expirationMs = maxExpiry))
+    }
+
+    @Test
+    fun `validateSessionConfig rejects expirationMs over 365 days`() {
+        val tooLong = 365L * 24 * 60 * 60 * 1000 + 1
+        try {
+            sessionManager.createSession(SessionConfig(expirationMs = tooLong))
+            fail("Expected expirationMs too large to be rejected")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message.orEmpty().contains("expirationMs out of range"))
+        }
+    }
+
+    @Test
+    fun `validateSessionConfig rejects negative expirationMs`() {
+        try {
+            sessionManager.createSession(SessionConfig(expirationMs = -1L))
+            fail("Expected negative expirationMs to be rejected")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message.orEmpty().contains("expirationMs out of range"))
+        }
+    }
+
+    // ---- applyMemoryPressure EMERGENCY + pinned (H7) -----------------------
+
+    @Test
+    fun `applyMemoryPressure EMERGENCY preserves pinned non-streaming sessions`() {
+        createDefaultSession(sessionId = "unpinned")
+        createDefaultSession(sessionId = "pinned")
+        createDefaultSession(sessionId = "stream")
+
+        sessionManager.getSession("stream")!!.isStreaming = true
+        sessionManager.getSession("pinned")!!.isPinned = true
+
+        sessionManager.applyMemoryPressure(MemoryPressure.EMERGENCY)
+
+        assertNull(sessionManager.getSession("unpinned"))    // evicted
+        assertNotNull(sessionManager.getSession("pinned"))   // pinned, non-streaming → preserved
+        assertNotNull(sessionManager.getSession("stream"))   // streaming → preserved
+        assertEquals(2, sessionManager.sessionCount)
+    }
+
+
         val handle = buildHandle()
         assertEquals(4096, handle.effectiveMaxTokens)
     }

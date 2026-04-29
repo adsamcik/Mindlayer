@@ -26,6 +26,9 @@ import java.util.concurrent.ConcurrentHashMap
  */
 private const val MAX_MEDIA_BYTES: Int = 100 * 1024 * 1024
 
+/** Maximum accepted image dimension (width or height). 8192² × 4 bpp = 256 MB worst-case. */
+private const val MAX_IMAGE_DIM: Int = 8192
+
 /**
  * Staged media ready for LiteRT-LM consumption.
  *
@@ -187,11 +190,11 @@ class SharedMemoryPool(cacheDir: File) {
                 buffer = shm.mapReadOnly()
                 val pixels = ByteArray(payloadSize)
                 buffer.get(pixels)
-                compressPixelsToPng(pixels, transfer.width, transfer.height, transfer.pixelFormat, outFile)
+                compressPixelsToPng(pixels, transfer.width, transfer.height, transfer.pixelFormat, transfer.rowStride, outFile)
             } else {
                 // Reconstruction failed — fall back to stream read
                 val pixels = readExactly(pfd, payloadSize)
-                compressPixelsToPng(pixels, transfer.width, transfer.height, transfer.pixelFormat, outFile)
+                compressPixelsToPng(pixels, transfer.width, transfer.height, transfer.pixelFormat, transfer.rowStride, outFile)
             }
         } finally {
             buffer?.let { SharedMemory.unmap(it) }
@@ -339,15 +342,28 @@ class SharedMemoryPool(cacheDir: File) {
         width: Int,
         height: Int,
         pixelFormat: Int,
+        rowStride: Int,
         outFile: File,
     ) {
         val config = pixelFormatToBitmapConfig(pixelFormat)
+        val bpp = bytesPerPixel(config)
+        val tightRowBytes = width * bpp
+        // M4: validate dimensions and buffer size before any Bitmap allocation.
+        validatePixelBufferLayout(width, height, pixelFormat, rowStride, pixels.size)
+        // C2: repack rows when the source had padding (sub-bitmap, hardware-backed, etc.).
+        val packed: ByteArray = if (rowStride <= 0 || rowStride == tightRowBytes) {
+            pixels
+        } else {
+            ByteArray(tightRowBytes * height).also { dst ->
+                for (y in 0 until height) {
+                    System.arraycopy(pixels, y * rowStride, dst, y * tightRowBytes, tightRowBytes)
+                }
+            }
+        }
         val bitmap = Bitmap.createBitmap(width, height, config)
         try {
-            bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
-            FileOutputStream(outFile).use { fos ->
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
-            }
+            bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(packed))
+            FileOutputStream(outFile).use { fos -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos) }
         } finally {
             bitmap.recycle()
         }
@@ -371,12 +387,6 @@ class SharedMemoryPool(cacheDir: File) {
     private fun sanitizeRequestIdForFilename(requestId: String): String =
         requestId.replace(UnsafeFilenameChars, "_").ifBlank { "request" }
 
-    private fun pixelFormatToBitmapConfig(pixelFormat: Int): Bitmap.Config = when (pixelFormat) {
-        PixelFormat.RGBA_8888 -> Bitmap.Config.ARGB_8888
-        PixelFormat.RGB_565  -> Bitmap.Config.RGB_565
-        else                 -> Bitmap.Config.ARGB_8888
-    }
-
     private fun extensionForMime(mimeType: String): String = when (mimeType) {
         "image/jpeg"              -> "jpg"
         "image/png"               -> "png"
@@ -390,4 +400,48 @@ class SharedMemoryPool(cacheDir: File) {
         "audio/mp4"               -> "m4a"
         else                      -> "bin"
     }
+}
+
+// ---- Pixel-layout helpers (internal for unit testing via Robolectric) ------
+
+private fun pixelFormatToBitmapConfig(pixelFormat: Int): Bitmap.Config = when (pixelFormat) {
+    PixelFormat.RGBA_8888 -> Bitmap.Config.ARGB_8888
+    PixelFormat.RGB_565  -> Bitmap.Config.RGB_565
+    else                 -> Bitmap.Config.ARGB_8888
+}
+
+internal fun bytesPerPixel(config: Bitmap.Config): Int = when (config) {
+    Bitmap.Config.RGB_565 -> 2
+    else -> 4 // ARGB_8888 and all other configs handled by the pool
+}
+
+/**
+ * Validates pixel buffer dimensions and layout. Contains no Bitmap allocation so it
+ * can be unit-tested directly on JVM/Robolectric without side-effects.
+ *
+ * @return tight buffer size (width × bpp × height) — the size after row repacking
+ */
+internal fun validatePixelBufferLayout(
+    width: Int,
+    height: Int,
+    pixelFormat: Int,
+    rowStride: Int,
+    bufferSize: Int,
+): Long {
+    require(width in 1..MAX_IMAGE_DIM) { "Image width out of range: $width" }
+    require(height in 1..MAX_IMAGE_DIM) { "Image height out of range: $height" }
+    val bpp = bytesPerPixel(pixelFormatToBitmapConfig(pixelFormat))
+    val tightRowBytes = width.toLong() * bpp.toLong()
+    val expected = if (rowStride > 0 && rowStride.toLong() != tightRowBytes) {
+        require(rowStride.toLong() >= tightRowBytes) {
+            "rowStride $rowStride < width*bpp $tightRowBytes"
+        }
+        rowStride.toLong() * height.toLong()
+    } else {
+        tightRowBytes * height.toLong()
+    }
+    require(bufferSize.toLong() == expected) {
+        "Pixel buffer size $bufferSize doesn't match expected $expected"
+    }
+    return tightRowBytes * height.toLong()
 }

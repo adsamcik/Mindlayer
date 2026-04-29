@@ -4,11 +4,14 @@ import android.content.Context
 import android.util.Log
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import io.mockk.coEvery
 import io.mockk.every
+import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.int
@@ -63,8 +66,9 @@ class LogRepositoryTest {
         unmockkAll()
     }
 
-    /** Wait for fire-and-forget coroutines to complete and return the single inserted entry. */
+    /** Flush any pending drain-loop work, then return the single inserted entry. */
     private suspend fun awaitSingleEntry(): LogEntry {
+        advanceUntilIdle()
         val entries = dao.getRecent(10)
         assertEquals("Expected exactly 1 log entry", 1, entries.size)
         return entries[0]
@@ -287,5 +291,80 @@ class LogRepositoryTest {
         assertEquals(1, dao.totalCount())
         val remaining = dao.getRecent(10)
         assertTrue(remaining[0].timestampMs >= oneDayAgo)
+    }
+
+    // --- backpressure ---
+
+    private fun dummyEntry() = LogEntry(
+        timestampMs = System.currentTimeMillis(),
+        category = LogCategory.INFERENCE,
+        event = LogEvent.REQUEST_START,
+    )
+
+    /**
+     * log() must never block the caller even when the channel is full.
+     * Uses a mock DAO that blocks indefinitely to keep the drain loop stuck,
+     * then verifies that 10_000 non-blocking log() calls complete in well
+     * under a second.
+     */
+    @Test(timeout = 10_000)
+    fun `log does not block when channel is full`() {
+        val drainStarted = java.util.concurrent.CountDownLatch(1)
+        val blockDrain = java.util.concurrent.CountDownLatch(1)
+        val blockingDao = mockk<LogDao>()
+        coEvery { blockingDao.insertAll(any()) } coAnswers {
+            drainStarted.countDown()
+            blockDrain.await() // blocks the drain coroutine's IO thread
+        }
+
+        val capacity = 16
+        val testRepo = LogRepository(blockingDao, Dispatchers.IO, bufferCapacity = capacity)
+
+        // Send one entry to start the drain loop and get it stuck on the DAO.
+        testRepo.log(dummyEntry())
+        drainStarted.await()
+
+        // Drain loop is now blocked. Channel buffer is empty (first entry claimed).
+        // 10_000 log() calls should complete quickly: first `capacity` go to buffer, rest are dropped.
+        val start = System.currentTimeMillis()
+        repeat(10_000) { testRepo.log(dummyEntry()) }
+        val elapsedMs = System.currentTimeMillis() - start
+
+        assertTrue("10_000 log() calls took ${elapsedMs}ms, expected <1000ms", elapsedMs < 1000)
+
+        blockDrain.countDown()
+        testRepo.shutdown()
+    }
+
+    /**
+     * droppedLogCount() must increase when the channel overflows.
+     */
+    @Test(timeout = 10_000)
+    fun `droppedLogCount increases when buffer overflows`() {
+        val drainStarted = java.util.concurrent.CountDownLatch(1)
+        val blockDrain = java.util.concurrent.CountDownLatch(1)
+        val blockingDao = mockk<LogDao>()
+        coEvery { blockingDao.insertAll(any()) } coAnswers {
+            drainStarted.countDown()
+            blockDrain.await()
+        }
+
+        val capacity = 16
+        val testRepo = LogRepository(blockingDao, Dispatchers.IO, bufferCapacity = capacity)
+
+        // Trigger drain loop and get it stuck.
+        testRepo.log(dummyEntry())
+        drainStarted.await()
+
+        // Now fill beyond capacity so drops accumulate.
+        repeat(capacity * 5) { testRepo.log(dummyEntry()) }
+
+        assertTrue(
+            "Expected droppedLogCount > 0 after overflow, got ${testRepo.droppedLogCount()}",
+            testRepo.droppedLogCount() > 0L,
+        )
+
+        blockDrain.countDown()
+        testRepo.shutdown()
     }
 }
