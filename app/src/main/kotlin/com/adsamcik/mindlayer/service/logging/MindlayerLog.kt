@@ -39,12 +39,31 @@ object MindlayerLog {
         if (requestId == null && sessionId == null) return message
         val ctx = buildString {
             append("[")
-            requestId?.let { append("req=$it ") }
-            sessionId?.let { append("sess=$it") }
+            requestId?.let { append("req=${sanitizeLogField(it)} ") }
+            sessionId?.let { append("sess=${sanitizeLogField(it)}") }
             append("]")
         }.replace("  ", " ").replace(" ]", "]")
         return "$ctx $message"
     }
+}
+
+/**
+ * Make an attacker-controlled string safe to embed in a logcat line.
+ * Strips control characters (newline, CR, ESC, etc.) and length-caps at 64
+ * to prevent log injection / log spoofing via crafted requestId/sessionId
+ * /toolName values arriving across the binder.
+ *
+ * Allowed characters: [A-Za-z0-9._:-/]; everything else becomes '_'.
+ */
+internal fun sanitizeLogField(value: String?): String {
+    if (value == null) return "null"
+    val limit = value.length.coerceAtMost(64)
+    val sb = StringBuilder(limit)
+    for (i in 0 until limit) {
+        val c = value[i]
+        if (c.isLetterOrDigit() || c in "._:-/") sb.append(c) else sb.append('_')
+    }
+    return sb.toString()
 }
 
 /**

@@ -288,8 +288,32 @@ class Mindlayer private constructor(
     // -- Tool calling ---------------------------------------------------------
 
     /**
-     * Submit a tool result back to the service for continued inference.
+     * Submit a tool result back to the service. Supply [callId] from
+     * [MindlayerEvent.ToolCall.callId] so the service can disambiguate parallel
+     * calls of the same tool.
      */
+    suspend fun submitToolResult(
+        requestId: String,
+        callId: String,
+        toolName: String,
+        resultJson: String,
+    ) {
+        val result = ToolResult(
+            requestId = requestId,
+            callId = callId,
+            toolName = toolName,
+            resultJson = resultJson,
+        )
+        withContext(Dispatchers.IO) {
+            connection.awaitConnected().submitToolResult(requestId, result)
+        }
+    }
+
+    @Deprecated(
+        "Use the 4-arg overload that takes callId from MindlayerEvent.ToolCall.callId. " +
+            "The legacy overload cannot disambiguate parallel calls of the same tool.",
+        ReplaceWith("submitToolResult(requestId, callId, toolName, resultJson)"),
+    )
     suspend fun submitToolResult(
         requestId: String,
         toolName: String,
@@ -297,6 +321,7 @@ class Mindlayer private constructor(
     ) {
         val result = ToolResult(
             requestId = requestId,
+            callId = null,
             toolName = toolName,
             resultJson = resultJson,
         )
@@ -752,18 +777,30 @@ class Mindlayer private constructor(
     ): String {
         try {
             return service.createSession(config)
+        } catch (e: android.os.RemoteException) {
+            // RemoteException wraps service-side IllegalStateException; let through to the warming retry below.
         } catch (e: IllegalStateException) {
-            if (!e.message.orEmpty().contains("Engine is not initialized")) throw e
+            // Same shape (some platforms surface IllegalStateException directly).
         }
 
-        service.prewarm(config.backend)
-        waitForEngineLoaded(service)
+        val status = service.status
+        if (!status.isEngineLoaded || status.engineWarming) {
+            if (!status.engineWarming) {
+                // Engine not even warming yet — kick it off.
+                service.prewarm(config.backend)
+            }
+            waitForEngineLoaded(service)
+            return service.createSession(config)
+        }
+        // Engine claims loaded but createSession failed for a different reason — retry once
+        // and let the exception propagate if it persists.
         return service.createSession(config)
     }
 
     private suspend fun waitForEngineLoaded(service: com.adsamcik.mindlayer.IMindlayerService) {
         repeat(60) {
-            if (service.status.isEngineLoaded) return
+            val s = service.status
+            if (s.isEngineLoaded && !s.engineWarming) return
             delay(250)
         }
         throw IllegalStateException("Engine did not finish initialization within the expected window")

@@ -40,6 +40,18 @@ class MindlayerSession internal constructor(
     /** Submit a tool result for continued inference. */
     suspend fun submitToolResult(
         requestId: String,
+        callId: String,
+        toolName: String,
+        resultJson: String,
+    ) = client.submitToolResult(requestId, callId, toolName, resultJson)
+
+    @Deprecated(
+        "Use the 4-arg overload that takes callId from MindlayerEvent.ToolCall.callId. " +
+            "The legacy overload cannot disambiguate parallel calls of the same tool.",
+        ReplaceWith("submitToolResult(requestId, callId, toolName, resultJson)"),
+    )
+    suspend fun submitToolResult(
+        requestId: String,
         toolName: String,
         resultJson: String,
     ) = client.submitToolResult(requestId, toolName, resultJson)

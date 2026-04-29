@@ -296,6 +296,36 @@ class ToolCallBridgeTest {
     }
 
     @Test
+    fun `submitResult with callId routes to exact match`() = runTest {
+        val pending = bridge.registerPendingToolCalls(
+            "req-1", listOf("search" to "query1", "search" to "query2"),
+        )
+        val firstId = pending[0].callId
+        val secondId = pending[1].callId
+        // Submit second's result FIRST, by callId — must NOT be matched to the first by FIFO.
+        bridge.submitResult("req-1", callId = secondId, toolName = "search", resultJson = "result-for-second")
+        bridge.submitResult("req-1", callId = firstId, toolName = "search", resultJson = "result-for-first")
+        val results = bridge.awaitResults("req-1")
+        // Results are returned in REGISTRATION order, but the *content* matches the callId, not arrival order.
+        assertEquals(
+            listOf("search" to "result-for-first", "search" to "result-for-second"),
+            results,
+        )
+    }
+
+    @Test
+    fun `submitResult mismatch fails pending entries immediately`() = runTest {
+        bridge.registerPendingToolCalls("req-1", listOf("search" to "q"))
+        bridge.submitResult("req-1", callId = null, toolName = "WRONG_TOOL", resultJson = "x")
+        try {
+            bridge.awaitResults("req-1", timeoutMs = 1_000)
+            fail("Expected exception from failed deferred")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("unmatched"))
+        }
+    }
+
+    @Test
     fun `submit results in different order than registration`() = runTest {
         bridge.registerPendingToolCalls(
             "req-1",
