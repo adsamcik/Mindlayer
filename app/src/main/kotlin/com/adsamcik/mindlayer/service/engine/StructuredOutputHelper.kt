@@ -70,7 +70,10 @@ object StructuredOutputHelper {
                 "tool_routing" -> StructuredOutputStrategy.TOOL_ROUTING
                 else -> StructuredOutputStrategy.PROMPT_AND_VALIDATE
             }
-            val maxRetries = so["max_retries"]?.jsonPrimitive?.intOrNull ?: 3
+            // M5 — clamp client-supplied retries to a safe range. An unbounded
+            // value lets a malicious caller spin tool-routing reflection loops
+            // and exhaust the conversation KV-cache budget on a single request.
+            val maxRetries = (so["max_retries"]?.jsonPrimitive?.intOrNull ?: 3).coerceIn(0, 5)
 
             StructuredOutputConfig(
                 schema = schema,

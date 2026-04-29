@@ -495,7 +495,9 @@ class ServiceBinder(
         }
         MindlayerLog.d(TAG, "cancelInference", requestId = sanitizeLogField(requestId))
         // Concurrency slot is released by the orchestrator's completion hook.
-        orchestrator.cancelInference(requestId)
+        // H3a — forward caller uid so the orchestrator can verify ownership at
+        // the bridge/job-map layer too.
+        orchestrator.cancelInference(uid, requestId)
     }
 
     // ---- Tool results -------------------------------------------------------
@@ -517,7 +519,12 @@ class ServiceBinder(
             "submitToolResult tool=${sanitizeLogField(result.toolName)}, callId=${result.callId ?: "(none)"}",
             requestId = sanitizeLogField(requestId),
         )
+        // H3a — route to the caller's per-uid slot. The orchestrator registered
+        // the pending call under the session owner's uid, which equals the
+        // caller's uid (verified by the activeInferenceUids check above for
+        // external callers; equal by definition for self-UID dashboard).
         orchestrator.toolCallBridge.submitResult(
+            uid = uid,
             requestId = requestId,
             callId = result.callId,
             toolName = result.toolName,

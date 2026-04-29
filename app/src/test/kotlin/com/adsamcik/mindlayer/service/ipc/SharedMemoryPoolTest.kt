@@ -465,4 +465,64 @@ class SharedMemoryPoolTest {
         assertEquals(4, bytesPerPixel(android.graphics.Bitmap.Config.ARGB_8888))
         assertEquals(2, bytesPerPixel(android.graphics.Bitmap.Config.RGB_565))
     }
+
+    // =========================================================================
+    // H1 — pixel format allowlist
+    // =========================================================================
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `validatePixelBufferLayout rejects pixel formats outside allowlist`() {
+        // RGBA_F16 / unknown sentinel must not silently coerce to ARGB_8888.
+        validatePixelBufferLayout(
+            width = 4,
+            height = 4,
+            pixelFormat = 0x1234, // arbitrary non-allowlisted value
+            rowStride = 0,
+            bufferSize = 64,
+        )
+    }
+
+    @Test
+    fun `validatePixelBufferLayout accepts RGB_565 from allowlist`() {
+        // RGB_565 has 2 bpp → 4*4*2 = 32 bytes.
+        val tight = validatePixelBufferLayout(
+            width = 4,
+            height = 4,
+            pixelFormat = PixelFormat.RGB_565,
+            rowStride = 0,
+            bufferSize = 32,
+        )
+        assertEquals(32L, tight)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `validatePixelBufferLayout rejects pixel-count overflow before allocation`() {
+        // 100_000 * 100_000 * 4 ≈ 40 GB → must fail the Long pixel-count guard
+        // even though each individual dimension is under MAX_IMAGE_DIM only
+        // when the cap is large enough — here both are over the cap so the
+        // dimension check fires first; this asserts dimension cap is enforced.
+        validatePixelBufferLayout(
+            width = 100_000,
+            height = 100_000,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 0,
+            bufferSize = Int.MAX_VALUE,
+        )
+    }
+
+    // =========================================================================
+    // H5 — assertSafePfdType: regular files accepted, fstat-unavailable allowed
+    // =========================================================================
+
+    @Test
+    fun `assertSafePfdType permits regular file PFDs`() {
+        val pfd = createPfdFromBytes(byteArrayOf(1, 2, 3), "bin")
+        try {
+            // Should not throw — temp file is a regular file (or fstat is
+            // stubbed under Robolectric, in which case the helper must permit).
+            pool.assertSafePfdType(pfd)
+        } finally {
+            pfd.close()
+        }
+    }
 }

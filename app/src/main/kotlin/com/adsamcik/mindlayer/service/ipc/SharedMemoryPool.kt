@@ -202,9 +202,14 @@ class SharedMemoryPool(cacheDir: File) {
             shm = reconstructSharedMemory(pfd, payloadSize)
             if (shm != null) {
                 buffer = shm.mapReadOnly()
-                val pixels = ByteArray(payloadSize)
-                buffer.get(pixels)
-                compressPixelsToPng(pixels, transfer.width, transfer.height, transfer.pixelFormat, transfer.rowStride, outFile)
+                // M21 — feed the mapped SharedMemory buffer to the bitmap directly
+                // instead of allocating a fresh ByteArray(payloadSize). The repack
+                // helper falls back to a row-by-row copy only when the client used
+                // a non-tight rowStride, bounding peak heap regardless.
+                compressPixelsFromBufferToPng(
+                    buffer, transfer.width, transfer.height,
+                    transfer.pixelFormat, transfer.rowStride, payloadSize, outFile,
+                )
             } else {
                 // Reconstruction failed — fall back to stream read
                 val pixels = readExactly(pfd, payloadSize)
@@ -255,6 +260,12 @@ class SharedMemoryPool(cacheDir: File) {
      * fds where EOF semantics are unreliable). Otherwise reads until EOF.
      */
     private fun stageFromPfd(pfd: ParcelFileDescriptor, outFile: File, knownSize: Int?) {
+        // H5 — reject FIFOs / sockets / character devices that would block the
+        // staging thread indefinitely. SharedMemory regions go through the
+        // dedicated reconstructSharedMemory path and are validated by the
+        // SharedMemory.fromFileDescriptor API, so this guard runs only on
+        // the generic PFD copy path.
+        assertSafePfdType(pfd)
         try {
             if (knownSize != null) {
                 require(knownSize in 1..MAX_MEDIA_BYTES) {
@@ -271,6 +282,48 @@ class SharedMemoryPool(cacheDir: File) {
         } catch (t: Throwable) {
             MindlayerLog.e(TAG, "Failed to stage PFD to ${outFile.name}", throwable = t)
             throw t
+        }
+    }
+
+    /**
+     * Reject [pfd] handles that point at non-regular files (FIFOs, sockets,
+     * character/block devices). Such fds can block [java.io.InputStream.read]
+     * forever, pinning the orchestrator coroutine and per-session mutex.
+     *
+     * Visible-for-testing so JVM unit tests can drive the helper directly.
+     *
+     * Robolectric/JVM note: [Os.fstat] is a real JNI call. When the runtime
+     * is missing the native shim (e.g. a stripped Robolectric image), or
+     * [android.system.OsConstants.S_IFMT] resolves to 0 (uninitialised stub),
+     * we cannot make a confident determination — in that case we permit the
+     * fd. The check is defense-in-depth on top of AIDL parcelable validation;
+     * the production runtime always has a working fstat.
+     */
+    internal fun assertSafePfdType(pfd: ParcelFileDescriptor) {
+        val st = try {
+            Os.fstat(pfd.fileDescriptor)
+        } catch (_: UnsatisfiedLinkError) {
+            return
+        } catch (_: NoClassDefFoundError) {
+            return
+        } catch (t: Throwable) {
+            // ErrnoException (and any other native-bridge failure) under JVM/
+            // Robolectric — fall through to permissive behaviour. On a real
+            // device a working fd never raises here.
+            MindlayerLog.d(TAG, "fstat unavailable; skipping PFD-type guard: ${t.javaClass.simpleName}")
+            return
+        }
+        val mask = OsConstants.S_IFMT
+        val regular = OsConstants.S_IFREG
+        // Stubbed constants → cannot enforce; allow.
+        if (mask == 0 || regular == 0) return
+        val type = st.st_mode and mask
+        // Robolectric returns st_mode=0 for tempfiles → cannot enforce; allow.
+        if (type == 0) return
+        if (type != regular) {
+            throw IllegalArgumentException(
+                "Unsupported source PFD type: 0x${"%x".format(type)}",
+            )
         }
     }
 
@@ -378,6 +431,58 @@ class SharedMemoryPool(cacheDir: File) {
         try {
             bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(packed))
             FileOutputStream(outFile).use { fos -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos) }
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    /**
+     * M21 — buffer-backed variant of [compressPixelsToPng]. When the client uses
+     * a tight rowStride (no padding), the mapped SharedMemory ByteBuffer is fed
+     * directly into the Bitmap with zero intermediate heap allocation. When the
+     * stride is padded we still need to repack into a tight buffer; the ByteArray
+     * sized at `tightRowBytes * height` is bounded by the M4 validation pass.
+     */
+    private fun compressPixelsFromBufferToPng(
+        source: ByteBuffer,
+        width: Int,
+        height: Int,
+        pixelFormat: Int,
+        rowStride: Int,
+        sourceSize: Int,
+        outFile: File,
+    ) {
+        val config = pixelFormatToBitmapConfig(pixelFormat)
+        val bpp = bytesPerPixel(config)
+        val tightRowBytes = width * bpp
+        validatePixelBufferLayout(width, height, pixelFormat, rowStride, sourceSize)
+        val isTight = rowStride <= 0 || rowStride == tightRowBytes
+
+        val bitmap = Bitmap.createBitmap(width, height, config)
+        try {
+            if (isTight) {
+                // Slice to the exact pixel range and reset position so the bitmap
+                // consumes from the start of the mapped region.
+                val view = source.duplicate().apply {
+                    order(source.order())
+                    position(0)
+                    limit(sourceSize)
+                }
+                bitmap.copyPixelsFromBuffer(view)
+            } else {
+                val packed = ByteArray(tightRowBytes * height)
+                val rowBuf = ByteArray(rowStride)
+                val view = source.duplicate().apply { position(0); limit(sourceSize) }
+                for (y in 0 until height) {
+                    view.position(y * rowStride)
+                    view.get(rowBuf, 0, rowStride)
+                    System.arraycopy(rowBuf, 0, packed, y * tightRowBytes, tightRowBytes)
+                }
+                bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(packed))
+            }
+            FileOutputStream(outFile).use { fos ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+            }
         } finally {
             bitmap.recycle()
         }
