@@ -333,6 +333,15 @@ class HistoryStore internal constructor(context: Context) {
     }
 
     /**
+     * Delete all conversations and turns from the local database.
+     * Called by [Mindlayer.eraseAllHistory].
+     */
+    suspend fun clearAll() {
+        db.conversationDao().deleteAll()
+        db.turnDao().deleteAll()
+    }
+
+    /**
      * Count total stored conversations.
      */
     suspend fun conversationCount(): Int {

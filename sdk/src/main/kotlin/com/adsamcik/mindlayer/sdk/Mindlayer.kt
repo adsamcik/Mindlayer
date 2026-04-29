@@ -81,11 +81,18 @@ class Mindlayer private constructor(
         /**
          * Create a [Mindlayer] instance and start binding to the service.
          * Use [awaitConnected] or observe [connectionState] before issuing RPCs.
+         *
+         * @param persistHistory when `true`, user prompts and model responses are
+         *   stored in an SQLCipher-encrypted Room database at
+         *   `context.getDatabasePath("mindlayer_history.db")`. Defaults to `false`
+         *   (privacy-by-default). Pass `true` only when the host app explicitly
+         *   opts in to conversation history (e.g., to power a history UI or
+         *   enable session recovery after process death).
          */
-        fun connect(context: Context): Mindlayer {
+        fun connect(context: Context, persistHistory: Boolean = false): Mindlayer {
             val mgr = ConnectionManager()
             mgr.connect(context)
-            val store = HistoryStore(context)
+            val store = if (persistHistory) HistoryStore(context) else null
             return Mindlayer(mgr, store)
         }
     }
@@ -428,6 +435,21 @@ class Mindlayer private constructor(
         }
     }
 
+    /**
+     * Erase all conversation history from the local database.
+     *
+     * This is a destructive operation. It deletes all conversations and their
+     * turns from the encrypted history DB on this device. The service-side
+     * sessions are NOT affected — only the SDK-side persistence is cleared.
+     *
+     * No-op when [connect] was called without `persistHistory = true`.
+     */
+    suspend fun eraseAllHistory() {
+        withContext(Dispatchers.IO) {
+            historyStore?.clearAll()
+        }
+    }
+
     // -- Convenience ----------------------------------------------------------
 
     // ── Advanced API ──────────────────────────────────────────────────────
@@ -679,6 +701,10 @@ class Mindlayer private constructor(
      * The write-end PFD is closed immediately after handing it off (the
      * service duplicates the fd internally). The read-end PFD is closed
      * by [TokenStreamReader] when the flow completes or is cancelled.
+     *
+     * Media source FDs (image.source / audio.source) are closed in the
+     * finally block after the binder call — by that point the service has
+     * already dup'd them into its own process.
      */
     private fun startInference(
         meta: RequestMeta,
@@ -688,7 +714,13 @@ class Mindlayer private constructor(
         return flow {
             val readEnd = withContext(Dispatchers.IO) {
                 val image = imageProvider()
-                val audio = audioProvider()
+                val audio = try {
+                    audioProvider()
+                } catch (e: Throwable) {
+                    // audioProvider failed after imageProvider may have allocated an FD
+                    image?.source?.closeQuietly()
+                    throw e
+                }
                 val pipe = ParcelFileDescriptor.createReliablePipe()
                 val readEnd = pipe[0]
                 val writeEnd = pipe[1]
@@ -701,14 +733,18 @@ class Mindlayer private constructor(
                     readEnd.close()
                     throw e
                 } finally {
-                    // Always close our copy of the write end — the service has dup'd it.
+                    // Always close our copies — the service has dup'd all three.
                     writeEnd.close()
+                    image?.source?.closeQuietly()
+                    audio?.source?.closeQuietly()
                 }
             }
 
             TokenStreamReader.readStream(readEnd).collect { emit(it) }
         }
     }
+
+    private fun ParcelFileDescriptor.closeQuietly() = try { close() } catch (_: Exception) {}
 
     private suspend fun createRemoteSessionWhenReady(
         service: com.adsamcik.mindlayer.IMindlayerService,
