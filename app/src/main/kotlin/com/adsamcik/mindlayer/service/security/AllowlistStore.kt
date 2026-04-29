@@ -121,33 +121,55 @@ class AllowlistStore(
             val pendingUpdated = readPending().filterNot { it.packageName == pkg }
             writePending(pendingUpdated)
             _pending.value = pendingUpdated
+
+            // Clear any denial when explicitly approved.
+            writeDenied(readDenied().filterNot { it.packageName == pkg })
         }
     }
 
     fun revoke(pkg: String) {
         withFileLock {
             val current = readEntries()
+            val target = current.firstOrNull { it.packageName == pkg } ?: return@withFileLock
             val updated = current.filterNot { it.packageName == pkg }
-            if (updated.size == current.size) return@withFileLock
             writeEntries(updated)
             _entries.value = updated
+
+            // Persist a denial so the revoked package cools down for one TTL.
+            val now = System.currentTimeMillis()
+            val deniedUpdated = readDenied().filterNot { it.packageName == pkg } +
+                DeniedEntry(pkg, target.signingCertSha256, now, now + DENIAL_TTL_MS)
+            writeDenied(deniedUpdated)
         }
     }
 
     /**
      * Record a caller that attempted to connect but is not on the allowlist.
-     * Used by the dashboard UI so the user can approve/deny. Deduplicates by
-     * packageName.
+     * Silently ignored if [pkg] is within its denial TTL or if [pkg] exceeds [MAX_PACKAGE_NAME_LENGTH].
+     * The pending list is capped at [MAX_PENDING] entries (most-recent retained).
      */
     fun recordPending(pkg: String, sigSha256: String, displayName: String? = null) {
+        if (pkg.length > MAX_PACKAGE_NAME_LENGTH) return
         withFileLock {
+            val now = System.currentTimeMillis()
+            // Suppress if the package is within its denial TTL.
+            val denied = readDenied()
+            if (denied.any {
+                    it.packageName == pkg &&
+                        it.signingCertSha256.equals(sigSha256, ignoreCase = true) &&
+                        it.expiresAtMs > now
+                }) {
+                return@withFileLock
+            }
             val current = readPending()
             val existing = current.firstOrNull { it.packageName == pkg }
             if (existing != null && existing.signingCertSha256.equals(sigSha256, ignoreCase = true)) {
                 return@withFileLock
             }
-            val updated = current.filterNot { it.packageName == pkg } +
-                PendingApproval(pkg, sigSha256, System.currentTimeMillis(), displayName)
+            val base = current.filterNot { it.packageName == pkg } +
+                PendingApproval(pkg, sigSha256, now, displayName)
+            // Cap at MAX_PENDING, keeping the most-recent entries.
+            val updated = base.sortedByDescending { it.firstRequestedAtMs }.take(MAX_PENDING)
             writePending(updated)
             _pending.value = updated
         }
@@ -156,10 +178,27 @@ class AllowlistStore(
     fun denyPending(pkg: String) {
         withFileLock {
             val current = readPending()
-            val updated = current.filterNot { it.packageName == pkg }
-            if (updated.size == current.size) return@withFileLock
-            writePending(updated)
-            _pending.value = updated
+            val entry = current.firstOrNull { it.packageName == pkg } ?: return@withFileLock
+            // Persist the denial with TTL so re-trigger is suppressed.
+            val now = System.currentTimeMillis()
+            val deniedUpdated = readDenied().filterNot { it.packageName == pkg } +
+                DeniedEntry(pkg, entry.signingCertSha256, now, now + DENIAL_TTL_MS)
+            writeDenied(deniedUpdated)
+            val updatedPending = current.filterNot { it.packageName == pkg }
+            writePending(updatedPending)
+            _pending.value = updatedPending
+        }
+    }
+
+    /**
+     * Returns true if [pkg]/[sigSha256] has been denied and the [DENIAL_TTL_MS] has not elapsed.
+     */
+    fun isDenied(pkg: String, sigSha256: String): Boolean {
+        val now = System.currentTimeMillis()
+        return readDenied().any {
+            it.packageName == pkg &&
+                it.signingCertSha256.equals(sigSha256, ignoreCase = true) &&
+                it.expiresAtMs > now
         }
     }
 

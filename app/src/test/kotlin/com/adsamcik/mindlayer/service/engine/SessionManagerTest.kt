@@ -440,6 +440,9 @@ class SessionManagerTest {
         val aRemaining = listOf("a1", "a2", "a3").count { sessionManager.getSession(it) != null }
         assertEquals(2, aRemaining)
     }
+
+    @Test
+    fun `createSession evicts lowest-priority idle session when at capacity`() {
         val tightTier = DeviceTier(2, 4096, 4096, 8 * 1024L)
         every { memoryBudget.deviceTier } returns tightTier
 
