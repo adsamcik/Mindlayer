@@ -14,10 +14,14 @@ import com.google.ai.edge.litertlm.tool
 import com.adsamcik.mindlayer.HistoryTurn
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.SessionInfo
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -217,14 +221,45 @@ class SessionManager(
     }
 
     fun destroySession(id: String) {
-        val handle = sessions.remove(id) ?: run {
+        // H6 — DO NOT remove-then-close. Native [Conversation.close] is unsafe
+        // while a flow collector is still in-flight on the same conversation
+        // (use-after-free in the LiteRT-LM JNI bridge). Instead:
+        //   1. look the handle up without removing,
+        //   2. if streaming, fire cancelProcess() to unblock the native flow,
+        //   3. acquire the per-session mutex (shared with InferenceOrchestrator),
+        //   4. close the conversation under the mutex,
+        //   5. only then remove the handle from the map.
+        // Step 5 ordering matters because callers (e.g. test cleanup, AIDL
+        // teardown) treat absence from the map as "fully torn down". Removing
+        // first creates a window where a concurrent infer() could still race.
+        val handle = sessions[id] ?: run {
             MindlayerLog.w(TAG, "destroySession: unknown session $id", sessionId = id)
             return
         }
+        if (handle.isStreaming) {
+            try {
+                handle.conversation.cancelProcess()
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "cancelProcess failed during destroy for $id", sessionId = id, throwable = t)
+            }
+        }
         try {
-            handle.conversation.close()
-        } catch (t: Throwable) {
-            MindlayerLog.w(TAG, "Error closing conversation for session $id", sessionId = id, throwable = t)
+            runBlocking {
+                handle.mutex.withLock {
+                    try {
+                        handle.conversation.close()
+                    } catch (t: Throwable) {
+                        MindlayerLog.w(
+                            TAG,
+                            "Error closing conversation for session $id",
+                            sessionId = id,
+                            throwable = t,
+                        )
+                    }
+                }
+            }
+        } finally {
+            sessions.remove(id)
         }
         logRepository?.logSessionDestroyed(id)
         MindlayerLog.i(TAG, "Session destroyed: $id (remaining=${sessions.size})", sessionId = id)
@@ -513,16 +548,39 @@ class SessionManager(
             if (array.isEmpty()) return null
 
             array.map { element ->
+                // L9 — reject reserved names. The `__structured_output` tool is
+                // injected by [StructuredOutputHelper] for tool-routing JSON
+                // mode; allowing a client to register a tool of that name (or
+                // any other `__`-prefixed reserved name) would let it
+                // impersonate the framework helper and intercept structured
+                // output reflection. Fail fast at session-config time rather
+                // than masking the conflict at dispatch time.
+                val name = element.jsonObject["name"]?.jsonPrimitive?.contentOrNull
+                require(name == null || !isReservedToolName(name)) {
+                    "Reserved tool name not allowed: $name"
+                }
                 val description = element.jsonObject.toString()
                 tool(JsonDefinedTool(description))
             }.also {
                 MindlayerLog.d(TAG, "Parsed ${it.size} tool definition(s)")
             }
+        } catch (e: IllegalArgumentException) {
+            // L9 — reserved-name rejections must surface to the client so the
+            // session is rejected, not silently created without tools.
+            throw e
         } catch (t: Throwable) {
             MindlayerLog.e(TAG, "Failed to parse toolsJson", throwable = t)
             null
         }
     }
+
+    /**
+     * L9 — names beginning with `__` are reserved for framework-injected
+     * helper tools (currently `__structured_output`). Client-supplied tools
+     * must not collide with this namespace.
+     */
+    private fun isReservedToolName(name: String): Boolean =
+        name == StructuredOutputHelper.TOOL_NAME || name.startsWith("__")
 
     /**
      * Lightweight [OpenApiTool] backed by a pre-serialised JSON description.

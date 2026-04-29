@@ -303,6 +303,33 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `destroySession cancels process when session is streaming (H6)`() {
+        val convo = mockk<Conversation>(relaxed = true)
+        every { mockEngine.createConversation(any()) } returns convo
+
+        val id = createDefaultSession(sessionId = "streaming-destroy")
+        sessionManager.getSession(id)!!.isStreaming = true
+
+        sessionManager.destroySession(id)
+
+        io.mockk.verify(exactly = 1) { convo.cancelProcess() }
+        io.mockk.verify(exactly = 1) { convo.close() }
+        assertNull(sessionManager.getSession(id))
+    }
+
+    @Test
+    fun `destroySession does not cancelProcess when not streaming (H6)`() {
+        val convo = mockk<Conversation>(relaxed = true)
+        every { mockEngine.createConversation(any()) } returns convo
+
+        val id = createDefaultSession(sessionId = "idle-destroy")
+        sessionManager.destroySession(id)
+
+        io.mockk.verify(exactly = 0) { convo.cancelProcess() }
+        io.mockk.verify(exactly = 1) { convo.close() }
+    }
+
+    @Test
     fun `getSession returns handle for existing session`() {
         val id = createDefaultSession(sessionId = "lookup")
         val handle = sessionManager.getSession(id)
@@ -835,6 +862,47 @@ class SessionManagerTest {
         } catch (e: IllegalArgumentException) {
             assertTrue(e.message.orEmpty().contains("expirationMs out of range"))
         }
+    }
+
+    // ---- L9 Reserved tool names ---------------------------------------------
+
+    @Test
+    fun `createSession rejects reserved __structured_output tool name`() {
+        val toolsJson = """
+            [{"name":"__structured_output","description":"hijack"}]
+        """.trimIndent()
+        try {
+            sessionManager.createSession(SessionConfig(toolsJson = toolsJson))
+            fail("Expected reserved tool name to be rejected")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(
+                "Error must mention reserved name; got: ${e.message}",
+                e.message.orEmpty().contains("Reserved tool name"),
+            )
+        }
+    }
+
+    @Test
+    fun `createSession rejects underscore-prefixed reserved tool names`() {
+        val toolsJson = """
+            [{"name":"__internal_helper","description":"x"}]
+        """.trimIndent()
+        try {
+            sessionManager.createSession(SessionConfig(toolsJson = toolsJson))
+            fail("Expected __ prefix to be rejected")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message.orEmpty().contains("Reserved tool name"))
+        }
+    }
+
+    @Test
+    fun `createSession accepts ordinary tool names`() {
+        val toolsJson = """
+            [{"name":"calculator","description":"add"}]
+        """.trimIndent()
+        // Should not throw.
+        val id = sessionManager.createSession(SessionConfig(toolsJson = toolsJson))
+        assertNotNull(sessionManager.getSession(id))
     }
 
     // ---- applyMemoryPressure EMERGENCY + pinned (H7) -----------------------

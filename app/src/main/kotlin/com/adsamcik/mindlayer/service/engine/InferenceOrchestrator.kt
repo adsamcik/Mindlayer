@@ -152,28 +152,58 @@ class InferenceOrchestrator(
         pipeWriteEnd: ParcelFileDescriptor,
         onComplete: (() -> Unit)?,
     ) {
+        // H3a — key activeJobs/bridge state by (uid, requestId). The owner uid
+        // is recorded on the SessionConfig at create-session time; if the
+        // session is unknown (e.g. test stubs that bypass SessionManager) we
+        // fall back to LEGACY_UID so behaviour is preserved.
+        val uid = uidForSession(meta.sessionId)
+        val key = jobKey(uid, meta.requestId)
         val job = scope.launch {
-            runInference(meta, image, audio, pipeWriteEnd)
+            runInference(meta, image, audio, pipeWriteEnd, uid)
         }
-        activeJobs[meta.requestId] = job
+        activeJobs[key] = job
         job.invokeOnCompletion {
-            activeJobs.remove(meta.requestId)
+            activeJobs.remove(key)
             onComplete?.invoke()
         }
     }
 
-    fun cancelInference(requestId: String) {
+    /**
+     * Cancel an in-flight inference. Verifies that [callerUid] matches the
+     * session owner so a malicious app cannot cancel another app's request
+     * even if it guesses (or scrapes from logs) the request id (H3a).
+     *
+     * Pass [ToolCallBridge.LEGACY_UID] to skip the uid check (used by the
+     * single-arg overload and by tests that bypass UID validation).
+     */
+    fun cancelInference(callerUid: Int, requestId: String) {
         val handle = sessionManager.findSessionByActiveRequest(requestId)
         if (handle != null) {
+            val ownerUid = handle.ownerToken as? Int ?: ToolCallBridge.LEGACY_UID
+            if (callerUid != ToolCallBridge.LEGACY_UID && ownerUid != ToolCallBridge.LEGACY_UID && callerUid != ownerUid) {
+                MindlayerLog.w(
+                    TAG,
+                    "Refusing cross-uid cancel: caller=$callerUid owner=$ownerUid request=$requestId",
+                    requestId = requestId,
+                    sessionId = handle.sessionId,
+                )
+                return
+            }
             MindlayerLog.i(TAG, "Cancelling native inference for request $requestId", requestId = requestId, sessionId = handle.sessionId)
             try {
                 handle.conversation.cancelProcess()
             } catch (t: Throwable) {
                 MindlayerLog.w(TAG, "cancelProcess() failed: ${t.safeLabel()}", requestId = requestId)
             }
+            val uid = ownerUid
+            toolCallBridge.cancel(uid, requestId)
+            activeJobs[jobKey(uid, requestId)]?.cancel()
+        } else {
+            // Session unknown (already destroyed?). Best-effort: cancel under
+            // both the resolved-uid slot (legacy) and the caller's slot.
+            toolCallBridge.cancel(callerUid, requestId)
+            activeJobs[jobKey(callerUid, requestId)]?.cancel()
         }
-        toolCallBridge.cancel(requestId)
-        activeJobs[requestId]?.cancel()
         logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = com.adsamcik.mindlayer.service.logging.LogCategory.INFERENCE,
@@ -183,6 +213,15 @@ class InferenceOrchestrator(
         ))
         MindlayerLog.i(TAG, "Cancelled request $requestId", requestId = requestId, sessionId = handle?.sessionId)
     }
+
+    /**
+     * Backwards-compat overload — uid-blind. ServiceBinder validates the uid
+     * at the AIDL boundary before delegating, so single-tenant tests and
+     * pre-H3a callers still work. Internal call paths should use the
+     * uid-aware overload above whenever possible.
+     */
+    fun cancelInference(requestId: String) =
+        cancelInference(ToolCallBridge.LEGACY_UID, requestId)
 
     fun shutdown() {
         activeJobs.values.forEach { it.cancel() }
@@ -211,11 +250,18 @@ class InferenceOrchestrator(
 
     // ---- Private -----------------------------------------------------------
 
+    private fun jobKey(uid: Int, requestId: String): String = "$uid:$requestId"
+
+    /** Resolve the uid that owns [sessionId], or [ToolCallBridge.LEGACY_UID]. */
+    private fun uidForSession(sessionId: String): Int =
+        sessionManager.getSessionOwner(sessionId) as? Int ?: ToolCallBridge.LEGACY_UID
+
     private suspend fun runInference(
         meta: RequestMeta,
         image: ImageTransfer?,
         audio: AudioTransfer?,
         pipeWriteEnd: ParcelFileDescriptor,
+        uid: Int = ToolCallBridge.LEGACY_UID,
     ) {
         val handle = sessionManager.getSession(meta.sessionId) ?: run {
             val writer = writerFactory(pipeWriteEnd)
@@ -420,7 +466,7 @@ class InferenceOrchestrator(
                         "(${accumulatedToolCalls.size} call(s))", requestId = meta.requestId, sessionId = meta.sessionId)
 
                     val pending = toolCallBridge.registerPendingToolCalls(
-                        meta.requestId, accumulatedToolCalls.toList()
+                        uid, meta.requestId, accumulatedToolCalls.toList()
                     )
                     for (call in pending) {
                         writer.writeToolCall(seq, call.callId, call.toolName, call.arguments)
@@ -440,7 +486,7 @@ class InferenceOrchestrator(
                     accumulatedToolCalls.clear()
 
                     // Suspend until client submits all tool results (or timeout)
-                    val results = toolCallBridge.awaitResults(meta.requestId)
+                    val results = toolCallBridge.awaitResults(uid, meta.requestId)
 
                     // Inject tool responses into the conversation
                     val toolResponses = results.map { (name, result) ->
@@ -496,7 +542,7 @@ class InferenceOrchestrator(
                 MindlayerLog.i(TAG, trace.summary(), requestId = meta.requestId, sessionId = meta.sessionId)
 
             } catch (e: CancellationException) {
-                toolCallBridge.cancel(meta.requestId)
+                toolCallBridge.cancel(uid, meta.requestId)
                 // Flow cancellation does NOT cancel native generation — the LiteRT-LM
                 // engine keeps decoding in the background unless we ask it to stop.
                 // This matters on broken-pipe (client died mid-stream) because the
@@ -511,7 +557,7 @@ class InferenceOrchestrator(
                 writer.writeDone(0, "cancelled")
                 throw e
             } catch (t: Throwable) {
-                toolCallBridge.cancel(meta.requestId)
+                toolCallBridge.cancel(uid, meta.requestId)
                 val safe = t.safeLabel()
                 trace.markError(safe)
                 MindlayerLog.e(TAG, "Inference failed for request ${meta.requestId}: $safe", requestId = meta.requestId, sessionId = meta.sessionId)

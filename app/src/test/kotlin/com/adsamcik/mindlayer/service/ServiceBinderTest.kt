@@ -283,7 +283,9 @@ class ServiceBinderTest {
     @Test
     fun `cancelInference delegates to orchestrator`() {
         binder.cancelInference("r1")
-        verify { orchestrator.cancelInference("r1") }
+        // H3a — ServiceBinder forwards caller uid; in test context the uid is
+        // the host process uid (Robolectric default). Match any uid.
+        verify { orchestrator.cancelInference(any<Int>(), "r1") }
     }
 
     // ---- Tool results -------------------------------------------------------
@@ -300,6 +302,7 @@ class ServiceBinderTest {
 
         verify {
             toolCallBridge.submitResult(
+                uid = any<Int>(),
                 requestId = "r1",
                 callId = null,
                 toolName = "calculator",
