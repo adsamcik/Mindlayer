@@ -92,7 +92,7 @@ class LogRepository(
             category = LogCategory.ERROR,
             event = LogEvent.REQUEST_ERROR,
             requestId = requestId, sessionId = sessionId,
-            errorMessage = errorMessage,
+            errorMessage = sanitizeErrorClass(errorMessage),
         ))
     }
 

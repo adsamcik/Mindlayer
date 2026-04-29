@@ -1,9 +1,14 @@
 package com.adsamcik.mindlayer.sdk
 
 import android.graphics.Bitmap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import java.util.Collections
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * A multi-turn conversation with the LLM. Manages session lifecycle,
@@ -26,9 +31,16 @@ class Conversation internal constructor(
     private val client: Mindlayer,
     private val config: ConversationConfig,
 ) : AutoCloseable {
-    private var sessionId: String? = null
-    private var closed = false
+    @Volatile private var sessionId: String? = null
+    private val closeStarted = AtomicBoolean(false)
     private val mutex = Mutex()
+
+    /**
+     * Tracks handles that are currently in-flight (returned from [chatStream] or
+     * being collected inside [collectHandle]). Guarded by synchronization on itself.
+     * [close] snapshots and clears this set, then cancels each handle.
+     */
+    private val inFlight: MutableSet<InferenceHandle> = Collections.synchronizedSet(mutableSetOf())
 
     /**
      * Send a text message and get the complete response.
@@ -58,37 +70,54 @@ class Conversation internal constructor(
      * Stream a text response (for real-time UI updates).
      * Returns an [InferenceHandle] with the event flow.
      *
+     * The handle is registered as in-flight and will be cancelled if [close] is
+     * called before collection completes.
+     *
      * Note: the session is created eagerly (suspending) before returning
      * the handle. Use the suspend [chat] overloads for simpler usage.
      */
     suspend fun chatStream(text: String): InferenceHandle {
         val sid = ensureSession()
-        return client.chat(sid, text)
+        return client.chat(sid, text).also { synchronized(inFlight) { inFlight.add(it) } }
     }
 
     /**
      * Stream a text + image response.
+     *
+     * The handle is registered as in-flight and will be cancelled if [close] is
+     * called before collection completes.
      */
     suspend fun chatStream(text: String, image: Bitmap): InferenceHandle {
         val sid = ensureSession()
-        return client.chatWithImage(sid, text, image)
+        return client.chatWithImage(sid, text, image).also { synchronized(inFlight) { inFlight.add(it) } }
     }
 
     /**
      * Close this conversation and release resources.
-     * Safe to call multiple times.
+     *
+     * Thread-safe and idempotent. Cancels any in-flight inference handles (including
+     * those returned by [chatStream] that the caller may still be collecting), then
+     * destroys the server-side session.
+     *
+     * Cancellation is fire-and-forget (launched on [Dispatchers.IO]) because [cancel]
+     * on [InferenceHandle] is a suspend function and [close] is non-suspend per
+     * [AutoCloseable]. The GlobalScope lifetime is intentional — these coroutines are
+     * short-lived cleanup tasks and must survive the [Conversation] object itself.
      */
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
     override fun close() {
-        if (closed) return
-        closed = true
-        val sid = sessionId ?: return
-        sessionId = null
-        try {
-            // Best-effort cleanup — service may already be disconnected
-            val service = client.connection.getService() ?: return
-            service.destroySession(sid)
-        } catch (_: Exception) {
-            // Session will be cleaned up server-side on timeout
+        if (!closeStarted.compareAndSet(false, true)) return
+        val handles = synchronized(inFlight) { inFlight.toList().also { inFlight.clear() } }
+        val sid = sessionId.also { sessionId = null }
+        GlobalScope.launch(Dispatchers.IO) {
+            handles.forEach { runCatching { it.cancel() } }
+            if (sid != null) {
+                try {
+                    client.connection.getService()?.destroySession(sid)
+                } catch (_: Exception) {
+                    // Session will be cleaned up server-side on timeout
+                }
+            }
         }
     }
 
@@ -104,7 +133,7 @@ class Conversation internal constructor(
     // -- Internals ----------------------------------------------------------------
 
     private suspend fun ensureSession(): String = mutex.withLock {
-        check(!closed) { "Conversation is closed" }
+        check(!closeStarted.get()) { "Conversation is closed" }
         sessionId?.let { return it }
 
         client.awaitConnected()
@@ -131,13 +160,13 @@ class Conversation internal constructor(
         return try {
             block(sid)
         } catch (e: android.os.RemoteException) {
-            if (closed) throw e
+            if (closeStarted.get()) throw e
             mutex.withLock { sessionId = null }
             val newSid = ensureSession()
             block(newSid)
         } catch (e: MindlayerException) {
             if (e.code == "SESSION_NOT_FOUND" || e.code == "SESSION_EVICTED" || e.code == "SESSION_EXPIRED") {
-                if (closed) throw e
+                if (closeStarted.get()) throw e
                 mutex.withLock { sessionId = null }
                 val newSid = ensureSession()
                 block(newSid)
@@ -148,6 +177,8 @@ class Conversation internal constructor(
     }
 
     private suspend fun collectHandle(handle: InferenceHandle): String {
+        synchronized(inFlight) { inFlight.add(handle) }
+        try {
         val accumulator = StringBuilder()
         var result: String? = null
         handle.events.collect { event ->
@@ -170,5 +201,8 @@ class Conversation internal constructor(
         return result ?: throw IllegalStateException(
             "Inference stream ended without a Done event"
         )
+        } finally {
+            synchronized(inFlight) { inFlight.remove(handle) }
+        }
     }
 }

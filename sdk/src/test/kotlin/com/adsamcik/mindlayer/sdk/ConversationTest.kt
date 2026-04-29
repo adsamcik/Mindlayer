@@ -11,11 +11,14 @@ import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.sdk.db.MindlayerDatabase
 import io.mockk.coEvery
 import io.mockk.every
+import io.mockk.just
 import io.mockk.mockk
 import io.mockk.mockkStatic
+import io.mockk.runs
 import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
+import org.junit.Assert.assertTrue
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -344,5 +347,58 @@ class ConversationTest {
 
         val cfg = configSlot.captured
         assertEquals(7L * 24 * 60 * 60 * 1000, cfg.expirationMs)
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  L14 — close() cancels in-flight handles (thread-safety fix)
+    // ═════════════════════════════════════════════════════════════════════
+
+    /**
+     * Verifies that [Conversation.close] cancels every in-flight
+     * [InferenceHandle] before calling [destroySession], ensuring the service
+     * is not left generating tokens for a dead session.
+     */
+    @Test
+    fun `close cancels in-flight handle before destroying session`() = runTest {
+        val callOrder = java.util.concurrent.CopyOnWriteArrayList<String>()
+
+        // Track order: cancel before destroy?
+        every { mockService.cancelInference(any()) } answers { callOrder.add("cancel") }
+        every { mockService.destroySession(any()) } answers { callOrder.add("destroy") }
+
+        val conv = mindlayer.conversation()
+        // chatStream creates the session and returns a cold-flow handle (not collected)
+        val handle = conv.chatStream("a long streaming message")
+
+        // Close the conversation — should cancel handle then destroy session
+        conv.close()
+
+        // GlobalScope.launch(Dispatchers.IO) is real, not test-virtual — wait briefly
+        val deadline = System.currentTimeMillis() + 2_000L
+        while (callOrder.size < 2 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50)
+        }
+
+        assertTrue("handle must be marked cancelled after close()", handle.isCancelled)
+        assertEquals(
+            "cancel must happen before destroySession",
+            listOf("cancel", "destroy"),
+            callOrder,
+        )
+    }
+
+    @Test
+    fun `close is idempotent when called multiple times`() = runTest {
+        stubInferToClose()
+        val conv = mindlayer.conversation()
+        try { conv.chat("setup") } catch (_: Exception) { }
+
+        conv.close()
+        conv.close()
+        conv.close()
+
+        // destroySession is called inside GlobalScope — wait briefly
+        Thread.sleep(200)
+        verify(exactly = 1) { mockService.destroySession(any()) }
     }
 }

@@ -85,6 +85,10 @@ interface ConversationDao {
     /** Delete conversations older than a given timestamp. */
     @Query("DELETE FROM conversations WHERE updatedAtMs < :beforeMs")
     suspend fun deleteOlderThan(beforeMs: Long): Int
+
+    /** Delete all conversations. Used by [HistoryStore.clearAll]. */
+    @Query("DELETE FROM conversations")
+    suspend fun deleteAll(): Int
 }
 
 data class ConversationWithTurnCount(

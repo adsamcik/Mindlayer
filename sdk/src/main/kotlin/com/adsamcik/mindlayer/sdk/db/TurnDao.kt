@@ -106,6 +106,10 @@ abstract class TurnDao {
     @Query("DELETE FROM turns WHERE turnId = :turnId")
     abstract suspend fun delete(turnId: String)
 
+    /** Delete all turns. Used by [HistoryStore.clearAll]. */
+    @Query("DELETE FROM turns")
+    abstract suspend fun deleteAll(): Int
+
     /** Count completed turns for a conversation. */
     @Query("SELECT COUNT(*) FROM turns WHERE conversationId = :conversationId AND state = 'COMPLETED'")
     abstract suspend fun countCompleted(conversationId: String): Int

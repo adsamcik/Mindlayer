@@ -620,4 +620,42 @@ class MindlayerApiTest {
         assertTrue(handle.isCancelled)
         coVerify(exactly = 1) { mockService.cancelInference(handle.requestId) }
     }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  M20 — persistHistory opt-in (privacy-by-default)
+    // ═════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `connect default persistHistory false gives null historyStore (historyCount is 0)`() = runTest {
+        // buildMindlayer(conn, null) simulates connect(ctx, persistHistory=false)
+        val ml = buildMindlayer(mockConnection, null)
+        assertEquals(0, ml.historyCount())
+        assertEquals(emptyList<ConversationSummary>(), ml.listHistory())
+    }
+
+    @Test
+    fun `connect persistHistory true gives live historyStore`() = runTest {
+        // buildMindlayer(conn, store) simulates connect(ctx, persistHistory=true)
+        val ml = buildMindlayer(mockConnection, store)
+        ml.createSession {}
+        assertEquals(1, ml.historyCount())
+    }
+
+    @Test
+    fun `eraseAllHistory clears all conversations`() = runTest {
+        val ml = buildMindlayer(mockConnection, store)
+        ml.createSession {}
+        assertEquals(1, ml.historyCount())
+
+        ml.eraseAllHistory()
+        assertEquals(0, ml.historyCount())
+    }
+
+    @Test
+    fun `eraseAllHistory is no-op when historyStore is null`() = runTest {
+        // Should not throw when persistHistory=false
+        val ml = buildMindlayer(mockConnection, null)
+        ml.eraseAllHistory() // must not throw
+        assertEquals(0, ml.historyCount())
+    }
 }

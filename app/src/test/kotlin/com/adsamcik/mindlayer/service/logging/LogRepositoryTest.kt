@@ -20,7 +20,9 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -117,7 +119,8 @@ class LogRepositoryTest {
     // --- logInferenceError ---
 
     @Test
-    fun `logInferenceError includes error message`() = runTest {
+    fun `logInferenceError sanitizes error message`() = runTest {
+        // "OOM crash" → spaces removed → "OOMcrash"
         repo.logInferenceError("req-3", "sess-3", "OOM crash")
         val e = awaitSingleEntry()
 
@@ -125,7 +128,8 @@ class LogRepositoryTest {
         assertEquals(LogEvent.REQUEST_ERROR, e.event)
         assertEquals("req-3", e.requestId)
         assertEquals("sess-3", e.sessionId)
-        assertEquals("OOM crash", e.errorMessage)
+        // Sanitized: spaces stripped
+        assertEquals("OOMcrash", e.errorMessage)
     }
 
     @Test
@@ -135,7 +139,38 @@ class LogRepositoryTest {
 
         assertEquals(LogCategory.ERROR, e.category)
         assertEquals(null, e.sessionId)
-        assertEquals("No session", e.errorMessage)
+        // Sanitized: space stripped
+        assertEquals("Nosession", e.errorMessage)
+    }
+
+    // --- M19: sanitizeErrorClass ---
+
+    @Test
+    fun `logInferenceError sanitizes long chatty string to le64 chars`() = runTest {
+        // Input has spaces (stripped) and is very long (capped at 64)
+        val longMessage = "leaked: SECRET PROMPT " + "x".repeat(200)
+        repo.logInferenceError("req-san", "sess-san", longMessage)
+        val e = awaitSingleEntry()
+
+        assertNotNull(e.errorMessage)
+        assertTrue("errorMessage should be <= 64 chars", e.errorMessage!!.length <= 64)
+        assertFalse("errorMessage should not contain spaces", e.errorMessage.contains(" "))
+    }
+
+    @Test
+    fun `logInferenceError preserves safe exception class names`() = runTest {
+        repo.logInferenceError("req-cls", "sess-cls", "OutOfMemoryError-IOException")
+        val e = awaitSingleEntry()
+
+        assertEquals("OutOfMemoryError-IOException", e.errorMessage)
+    }
+
+    @Test
+    fun `logInferenceError with blank message stores null`() = runTest {
+        repo.logInferenceError("req-blank", "sess-blank", "   ")
+        val e = awaitSingleEntry()
+
+        assertNull(e.errorMessage)
     }
 
     // --- logThermalBandChange ---
