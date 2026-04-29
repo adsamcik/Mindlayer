@@ -856,7 +856,8 @@ class SessionManagerTest {
         assertEquals(2, sessionManager.sessionCount)
     }
 
-
+    @Test
+    fun `SessionHandle effectiveMaxTokens reflects constructor value`() {
         val handle = buildHandle()
         assertEquals(4096, handle.effectiveMaxTokens)
     }
