@@ -46,6 +46,14 @@ enum class ConnectionState {
      * the rate limit.
      */
     REJECTED_NOT_APPROVED,
+
+    /**
+     * Auto-reconnect exhausted [ConnectionManager.MAX_RECONNECT_ATTEMPTS]
+     * consecutive failed rebind attempts. The service is assumed permanently
+     * unavailable (e.g. uninstalled). No further reconnects are scheduled.
+     * Call [ConnectionManager.connect] to reset the counter and try again.
+     */
+    BIND_GAVE_UP,
 }
 
 /**
@@ -80,6 +88,9 @@ class ConnectionManager {
 
         const val DEFAULT_CONNECT_TIMEOUT_MS = 15_000L
 
+        /** Maximum consecutive failed rebind attempts before giving up. */
+        const val MAX_RECONNECT_ATTEMPTS = 10
+
         private const val BIND_FLAGS =
             Context.BIND_AUTO_CREATE or
             Context.BIND_IMPORTANT or
@@ -105,6 +116,16 @@ class ConnectionManager {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var backoffMs = INITIAL_BACKOFF_MS
+    private var consecutiveFailures = 0
+
+    /**
+     * True once [MAX_RECONNECT_ATTEMPTS] consecutive rebind attempts have
+     * failed without a successful [onServiceConnected]. No further reconnects
+     * are scheduled. Call [connect] to reset and retry.
+     */
+    @Volatile
+    var bindGaveUp = false
+        private set
 
     // -- Public API -----------------------------------------------------------
 
@@ -114,6 +135,11 @@ class ConnectionManager {
      */
     fun connect(context: Context) {
         if (_state.value == ConnectionState.CONNECTED || _state.value == ConnectionState.CONNECTING) return
+        if (bindGaveUp) {
+            bindGaveUp = false
+            consecutiveFailures = 0
+            backoffMs = INITIAL_BACKOFF_MS
+        }
         boundContext = context.applicationContext
         doBind()
     }
@@ -149,9 +175,18 @@ class ConnectionManager {
         timeoutMs: Long = DEFAULT_CONNECT_TIMEOUT_MS,
     ): IMindlayerService = withTimeout(timeoutMs) {
         while (true) {
-            _state.first { it == ConnectionState.CONNECTED || it == ConnectionState.REJECTED_NOT_APPROVED }
+            _state.first {
+                it == ConnectionState.CONNECTED ||
+                it == ConnectionState.REJECTED_NOT_APPROVED ||
+                it == ConnectionState.BIND_GAVE_UP
+            }
             if (_state.value == ConnectionState.REJECTED_NOT_APPROVED) {
                 throw SecurityException("Mindlayer rejected this app — user approval required in the Mindlayer dashboard")
+            }
+            if (_state.value == ConnectionState.BIND_GAVE_UP) {
+                throw IllegalStateException(
+                    "Mindlayer service permanently unavailable after $MAX_RECONNECT_ATTEMPTS attempts; call connect() to retry",
+                )
             }
             val service = binderRef.get()
             if (service != null) return@withTimeout service
@@ -179,6 +214,8 @@ class ConnectionManager {
                 val service = IMindlayerService.Stub.asInterface(binder)
                 binderRef.set(service)
                 backoffMs = INITIAL_BACKOFF_MS
+                consecutiveFailures = 0
+                bindGaveUp = false
 
                 // Signal 3: linkToDeath for fast kernel-level death notification
                 val recipient = IBinder.DeathRecipient { onBinderDied() }
@@ -286,6 +323,17 @@ class ConnectionManager {
     }
 
     private fun scheduleReconnect() {
+        if (bindGaveUp) {
+            _state.value = ConnectionState.BIND_GAVE_UP
+            return
+        }
+        consecutiveFailures++
+        if (consecutiveFailures >= MAX_RECONNECT_ATTEMPTS) {
+            bindGaveUp = true
+            _state.value = ConnectionState.BIND_GAVE_UP
+            Log.w(TAG, "Bind gave up after $MAX_RECONNECT_ATTEMPTS attempts; explicit reconnect required")
+            return
+        }
         scope.launch {
             val wait = backoffMs
             Log.i(TAG, "Reconnecting in ${wait}ms")
