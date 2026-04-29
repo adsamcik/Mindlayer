@@ -129,23 +129,38 @@ class TypesTest {
             resultJson = """{"results":["a","b"]}""",
         )
         assertEquals("req-2", tr.requestId)
+        assertNull(tr.callId)
         assertEquals("search", tr.toolName)
         assertEquals("""{"results":["a","b"]}""", tr.resultJson)
     }
 
     @Test
+    fun `ToolResult with callId`() {
+        val tr = ToolResult(
+            requestId = "req-3",
+            callId = "call-abc",
+            toolName = "weather",
+            resultJson = """{"temp":22}""",
+        )
+        assertEquals("req-3", tr.requestId)
+        assertEquals("call-abc", tr.callId)
+        assertEquals("weather", tr.toolName)
+    }
+
+    @Test
     fun `ToolResult equals and hashCode`() {
-        val a = ToolResult("r", "t", "{}")
-        val b = ToolResult("r", "t", "{}")
+        val a = ToolResult("r", null, "t", "{}")
+        val b = ToolResult("r", null, "t", "{}")
         assertEquals(a, b)
         assertEquals(a.hashCode(), b.hashCode())
     }
 
     @Test
     fun `ToolResult copy preserves unchanged fields`() {
-        val original = ToolResult("r", "calc", """{"ans":42}""")
+        val original = ToolResult("r", null, "calc", """{"ans":42}""")
         val copied = original.copy(toolName = "search")
         assertEquals("r", copied.requestId)
+        assertNull(copied.callId)
         assertEquals("search", copied.toolName)
         assertEquals("""{"ans":42}""", copied.resultJson)
     }
@@ -156,6 +171,7 @@ class TypesTest {
     fun `ServiceStatus construction with all fields`() {
         val ss = ServiceStatus(
             isEngineLoaded = true,
+            engineWarming = false,
             activeSessionCount = 3,
             activeInferenceCount = 1,
             backend = "GPU",
@@ -169,6 +185,7 @@ class TypesTest {
             headroom = 0.75f,
         )
         assertTrue(ss.isEngineLoaded)
+        assertFalse(ss.engineWarming)
         assertEquals(3, ss.activeSessionCount)
         assertEquals(1, ss.activeInferenceCount)
         assertEquals("GPU", ss.backend)
@@ -198,12 +215,13 @@ class TypesTest {
         assertEquals(0L, ss.totalRamMb)
         assertEquals(0, ss.maxSessions)
         assertNull(ss.headroom)
+        assertFalse(ss.engineWarming)
     }
 
     @Test
     fun `ServiceStatus equals and hashCode`() {
-        val a = ServiceStatus(true, 1, 0, "GPU", "COOL", true, 100L)
-        val b = ServiceStatus(true, 1, 0, "GPU", "COOL", true, 100L)
+        val a = ServiceStatus(true, false, 1, 0, "GPU", "COOL", true, 100L)
+        val b = ServiceStatus(true, false, 1, 0, "GPU", "COOL", true, 100L)
         assertEquals(a, b)
         assertEquals(a.hashCode(), b.hashCode())
     }

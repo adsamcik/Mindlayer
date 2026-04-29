@@ -28,6 +28,19 @@ class HistoryStore internal constructor(context: Context) {
         /** Rough chars-per-token ratio for budget calculations. */
         private const val CHARS_PER_TOKEN = 4
 
+        /**
+         * Hard ceiling on a single turn's text length during replay selection.
+         * Turns exceeding this are skipped to prevent multi-MB blobs reaching
+         * the service regardless of what tokenEstimate the DB stores.
+         */
+        private const val MAX_TURN_TEXT_CHARS = 32_768
+
+        /**
+         * Maximum number of turns included in a single replay bundle.
+         * Caps memory and IPC payload even when every turn is small.
+         */
+        private const val MAX_REPLAY_TURNS = 200
+
         private val json = Json { ignoreUnknownKeys = true }
     }
 
@@ -229,9 +242,19 @@ class HistoryStore internal constructor(context: Context) {
         remaining -= systemTokens
 
         for (turn in allCompleted) {
-            if (turn.tokenEstimate > remaining) break
+            if (selected.size >= MAX_REPLAY_TURNS) break
+
+            // Recompute from actual text — never trust the stored tokenEstimate,
+            // which is attacker-controlled if the DB is tampered with.
+            val text = turn.textContent
+            if (text != null && text.length > MAX_TURN_TEXT_CHARS) {
+                Log.w(TAG, "skipping turn id=${turn.turnId} text too long (${text.length} chars)")
+                continue
+            }
+            val recomputed = estimateTokens(text)
+            if (recomputed > remaining) break
             selected.add(turn)
-            remaining -= turn.tokenEstimate
+            remaining -= recomputed
         }
 
         // Reverse to chronological order

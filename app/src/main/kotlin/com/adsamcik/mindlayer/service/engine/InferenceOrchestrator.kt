@@ -24,8 +24,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.put
 import com.adsamcik.mindlayer.service.logging.logExtraJson
 import org.json.JSONArray
@@ -181,9 +185,27 @@ class InferenceOrchestrator(
 
     fun shutdown() {
         activeJobs.values.forEach { it.cancel() }
+        runBlocking { awaitAllJobs(timeoutMs = 5_000) }
         activeJobs.clear()
         sharedMemoryPool.cleanupAll()
         sessionManager.shutdown()
+    }
+
+    /**
+     * Suspend until all active inference jobs finish (or [timeoutMs] elapses).
+     *
+     * Call this before any destructive engine operation (backend switch,
+     * session shutdown) to ensure no in-flight [Conversation.sendMessageAsync]
+     * calls race against teardown.
+     */
+    suspend fun awaitAllJobs(timeoutMs: Long = 5_000) {
+        val jobs = activeJobs.values.toList()
+        if (jobs.isEmpty()) return
+        try {
+            withTimeout(timeoutMs) { jobs.joinAll() }
+        } catch (_: TimeoutCancellationException) {
+            MindlayerLog.w(TAG, "awaitAllJobs timed out; ${activeJobs.size} job(s) still active")
+        }
     }
 
     // ---- Private -----------------------------------------------------------

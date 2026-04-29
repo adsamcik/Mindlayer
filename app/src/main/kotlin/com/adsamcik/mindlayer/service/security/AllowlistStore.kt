@@ -32,6 +32,17 @@ data class PendingApproval(
 )
 
 /**
+ * A package that was explicitly denied (via [AllowlistStore.denyPending]) or
+ * recently revoked. Suppresses re-creation of pending entries until [expiresAtMs].
+ */
+data class DeniedEntry(
+    val packageName: String,
+    val signingCertSha256: String,
+    val deniedAtMs: Long,
+    val expiresAtMs: Long,
+)
+
+/**
  * File-backed allowlist of caller packages. Entries are keyed by `packageName`
  * and include the pinned signing-cert SHA-256 at approval time — a re-signed
  * package is implicitly rejected.
@@ -60,6 +71,7 @@ class AllowlistStore(
     }
     private val entriesFile: File = File(baseDir, "entries.json")
     private val pendingFile: File = File(baseDir, "pending.json")
+    private val deniedFile: File = File(baseDir, "denied.json")
     private val lockFile: File = File(baseDir, "allowlist.lock")
     private val hmacKeyFile: File = File(baseDir, "allowlist.hmac")
 
@@ -192,6 +204,21 @@ class AllowlistStore(
         atomicWrite(pendingFile, signedEnvelope(PENDING_KEY, array).toString())
     }
 
+    private fun writeDenied(list: List<DeniedEntry>) {
+        val now = System.currentTimeMillis()
+        val pruned = list.filter { it.expiresAtMs > now }
+        val array = JSONArray()
+        for (e in pruned.sortedBy { it.packageName }) {
+            array.put(JSONObject().apply {
+                put("pkg", e.packageName)
+                put("sig", e.signingCertSha256)
+                put("deniedAtMs", e.deniedAtMs)
+                put("expiresAtMs", e.expiresAtMs)
+            })
+        }
+        atomicWrite(deniedFile, signedEnvelope(DENIED_KEY, array).toString())
+    }
+
     private fun atomicWrite(target: File, content: String) {
         val tmp = File(target.parentFile, target.name + ".tmp")
         try {
@@ -249,6 +276,31 @@ class AllowlistStore(
         }
     }
 
+    private fun readDenied(): List<DeniedEntry> {
+        val array = readSignedArray(deniedFile, DENIED_KEY) ?: return emptyList()
+        val now = System.currentTimeMillis()
+        return try {
+            buildList(array.length()) {
+                for (i in 0 until array.length()) {
+                    val o = array.getJSONObject(i)
+                    val expires = o.optLong("expiresAtMs", 0L)
+                    if (expires > now) {
+                        add(
+                            DeniedEntry(
+                                packageName = o.getString("pkg"),
+                                signingCertSha256 = o.getString("sig"),
+                                deniedAtMs = o.optLong("deniedAtMs", 0L),
+                                expiresAtMs = expires,
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
     private fun readSignedArray(file: File, arrayKey: String): JSONArray? {
         if (!file.exists()) return null
         val raw = try { file.readText() } catch (_: IOException) { return null }
@@ -260,9 +312,14 @@ class AllowlistStore(
                 return null
             } else {
                 val envelope = JSONObject(trimmed)
+                val version = envelope.optInt("version", -1)
+                if (version !in MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION) {
+                    MindlayerLog.w(TAG, "Rejected unknown-version allowlist file ${file.name} (version=$version)")
+                    return null
+                }
                 val array = envelope.optJSONArray(arrayKey) ?: return null
                 val mac = envelope.optString(MAC_KEY)
-                if (!verifyMac(canonicalArray(array, arrayKey), mac)) {
+                if (!verifyMac(canonicalPayload(version, arrayKey, array), mac)) {
                     MindlayerLog.w(TAG, "Rejected tampered allowlist file ${file.name}")
                     return null
                 }
@@ -274,49 +331,65 @@ class AllowlistStore(
         }
     }
 
+    /**
+     * Old behaviour silently re-signed any legacy unsigned array as if it were
+     * trusted — that's a forgery primitive for an offline attacker who could
+     * write to the data dir between releases (see security audit M7). New
+     * behaviour: rename the file to `.legacy-rejected-<ts>` so the user must
+     * re-approve callers via the dashboard. The renamed file is preserved for
+     * forensic inspection but never read by the runtime.
+     */
     private fun migrateLegacyArray(file: File, arrayKey: String) {
         if (!file.exists()) return
         val raw = try { file.readText() } catch (_: IOException) { return }
         val trimmed = raw.trim()
         if (!trimmed.startsWith("[")) return
-        val array = try {
-            JSONArray(trimmed)
+        val ts = System.currentTimeMillis()
+        val renamed = File(file.parentFile, "${file.name}.legacy-rejected-$ts")
+        try {
+            if (file.renameTo(renamed)) {
+                MindlayerLog.w(TAG, "Renamed unsigned legacy allowlist ${file.name} to ${renamed.name}; user must re-approve callers")
+            } else {
+                file.delete()
+                MindlayerLog.w(TAG, "Deleted unsigned legacy allowlist ${file.name} (rename failed)")
+            }
         } catch (t: Throwable) {
-            MindlayerLog.w(TAG, "Failed to migrate legacy allowlist file ${file.name}", throwable = t)
-            return
+            MindlayerLog.w(TAG, "Failed to quarantine legacy allowlist file ${file.name}", throwable = t)
         }
-        atomicWrite(file, signedEnvelope(arrayKey, array).toString())
     }
 
     private fun signedEnvelope(arrayKey: String, array: JSONArray): JSONObject {
         return JSONObject().apply {
             put("version", SIGNED_FILE_VERSION)
             put(arrayKey, array)
-            put(MAC_KEY, hmac(canonicalArray(array, arrayKey)))
+            put(MAC_KEY, hmac(canonicalPayload(SIGNED_FILE_VERSION, arrayKey, array)))
         }
     }
 
-    private fun canonicalArray(array: JSONArray, arrayKey: String): String = buildString {
-        append('[')
-        for (i in 0 until array.length()) {
-            if (i > 0) append(',')
-            val item = array.getJSONObject(i)
-            when (arrayKey) {
-                ENTRIES_KEY -> appendCanonicalObject(
-                    item,
-                    timestampKey = "grantedAtMs",
-                )
-                PENDING_KEY -> appendCanonicalObject(
-                    item,
-                    timestampKey = "firstRequestedAtMs",
-                )
-                else -> throw IllegalArgumentException("Unknown allowlist array key: $arrayKey")
+    /**
+     * Build the canonical pre-image used for HMAC. Includes the file [version]
+     * and [arrayKey] as a domain separator so a v1-signed entries blob can NOT
+     * be replayed as v2/pending/denied. See [readSignedArray] for the verifier
+     * that reconstructs this.
+     */
+    private fun canonicalPayload(version: Int, arrayKey: String, array: JSONArray): String =
+        buildString {
+            append("v=").append(version).append("|k=").append(arrayKey).append('|')
+            append('[')
+            for (i in 0 until array.length()) {
+                if (i > 0) append(',')
+                val item = array.getJSONObject(i)
+                when (arrayKey) {
+                    ENTRIES_KEY -> appendCanonicalEntry(item, timestampKey = "grantedAtMs")
+                    PENDING_KEY -> appendCanonicalEntry(item, timestampKey = "firstRequestedAtMs")
+                    DENIED_KEY -> appendCanonicalDenied(item)
+                    else -> throw IllegalArgumentException("Unknown allowlist array key: $arrayKey")
+                }
             }
+            append(']')
         }
-        append(']')
-    }
 
-    private fun StringBuilder.appendCanonicalObject(item: JSONObject, timestampKey: String) {
+    private fun StringBuilder.appendCanonicalEntry(item: JSONObject, timestampKey: String) {
         append('{')
         append("\"pkg\":").append(JSONObject.quote(item.getString("pkg")))
         append(",\"sig\":").append(JSONObject.quote(item.getString("sig")))
@@ -325,6 +398,15 @@ class AllowlistStore(
         if (displayName != null) {
             append(",\"displayName\":").append(JSONObject.quote(displayName))
         }
+        append('}')
+    }
+
+    private fun StringBuilder.appendCanonicalDenied(item: JSONObject) {
+        append('{')
+        append("\"pkg\":").append(JSONObject.quote(item.getString("pkg")))
+        append(",\"sig\":").append(JSONObject.quote(item.getString("sig")))
+        append(",\"deniedAtMs\":").append(item.optLong("deniedAtMs", 0L))
+        append(",\"expiresAtMs\":").append(item.optLong("expiresAtMs", 0L))
         append('}')
     }
 
@@ -343,27 +425,84 @@ class AllowlistStore(
         )
     }
 
+    /**
+     * Returns the HMAC key, generating one on first use. Wrapped in
+     * [withFileLock] so concurrent first-runs across the main and `:ml`
+     * processes (audit H8) can't generate divergent keys that would silently
+     * invalidate the allowlist.
+     *
+     * If the key file exists but is unreadable / wrong size (corrupt), the
+     * bad file is **quarantined** to `<name>.bad-<ts>` and a fresh key is
+     * generated (audit M15). The user-visible effect is that approvals must
+     * be re-granted, but the failure is loud (logged at error level) rather
+     * than silent.
+     */
     private fun loadOrCreateHmacKey(): ByteArray {
+        // Cache to avoid repeated disk reads + double-checked entry into the lock.
+        cachedHmacKey?.let { return it }
+        return withFileLock {
+            // Re-check inside the lock — another process may have written since.
+            cachedHmacKey?.let { return@withFileLock it }
+            val key = readOrCreateHmacKeyLocked()
+            cachedHmacKey = key
+            key
+        }
+    }
+
+    private fun readOrCreateHmacKeyLocked(): ByteArray {
         if (hmacKeyFile.exists()) {
-            val encoded = hmacKeyFile.readText().trim()
+            val encoded = try {
+                hmacKeyFile.readText().trim()
+            } catch (t: Throwable) {
+                quarantineCorruptHmacKey("read failed: ${t.javaClass.simpleName}")
+                return generateAndPersistHmacKey()
+            }
             val decoded = runCatching { Base64.getDecoder().decode(encoded) }.getOrNull()
             if (decoded != null && decoded.size >= HMAC_KEY_BYTES) return decoded
+            quarantineCorruptHmacKey("decode failed or wrong length (${decoded?.size ?: -1})")
         }
+        return generateAndPersistHmacKey()
+    }
+
+    private fun quarantineCorruptHmacKey(reason: String) {
+        val ts = System.currentTimeMillis()
+        val quarantined = File(hmacKeyFile.parentFile, "${hmacKeyFile.name}.bad-$ts")
+        val moved = try { hmacKeyFile.renameTo(quarantined) } catch (_: Throwable) { false }
+        MindlayerLog.e(
+            TAG,
+            "HMAC key file corrupt ($reason); ${if (moved) "quarantined to ${quarantined.name}" else "could not quarantine"}; allowlist will be reset",
+        )
+    }
+
+    private fun generateAndPersistHmacKey(): ByteArray {
         val key = ByteArray(HMAC_KEY_BYTES)
         SecureRandom().nextBytes(key)
         atomicWrite(hmacKeyFile, Base64.getEncoder().encodeToString(key))
         return key
     }
 
+    @Volatile
+    private var cachedHmacKey: ByteArray? = null
+
     companion object {
         private const val TAG = "AllowlistStore"
         const val DEFAULT_DIR_NAME = "mindlayer_allowlist"
-        private const val SIGNED_FILE_VERSION = 1
+        // Bumped to 2 when canonicalPayload was changed to include version+arrayKey
+        // domain separator (audit M6). Verifier accepts MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION.
+        private const val SIGNED_FILE_VERSION = 2
+        private const val MIN_SUPPORTED_VERSION = 2
         private const val ENTRIES_KEY = "entries"
         private const val PENDING_KEY = "pending"
+        private const val DENIED_KEY = "denied"
         private const val MAC_KEY = "mac"
         private const val HMAC_ALGORITHM = "HmacSHA256"
         private const val HMAC_KEY_BYTES = 32
         private val HEX_SHA256 = Regex("(?i)^[0-9a-f]{64}$")
+
+        // Anti-DoS caps for the pending list (audit H2/F-B-O-1).
+        const val MAX_PENDING = 32
+        const val MAX_PACKAGE_NAME_LENGTH = 255
+        // Length of denial cooldown after denyPending / revoke (audit M8).
+        const val DENIAL_TTL_MS = 7L * 24 * 60 * 60 * 1000
     }
 }

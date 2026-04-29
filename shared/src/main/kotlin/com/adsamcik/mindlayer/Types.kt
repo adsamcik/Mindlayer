@@ -75,16 +75,18 @@ data class AudioTransfer(
 @Parcelize
 data class ToolResult(
     val requestId: String,
+    val callId: String? = null,
     val toolName: String,
     val resultJson: String,
 ) : Parcelable {
     override fun toString(): String =
-        "ToolResult(requestId=$requestId, toolName=$toolName, resultJson=<redacted:${resultJson.length}>)"
+        "ToolResult(requestId=$requestId, callId=$callId, toolName=$toolName, resultJson=<redacted:${resultJson.length}>)"
 }
 
 @Parcelize
 data class ServiceStatus(
     val isEngineLoaded: Boolean,
+    val engineWarming: Boolean = false,
     val activeSessionCount: Int,
     val activeInferenceCount: Int,
     val backend: String,

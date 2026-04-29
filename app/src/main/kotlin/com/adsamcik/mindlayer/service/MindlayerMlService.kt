@@ -28,6 +28,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 
@@ -37,6 +39,8 @@ class MindlayerMlService : Service() {
         private const val TAG = "MindlayerMlService"
         private const val NOTIFICATION_CHANNEL_ID = "mindlayer_inference"
         private const val NOTIFICATION_ID = 1
+        private const val LOG_CLEANUP_INTERVAL_MS = 24L * 60 * 60 * 1000
+        private const val ACTION_STOP = "com.adsamcik.mindlayer.STOP"
 
         const val STATE_IDLE = "idle"
         const val STATE_LOADING = "loading"
@@ -106,6 +110,7 @@ class MindlayerMlService : Service() {
         thermalMonitor.start()
         observeMemoryPressure()
         observeThermalPolicy()
+        scheduleLogCleanup()
     }
 
     override fun onBind(intent: Intent?): IBinder {
@@ -123,7 +128,18 @@ class MindlayerMlService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        MindlayerLog.i(TAG, "onStartCommand, startId=$startId")
+        MindlayerLog.i(TAG, "onStartCommand, startId=$startId, action=${intent?.action}")
+        if (intent?.action == ACTION_STOP) {
+            MindlayerLog.i(TAG, "Stop requested via notification action")
+            serviceScope.launch {
+                try {
+                    orchestrator.shutdown()
+                } finally {
+                    stopSelf(startId)
+                }
+            }
+            return START_NOT_STICKY
+        }
         // START_NOT_STICKY: don't auto-restart; recovery is client-driven
         return START_NOT_STICKY
     }
@@ -151,6 +167,25 @@ class MindlayerMlService : Service() {
 
         // Forward to MemoryBudget for immediate re-evaluation and escalation
         memoryBudget.onTrimMemory(level)
+    }
+
+    private fun scheduleLogCleanup() {
+        serviceScope.launch(Dispatchers.IO) {
+            // Immediate pass on startup to catch up after long offline period.
+            try {
+                logRepository.cleanup(retentionDays = 7)
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "Log cleanup (startup) failed", throwable = t)
+            }
+            while (isActive) {
+                delay(LOG_CLEANUP_INTERVAL_MS)
+                try {
+                    logRepository.cleanup(retentionDays = 7)
+                } catch (t: Throwable) {
+                    MindlayerLog.w(TAG, "Log cleanup failed", throwable = t)
+                }
+            }
+        }
     }
 
     /**
@@ -206,27 +241,37 @@ class MindlayerMlService : Service() {
      * All sessions are destroyed first because their [Conversation] references
      * become invalid after engine teardown.  GPU re-enable is gated by
      * [ThermalMonitor.canReenableGpu] (30 s cooldown).
+     *
+     * The decision and the clearing of [pendingBackend] happen atomically
+     * under [stateLock] so a binder thread racing to start inference cannot
+     * observe an inconsistent state between the idleness check and the
+     * destructive coroutine launch.
      */
     private fun applyPendingBackendSwitch() {
-        val target = pendingBackend ?: return
-        val current = engineManager.currentBackend
-
-        if (target == current) {
+        val target: String
+        synchronized(stateLock) {
+            target = pendingBackend ?: return
+            // Re-check idleness under the same lock that enterForeground uses.
+            // If an inference just started, exitForeground() will retry.
+            if (activeInferenceCount > 0) return
+            val current = engineManager.currentBackend
+            if (target == current) {
+                pendingBackend = null
+                return
+            }
+            if (target == "GPU" && !thermalMonitor.canReenableGpu()) {
+                MindlayerLog.i(TAG, "GPU re-enable cooldown not elapsed, deferring")
+                return
+            }
             pendingBackend = null
-            return
         }
 
-        // For GPU re-enable, check cooldown
-        if (target == "GPU" && !thermalMonitor.canReenableGpu()) {
-            MindlayerLog.i(TAG, "GPU re-enable cooldown not elapsed, deferring")
-            return
-        }
-
-        MindlayerLog.i(TAG, "Applying backend switch: $current → $target")
-        pendingBackend = null
-
+        MindlayerLog.i(TAG, "Applying backend switch: ${engineManager.currentBackend} → $target")
         serviceScope.launch {
             try {
+                // Wait for any coroutine that slipped in before we took the
+                // lock to finish — avoids closing a Conversation mid-inference.
+                orchestrator.awaitAllJobs()
                 // Destroy all sessions first — they hold Conversation refs to old engine
                 sessionManager.shutdown()
                 engineManager.switchBackend(target)
@@ -312,7 +357,7 @@ class MindlayerMlService : Service() {
         )
 
         val stopIntent = Intent(this, MindlayerMlService::class.java).apply {
-            action = "com.adsamcik.mindlayer.STOP"
+            action = ACTION_STOP
         }
         val stopPendingIntent = PendingIntent.getService(
             this, 0, stopIntent,
