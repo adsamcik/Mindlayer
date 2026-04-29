@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.util.Base64
 
 plugins {
     alias(libs.plugins.android.application)
@@ -19,9 +20,21 @@ val keystoreProperties = Properties().apply {
         keystorePropertiesFile.inputStream().use { load(it) }
     }
 }
-val hasReleaseKeystore = keystoreProperties.getProperty("storeFile")?.let {
-    rootProject.file(it).exists()
-} ?: false
+val localReleaseKeystore = keystoreProperties.getProperty("storeFile")?.let(rootProject::file)
+val hasLocalReleaseKeystore = localReleaseKeystore?.exists() == true
+val ciKeystoreBase64 = providers.environmentVariable("ANDROID_KEYSTORE_BASE64").orNull?.takeIf { it.isNotBlank() }
+val ciKeystorePassword = providers.environmentVariable("ANDROID_KEYSTORE_PASSWORD").orNull?.takeIf { it.isNotBlank() }
+val ciKeyAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").orNull?.takeIf { it.isNotBlank() }
+val ciKeyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").orNull?.takeIf { it.isNotBlank() }
+val ciReleaseKeystore = ciKeystoreBase64?.let { encoded ->
+    layout.buildDirectory.file("generated/signing/ci-release.jks").get().asFile.also { file ->
+        file.parentFile.mkdirs()
+        file.writeBytes(Base64.getDecoder().decode(encoded))
+    }
+}
+val hasCiReleaseKeystore =
+    ciReleaseKeystore != null && ciKeystorePassword != null && ciKeyAlias != null && ciKeyPassword != null
+val hasReleaseKeystore = hasLocalReleaseKeystore || hasCiReleaseKeystore
 
 android {
     namespace = "com.adsamcik.mindlayer.service"
@@ -43,10 +56,17 @@ android {
     signingConfigs {
         if (hasReleaseKeystore) {
             create("release") {
-                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
-                storePassword = keystoreProperties.getProperty("storePassword")
-                keyAlias = keystoreProperties.getProperty("keyAlias")
-                keyPassword = keystoreProperties.getProperty("keyPassword")
+                if (hasLocalReleaseKeystore) {
+                    storeFile = localReleaseKeystore
+                    storePassword = keystoreProperties.getProperty("storePassword")
+                    keyAlias = keystoreProperties.getProperty("keyAlias")
+                    keyPassword = keystoreProperties.getProperty("keyPassword")
+                } else {
+                    storeFile = checkNotNull(ciReleaseKeystore)
+                    storePassword = checkNotNull(ciKeystorePassword)
+                    keyAlias = checkNotNull(ciKeyAlias)
+                    keyPassword = checkNotNull(ciKeyPassword)
+                }
             }
         }
     }

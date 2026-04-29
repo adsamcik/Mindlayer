@@ -80,7 +80,10 @@ class EngineManagerTest {
         cacheDir = File(tmpRoot, "cache").apply { mkdirs() }
         nativeLibDir = File(tmpRoot, "nativeLib").apply { mkdirs() }
 
-        appInfo = ApplicationInfo().apply { nativeLibraryDir = nativeLibDir.absolutePath }
+        appInfo = ApplicationInfo().apply {
+            nativeLibraryDir = nativeLibDir.absolutePath
+            flags = ApplicationInfo.FLAG_DEBUGGABLE
+        }
         assetManager = mockk(relaxed = true) {
             every { list("") } returns emptyArray()
         }
@@ -176,7 +179,7 @@ class EngineManagerTest {
 
         // Should return existing file without opening asset stream
         assertEquals(existing.absolutePath, path)
-        verify(exactly = 0) { assetManager.open(any()) }
+        verify(exactly = 0) { assetManager.open(EngineManager.DEFAULT_MODEL_FILENAME) }
     }
 
     @Test(expected = IllegalStateException::class)

@@ -1,6 +1,11 @@
 package com.adsamcik.mindlayer.service.engine
 
+import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.content.res.AssetManager
 import androidx.test.core.app.ApplicationProvider
+import io.mockk.every
+import io.mockk.mockk
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -10,7 +15,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.security.MessageDigest
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -104,7 +111,7 @@ class ModelRegistryTest {
         context.filesDir.listFiles()?.forEach { it.delete() }
         context.cacheDir.listFiles()?.forEach { it.delete() }
 
-        val models = ModelRegistry.discoverModels(context)
+        val models = ModelRegistry.discoverModels(context, requireIntegrity = false)
         assertTrue("Expected empty, got $models", models.isEmpty())
     }
 
@@ -129,7 +136,7 @@ class ModelRegistryTest {
         File(context.cacheDir, "shared.litertlm").writeBytes(ByteArray(9_999))
         File(context.cacheDir, "tiny.litertlm").writeBytes(ByteArray(10))
 
-        val models = ModelRegistry.discoverModels(context)
+        val models = ModelRegistry.discoverModels(context, requireIntegrity = false)
 
         // Three distinct filenames discovered
         assertEquals(3, models.size)
@@ -152,5 +159,215 @@ class ModelRegistryTest {
 
         // No non-model files crept in
         assertTrue(models.none { it.path.endsWith("notes.txt") })
+    }
+
+    @Test
+    fun `discoverModels requires valid integrity metadata when requested`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        context.filesDir.listFiles()?.forEach { it.delete() }
+        context.cacheDir.listFiles()?.forEach { it.delete() }
+
+        val goodBytes = "trusted model".toByteArray()
+        val good = File(context.filesDir, "good.litertlm").apply {
+            writeBytes(goodBytes)
+        }
+        File(context.filesDir, "good.litertlm.sha256").writeText(sha256(goodBytes))
+
+        File(context.filesDir, "tampered.litertlm").writeText("tampered")
+        File(context.filesDir, "tampered.litertlm.sha256").writeText("0".repeat(64))
+        File(context.filesDir, "missing-hash.litertlm").writeText("missing")
+
+        val models = ModelRegistry.discoverModels(context, requireIntegrity = true)
+
+        assertEquals(1, models.size)
+        assertEquals("good", models.single().id)
+        assertEquals(good.absolutePath, models.single().path)
+        assertEquals(sha256(goodBytes), models.single().sha256)
+    }
+
+    @Test
+    fun `discoverModels accepts sidecar hash with uppercase digest and filename suffix`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        context.filesDir.listFiles()?.forEach { it.delete() }
+        context.cacheDir.listFiles()?.forEach { it.delete() }
+
+        val bytes = "sidecar model".toByteArray()
+        val model = File(context.filesDir, "sidecar-model.litertlm").apply {
+            writeBytes(bytes)
+        }
+        File(context.filesDir, "sidecar-model.sha256").writeText(
+            "${sha256(bytes).uppercase()}  sidecar-model.litertlm\n",
+        )
+
+        val models = ModelRegistry.discoverModels(context, requireIntegrity = true)
+
+        assertEquals(listOf("sidecar-model"), models.map { it.id })
+        assertEquals(model.absolutePath, models.single().path)
+        assertEquals(sha256(bytes), models.single().sha256)
+    }
+
+    @Test
+    fun `discoverModels accepts asset manifest metadata without sidecar`() {
+        val baseContext = ApplicationProvider.getApplicationContext<android.content.Context>()
+        baseContext.filesDir.listFiles()?.forEach { it.delete() }
+        baseContext.cacheDir.listFiles()?.forEach { it.delete() }
+        val context = contextWithManifest(baseContext)
+
+        val model = File(baseContext.filesDir, "manifest-empty.litertlm").apply {
+            writeBytes(ByteArray(0))
+        }
+
+        val models = ModelRegistry.discoverModels(context, requireIntegrity = true)
+
+        assertEquals(listOf("manifest-empty"), models.map { it.id })
+        assertEquals(model.absolutePath, models.single().path)
+        assertEquals(sha256(ByteArray(0)), models.single().sha256)
+    }
+
+    @Test
+    fun `discoverModels rejects manifest entries with size mismatch or invalid sha`() {
+        val baseContext = ApplicationProvider.getApplicationContext<android.content.Context>()
+        baseContext.filesDir.listFiles()?.forEach { it.delete() }
+        baseContext.cacheDir.listFiles()?.forEach { it.delete() }
+        val context = contextWithManifest(baseContext)
+
+        File(baseContext.filesDir, "manifest-size-mismatch.litertlm").writeBytes(ByteArray(0))
+        File(baseContext.filesDir, "manifest-invalid-sha.litertlm").writeBytes(ByteArray(0))
+
+        val models = ModelRegistry.discoverModels(context, requireIntegrity = true)
+
+        assertTrue(models.isEmpty())
+    }
+
+    @Test
+    fun `discoverModels falls back to sidecar when asset manifest is malformed`() {
+        val baseContext = ApplicationProvider.getApplicationContext<android.content.Context>()
+        baseContext.filesDir.listFiles()?.forEach { it.delete() }
+        baseContext.cacheDir.listFiles()?.forEach { it.delete() }
+        val context = contextWithManifest(baseContext, manifest = "{not-json")
+
+        val bytes = "sidecar survives bad manifest".toByteArray()
+        val model = File(baseContext.filesDir, "sidecar-after-bad-manifest.litertlm").apply {
+            writeBytes(bytes)
+        }
+        File(baseContext.filesDir, "sidecar-after-bad-manifest.litertlm.sha256")
+            .writeText(sha256(bytes))
+
+        val models = ModelRegistry.discoverModels(context, requireIntegrity = true)
+
+        assertEquals(listOf("sidecar-after-bad-manifest"), models.map { it.id })
+        assertEquals(model.absolutePath, models.single().path)
+    }
+
+    @Test
+    fun `discoverModels default fail-closes on non-debug context without integrity metadata`() {
+        val baseContext = ApplicationProvider.getApplicationContext<android.content.Context>()
+        baseContext.filesDir.listFiles()?.forEach { it.delete() }
+        baseContext.cacheDir.listFiles()?.forEach { it.delete() }
+        val context = contextWithManifest(baseContext, manifest = """{"models":[]}""")
+
+        File(baseContext.filesDir, "untrusted.litertlm").writeText("no hash")
+
+        assertTrue(ModelRegistry.discoverModels(context).isEmpty())
+    }
+
+    @Test
+    fun `discoverModels deletes invalid extracted ai pack model and rediscovers on next pass`() {
+        val baseContext = ApplicationProvider.getApplicationContext<android.content.Context>()
+        baseContext.filesDir.listFiles()?.forEach { it.delete() }
+        baseContext.cacheDir.listFiles()?.forEach { it.delete() }
+        val context = contextWithManifest(
+            baseContext = baseContext,
+            assetNames = arrayOf("manifest-empty.litertlm"),
+            assetContents = mapOf("manifest-empty.litertlm" to ByteArray(0)),
+        )
+        val extracted = File(baseContext.filesDir, "manifest-empty.litertlm").apply {
+            writeText("corrupted existing extraction")
+        }
+
+        assertTrue(ModelRegistry.discoverModels(context, requireIntegrity = true).isEmpty())
+        assertFalse(extracted.exists())
+
+        val rediscovered = ModelRegistry.discoverModels(context, requireIntegrity = true)
+
+        assertEquals(listOf("manifest-empty"), rediscovered.map { it.id })
+        assertEquals(0L, extracted.length())
+    }
+
+    @Test
+    fun `discoverModels keeps valid local model when ai pack asset open fails`() {
+        val baseContext = ApplicationProvider.getApplicationContext<android.content.Context>()
+        baseContext.filesDir.listFiles()?.forEach { it.delete() }
+        baseContext.cacheDir.listFiles()?.forEach { it.delete() }
+        val bytes = "trusted local model".toByteArray()
+        val local = File(baseContext.filesDir, "trusted-local.litertlm").apply {
+            writeBytes(bytes)
+        }
+        File(baseContext.filesDir, "trusted-local.litertlm.sha256").writeText(sha256(bytes))
+        val context = contextWithManifest(
+            baseContext = baseContext,
+            assetNames = arrayOf("manifest-empty.litertlm"),
+            failAssetOpenFor = "manifest-empty.litertlm",
+        )
+
+        val models = ModelRegistry.discoverModels(context, requireIntegrity = true)
+
+        assertEquals(listOf("trusted-local"), models.map { it.id })
+        assertEquals(local.absolutePath, models.single().path)
+    }
+
+    private fun sha256(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+
+    private fun contextWithManifest(
+        baseContext: Context,
+        manifest: String = MODEL_INTEGRITY_MANIFEST,
+        assetNames: Array<String> = emptyArray(),
+        assetContents: Map<String, ByteArray> = emptyMap(),
+        failAssetOpenFor: String? = null,
+    ): Context {
+        val assetManager = mockk<AssetManager> {
+            every { open(any<String>()) } answers {
+                val name = firstArg<String>()
+                if (name == failAssetOpenFor) throw java.io.IOException("asset unavailable")
+                val bytes = when (name) {
+                    "model_integrity.json" -> manifest.encodeToByteArray()
+                    else -> assetContents[name] ?: ByteArray(0)
+                }
+                ByteArrayInputStream(bytes)
+            }
+            every { list("") } returns assetNames
+        }
+        return mockk {
+            every { filesDir } returns baseContext.filesDir
+            every { getExternalFilesDir(null) } returns null
+            every { cacheDir } returns baseContext.cacheDir
+            every { applicationInfo } returns ApplicationInfo()
+            every { assets } returns assetManager
+        }
+    }
+
+    private companion object {
+        private const val MODEL_INTEGRITY_MANIFEST = """
+            {
+              "models": [
+                {
+                  "filename": "manifest-empty.litertlm",
+                  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                },
+                {
+                  "filename": "manifest-size-mismatch.litertlm",
+                  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                  "sizeBytes": 42
+                },
+                {
+                  "filename": "manifest-invalid-sha.litertlm",
+                  "sha256": "not-a-sha256"
+                }
+              ]
+            }
+        """
     }
 }
