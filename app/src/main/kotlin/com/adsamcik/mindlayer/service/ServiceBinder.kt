@@ -83,6 +83,25 @@ class ServiceBinder(
     private val activeInferenceOwners = ConcurrentHashMap<String, Any>()
 
     /**
+     * v0.4 recently-completed inference tracking. Maps `scopedKey
+     * (uid:requestId)` → wall-clock millis when the inference terminated.
+     *
+     * `cancelInferenceV2` and `submitToolResultV2` consult this map to
+     * distinguish [com.adsamcik.mindlayer.CancelResult.ALREADY_FINISHED]
+     * from [com.adsamcik.mindlayer.CancelResult.UNKNOWN] for callers
+     * whose request just terminated. Entries older than
+     * [RECENTLY_COMPLETED_RETENTION_MS] are pruned opportunistically on
+     * each lookup so the map stays bounded.
+     *
+     * Keyed by the scoped key (uid:requestId) so cross-UID lookups stay
+     * opaque — `cancelInferenceV2` builds the lookup key from
+     * `(callingUid, requestId)`, never finds another UID's entry, and the
+     * F-007 anti-enumeration property is preserved.
+     */
+    private val recentlyCompleted = ConcurrentHashMap<String, Long>()
+    private val recentlyCompletedSweepCounter = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
      * Bound concurrent diagnostic dumps to one. Each dump holds a binder
      * thread for Room I/O — without this an authorized attacker could
      * cheaply exhaust the binder pool while still under the per-UID
@@ -118,9 +137,27 @@ class ServiceBinder(
          * Logical API version surfaced via [getCapabilities]. Bumped whenever
          * a new method is appended to the AIDL interface. v1 was the pre-
          * `inferMulti` surface; v2 added [inferMulti]; v3 added
-         * [prewarmAndAwait].
+         * [prewarmAndAwait]; v4 added [cancelInferenceV2] +
+         * [submitToolResultV2].
          */
-        const val CURRENT_API_VERSION = 3
+        const val CURRENT_API_VERSION = 4
+
+        /**
+         * How long after termination a scoped key remains in
+         * [recentlyCompleted] for `cancelInferenceV2` /
+         * `submitToolResultV2` to distinguish "already finished" from
+         * "never existed". 30 s is generous; bumping further means a
+         * larger steady-state map and longer-lived references to
+         * terminated requestIds.
+         */
+        const val RECENTLY_COMPLETED_RETENTION_MS: Long = 30_000L
+
+        /**
+         * Sweep [recentlyCompleted] entries older than retention every Nth
+         * lookup. Cheap amortized cost; prevents the map from growing
+         * unbounded under sustained churn.
+         */
+        const val RECENTLY_COMPLETED_SWEEP_INTERVAL: Int = 32
 
         /**
          * Maximum [com.adsamcik.mindlayer.MediaPart] entries accepted in a
@@ -157,6 +194,7 @@ class ServiceBinder(
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_STRUCTURED_OUTPUT,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_MEDIA_LIST,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_PREWARM_AWAIT,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL,
         )
     }
 
@@ -628,12 +666,14 @@ class ServiceBinder(
                 if (activeInferenceUids.remove(scopedKey) != null) {
                     rateLimiter.endInference(uid)
                 }
+                markRecentlyCompleted(scopedKey)
             }
         } catch (t: Throwable) {
             activeInferenceOwners.remove(scopedKey)
             if (activeInferenceUids.remove(scopedKey) != null) {
                 rateLimiter.endInference(uid)
             }
+            markRecentlyCompleted(scopedKey)
             throw t
         }
     }
@@ -644,10 +684,11 @@ class ServiceBinder(
      * consume multiple images / video / documents without another wire-break.
      *
      * Today's engine constraint (see `MediaPart` KDoc): the validator
-     * rejects multi-image, multi-audio, and any [com.adsamcik.mindlayer.MediaPart.KIND_VIDEO]
-     * / [com.adsamcik.mindlayer.MediaPart.KIND_DOCUMENT]. Within those
-     * limits the binder picks the first image and first audio (preserving
-     * ordering by extracting in list order) and dispatches to the existing
+     * rejects multi-image, multi-audio, and any
+     * [com.adsamcik.mindlayer.MediaPart.KIND_VIDEO] /
+     * [com.adsamcik.mindlayer.MediaPart.KIND_DOCUMENT]. Within those limits
+     * the binder picks the first image and first audio (preserving ordering
+     * by extracting in list order) and dispatches to the existing
      * orchestrator. When litert-lm #1874 lifts multi-image, the orchestrator
      * gains an ordered-list path and the validator caps loosen — wire shape
      * doesn't change.
@@ -730,12 +771,14 @@ class ServiceBinder(
                 if (activeInferenceUids.remove(scopedKey) != null) {
                     rateLimiter.endInference(uid)
                 }
+                markRecentlyCompleted(scopedKey)
             }
         } catch (t: Throwable) {
             activeInferenceOwners.remove(scopedKey)
             if (activeInferenceUids.remove(scopedKey) != null) {
                 rateLimiter.endInference(uid)
             }
+            markRecentlyCompleted(scopedKey)
             throw t
         }
     }
@@ -811,6 +854,66 @@ class ServiceBinder(
         orchestrator.cancelInference(scopedKey)
     }
 
+    /**
+     * v0.4 detailed cancel result. Same authz fence as [cancelInference] but
+     * returns a tri-state [com.adsamcik.mindlayer.CancelResult.outcome] so
+     * callers can distinguish CANCELLED / ALREADY_FINISHED / UNKNOWN.
+     *
+     * Anti-enumeration: an external caller probing another UID's requestId
+     * always sees [com.adsamcik.mindlayer.CancelResult.UNKNOWN] — the
+     * recently-completed cache is keyed by `(uid, requestId)` so no
+     * cross-UID lookup ever hits.
+     */
+    override fun cancelInferenceV2(requestId: String): com.adsamcik.mindlayer.CancelResult {
+        authorizeCall()
+        try {
+            IpcInputValidator.validateId(requestId, "requestId")
+        } catch (e: IllegalArgumentException) {
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_REQUEST,
+                "Invalid requestId: ${e.message}",
+            )
+        }
+        val uid = Binder.getCallingUid()
+        val isSelfUid = uid == Process.myUid()
+        if (!isSelfUid) {
+            requireRegisteredClient()
+        }
+
+        // Look up active first.
+        val activeKey: String? = if (isSelfUid) {
+            activeInferenceUids.keys.firstOrNull { it.endsWith(":$requestId") }
+        } else {
+            val key = inferenceKey(uid, requestId)
+            if (activeInferenceUids.containsKey(key)) key else null
+        }
+        if (activeKey != null) {
+            if (!isSelfUid) requireRequestOwner(activeKey)
+            MindlayerLog.d(TAG, "cancelInferenceV2: cancelling", requestId = requestId)
+            orchestrator.cancelInference(activeKey)
+            return com.adsamcik.mindlayer.CancelResult(
+                outcome = com.adsamcik.mindlayer.CancelResult.CANCELLED,
+            )
+        }
+
+        // Then check the recently-completed cache.
+        val recentKey: String? = if (isSelfUid) {
+            recentlyCompleted.keys.firstOrNull { it.endsWith(":$requestId") }
+        } else {
+            val key = inferenceKey(uid, requestId)
+            if (isRecentlyCompleted(key)) key else null
+        }
+        return if (recentKey != null) {
+            com.adsamcik.mindlayer.CancelResult(
+                outcome = com.adsamcik.mindlayer.CancelResult.ALREADY_FINISHED,
+            )
+        } else {
+            com.adsamcik.mindlayer.CancelResult(
+                outcome = com.adsamcik.mindlayer.CancelResult.UNKNOWN,
+            )
+        }
+    }
+
     // ---- Tool results -------------------------------------------------------
 
     override fun submitToolResult(requestId: String, result: ToolResult) {
@@ -853,6 +956,104 @@ class ServiceBinder(
             toolName = result.toolName,
             resultJson = result.resultJson,
         )
+    }
+
+    /**
+     * v0.4 detailed submitToolResult. Returns ACCEPTED when the result was
+     * queued, NO_PENDING_CALL when the request is active but no tool call
+     * is awaiting this callId, REQUEST_GONE when the request is no longer
+     * tracked (terminated, never existed, or owned by another UID — see
+     * [com.adsamcik.mindlayer.ToolSubmitResult.REQUEST_GONE] for the
+     * anti-enumeration property).
+     */
+    override fun submitToolResultV2(
+        requestId: String,
+        result: ToolResult,
+    ): com.adsamcik.mindlayer.ToolSubmitResult {
+        authorizeCall()
+        try {
+            IpcInputValidator.validateId(requestId, "requestId")
+            IpcInputValidator.validateToolResult(result)
+            require(result.requestId == requestId) {
+                "ToolResult.requestId must equal AIDL requestId"
+            }
+        } catch (e: IllegalArgumentException) {
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_TOOL_RESULT,
+                "Invalid ToolResult: ${e.message}",
+            )
+        }
+        val uid = Binder.getCallingUid()
+        val isSelfUid = uid == Process.myUid()
+
+        // Find the request in active map (UID-scoped lookup for external callers).
+        val scopedKey: String? = if (isSelfUid) {
+            activeInferenceUids.keys.firstOrNull { it.endsWith(":$requestId") }
+        } else {
+            val key = inferenceKey(uid, requestId)
+            if (activeInferenceUids.containsKey(key)) key else null
+        }
+
+        if (scopedKey == null) {
+            // Either gone or never owned by this caller. Anti-enumeration:
+            // REQUEST_GONE conflates the two cases.
+            return com.adsamcik.mindlayer.ToolSubmitResult(
+                outcome = com.adsamcik.mindlayer.ToolSubmitResult.REQUEST_GONE,
+            )
+        }
+        if (!isSelfUid) requireRequestOwner(scopedKey)
+
+        // Active. Try to deliver via the existing bridge.
+        val accepted = orchestrator.toolCallBridge.submitResult(
+            scopedKey = scopedKey,
+            callId = result.callId,
+            toolName = result.toolName,
+            resultJson = result.resultJson,
+        )
+        return com.adsamcik.mindlayer.ToolSubmitResult(
+            outcome = if (accepted) {
+                com.adsamcik.mindlayer.ToolSubmitResult.ACCEPTED
+            } else {
+                com.adsamcik.mindlayer.ToolSubmitResult.NO_PENDING_CALL
+            },
+        )
+    }
+
+    // ---- Recently-completed cache (v04-cancel-tool-status) ------------------
+
+    /**
+     * Mark a scoped key as recently completed. Called from the orchestrator
+     * completion hooks in [infer] and [inferMulti] paths after the inference
+     * terminates (success / error / cancel). The key remains visible for
+     * [RECENTLY_COMPLETED_RETENTION_MS] ms; lookups beyond that window
+     * return as if the request never existed.
+     */
+    private fun markRecentlyCompleted(scopedKey: String) {
+        recentlyCompleted[scopedKey] = System.currentTimeMillis()
+        sweepRecentlyCompletedIfNeeded()
+    }
+
+    /**
+     * `true` if [scopedKey] was marked complete within the retention window.
+     * Opportunistically sweeps stale entries every Nth call so the map
+     * stays bounded.
+     */
+    private fun isRecentlyCompleted(scopedKey: String): Boolean {
+        val finishedAt = recentlyCompleted[scopedKey] ?: return false
+        val now = System.currentTimeMillis()
+        if (now - finishedAt > RECENTLY_COMPLETED_RETENTION_MS) {
+            recentlyCompleted.remove(scopedKey, finishedAt)
+            return false
+        }
+        sweepRecentlyCompletedIfNeeded()
+        return true
+    }
+
+    private fun sweepRecentlyCompletedIfNeeded() {
+        val n = recentlyCompletedSweepCounter.incrementAndGet()
+        if (n % RECENTLY_COMPLETED_SWEEP_INTERVAL != 0) return
+        val cutoff = System.currentTimeMillis() - RECENTLY_COMPLETED_RETENTION_MS
+        recentlyCompleted.entries.removeAll { it.value < cutoff }
     }
 
     /**
