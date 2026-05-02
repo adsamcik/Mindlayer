@@ -548,36 +548,8 @@ class Mindlayer private constructor(
      * @throws IllegalStateException if the stream ends without a terminal
      *   [MindlayerEvent.Done] event.
      */
-    suspend fun chatOnce(sessionId: String, text: String): String {
-        var result: String? = null
-        val accumulator = StringBuilder()
-
-        chat(sessionId, text).events.collect { event ->
-            when (event) {
-                is MindlayerEvent.TextDelta -> accumulator.append(event.text)
-                is MindlayerEvent.Done -> {
-                    result = event.fullText ?: accumulator.toString()
-                }
-                is MindlayerEvent.Error -> throw MindlayerException.fromStreamError(
-                    message = event.message,
-                    codeName = event.code,
-                    seq = event.seq,
-                    tsMs = event.tsMs,
-                    sessionId = sessionId,
-                )
-                is MindlayerEvent.ToolCall -> throw MindlayerException(
-                    message = TOOL_CALL_IN_ONESHOT_MSG,
-                    codeName = "UNSUPPORTED_TOOL_CALL",
-                    sessionId = sessionId,
-                )
-                else -> { /* Started, Metrics — ignored */ }
-            }
-        }
-
-        return result ?: throw IllegalStateException(
-            "Inference stream ended without a Done event"
-        )
-    }
+    suspend fun chatOnce(sessionId: String, text: String): String =
+        collectHandleToString(chat(sessionId, text), sessionId)
 
     /**
      * Send a text + image message and return the complete response text.
@@ -588,11 +560,75 @@ class Mindlayer private constructor(
         sessionId: String,
         text: String,
         bitmap: Bitmap,
+    ): String = collectHandleToString(chatWithImage(sessionId, text, bitmap), sessionId)
+
+    /**
+     * Send a text + audio message and return the complete response text.
+     *
+     * @see chatOnce for error semantics.
+     */
+    suspend fun chatWithAudioOnce(
+        sessionId: String,
+        text: String,
+        audioFile: File,
+    ): String = collectHandleToString(chatWithAudio(sessionId, text, audioFile), sessionId)
+
+    /**
+     * Stream just the text deltas from [chat] as a [Flow]&lt;String&gt;.
+     *
+     * Filters out non-text events (Started, Metrics) and converts terminal
+     * frames into flow signals: [MindlayerEvent.Done] completes the flow,
+     * [MindlayerEvent.Error] throws a [MindlayerException], and an
+     * unexpected [MindlayerEvent.ToolCall] throws with code
+     * `UNSUPPORTED_TOOL_CALL` (silently dropping it would deadlock the
+     * inference because no [submitToolResult] would follow).
+     *
+     * Useful for streaming text directly into a `TextField` without
+     * writing the event-handling boilerplate by hand.
+     *
+     * ```kotlin
+     * mindlayer.chatTextFlow(sessionId, "Tell me a story").collect { delta ->
+     *     textFieldState.value += delta
+     * }
+     * ```
+     */
+    fun chatTextFlow(sessionId: String, text: String): kotlinx.coroutines.flow.Flow<String> =
+        textDeltaFlow(chat(sessionId, text), sessionId)
+
+    /**
+     * Like [chatTextFlow] but emits the **cumulative** text after each delta.
+     * Each emission is a complete prefix of the response so far — useful for
+     * UIs that want to display the growing answer with simple "set this whole
+     * string" semantics rather than appending.
+     *
+     * The final emission is the full response text. Errors and tool calls
+     * are surfaced the same way as [chatTextFlow].
+     */
+    fun chatFullTextFlow(sessionId: String, text: String): kotlinx.coroutines.flow.Flow<String> =
+        kotlinx.coroutines.flow.flow {
+            val acc = StringBuilder()
+            textDeltaFlow(chat(sessionId, text), sessionId).collect { delta ->
+                acc.append(delta)
+                emit(acc.toString())
+            }
+        }
+
+    /**
+     * Internal helper: collect an [InferenceHandle] to a complete response
+     * string. Used by [chatOnce], [chatWithImageOnce], [chatWithAudioOnce],
+     * and (transitively) [generate] / [generateWithImage] / [generateWithAudio].
+     *
+     * Replaces four near-identical inline implementations with one source of
+     * truth so the error mapping (Error → typed MindlayerException;
+     * ToolCall → `UNSUPPORTED_TOOL_CALL`) cannot drift between call sites.
+     */
+    private suspend fun collectHandleToString(
+        handle: InferenceHandle,
+        sessionId: String,
     ): String {
         var result: String? = null
         val accumulator = StringBuilder()
-
-        chatWithImage(sessionId, text, bitmap).events.collect { event ->
+        handle.events.collect { event ->
             when (event) {
                 is MindlayerEvent.TextDelta -> accumulator.append(event.text)
                 is MindlayerEvent.Done -> {
@@ -603,20 +639,52 @@ class Mindlayer private constructor(
                     codeName = event.code,
                     seq = event.seq,
                     tsMs = event.tsMs,
+                    requestId = handle.requestId,
                     sessionId = sessionId,
                 )
                 is MindlayerEvent.ToolCall -> throw MindlayerException(
                     message = TOOL_CALL_IN_ONESHOT_MSG,
                     codeName = "UNSUPPORTED_TOOL_CALL",
+                    requestId = handle.requestId,
                     sessionId = sessionId,
                 )
-                else -> {}
+                else -> { /* Started, Metrics — ignored */ }
             }
         }
-
         return result ?: throw IllegalStateException(
             "Inference stream ended without a Done event"
         )
+    }
+
+    /**
+     * Internal helper: filter an [InferenceHandle]'s events down to a flow
+     * of text deltas, raising on Error/ToolCall and completing on Done.
+     */
+    private fun textDeltaFlow(
+        handle: InferenceHandle,
+        sessionId: String,
+    ): kotlinx.coroutines.flow.Flow<String> = kotlinx.coroutines.flow.flow {
+        handle.events.collect { event ->
+            when (event) {
+                is MindlayerEvent.TextDelta -> emit(event.text)
+                is MindlayerEvent.Done -> return@collect
+                is MindlayerEvent.Error -> throw MindlayerException.fromStreamError(
+                    message = event.message,
+                    codeName = event.code,
+                    seq = event.seq,
+                    tsMs = event.tsMs,
+                    requestId = handle.requestId,
+                    sessionId = sessionId,
+                )
+                is MindlayerEvent.ToolCall -> throw MindlayerException(
+                    message = TOOL_CALL_IN_ONESHOT_MSG,
+                    codeName = "UNSUPPORTED_TOOL_CALL",
+                    requestId = handle.requestId,
+                    sessionId = sessionId,
+                )
+                else -> { /* Started, Metrics — silently dropped */ }
+            }
+        }
     }
 
     /**
@@ -664,6 +732,28 @@ class Mindlayer private constructor(
         val sessionId = createSession(configure)
         return try {
             chatWithImageOnce(sessionId, text, bitmap)
+        } finally {
+            try {
+                destroySession(sessionId)
+            } catch (_: Exception) {
+                // Best-effort cleanup
+            }
+        }
+    }
+
+    /**
+     * Stateless one-shot text + audio generation.
+     *
+     * @see generate for lifecycle semantics.
+     */
+    suspend fun generateWithAudio(
+        text: String,
+        audioFile: File,
+        configure: SessionConfigBuilder.() -> Unit = {},
+    ): String {
+        val sessionId = createSession(configure)
+        return try {
+            chatWithAudioOnce(sessionId, text, audioFile)
         } finally {
             try {
                 destroySession(sessionId)
