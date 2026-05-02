@@ -51,12 +51,14 @@ Every public AIDL Parcelable lives in `:shared` and crosses process boundaries v
 | `HistoryTurn` | `role: String, text: String` | Role values from `IpcInputValidator.ALLOWED_ROLES`. |
 | `SessionConfig` | 11 fields | `extraContextJson` is the open extension point. Avoid bolting on more parameters. |
 | `RequestMeta` | `requestId, sessionId, textContent?, role, priority` | `priority` and `role` are currently vestigial — see `v03-role-strings`. |
-| `ImageTransfer` | 9 fields incl. `ParcelFileDescriptor source` | New media kinds → use the `MediaPart` Parcelable from v0.4, don't extend this. |
+| `ImageTransfer` | 9 fields incl. `ParcelFileDescriptor source` | Frozen — use the v0.4 `MediaPart` for new media kinds. |
 | `AudioTransfer` | 5 fields | Same. |
 | `ToolResult` | `requestId, callId, toolName, resultJson` | `resultJson` is the extension point. |
 | `ServiceStatus` | 12 fields | Polled at 2 s by the dashboard — keep cheap. |
 | `EngineInfo` | 7 fields | Static-ish; refresh on engine reload. |
 | `SessionInfo` | 10 fields incl. `expirationMs`, `expiresAtMs` | These two were added post-v0 with defaults; pre-1.0 audience accepted the wire break. **Do not repeat this pattern.** |
+| `ServiceCapabilities` (v0.2) | `schemaVersion: Int = 1` first; 13 numeric/feature fields | First parcelable to follow the schemaVersion convention. |
+| `MediaPart` (v0.4) | `schemaVersion: Int = 1` first; tagged-union kind + image/audio/video/document fields | Carries an ordered list via `inferMulti`. Wire reserves `KIND_VIDEO`/`KIND_DOCUMENT` for engines that aren't here yet. |
 
 ### 3. Pipe stream protocol (`mindlayer.stream.v1`)
 

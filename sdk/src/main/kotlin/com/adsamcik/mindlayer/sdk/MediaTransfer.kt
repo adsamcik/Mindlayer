@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.net.Uri
 import android.os.Build
+import android.os.Parcel
 import android.os.ParcelFileDescriptor
 import android.os.SharedMemory
 import android.system.OsConstants
@@ -36,7 +37,79 @@ object MediaTransfer {
 
     private const val TAG = "MediaTransfer"
 
-    // ---- Image builders ----------------------------------------------------
+    // ---- v0.4 MediaPart builders -------------------------------------------
+
+    /**
+     * Build a [com.adsamcik.mindlayer.MediaPart] of kind
+     * [com.adsamcik.mindlayer.MediaPart.KIND_IMAGE] from a [Bitmap]. Today's
+     * engine (Gemma 4 via litert-lm) accepts at most one image per request;
+     * multi-image will become available when litert-lm #1874 lands.
+     *
+     * The returned `MediaPart` carries a placeholder `requestId = ""` —
+     * [com.adsamcik.mindlayer.sdk.Mindlayer.chatWithMedia] re-tags every
+     * part with the freshly-allocated UUID before dispatching to the
+     * service, so callers don't need to plumb requestIds through the
+     * builder.
+     */
+    fun imagePart(bitmap: Bitmap): com.adsamcik.mindlayer.MediaPart {
+        val transfer = fromBitmap(requestId = "", bitmap)
+        return imageTransferToMediaPart(transfer)
+    }
+
+    /** Build a [com.adsamcik.mindlayer.MediaPart] from an encoded image file. */
+    fun imagePart(file: File): com.adsamcik.mindlayer.MediaPart {
+        val transfer = fromImageFile(requestId = "", file)
+        return imageTransferToMediaPart(transfer)
+    }
+
+    /**
+     * Build a [com.adsamcik.mindlayer.MediaPart] of kind
+     * [com.adsamcik.mindlayer.MediaPart.KIND_AUDIO] from an audio file
+     * (WAV / MP3 / OGG).
+     */
+    fun audioPart(file: File): com.adsamcik.mindlayer.MediaPart {
+        val transfer = fromAudioFile(requestId = "", file)
+        return audioTransferToMediaPart(transfer, payloadBytes = file.length())
+    }
+
+    /**
+     * Build a [com.adsamcik.mindlayer.MediaPart] of kind audio from raw
+     * audio bytes already in memory.
+     */
+    fun audioPart(bytes: ByteArray, mimeType: String): com.adsamcik.mindlayer.MediaPart {
+        val transfer = fromAudioBytes(requestId = "", bytes, mimeType)
+        return audioTransferToMediaPart(transfer, payloadBytes = bytes.size.toLong())
+    }
+
+    private fun imageTransferToMediaPart(t: ImageTransfer): com.adsamcik.mindlayer.MediaPart =
+        com.adsamcik.mindlayer.MediaPart(
+            requestId = t.requestId,
+            kind = com.adsamcik.mindlayer.MediaPart.KIND_IMAGE,
+            mimeType = t.mimeType,
+            source = t.source,
+            isSharedMemory = t.isSharedMemory,
+            payloadBytes = t.payloadBytes.toLong(),
+            width = t.width,
+            height = t.height,
+            pixelFormat = t.pixelFormat,
+            rowStride = t.rowStride,
+        )
+
+    private fun audioTransferToMediaPart(
+        t: AudioTransfer,
+        payloadBytes: Long,
+    ): com.adsamcik.mindlayer.MediaPart =
+        com.adsamcik.mindlayer.MediaPart(
+            requestId = t.requestId,
+            kind = com.adsamcik.mindlayer.MediaPart.KIND_AUDIO,
+            mimeType = t.mimeType,
+            source = t.source,
+            isSharedMemory = t.isSharedMemory,
+            payloadBytes = payloadBytes,
+            durationMs = t.durationMs,
+        )
+
+    // ---- Image builders (legacy, used by chatWithImage) --------------------
 
     /**
      * Create an [ImageTransfer] from a [Bitmap]'s raw pixels.
@@ -142,10 +215,7 @@ object MediaTransfer {
                 SharedMemory.unmap(buffer)
             }
             shm.setProtect(OsConstants.PROT_READ)
-            // getFileDescriptor() removed from compileSdk 36 stubs; use reflection
-            val fd = SharedMemory::class.java.getMethod("getFileDescriptor")
-                .invoke(shm) as java.io.FileDescriptor
-            val pfd = ParcelFileDescriptor.dup(fd)
+            val pfd = sharedMemoryToPfd(shm)
 
             return ImageTransfer(
                 requestId = requestId,
@@ -178,10 +248,7 @@ object MediaTransfer {
                 SharedMemory.unmap(buffer)
             }
             shm.setProtect(OsConstants.PROT_READ)
-            // getFileDescriptor() removed from compileSdk 36 stubs; use reflection
-            val fd = SharedMemory::class.java.getMethod("getFileDescriptor")
-                .invoke(shm) as java.io.FileDescriptor
-            val pfd = ParcelFileDescriptor.dup(fd)
+            val pfd = sharedMemoryToPfd(shm)
 
             return AudioTransfer(
                 requestId = requestId,
@@ -191,6 +258,43 @@ object MediaTransfer {
             )
         } finally {
             shm.close()
+        }
+    }
+
+    /**
+     * Extract a [ParcelFileDescriptor] from a [SharedMemory] using only public APIs.
+     *
+     * `SharedMemory.getFileDescriptor()` is a non-SDK (`max-target-o`) hidden
+     * method. Reflection used to be a workaround, but apps targeting SDK 30+
+     * are blocked at runtime by Android's hidden API enforcement, so the
+     * reflective access throws on every modern target.
+     *
+     * Instead, round-trip through a [Parcel]: AOSP's `SharedMemory.writeToParcel`
+     * writes the underlying FD as the first parcel object via
+     * `Parcel.writeFileDescriptor`, so [Parcel.readFileDescriptor] — a public
+     * API — pulls it back out as a freshly-`dup`'d [ParcelFileDescriptor]. The
+     * extracted PFD is independent of both the parcel's tracked copy (closed by
+     * `recycle()`) and the original `SharedMemory` (closed by `close()`), so
+     * the caller can safely close the source `SharedMemory` immediately.
+     *
+     * Wire format on the AIDL boundary is unchanged: `ImageTransfer.source` is
+     * still a PFD wrapping an ashmem-backed FD, and the receiver's
+     * `SharedMemoryPool.reconstructSharedMemory` continues to work as-is.
+     *
+     * This is a validated AOSP-platform workaround, not a documented public
+     * contract: it relies on `SharedMemory` parceling its FD first. Verified
+     * against AOSP API 27 (introduction) through API 36.
+     */
+    @RequiresApi(Build.VERSION_CODES.O_MR1)
+    private fun sharedMemoryToPfd(shm: SharedMemory): ParcelFileDescriptor {
+        val parcel = Parcel.obtain()
+        return try {
+            shm.writeToParcel(parcel, 0)
+            parcel.setDataPosition(0)
+            parcel.readFileDescriptor()
+                ?: error("readFileDescriptor returned null for SharedMemory")
+        } finally {
+            parcel.recycle()
         }
     }
 
