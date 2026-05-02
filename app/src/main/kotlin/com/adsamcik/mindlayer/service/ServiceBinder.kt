@@ -140,7 +140,7 @@ class ServiceBinder(
          * [prewarmAndAwait]; v4 added [cancelInferenceV2] +
          * [submitToolResultV2].
          */
-        const val CURRENT_API_VERSION = 4
+        const val CURRENT_API_VERSION = 5
 
         /**
          * How long after termination a scoped key remains in
@@ -195,6 +195,7 @@ class ServiceBinder(
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_MEDIA_LIST,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_PREWARM_AWAIT,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS,
         )
     }
 
@@ -1359,6 +1360,54 @@ class ServiceBinder(
             // #1874 lifts multi-image, this rises with the validator caps.
             maxMediaPartsPerRequest = MAX_MEDIA_PARTS_PER_REQUEST,
             maxTotalMediaBytesPerRequest = IpcInputValidator.MAX_TOTAL_MEDIA_BYTES_PER_REQUEST,
+        )
+    }
+
+    /**
+     * v0.4 typed diagnostics snapshot. Returns a small, programmatically
+     * consumable struct for dashboard polling and external monitoring;
+     * legacy [getDiagnostics] (string JSON dump) stays for human-readable
+     * bug reports.
+     *
+     * Per-caller scoped: external callers see only their own session /
+     * inference / error counts; self-UID dashboard sees aggregates.
+     */
+    override fun getDiagnosticsTyped(): com.adsamcik.mindlayer.DiagnosticsSnapshot {
+        // Quarter-cost — typed diagnostics is a polling endpoint for
+        // dashboards, not a heavy bug-report dump.
+        authorizeCall(cost = 0.25)
+        val uid = Binder.getCallingUid()
+        val isSelfUid = uid == Process.myUid()
+
+        val callerSessions = if (isSelfUid) {
+            orchestrator.listSessions().size
+        } else {
+            orchestrator.listSessionsOwnedBy(uid).size
+        }
+        val activeForCaller = if (isSelfUid) {
+            activeInferenceUids.size
+        } else {
+            activeInferenceUids.values.count { it == uid }
+        }
+        // Recent counts: today we approximate "last 5 minutes" with the
+        // recently-completed cache (30 s retention). Best-effort signal —
+        // log-DB-backed counts will land alongside `v04-eviction-callback`.
+        val recentForCaller = if (isSelfUid) {
+            recentlyCompleted.size + activeForCaller
+        } else {
+            val prefix = "$uid:"
+            recentlyCompleted.keys.count { it.startsWith(prefix) } + activeForCaller
+        }
+
+        return com.adsamcik.mindlayer.DiagnosticsSnapshot(
+            capturedAtMs = System.currentTimeMillis(),
+            service = getStatus(),
+            engine = getEngineInfo(),
+            callerSessionCount = callerSessions,
+            recentInferenceCount = recentForCaller,
+            // No log-DB read on this path; populate when the eviction work lands.
+            recentErrorCount = 0,
+            recentlyCompletedTrackedCount = recentlyCompleted.size,
         )
     }
 
