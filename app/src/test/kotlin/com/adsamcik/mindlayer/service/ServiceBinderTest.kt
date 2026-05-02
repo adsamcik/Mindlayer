@@ -226,25 +226,36 @@ class ServiceBinderTest {
 
         binder.infer(meta, null, null, pfd)
 
-        verify { orchestrator.infer(meta, null, null, pfd, any()) }
+        verify { orchestrator.infer(any<String>(), meta, null, null, pfd, any()) }
     }
 
     @Test
     fun `infer passes image and audio to orchestrator`() {
         val meta = RequestMeta(requestId = "r2", sessionId = "s1")
         val image = mockk<com.adsamcik.mindlayer.ImageTransfer>(relaxed = true)
+        every { image.requestId } returns "r2"
+        every { image.payloadBytes } returns 1024
+        every { image.width } returns 0
+        every { image.height } returns 0
+        every { image.pixelFormat } returns 0
+        every { image.rowStride } returns 0
+        every { image.isSharedMemory } returns false
+        every { image.mimeType } returns "image/jpeg"
         val audio = mockk<com.adsamcik.mindlayer.AudioTransfer>(relaxed = true)
+        every { audio.requestId } returns "r2"
+        every { audio.mimeType } returns "audio/wav"
+        every { audio.durationMs } returns null
         val pfd = mockk<ParcelFileDescriptor>(relaxed = true)
 
         binder.infer(meta, image, audio, pfd)
 
-        verify { orchestrator.infer(meta, image, audio, pfd, any()) }
+        verify { orchestrator.infer(any<String>(), meta, image, audio, pfd, any()) }
     }
 
     @Test
     fun `cancelInference delegates to orchestrator`() {
         binder.cancelInference("r1")
-        verify { orchestrator.cancelInference("r1") }
+        verify { orchestrator.cancelInference(any<String>()) }
     }
 
     // ---- Tool results -------------------------------------------------------
@@ -261,7 +272,7 @@ class ServiceBinderTest {
 
         verify {
             toolCallBridge.submitResult(
-                requestId = "r1",
+                scopedKey = any<String>(),
                 toolName = "calculator",
                 resultJson = """{"answer": 42}""",
             )

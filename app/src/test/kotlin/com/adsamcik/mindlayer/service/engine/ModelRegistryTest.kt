@@ -153,4 +153,44 @@ class ModelRegistryTest {
         // No non-model files crept in
         assertTrue(models.none { it.path.endsWith("notes.txt") })
     }
+
+    // ── F-003: trust-ranked discovery ───────────────────────────────────
+
+    @Test
+    fun `discoverModels prefers filesDir over cacheDir even when cache file is larger`() {
+        // Pins F-003 (regression of F-002): the previous code sorted by
+        // size only, so a sideload could shadow the legitimate AI-Pack
+        // file. The new ordering ranks by trust origin first.
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        context.filesDir.listFiles()?.forEach { it.delete() }
+        context.cacheDir.listFiles()?.forEach { it.delete() }
+
+        // Cache copy is HUGE — would win under "sort by size desc only".
+        File(context.cacheDir, "evil.litertlm").writeBytes(ByteArray(50_000))
+        // Files copy is SMALL — but it's in a more-trusted origin tier.
+        File(context.filesDir, "good.litertlm").writeBytes(ByteArray(100))
+
+        val models = ModelRegistry.discoverModels(context)
+        // Highest-trust origin first, regardless of size.
+        assertEquals("good", models.first().id)
+    }
+
+    @Test
+    fun `discoverModels rejects unsafe filenames`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        context.filesDir.listFiles()?.forEach { it.delete() }
+        context.cacheDir.listFiles()?.forEach { it.delete() }
+
+        // Names with / or .. cannot exist as actual filesystem entries
+        // here (the OS rejects them), but a slash-only "path" component
+        // matters: SAFE_NAME_PATTERN must reject anything outside
+        // [A-Za-z0-9_.-] + .litertlm.
+        File(context.filesDir, "evil model.litertlm").writeBytes(ByteArray(10))
+        File(context.filesDir, "good.litertlm").writeBytes(ByteArray(10))
+
+        val models = ModelRegistry.discoverModels(context)
+        // Only the safe-named one survives.
+        assertEquals(1, models.size)
+        assertEquals("good", models.first().id)
+    }
 }

@@ -70,7 +70,11 @@ object StructuredOutputHelper {
                 "tool_routing" -> StructuredOutputStrategy.TOOL_ROUTING
                 else -> StructuredOutputStrategy.PROMPT_AND_VALIDATE
             }
-            val maxRetries = so["max_retries"]?.jsonPrimitive?.intOrNull ?: 3
+            val maxRetries = (so["max_retries"]?.jsonPrimitive?.intOrNull ?: 3)
+                // F-034: cap retries so an unmatchable schema cannot run
+                // an unbounded number of full inference round-trips. 5 is
+                // the practical limit before we admit defeat.
+                .coerceIn(0, 5)
 
             StructuredOutputConfig(
                 schema = schema,

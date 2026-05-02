@@ -8,6 +8,7 @@ import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
+import com.adsamcik.mindlayer.service.logging.safeLabel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -115,6 +116,15 @@ class EngineManager(
         val path = target.path
         val cacheDir = context.cacheDir.resolve("litert_cache").also { it.mkdirs() }
 
+        // F-002: verify the on-disk model SHA-256 matches the build-time
+        // manifest before handing it to native init. APK signing protects
+        // delivery via the AI Pack, but the extracted file in `filesDir`
+        // is mutable (root, OEM agents) and never re-verified on later
+        // loads. When `BuildConfig.MODEL_SHA256` is empty (the dev/CI
+        // default) we emit a loud warning instead of failing — once the
+        // build pipeline pins the manifest, mismatches must hard-fail.
+        verifyModelIntegrity(File(path))
+
         // Pre-flight memory check: model needs ~2.5GB + working buffers
         val modelSizeBytes = target.sizeBytes
         val activityManager = context.getSystemService(android.app.ActivityManager::class.java)
@@ -166,11 +176,16 @@ class EngineManager(
                 return eng
 
             } catch (t: Throwable) {
-                val errorDetail = "${t::class.simpleName}: ${t.message}" +
-                    (t.cause?.let { " caused by ${it::class.simpleName}: ${it.message}" } ?: "")
-                Log.w(TAG, "Backend $name failed: $errorDetail", t)
+                // F-006: never persist or surface raw native exception text.
+                // LiteRT-LM tokenizer/template exceptions can inline prompt
+                // fragments; safeLabel() returns class names only. The full
+                // stack trace still reaches logcat (passing throwable=t)
+                // for debug builds, but production storage / diagnostic
+                // export must use the redacted form.
+                val safeDetail = t.safeLabel()
+                MindlayerLog.w(TAG, "Backend $name failed: $safeDetail", throwable = t)
                 if (name == "GPU") {
-                    lastGpuFailureReason = errorDetail
+                    lastGpuFailureReason = safeDetail
                 }
                 lastError = t
                 logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
@@ -178,7 +193,7 @@ class EngineManager(
                     category = com.adsamcik.mindlayer.service.logging.LogCategory.ENGINE,
                     event = com.adsamcik.mindlayer.service.logging.LogEvent.ENGINE_FALLBACK,
                     backend = name,
-                    errorMessage = errorDetail,
+                    errorMessage = safeDetail,
                 ))
             }
         }
@@ -189,6 +204,62 @@ class EngineManager(
                 "(available RAM: ${availMb}MB, model: ${modelSizeBytes / 1024 / 1024}MB). " +
                 "Try closing other apps to free memory.", lastError
         )
+    }
+
+    /**
+     * Verify the on-disk model file's SHA-256 matches the build-time
+     * manifest in `BuildConfig.MODEL_SHA256`.
+     *
+     * Behaviour:
+     *  - Manifest empty (default) → emit a warning and continue. This is
+     *    the dev/CI mode before the build pipeline pins the hash.
+     *  - Manifest non-empty + on-disk hash matches → silent pass.
+     *  - Manifest non-empty + on-disk hash differs → throw
+     *    [SecurityException]. Refusing to load is safer than booting a
+     *    swapped backdoored model (see SECURITY_REVIEW F-002 / F-003).
+     */
+    private fun verifyModelIntegrity(file: File) {
+        val expected = com.adsamcik.mindlayer.service.BuildConfig.MODEL_SHA256
+        if (expected.isEmpty()) {
+            MindlayerLog.w(
+                TAG,
+                "Model integrity manifest empty — loading without SHA-256 " +
+                    "verification. CI must pin BuildConfig.MODEL_SHA256.",
+            )
+            return
+        }
+        val actual = sha256(file)
+        if (!constantTimeEquals(actual, expected)) {
+            MindlayerLog.e(
+                TAG,
+                "Model SHA-256 mismatch (expected=…${expected.takeLast(8)}, " +
+                    "actual=…${actual.takeLast(8)}); refusing to load.",
+            )
+            throw SecurityException("Model integrity check failed")
+        }
+        MindlayerLog.i(TAG, "Model integrity verified (SHA-256 …${actual.takeLast(8)})")
+    }
+
+    private fun sha256(file: File): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n == -1) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun constantTimeEquals(a: String, b: String): Boolean {
+        if (a.length != b.length) return false
+        var diff = 0
+        for (i in a.indices) {
+            diff = diff or (a[i].code xor b[i].code)
+        }
+        return diff == 0
     }
 
     /** Returns the current [Engine] or throws if not yet initialized. */

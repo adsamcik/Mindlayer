@@ -177,14 +177,48 @@ class AllowlistStore(
         atomicWrite(pendingFile, array.toString())
     }
 
+    /**
+     * F-025: atomic write with fsync.
+     *
+     * Writes to a `.tmp` sibling, fsyncs the contents, then renames over
+     * the target with [java.nio.file.StandardCopyOption.ATOMIC_MOVE].
+     * This guarantees that a crash mid-write cannot leave a half-written
+     * file that subsequently parses as an empty allowlist (silent
+     * revocation of every approval).
+     *
+     * If the platform refuses ATOMIC_MOVE (e.g. cross-filesystem rename
+     * on some emulators), we fall back to a plain rename — but never to
+     * "write directly to target" because that is the failure mode we are
+     * defending against.
+     */
     private fun atomicWrite(target: File, content: String) {
         val tmp = File(target.parentFile, target.name + ".tmp")
         try {
-            tmp.writeText(content)
-            if (!tmp.renameTo(target)) {
-                // Fallback — some filesystems refuse cross-fs renames; do best-effort copy.
-                target.writeText(content)
-                tmp.delete()
+            // Write + fsync the bytes before any rename.
+            java.io.FileOutputStream(tmp).use { fos ->
+                fos.write(content.toByteArray(Charsets.UTF_8))
+                fos.flush()
+                try { fos.fd.sync() } catch (_: Throwable) { /* fsync best effort */ }
+            }
+            try {
+                java.nio.file.Files.move(
+                    tmp.toPath(),
+                    target.toPath(),
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                )
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                if (!tmp.renameTo(target)) {
+                    // Last-resort REPLACE_EXISTING without atomicity. We
+                    // accept this only after ATOMIC_MOVE explicitly
+                    // failed; we still avoid the "write directly to
+                    // target" anti-pattern.
+                    java.nio.file.Files.move(
+                        tmp.toPath(),
+                        target.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    )
+                }
             }
         } catch (e: IOException) {
             tmp.delete()

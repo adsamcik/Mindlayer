@@ -46,7 +46,7 @@ class ToolCallBridgeTest {
             listOf("calculator" to """{"expr":"1+1"}"""),
         )
         assertEquals(1, calls.size)
-        assertEquals("req-1", calls[0].requestId)
+        assertEquals("req-1", calls[0].scopedKey)
         assertEquals("calculator", calls[0].toolName)
         assertEquals("""{"expr":"1+1"}""", calls[0].arguments)
         assertFalse(calls[0].resultDeferred.isCompleted)

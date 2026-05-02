@@ -10,6 +10,11 @@ import java.util.concurrent.ConcurrentHashMap
  * Coordinates the tool-call loop between the inference streaming coroutine
  * and client-side [submitResult] calls arriving via AIDL.
  *
+ * Internal map keys are **scoped keys** (`uid:publicRequestId`) so that two
+ * authorized callers with colliding public `requestId` values cannot poison
+ * each other's pending tool-call list (F-007). The orchestrator and the
+ * binder are the only callers; both already handle scoping.
+ *
  * Flow:
  *  1. Streaming detects tool calls → [registerPendingToolCalls] stores them
  *  2. Tool call events are written to the pipe for the client
@@ -29,50 +34,52 @@ class ToolCallBridge {
     }
 
     data class PendingToolCall(
-        val requestId: String,
+        val scopedKey: String,
         val callId: String,
         val toolName: String,
         val arguments: String,
         val resultDeferred: CompletableDeferred<String> = CompletableDeferred(),
     )
 
-    /** requestId → list of pending tool calls for that inference request. */
+    /** scopedKey → list of pending tool calls for that inference request. */
     private val pending = ConcurrentHashMap<String, MutableList<PendingToolCall>>()
 
     /**
      * Register tool calls that the model wants executed.
      *
      * Generates a unique [PendingToolCall.callId] for each call and stores
-     * them keyed by [requestId]. Returns the list so the caller can write
-     * corresponding pipe events.
+     * them keyed by the orchestrator-supplied [scopedKey]. Returns the list
+     * so the caller can write corresponding pipe events.
      */
     fun registerPendingToolCalls(
-        requestId: String,
+        scopedKey: String,
         toolCalls: List<Pair<String, String>>,
     ): List<PendingToolCall> {
         val calls = toolCalls.map { (name, args) ->
             PendingToolCall(
-                requestId = requestId,
+                scopedKey = scopedKey,
                 callId = UUID.randomUUID().toString(),
                 toolName = name,
                 arguments = args,
             )
         }
-        pending[requestId] = calls.toMutableList()
-        MindlayerLog.d(TAG, "Registered ${calls.size} pending tool call(s) for request $requestId", requestId = requestId)
+        pending[scopedKey] = calls.toMutableList()
+        MindlayerLog.d(TAG, "Registered ${calls.size} pending tool call(s) for scopedKey=$scopedKey")
         return calls
     }
 
     /**
      * Called from the AIDL binder thread when the client submits a tool result.
      *
-     * Completes the [CompletableDeferred] of the first unfinished pending call
-     * matching [toolName], unblocking the streaming coroutine in [awaitResults].
+     * [scopedKey] is the binder-side namespaced key derived from the caller's
+     * UID and the public requestId. Completes the [CompletableDeferred] of
+     * the first unfinished pending call matching [toolName], unblocking the
+     * streaming coroutine in [awaitResults].
      */
-    fun submitResult(requestId: String, toolName: String, resultJson: String) {
-        val calls = pending[requestId]
+    fun submitResult(scopedKey: String, toolName: String, resultJson: String) {
+        val calls = pending[scopedKey]
         if (calls == null) {
-            MindlayerLog.w(TAG, "submitResult: no pending calls for request $requestId", requestId = requestId)
+            MindlayerLog.w(TAG, "submitResult: no pending calls for scopedKey=$scopedKey")
             return
         }
 
@@ -81,27 +88,27 @@ class ToolCallBridge {
         }
 
         if (match == null) {
-            MindlayerLog.w(TAG, "submitResult: no pending call for tool '$toolName' in request $requestId", requestId = requestId)
+            MindlayerLog.w(TAG, "submitResult: no pending call for tool '$toolName' in scopedKey=$scopedKey")
             return
         }
 
         match.resultDeferred.complete(resultJson)
-        MindlayerLog.d(TAG, "Result submitted for tool '$toolName' in request $requestId", requestId = requestId)
+        MindlayerLog.d(TAG, "Result submitted for tool '$toolName' in scopedKey=$scopedKey")
     }
 
     /**
-     * Suspend until every pending tool call for [requestId] has a result, or
+     * Suspend until every pending tool call for [scopedKey] has a result, or
      * [timeoutMs] expires (throws [kotlinx.coroutines.TimeoutCancellationException]).
      *
      * Returns `(toolName, resultJson)` pairs in the same order as registration.
      * Cleans up the pending entry regardless of outcome.
      */
     suspend fun awaitResults(
-        requestId: String,
+        scopedKey: String,
         timeoutMs: Long = DEFAULT_TIMEOUT_MS,
     ): List<Pair<String, String>> {
-        val calls = pending[requestId]
-            ?: throw IllegalStateException("No pending tool calls for request $requestId")
+        val calls = pending[scopedKey]
+            ?: throw IllegalStateException("No pending tool calls for scopedKey=$scopedKey")
 
         return try {
             withTimeout(timeoutMs) {
@@ -111,13 +118,13 @@ class ToolCallBridge {
                 }
             }
         } finally {
-            pending.remove(requestId)
+            pending.remove(scopedKey)
         }
     }
 
     /** Clean up pending calls for a request (e.g. on cancellation). */
-    fun cancel(requestId: String) {
-        pending.remove(requestId)?.forEach { call ->
+    fun cancel(scopedKey: String) {
+        pending.remove(scopedKey)?.forEach { call ->
             call.resultDeferred.cancel()
         }
     }

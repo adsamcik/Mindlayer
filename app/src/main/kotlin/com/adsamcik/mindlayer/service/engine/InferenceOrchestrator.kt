@@ -58,7 +58,12 @@ class InferenceOrchestrator(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    // Active inference jobs keyed by requestId for cancellation
+    /**
+     * Active inference jobs keyed by **scoped key** (`uid:publicRequestId`,
+     * see `ServiceBinder.inferenceKey`). Namespacing by UID prevents a
+     * co-signed peer from cancelling another caller's inference by guessing
+     * the public requestId (F-007).
+     */
     private val activeJobs = ConcurrentHashMap<String, Job>()
 
     /** Bridge between the streaming coroutine and AIDL submitToolResult(). */
@@ -104,12 +109,13 @@ class InferenceOrchestrator(
      * produce valid output until that issue is resolved.
      */
     fun infer(
+        scopedKey: String,
         meta: RequestMeta,
         image: ImageTransfer?,
         audio: AudioTransfer?,
         pipeWriteEnd: ParcelFileDescriptor,
     ) {
-        infer(meta, image, audio, pipeWriteEnd, onComplete = null)
+        infer(scopedKey, meta, image, audio, pipeWriteEnd, onComplete = null)
     }
 
     /**
@@ -117,8 +123,15 @@ class InferenceOrchestrator(
      * the orchestrator's coroutine scope when the request finishes (success,
      * error, or cancellation). Used by [ServiceBinder] to release per-UID
      * rate-limit concurrency slots.
+     *
+     * [scopedKey] is the binder-supplied namespaced key (`uid:publicRequestId`)
+     * used for all in-process state (activeJobs, ToolCallBridge.pending,
+     * SharedMemoryPool.stagedFiles, SessionHandle.activeRequestId). The
+     * public `meta.requestId` continues to flow to the SDK in stream events
+     * unmodified.
      */
     fun infer(
+        scopedKey: String,
         meta: RequestMeta,
         image: ImageTransfer?,
         audio: AudioTransfer?,
@@ -126,35 +139,37 @@ class InferenceOrchestrator(
         onComplete: (() -> Unit)?,
     ) {
         val job = scope.launch {
-            runInference(meta, image, audio, pipeWriteEnd)
+            runInference(scopedKey, meta, image, audio, pipeWriteEnd)
         }
-        activeJobs[meta.requestId] = job
+        activeJobs[scopedKey] = job
         job.invokeOnCompletion {
-            activeJobs.remove(meta.requestId)
+            activeJobs.remove(scopedKey)
             onComplete?.invoke()
         }
     }
 
-    fun cancelInference(requestId: String) {
-        val handle = sessionManager.findSessionByActiveRequest(requestId)
+    fun cancelInference(scopedKey: String) {
+        val handle = sessionManager.findSessionByActiveRequest(scopedKey)
         if (handle != null) {
-            MindlayerLog.i(TAG, "Cancelling native inference for request $requestId", requestId = requestId, sessionId = handle.sessionId)
+            MindlayerLog.i(TAG, "Cancelling native inference for scopedKey=$scopedKey", sessionId = handle.sessionId)
             try {
                 handle.conversation.cancelProcess()
             } catch (t: Throwable) {
-                MindlayerLog.w(TAG, "cancelProcess() failed: ${t.safeLabel()}", requestId = requestId)
+                MindlayerLog.w(TAG, "cancelProcess() failed: ${t.safeLabel()}")
             }
         }
-        toolCallBridge.cancel(requestId)
-        activeJobs[requestId]?.cancel()
+        toolCallBridge.cancel(scopedKey)
+        activeJobs[scopedKey]?.cancel()
         logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = com.adsamcik.mindlayer.service.logging.LogCategory.INFERENCE,
             event = com.adsamcik.mindlayer.service.logging.LogEvent.REQUEST_CANCEL,
-            requestId = requestId,
+            // Strip the uid namespace prefix so the persisted requestId
+            // matches what the client recognises.
+            requestId = scopedKey.substringAfter(':'),
             sessionId = handle?.sessionId,
         ))
-        MindlayerLog.i(TAG, "Cancelled request $requestId", requestId = requestId, sessionId = handle?.sessionId)
+        MindlayerLog.i(TAG, "Cancelled scopedKey=$scopedKey", sessionId = handle?.sessionId)
     }
 
     fun shutdown() {
@@ -167,6 +182,7 @@ class InferenceOrchestrator(
     // ---- Private -----------------------------------------------------------
 
     private suspend fun runInference(
+        scopedKey: String,
         meta: RequestMeta,
         image: ImageTransfer?,
         audio: AudioTransfer?,
@@ -181,21 +197,23 @@ class InferenceOrchestrator(
         val trace = RequestTrace(meta.requestId, meta.sessionId)
 
         // Stage media outside the session lock so PFD I/O doesn't block other
-        // sessions. Staging is idempotent per requestId.
+        // sessions. Staging is keyed by the scoped key (uid:requestId) so a
+        // co-signed peer with the same public requestId cannot delete or
+        // collide with another caller's staged files (F-007).
         var stagedImage: StagedMedia? = null
         var stagedAudio: StagedMedia? = null
         try {
             if (image != null) {
-                stagedImage = sharedMemoryPool.stageImage(image)
+                stagedImage = sharedMemoryPool.stageImage(scopedKey, image)
                 MindlayerLog.d(TAG, "Staged image: ${stagedImage.filePath}", requestId = meta.requestId, sessionId = meta.sessionId)
             }
             if (audio != null) {
-                stagedAudio = sharedMemoryPool.stageAudio(audio)
+                stagedAudio = sharedMemoryPool.stageAudio(scopedKey, audio)
                 MindlayerLog.d(TAG, "Staged audio: ${stagedAudio.filePath}", requestId = meta.requestId, sessionId = meta.sessionId)
             }
         } catch (t: Throwable) {
             MindlayerLog.e(TAG, "Media staging failed for request ${meta.requestId}: ${t.safeLabel()}", requestId = meta.requestId, sessionId = meta.sessionId)
-            sharedMemoryPool.cleanup(meta.requestId)
+            sharedMemoryPool.cleanup(scopedKey)
             val writer = writerFactory(pipeWriteEnd)
             writer.closeWithError(0, "media_staging_failed: ${t.safeLabel()}")
             return
@@ -203,7 +221,7 @@ class InferenceOrchestrator(
 
         // Single-writer: serialize sends for this session
         handle.mutex.withLock {
-            handle.activeRequestId = meta.requestId
+            handle.activeRequestId = scopedKey
             handle.isStreaming = true
             val writer = writerFactory(pipeWriteEnd)
             service.enterForeground()
@@ -362,7 +380,7 @@ class InferenceOrchestrator(
                         "(${accumulatedToolCalls.size} call(s))", requestId = meta.requestId, sessionId = meta.sessionId)
 
                     val pending = toolCallBridge.registerPendingToolCalls(
-                        meta.requestId, accumulatedToolCalls.toList()
+                        scopedKey, accumulatedToolCalls.toList()
                     )
                     for (call in pending) {
                         writer.writeToolCall(seq, call.callId, call.toolName, call.arguments)
@@ -373,13 +391,19 @@ class InferenceOrchestrator(
                             event = com.adsamcik.mindlayer.service.logging.LogEvent.TOOL_CALL,
                             requestId = meta.requestId,
                             sessionId = meta.sessionId,
-                            extraJson = """{"tool":"${call.toolName}","round":$toolCallRound}""",
+                            // F-044: build JSON via the kotlinx-serialization
+                            // builder so attacker-controlled toolNames cannot
+                            // corrupt the persisted log entry.
+                            extraJson = kotlinx.serialization.json.buildJsonObject {
+                                put("tool", kotlinx.serialization.json.JsonPrimitive(call.toolName))
+                                put("round", kotlinx.serialization.json.JsonPrimitive(toolCallRound))
+                            }.toString(),
                         ))
                     }
                     accumulatedToolCalls.clear()
 
                     // Suspend until client submits all tool results (or timeout)
-                    val results = toolCallBridge.awaitResults(meta.requestId)
+                    val results = toolCallBridge.awaitResults(scopedKey)
 
                     // Inject tool responses into the conversation
                     val toolResponses = results.map { (name, result) ->
@@ -433,7 +457,7 @@ class InferenceOrchestrator(
                 MindlayerLog.i(TAG, trace.summary(), requestId = meta.requestId, sessionId = meta.sessionId)
 
             } catch (e: CancellationException) {
-                toolCallBridge.cancel(meta.requestId)
+                toolCallBridge.cancel(scopedKey)
                 // Flow cancellation does NOT cancel native generation — the LiteRT-LM
                 // engine keeps decoding in the background unless we ask it to stop.
                 // This matters on broken-pipe (client died mid-stream) because the
@@ -448,7 +472,7 @@ class InferenceOrchestrator(
                 writer.writeDone(0, "cancelled")
                 throw e
             } catch (t: Throwable) {
-                toolCallBridge.cancel(meta.requestId)
+                toolCallBridge.cancel(scopedKey)
                 val safe = t.safeLabel()
                 trace.markError(safe)
                 MindlayerLog.e(TAG, "Inference failed for request ${meta.requestId}: $safe", requestId = meta.requestId, sessionId = meta.sessionId)
@@ -462,8 +486,10 @@ class InferenceOrchestrator(
                 handle.activeRequestId = null
                 handle.isStreaming = false
                 service.exitForeground()
-                // Clean up staged media files regardless of outcome
-                sharedMemoryPool.cleanup(meta.requestId)
+                // Clean up staged media files regardless of outcome — keyed
+                // by scopedKey so a co-signed peer with the same public
+                // requestId cannot trigger early cleanup of our files.
+                sharedMemoryPool.cleanup(scopedKey)
             }
         }
     }

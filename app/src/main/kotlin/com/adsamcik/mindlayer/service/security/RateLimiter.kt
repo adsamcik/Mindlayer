@@ -21,7 +21,12 @@ class RateLimiter(
 
     fun tryAcquire(uid: Int): Boolean {
         evictIdleOpportunistically()
-        val bucket = buckets.getOrPut(uid) { Bucket(capacity = maxRequestsPerMinute.toDouble()) }
+        // F-027: brand-new buckets must NOT start full — that lets a UID
+        // burst the documented RPM, idle past the 10-min eviction, then
+        // burst again past the cap. We start at 0 and refill from there.
+        val bucket = buckets.getOrPut(uid) {
+            Bucket(capacity = maxRequestsPerMinute.toDouble(), initialTokens = 0.0)
+        }
         synchronized(bucket) {
             val now = timeSource()
             // Refill: capacity tokens per 60s => capacity/60000 tokens per ms
@@ -42,7 +47,9 @@ class RateLimiter(
     }
 
     fun beginInference(uid: Int): Boolean {
-        val bucket = buckets.getOrPut(uid) { Bucket(capacity = maxRequestsPerMinute.toDouble()) }
+        val bucket = buckets.getOrPut(uid) {
+            Bucket(capacity = maxRequestsPerMinute.toDouble(), initialTokens = 0.0)
+        }
         synchronized(bucket) {
             bucket.lastAccessMs = timeSource()
             if (bucket.concurrent >= maxConcurrent) return false
@@ -77,8 +84,8 @@ class RateLimiter(
 
     @Volatile private var lastEvictionMs: Long = 0L
 
-    private class Bucket(capacity: Double) {
-        @JvmField var tokens: Double = capacity
+    private class Bucket(capacity: Double, initialTokens: Double = capacity) {
+        @JvmField var tokens: Double = initialTokens
         @JvmField var lastRefillMs: Long = 0L
         @JvmField var lastAccessMs: Long = 0L
         @JvmField var concurrent: Int = 0

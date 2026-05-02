@@ -307,7 +307,7 @@ class InferencePipelineTest {
             sessionId = sessionId,
             textContent = text,
         )
-        orchestrator.infer(meta, image = null, audio = null, pipeWriteEnd = pfd)
+        orchestrator.infer("test:" + meta.requestId, meta, image = null, audio = null, pipeWriteEnd = pfd)
 
         assertTrue("Pipe should close within 30s", latch.await(30, TimeUnit.SECONDS))
         return parseFrames(frames)
@@ -400,11 +400,12 @@ class InferencePipelineTest {
             sessionId = sessionId,
             textContent = "Hello",
         )
-        orchestrator.infer(meta, image = null, audio = null, pipeWriteEnd = pfd)
+        orchestrator.infer("test:" + meta.requestId, meta, image = null, audio = null, pipeWriteEnd = pfd)
 
-        // Wait for the first chunk, then cancel
+        // Wait for the first chunk, then cancel. Cancel uses the same
+        // scoped key the infer() call was registered under.
         Thread.sleep(200)
-        orchestrator.cancelInference(requestId)
+        orchestrator.cancelInference("test:" + requestId)
 
         assertTrue("Pipe should close within 30s", latch.await(30, TimeUnit.SECONDS))
 
@@ -437,7 +438,7 @@ class InferencePipelineTest {
             sessionId = "nonexistent-session",
             textContent = "Hello",
         )
-        orchestrator.infer(meta, image = null, audio = null, pipeWriteEnd = pfd)
+        orchestrator.infer("test:" + meta.requestId, meta, image = null, audio = null, pipeWriteEnd = pfd)
 
         assertTrue("Pipe should close within 30s", latch.await(30, TimeUnit.SECONDS))
 
@@ -560,8 +561,8 @@ class InferencePipelineTest {
         val metaA = RequestMeta(requestId = "req-A", sessionId = sessionA, textContent = "Hi A")
         val metaB = RequestMeta(requestId = "req-B", sessionId = sessionB, textContent = "Hi B")
 
-        orchestrator.infer(metaA, null, null, pfdA)
-        orchestrator.infer(metaB, null, null, pfdB)
+        orchestrator.infer("test:" + metaA.requestId, metaA, null, null, pfdA)
+        orchestrator.infer("test:" + metaB.requestId, metaB, null, null, pfdB)
 
         assertTrue("Pipe A should close within 30s", latchA.await(30, TimeUnit.SECONDS))
         assertTrue("Pipe B should close within 30s", latchB.await(30, TimeUnit.SECONDS))
@@ -688,7 +689,7 @@ class InferencePipelineTest {
             sessionId = sessionId,
             textContent = "Hello",
         )
-        orchestrator.infer(meta, image = null, audio = null, pipeWriteEnd = pfd)
+        orchestrator.infer("test:" + meta.requestId, meta, image = null, audio = null, pipeWriteEnd = pfd)
 
         // Let first chunk emit, then destroy the session
         Thread.sleep(200)
@@ -734,7 +735,7 @@ class InferencePipelineTest {
             sessionId = sessionId,
             textContent = "Hello",
         )
-        orchestrator.infer(meta, image = null, audio = null, pipeWriteEnd = pfd)
+        orchestrator.infer("test:" + meta.requestId, meta, image = null, audio = null, pipeWriteEnd = pfd)
 
         // Close the read end early to simulate client disconnect
         Thread.sleep(150)

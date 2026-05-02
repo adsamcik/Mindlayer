@@ -38,6 +38,15 @@ android {
         // Only bundle resources for the locales we actually ship.
         // Expand this list when translations are added.
         resourceConfigurations += listOf("en")
+
+        // F-002: hex-encoded SHA-256 of the bundled model file. When
+        // non-empty, the engine refuses to load any .litertlm whose hash
+        // does not match. Populate from CI (or `-PmodelSha256=…`) once the
+        // model becomes part of the artifact pipeline; an empty string
+        // keeps verification advisory (logged warning only) so debug
+        // builds work without the manifest.
+        val modelSha = (project.findProperty("modelSha256") as? String)?.lowercase()?.trim() ?: ""
+        buildConfigField("String", "MODEL_SHA256", "\"$modelSha\"")
     }
 
     signingConfigs {
@@ -73,6 +82,7 @@ android {
     buildFeatures {
         aidl = true
         compose = true
+        buildConfig = true
     }
 
     assetPacks += listOf(":gemma_model")

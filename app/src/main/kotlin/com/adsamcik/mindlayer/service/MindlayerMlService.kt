@@ -105,6 +105,30 @@ class MindlayerMlService : Service() {
         thermalMonitor.start()
         observeMemoryPressure()
         observeThermalPolicy()
+        // F-022: schedule the documented 7-day log-retention cleanup. The
+        // routine was implemented but never wired up; without it,
+        // (post-F-006) safeLabel-redacted error rows still accumulate
+        // forever which is undesirable on a low-storage device.
+        scheduleLogCleanup()
+    }
+
+    /**
+     * Run [LogRepository.cleanup] on a 24-hour cadence in [serviceScope].
+     * Cancelled automatically when the service is destroyed.
+     */
+    private fun scheduleLogCleanup() {
+        serviceScope.launch {
+            // First-run delay so we don't compete with cold-start work.
+            kotlinx.coroutines.delay(60_000L)
+            while (true) {
+                try {
+                    logRepository.cleanup()
+                } catch (t: Throwable) {
+                    Log.w(TAG, "log cleanup raised", t)
+                }
+                kotlinx.coroutines.delay(24L * 60L * 60L * 1000L)
+            }
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder {

@@ -91,11 +91,19 @@ class TokenStreamWriter private constructor(
     fun close() {
         if (closed) return
         closed = true
-        try {
-            output.flush()
-            output.close()
-        } catch (e: IOException) {
+        // F-020: independent try/catch around flush and close. The
+        // previous code wrapped both in a single `catch(IOException)`,
+        // so any non-IOException from `flush()` skipped `close()` and
+        // leaked the FD permanently (closed=true was already set above).
+        try { output.flush() } catch (e: IOException) {
+            MindlayerLog.w(TAG, "IOException flushing pipe (client may have disconnected)", throwable = e)
+        } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "Non-IOException flushing pipe", throwable = t)
+        }
+        try { output.close() } catch (e: IOException) {
             MindlayerLog.w(TAG, "IOException closing pipe (client may have disconnected)", throwable = e)
+        } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "Non-IOException closing pipe", throwable = t)
         }
     }
 
