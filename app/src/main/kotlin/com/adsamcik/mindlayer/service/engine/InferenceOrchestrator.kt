@@ -18,12 +18,15 @@ import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.ipc.StagedMedia
 import com.adsamcik.mindlayer.service.ipc.TokenStreamWriter
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -42,11 +45,40 @@ class InferenceOrchestrator(
     private val sharedMemoryPool: SharedMemoryPool,
     private val logRepository: com.adsamcik.mindlayer.service.logging.LogRepository? = null,
     private val writerFactory: (ParcelFileDescriptor) -> TokenStreamWriter = ::TokenStreamWriter,
+    ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /**
+     * F-061: total wall-clock cap on a single inference. Tests inject a
+     * smaller value so the timeout path is exercised without waiting the
+     * full production budget.
+     */
+    private val maxInferenceMs: Long = MAX_INFERENCE_MS,
 ) {
 
     companion object {
         private const val TAG = "InferenceOrchestrator"
         private const val MAX_TOOL_ROUNDS = 25
+
+        /**
+         * F-036: cap on the JSON-encoded length of model-emitted tool
+         * arguments. The 1 MiB pipe-frame limit is the upstream constraint
+         * (`MAX_FRAME_BYTES`); 64 KiB matches the symmetric incoming
+         * limit `IpcInputValidator.MAX_TOOL_RESULT_LEN` and leaves
+         * headroom for envelope overhead. Truncating raw JSON yields
+         * invalid JSON — that is the desired UX: the SDK's tool runner
+         * sees malformed JSON and treats the call as a tool error.
+         */
+        const val MAX_TOOL_ARGS_LEN = 64 * 1024
+
+        /**
+         * F-061: hard wall-clock cap on a single inference. The SDK's tool
+         * round-trip cap (`ToolCallBridge.DEFAULT_TIMEOUT_MS`) bounds a
+         * single tool round; this bounds the whole conversation turn
+         * (prefill + decode + every tool round combined) so a
+         * runaway-loopy model or a deadlocked tool client cannot pin
+         * a session forever and leak its slot/concurrency budget.
+         */
+        const val MAX_INFERENCE_MS = 5L * 60L * 1000L
+
         private val gson = Gson()
     }
 
@@ -56,7 +88,11 @@ class InferenceOrchestrator(
         return if (parts.isEmpty()) null else parts.joinToString("") { it.text }
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    // F-009: orchestrator runs on Dispatchers.IO (default). The IO pool is
+    // sized for blocking work (~64 threads on Android), so even a worst-case
+    // wedged-pipe burst cannot exhaust workers within the writer's 5s
+    // backpressure-timeout window. Tests inject StandardTestDispatcher.
+    private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
 
     /**
      * Active inference jobs keyed by **scoped key** (`uid:publicRequestId`,
@@ -77,8 +113,12 @@ class InferenceOrchestrator(
     fun createSession(config: SessionConfig, ownerToken: Any?): String =
         sessionManager.createSession(config, ownerToken)
 
-    fun closeAllOwnedBy(ownerToken: Any): List<String> =
-        sessionManager.closeAllOwnedBy(ownerToken)
+    fun closeAllOwnedBy(ownerToken: Any): List<String> {
+        sessionManager.activeRequestIdsOwnedBy(ownerToken).forEach { scopedKey ->
+            cancelInference(scopedKey)
+        }
+        return sessionManager.closeAllOwnedBy(ownerToken)
+    }
 
     fun getSessionOwner(sessionId: String): Any? =
         sessionManager.getSessionOwner(sessionId)
@@ -86,8 +126,12 @@ class InferenceOrchestrator(
     fun listSessionsOwnedBy(ownerToken: Any): List<SessionInfo> =
         sessionManager.listSessionsOwnedBy(ownerToken)
 
-    fun destroySession(sessionId: String) =
+    fun destroySession(sessionId: String) {
+        sessionManager.activeRequestIdForSession(sessionId)?.let { scopedKey ->
+            cancelInference(scopedKey)
+        }
         sessionManager.destroySession(sessionId)
+    }
 
     fun getSessionInfo(sessionId: String): SessionInfo? =
         sessionManager.getSessionInfo(sessionId)
@@ -179,6 +223,23 @@ class InferenceOrchestrator(
         sessionManager.shutdown()
     }
 
+    /**
+     * F-043: cancel every in-flight inference. Used by [MindlayerMlService]
+     * when handling the foreground notification's STOP action. Each entry
+     * goes through the standard [cancelInference] path so native
+     * `cancelProcess()` is called and the SDK sees a clean cancellation
+     * frame on the pipe.
+     */
+    fun cancelAll() {
+        activeJobs.keys.toList().forEach { scopedKey ->
+            try {
+                cancelInference(scopedKey)
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "cancelAll: cancelInference($scopedKey) raised ${t.safeLabel()}")
+            }
+        }
+    }
+
     // ---- Private -----------------------------------------------------------
 
     private suspend fun runInference(
@@ -204,11 +265,13 @@ class InferenceOrchestrator(
         var stagedAudio: StagedMedia? = null
         try {
             if (image != null) {
-                stagedImage = sharedMemoryPool.stageImage(scopedKey, image)
+                stagedImage = withContext(Dispatchers.IO) {
+                    sharedMemoryPool.stageImage(scopedKey, image)
+                }
                 MindlayerLog.d(TAG, "Staged image: ${stagedImage.filePath}", requestId = meta.requestId, sessionId = meta.sessionId)
             }
             if (audio != null) {
-                stagedAudio = sharedMemoryPool.stageAudio(scopedKey, audio)
+                stagedAudio = sharedMemoryPool.stageAudioWithTimeout(scopedKey, audio)
                 MindlayerLog.d(TAG, "Staged audio: ${stagedAudio.filePath}", requestId = meta.requestId, sessionId = meta.sessionId)
             }
         } catch (t: Throwable) {
@@ -235,6 +298,7 @@ class InferenceOrchestrator(
                 tokenCount = ((meta.textContent?.length ?: 0) / 4).coerceAtLeast(if (meta.textContent.isNullOrEmpty()) 0 else 1),
             )
             try {
+                kotlinx.coroutines.withTimeout(maxInferenceMs) {
                 writer.writeHeader(meta.requestId)
 
                 // Build multimodal content parts.
@@ -297,9 +361,7 @@ class InferenceOrchestrator(
                             firstTokenSeen = true
                         }
                     }
-                    for (tc in chunk.toolCalls) {
-                        accumulatedToolCalls.add(tc.name to gson.toJson(tc.arguments))
-                    }
+                    acceptToolCalls(handle, chunk.toolCalls, accumulatedToolCalls, meta)
                 }
 
                 // --- Structured output: TOOL_ROUTING extraction -------------
@@ -311,7 +373,20 @@ class InferenceOrchestrator(
                         accumulatedToolCalls.removeAll {
                             it.first == StructuredOutputHelper.TOOL_NAME
                         }
-                        writer.writeTokenDelta(seq, structuredResult)
+                        val validated = validateAndMaybeRetry(
+                            handle = handle,
+                            initialOutput = structuredResult,
+                            config = soConfig!!,
+                            meta = meta,
+                            writer = writer,
+                            isToolRouting = true,
+                        )
+                        if (validated == null) {
+                            // Helper already emitted the closeWithError frame
+                            // and logged. Fall through to finally for cleanup.
+                            return@withTimeout
+                        }
+                        writer.writeTokenDelta(seq, validated)
                         seq++
                         handle.estimatedTokens++
                         requestTokenCount++
@@ -320,38 +395,18 @@ class InferenceOrchestrator(
 
                 // --- Structured output: PROMPT_AND_VALIDATE retry -----------
                 if (isPromptValidate && responseBuffer != null) {
-                    var output = responseBuffer.toString()
-                    for (attempt in 0..soConfig.maxRetries) {
-                        when (val result = StructuredOutputHelper.validateJsonOutput(
-                            output, soConfig.schema,
-                        )) {
-                            is ValidationResult.Valid -> {
-                                output = result.json
-                                break
-                            }
-                            is ValidationResult.Invalid -> {
-                                if (attempt >= soConfig.maxRetries) {
-                                    MindlayerLog.w(TAG, "Structured output: validation failed " +
-                                        "after $attempt retries, using last output", requestId = meta.requestId, sessionId = meta.sessionId)
-                                    break
-                                }
-                                MindlayerLog.w(TAG, "Structured output: validation failed " +
-                                    "(retry ${attempt + 1}/${soConfig.maxRetries}): " +
-                                    "${result.errors}", requestId = meta.requestId, sessionId = meta.sessionId)
-                                val retryPrompt = StructuredOutputHelper.buildRetryPrompt(
-                                    result.errors, soConfig.schema,
-                                )
-                                val retryBuf = StringBuilder()
-                                handle.conversation
-                                    .sendMessageAsync(Contents.of(retryPrompt))
-                                    .collect { chunk ->
-                                        chunk.text()?.let { retryBuf.append(it) }
-                                    }
-                                output = retryBuf.toString()
-                            }
-                        }
+                    val validated = validateAndMaybeRetry(
+                        handle = handle,
+                        initialOutput = responseBuffer.toString(),
+                        config = soConfig!!,
+                        meta = meta,
+                        writer = writer,
+                        isToolRouting = false,
+                    )
+                    if (validated == null) {
+                        return@withTimeout
                     }
-                    writer.writeTokenDelta(seq, output)
+                    writer.writeTokenDelta(seq, validated)
                     seq++
                     handle.estimatedTokens++
                     requestTokenCount++
@@ -367,7 +422,18 @@ class InferenceOrchestrator(
                             accumulatedToolCalls.removeAll {
                                 it.first == StructuredOutputHelper.TOOL_NAME
                             }
-                            writer.writeTokenDelta(seq, structuredResult)
+                            val validated = validateAndMaybeRetry(
+                                handle = handle,
+                                initialOutput = structuredResult,
+                                config = soConfig!!,
+                                meta = meta,
+                                writer = writer,
+                                isToolRouting = true,
+                            )
+                            if (validated == null) {
+                                return@withTimeout
+                            }
+                            writer.writeTokenDelta(seq, validated)
                             seq++
                             handle.estimatedTokens++
                             requestTokenCount++
@@ -405,9 +471,12 @@ class InferenceOrchestrator(
                     // Suspend until client submits all tool results (or timeout)
                     val results = toolCallBridge.awaitResults(scopedKey)
 
-                    // Inject tool responses into the conversation
+                    // F-035: scrub Gemma turn-tokens and wrap each tool
+                    // result in a per-request-nonced envelope. The model's
+                    // safety preamble (set in SessionManager) tells it that
+                    // envelope contents are untrusted data, never instructions.
                     val toolResponses = results.map { (name, result) ->
-                        Content.ToolResponse(name, result)
+                        Content.ToolResponse(name, ToolOutputSanitizer.wrap(name, result))
                     }
                     val response = handle.conversation.sendMessage(
                         Message.tool(Contents.of(toolResponses))
@@ -423,9 +492,7 @@ class InferenceOrchestrator(
                     }
 
                     // Check whether the model wants more tool calls
-                    for (tc in response.toolCalls) {
-                        accumulatedToolCalls.add(tc.name to gson.toJson(tc.arguments))
-                    }
+                    acceptToolCalls(handle, response.toolCalls, accumulatedToolCalls, meta)
                 }
 
                 val finishReason = when {
@@ -456,6 +523,30 @@ class InferenceOrchestrator(
                 )
                 MindlayerLog.i(TAG, trace.summary(), requestId = meta.requestId, sessionId = meta.sessionId)
 
+                } // end withTimeout(MAX_INFERENCE_MS)
+
+            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                // F-061: total wall-clock budget for a single inference is
+                // MAX_INFERENCE_MS. On expiry, cancel native generation,
+                // mark the trace, log, and emit a terminal error frame so
+                // the SDK reports a stable `inference_timeout` reason
+                // instead of a generic cancellation.
+                toolCallBridge.cancel(scopedKey)
+                try {
+                    handle.conversation.cancelProcess()
+                } catch (t: Throwable) {
+                    MindlayerLog.w(TAG, "cancelProcess() after timeout raised ${t.safeLabel()}", requestId = meta.requestId, sessionId = meta.sessionId)
+                }
+                trace.markError("inference_timeout")
+                MindlayerLog.w(TAG, "Inference exceeded wall-clock cap (${maxInferenceMs} ms) for request ${meta.requestId}", requestId = meta.requestId, sessionId = meta.sessionId)
+                logRepository?.logInferenceError(
+                    meta.requestId, meta.sessionId, "inference_timeout"
+                )
+                kotlinx.coroutines.withContext(NonCancellable) {
+                    try { writer.closeWithError(0, "inference_timeout") } catch (_: Throwable) { }
+                }
+                // Don't re-throw — caller treats timeout as a clean termination
+                // for the slot/concurrency accounting. The job completes normally.
             } catch (e: CancellationException) {
                 toolCallBridge.cancel(scopedKey)
                 // Flow cancellation does NOT cancel native generation — the LiteRT-LM
@@ -469,7 +560,15 @@ class InferenceOrchestrator(
                 }
                 trace.markError("cancelled")
                 MindlayerLog.i(TAG, "Inference cancelled for request ${meta.requestId}", requestId = meta.requestId, sessionId = meta.sessionId)
-                writer.writeDone(0, "cancelled")
+                // F-009: writer.writeDone() is suspend, but we are in a
+                // CancellationException catch — coroutine is being torn
+                // down. Wrap with NonCancellable so the terminal frame
+                // can flush before the pipe closes.
+                withContext(NonCancellable) {
+                    try { writer.writeDone(0, "cancelled") } catch (_: Throwable) {
+                        // Best-effort terminal frame; pipe may already be closed.
+                    }
+                }
                 throw e
             } catch (t: Throwable) {
                 toolCallBridge.cancel(scopedKey)
@@ -481,7 +580,7 @@ class InferenceOrchestrator(
                 )
                 writer.closeWithError(0, safe)
                 return
-            } finally {
+            }finally {
                 writer.close()
                 handle.activeRequestId = null
                 handle.isStreaming = false
@@ -492,5 +591,150 @@ class InferenceOrchestrator(
                 sharedMemoryPool.cleanup(scopedKey)
             }
         }
+    }
+
+    /**
+     * F-036: filter the model-emitted tool calls in [toolCalls] against
+     * [SessionManager.SessionHandle.allowedToolNames]. Unknown names are
+     * dropped (and logged); known names whose serialised arguments exceed
+     * [MAX_TOOL_ARGS_LEN] are truncated (yielding invalid JSON, which the
+     * SDK treats as a tool error — fail-closed by design).
+     */
+    private fun acceptToolCalls(
+        handle: SessionManager.SessionHandle,
+        toolCalls: List<com.google.ai.edge.litertlm.ToolCall>,
+        accumulator: MutableList<Pair<String, String>>,
+        meta: RequestMeta,
+    ) {
+        for (tc in toolCalls) {
+            if (tc.name !in handle.allowedToolNames) {
+                MindlayerLog.w(
+                    TAG,
+                    "Dropped model-emitted tool call with unknown name '${tc.name.take(64)}'",
+                    requestId = meta.requestId, sessionId = meta.sessionId,
+                )
+                logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
+                    timestampMs = System.currentTimeMillis(),
+                    category = com.adsamcik.mindlayer.service.logging.LogCategory.SECURITY,
+                    event = com.adsamcik.mindlayer.service.logging.LogEvent.TOOL_CALL_REJECTED,
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                    extraJson = kotlinx.serialization.json.buildJsonObject {
+                        put("dropped_tool", kotlinx.serialization.json.JsonPrimitive(tc.name.take(64)))
+                        put("reason", kotlinx.serialization.json.JsonPrimitive("unknown_name"))
+                    }.toString(),
+                ))
+                continue
+            }
+            val argsJson = gson.toJson(tc.arguments)
+            val cappedArgs = if (argsJson.length > MAX_TOOL_ARGS_LEN) {
+                MindlayerLog.w(
+                    TAG,
+                    "Truncated tool args for '${tc.name}' from ${argsJson.length} to $MAX_TOOL_ARGS_LEN bytes",
+                    requestId = meta.requestId, sessionId = meta.sessionId,
+                )
+                logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
+                    timestampMs = System.currentTimeMillis(),
+                    category = com.adsamcik.mindlayer.service.logging.LogCategory.SECURITY,
+                    event = com.adsamcik.mindlayer.service.logging.LogEvent.TOOL_CALL_REJECTED,
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                    extraJson = kotlinx.serialization.json.buildJsonObject {
+                        put("tool", kotlinx.serialization.json.JsonPrimitive(tc.name))
+                        put("reason", kotlinx.serialization.json.JsonPrimitive("oversize_args"))
+                        put("size", kotlinx.serialization.json.JsonPrimitive(argsJson.length))
+                    }.toString(),
+                ))
+                // Intentionally produce invalid JSON: the SDK's tool runner
+                // will fail to parse it and surface a tool-error to the
+                // caller. Smart truncation could elide a closing brace and
+                // produce shorter-but-still-parseable malicious args.
+                argsJson.substring(0, MAX_TOOL_ARGS_LEN)
+            } else argsJson
+            accumulator.add(tc.name to cappedArgs)
+        }
+    }
+
+    /**
+     * F-038: shared validation + retry helper for both PROMPT_AND_VALIDATE
+     * and TOOL_ROUTING. On retry exhaustion both strategies fail-closed —
+     * the helper writes `closeWithError(seq, "structured_output_validation_failed")`
+     * and returns `null` instead of leaking the last invalid output to the
+     * client.
+     *
+     * For TOOL_ROUTING the retry loop re-prompts the model with the
+     * standard retry prompt; the model is expected to invoke the
+     * synthetic structured-output tool again. For PROMPT_AND_VALIDATE the
+     * retry yields free-text JSON.
+     *
+     * @return validated JSON string on success, or `null` if the helper
+     *         already emitted the terminal error frame and the caller
+     *         must unwind the request.
+     */
+    private suspend fun validateAndMaybeRetry(
+        handle: SessionManager.SessionHandle,
+        initialOutput: String,
+        config: StructuredOutputConfig,
+        meta: RequestMeta,
+        writer: TokenStreamWriter,
+        isToolRouting: Boolean,
+    ): String? {
+        var output = initialOutput
+        for (attempt in 0..config.maxRetries) {
+            when (val result = StructuredOutputHelper.validateJsonOutput(output, config.schema)) {
+                is ValidationResult.Valid -> return result.json
+                is ValidationResult.Invalid -> {
+                    if (attempt >= config.maxRetries) {
+                        MindlayerLog.w(
+                            TAG,
+                            "Structured output validation failed after $attempt retries; " +
+                                "failing request (strategy=${if (isToolRouting) "tool_routing" else "prompt_and_validate"}, " +
+                                "errorCount=${result.errors.size})",
+                            requestId = meta.requestId, sessionId = meta.sessionId,
+                        )
+                        logRepository?.logInferenceError(
+                            meta.requestId, meta.sessionId,
+                            "structured_output_validation_failed",
+                        )
+                        writer.closeWithError(0, "structured_output_validation_failed")
+                        return null
+                    }
+                    MindlayerLog.w(
+                        TAG,
+                        "Structured output: validation failed " +
+                            "(retry ${attempt + 1}/${config.maxRetries}, " +
+                            "errorCount=${result.errors.size}, " +
+                            "strategy=${if (isToolRouting) "tool_routing" else "prompt_and_validate"})",
+                        requestId = meta.requestId, sessionId = meta.sessionId,
+                    )
+                    val retryPrompt = StructuredOutputHelper.buildRetryPrompt(
+                        result.errors, config.schema,
+                    )
+                    val retryBuf = StringBuilder()
+                    handle.conversation
+                        .sendMessageAsync(Contents.of(retryPrompt))
+                        .collect { chunk ->
+                            chunk.text()?.let { retryBuf.append(it) }
+                            if (isToolRouting) {
+                                // The synthetic tool's arguments are what
+                                // we want to validate. Capture every
+                                // emitted call to the structured-output
+                                // tool and prefer its arguments over any
+                                // free-text output.
+                                for (tc in chunk.toolCalls) {
+                                    if (tc.name == StructuredOutputHelper.TOOL_NAME) {
+                                        retryBuf.clear()
+                                        retryBuf.append(gson.toJson(tc.arguments))
+                                    }
+                                }
+                            }
+                        }
+                    output = retryBuf.toString()
+                }
+            }
+        }
+        // Unreachable: the loop body always returns or breaks via the
+        // exhaustion branch above.
+        return null
     }
 }

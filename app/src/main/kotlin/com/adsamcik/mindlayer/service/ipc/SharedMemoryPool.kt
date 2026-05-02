@@ -6,12 +6,19 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.SharedMemory
-import android.util.Log
+import android.system.ErrnoException
+import android.system.Os
 import androidx.annotation.RequiresApi
 import com.adsamcik.mindlayer.AudioTransfer
 import com.adsamcik.mindlayer.ImageTransfer
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
+import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.adsamcik.mindlayer.service.security.IpcInputValidator
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.EOFException
 import java.io.File
 import java.io.FileOutputStream
@@ -70,11 +77,21 @@ class SharedMemoryPool(cacheDir: File) {
         private const val TAG = "SharedMemoryPool"
         private const val STAGING_DIR = "media_staging"
         private const val COPY_BUFFER_SIZE = 8192
+
+        /**
+         * F-010: maximum wall time the audio-staging copy may run before
+         * the watchdog forcibly closes the source PFD. Audio uses
+         * `knownSize = null` and reads-until-EOF; without this watchdog a
+         * caller can wedge the worker by holding the pipe write end open
+         * forever. Adjustable per-call via [stageAudioWithTimeout].
+         */
+        const val AUDIO_STAGE_TIMEOUT_MS: Long = 20_000L
     }
 
     private val stagingDir = File(cacheDir, STAGING_DIR).also { it.mkdirs() }
     private val stagingDirCanonical: String = stagingDir.canonicalPath
     private val stagedFiles = ConcurrentHashMap<String, MutableList<File>>()
+    private val activePfds = ConcurrentHashMap<String, MutableSet<ParcelFileDescriptor>>()
 
     // ---- Public API --------------------------------------------------------
 
@@ -104,6 +121,7 @@ class SharedMemoryPool(cacheDir: File) {
         val mime = transfer.mimeType ?: "image/png"
         val staged = createStagingFile("img", extensionForMime(mime))
 
+        trackActivePfd(scopedKey, transfer.source)
         try {
             if (isRawPixels) {
                 stageRawPixels(transfer, staged)
@@ -118,10 +136,12 @@ class SharedMemoryPool(cacheDir: File) {
         } catch (t: Throwable) {
             staged.delete()
             throw t
+        } finally {
+            untrackActivePfd(scopedKey, transfer.source)
         }
 
         trackFile(scopedKey, staged)
-        Log.d(TAG, "Staged image for scopedKey=$scopedKey → ${staged.name} ($mime)")
+        MindlayerLog.d(TAG, "Staged image for scopedKey=$scopedKey → ${staged.name} ($mime)")
 
         return StagedMedia(
             scopedKey = scopedKey,
@@ -146,15 +166,18 @@ class SharedMemoryPool(cacheDir: File) {
         }
         val staged = createStagingFile("aud", extensionForMime(transfer.mimeType))
 
+        trackActivePfd(scopedKey, transfer.source)
         try {
             stageFromPfd(transfer.source, staged, knownSize = null)
         } catch (t: Throwable) {
             staged.delete()
             throw t
+        } finally {
+            untrackActivePfd(scopedKey, transfer.source)
         }
 
         trackFile(scopedKey, staged)
-        Log.d(TAG, "Staged audio for scopedKey=$scopedKey → ${staged.name} (${transfer.mimeType})")
+        MindlayerLog.d(TAG, "Staged audio for scopedKey=$scopedKey → ${staged.name} (${transfer.mimeType})")
 
         return StagedMedia(
             scopedKey = scopedKey,
@@ -164,20 +187,99 @@ class SharedMemoryPool(cacheDir: File) {
         )
     }
 
+    /**
+     * F-010: suspend variant with a watchdog that closes
+     * [AudioTransfer.source] if the copy stalls more than [timeoutMs].
+     * Required because audio uses `knownSize = null` and reads until EOF —
+     * a caller-controlled pipe FD whose writer never closes would otherwise
+     * pin a worker thread indefinitely. Closing the FD is the only reliable
+     * way to break a blocked `read()` syscall on Android; coroutine
+     * cancellation alone cannot interrupt it.
+     */
+    suspend fun stageAudioWithTimeout(
+        scopedKey: String,
+        transfer: AudioTransfer,
+        timeoutMs: Long = AUDIO_STAGE_TIMEOUT_MS,
+    ): StagedMedia = withContext(Dispatchers.IO) {
+        coroutineScope {
+            val watchdog = launch {
+                delay(timeoutMs)
+                try { transfer.source.close() } catch (_: Throwable) { /* best-effort */ }
+                MindlayerLog.w(
+                    TAG,
+                    "Audio staging watchdog fired for scopedKey=$scopedKey after ${timeoutMs}ms",
+                    throwable = null,
+                )
+            }
+            try {
+                stageAudio(scopedKey, transfer)
+            } catch (e: java.io.IOException) {
+                if (watchdog.isCompleted) {
+                    throw java.util.concurrent.TimeoutException(
+                        "audio_staging_timeout after ${timeoutMs}ms"
+                    ).apply { initCause(e) }
+                }
+                throw e
+            } finally {
+                watchdog.cancel()
+            }
+        }
+    }
+
     /** Delete all staged files for [scopedKey]. Safe to call multiple times. */
     fun cleanup(scopedKey: String) {
-        val files = stagedFiles.remove(scopedKey) ?: return
+        val closedPfds = closeActivePfds(scopedKey)
+        val files = stagedFiles.remove(scopedKey) ?: run {
+            if (closedPfds > 0) {
+                MindlayerLog.d(TAG, "Closed $closedPfds active media PFD(s) for scopedKey=$scopedKey")
+            }
+            return
+        }
         var deleted = 0
         for (file in files) {
             if (file.delete()) deleted++
         }
-        Log.d(TAG, "Cleaned up $deleted/${files.size} staged file(s) for scopedKey=$scopedKey")
+        MindlayerLog.d(
+            TAG,
+            "Cleaned up $deleted/${files.size} staged file(s) and closed " +
+                "$closedPfds active PFD(s) for scopedKey=$scopedKey",
+        )
     }
 
     /** Delete every staged file. Called on service destroy. */
     fun cleanupAll() {
-        for (key in stagedFiles.keys().toList()) cleanup(key)
+        val keys = (stagedFiles.keys().toList() + activePfds.keys().toList()).toSet()
+        for (key in keys) cleanup(key)
         stagingDir.listFiles()?.forEach { it.delete() }
+    }
+
+    private fun trackActivePfd(scopedKey: String, pfd: ParcelFileDescriptor) {
+        val set = activePfds.computeIfAbsent(scopedKey) {
+            ConcurrentHashMap.newKeySet()
+        }
+        set.add(pfd)
+    }
+
+    private fun untrackActivePfd(scopedKey: String, pfd: ParcelFileDescriptor) {
+        val set = activePfds[scopedKey] ?: return
+        set.remove(pfd)
+        if (set.isEmpty()) {
+            activePfds.remove(scopedKey, set)
+        }
+    }
+
+    private fun closeActivePfds(scopedKey: String): Int {
+        val pfds = activePfds.remove(scopedKey) ?: return 0
+        var closed = 0
+        for (pfd in pfds) {
+            try {
+                pfd.close()
+                closed++
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "Failed to close active media PFD: ${t.safeLabel()}")
+            }
+        }
+        return closed
     }
 
     // ---- Raw pixel staging (SharedMemory, API 27+) -------------------------
@@ -188,7 +290,7 @@ class SharedMemoryPool(cacheDir: File) {
         } else {
             // API 26: isSharedMemory should never be true (SDK guards this),
             // but handle defensively by treating source as a regular fd.
-            Log.w(TAG, "SharedMemory on API ${Build.VERSION.SDK_INT} — falling back to stream copy")
+            MindlayerLog.w(TAG, "SharedMemory on API ${Build.VERSION.SDK_INT} — falling back to stream copy")
             stageFromPfd(transfer.source, outFile, knownSize = null)
         }
     }
@@ -217,7 +319,7 @@ class SharedMemoryPool(cacheDir: File) {
                     // mapping; we proceed because we map READ-only and copy
                     // to a private buffer immediately, but we log so the
                     // failure is visible in diagnostics.
-                    MindlayerLog.w(TAG, "setProtect(PROT_READ) failed; relying on private copy", throwable = t)
+                    MindlayerLog.w(TAG, "setProtect(PROT_READ) failed; relying on private copy: ${t.safeLabel()}")
                 }
                 buffer = shm.mapReadOnly()
                 val pixels = ByteArray(payloadSize)
@@ -234,7 +336,7 @@ class SharedMemoryPool(cacheDir: File) {
             try {
                 pfd.close()
             } catch (t: Throwable) {
-                MindlayerLog.w(TAG, "Failed to close ParcelFileDescriptor", throwable = t)
+                MindlayerLog.w(TAG, "Failed to close ParcelFileDescriptor: ${t.safeLabel()}")
             }
         }
     }
@@ -259,7 +361,7 @@ class SharedMemoryPool(cacheDir: File) {
                 parcel.recycle()
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "SharedMemory reconstruction failed, using stream fallback", t)
+            MindlayerLog.w(TAG, "SharedMemory reconstruction failed, using stream fallback: ${t.safeLabel()}")
             null
         }
     }
@@ -278,6 +380,7 @@ class SharedMemoryPool(cacheDir: File) {
                 require(knownSize in 1..MAX_MEDIA_BYTES) {
                     "Media payload size out of bounds: $knownSize"
                 }
+                requireFdSizeAtLeast(pfd, knownSize)
                 val bytes = readExactly(pfd, knownSize)
                 outFile.writeBytes(bytes)
             } else {
@@ -288,7 +391,7 @@ class SharedMemoryPool(cacheDir: File) {
                 }
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "Failed to stage PFD to ${outFile.name}", t)
+            MindlayerLog.e(TAG, "Failed to stage PFD to ${outFile.name}: ${t.safeLabel()}")
             throw t
         }
     }
@@ -309,6 +412,17 @@ class SharedMemoryPool(cacheDir: File) {
                 "Media payload size out of bounds: >$maxBytes"
             }
             output.write(buf, 0, n)
+        }
+    }
+
+    private fun requireFdSizeAtLeast(pfd: ParcelFileDescriptor, expectedBytes: Int) {
+        val statSize = try {
+            Os.fstat(pfd.fileDescriptor).st_size
+        } catch (e: ErrnoException) {
+            throw IllegalArgumentException("Unable to stat media source", e)
+        }
+        require(statSize >= expectedBytes) {
+            "Media source size ($statSize B) smaller than declared payloadBytes ($expectedBytes B)"
         }
     }
 
@@ -361,12 +475,55 @@ class SharedMemoryPool(cacheDir: File) {
         val bitmap = Bitmap.createBitmap(width, height, config)
         try {
             bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
+            // F-063: cap PNG output at MAX_MEDIA_BYTES. A small input bitmap
+            // can still produce a multi-GB PNG when the encoder hits a
+            // pathological palette or filter sequence; without a streaming
+            // counter we'd OOM the staging filesystem before the AIDL caller
+            // ever sees a failure. Throws partway through compression so
+            // the orchestrator's existing `media_staging_failed` cleanup
+            // path deletes the partial output.
             FileOutputStream(outFile).use { fos ->
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                val capped = CountingOutputStream(fos, MAX_MEDIA_BYTES.toLong(), "png_too_large")
+                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, capped)) {
+                    throw java.io.IOException("png_compress_failed")
+                }
             }
         } finally {
             bitmap.recycle()
         }
+    }
+
+    /**
+     * F-063: byte-counting output stream that throws once it has streamed
+     * more than [maxBytes] total. Used to cap [Bitmap.compress] so a
+     * pathological encoder run cannot fill the staging filesystem before
+     * the caller sees an error.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal class CountingOutputStream(
+        private val delegate: java.io.OutputStream,
+        private val maxBytes: Long,
+        private val label: String,
+    ) : java.io.OutputStream() {
+        private var count: Long = 0L
+
+        private fun checkAndAdd(n: Int) {
+            count += n
+            if (count > maxBytes) throw java.io.IOException(label)
+        }
+
+        override fun write(b: Int) {
+            checkAndAdd(1)
+            delegate.write(b)
+        }
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            checkAndAdd(len)
+            delegate.write(b, off, len)
+        }
+
+        override fun flush() = delegate.flush()
+        override fun close() = delegate.close()
     }
 
     /**
@@ -389,7 +546,7 @@ class SharedMemoryPool(cacheDir: File) {
             // Don't escalate decoder exceptions on the probe — they
             // indicate the file isn't a real image, not that it is a
             // bomb. Production rejection happens downstream.
-            MindlayerLog.w(TAG, "image bounds probe raised; deferring to native decoder", throwable = t)
+            MindlayerLog.w(TAG, "image bounds probe raised; deferring to native decoder: ${t.safeLabel()}")
             return
         }
         if (opts.outWidth <= 0 || opts.outHeight <= 0) {

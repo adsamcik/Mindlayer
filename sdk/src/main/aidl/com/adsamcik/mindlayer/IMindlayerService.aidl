@@ -39,4 +39,9 @@ interface IMindlayerService {
 
     // Pre-warm the engine in the background (fire-and-forget)
     oneway void prewarm(String backend);
+
+    // Revoke approval for an installed caller package and tear down any
+    // sessions it currently owns. Self-UID only (the dashboard process)
+    // — external callers are rejected at the ServiceBinder authz gate.
+    void revokeApp(String packageName);
 }

@@ -247,6 +247,12 @@ fun DashboardScreen(
     onTestInference: () -> Unit = {},
     onNavigateToHistory: () -> Unit = {},
     onNavigateToLogs: () -> Unit = {},
+    /**
+     * F-055: cross-process revoke hook. The activity wires this to
+     * [DashboardViewModel.revokeApp] so a tap in the Allowed Apps card
+     * goes through the `:ml` AIDL path and tears down owned sessions.
+     */
+    onRevokeApp: ((packageName: String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -286,7 +292,7 @@ fun DashboardScreen(
                 item { CardEnterAnimation(3) { ActiveSessionsCard(state) } }
                 item { CardEnterAnimation(4) { ActivityNavigationCard(onNavigateToHistory, onNavigateToLogs) } }
                 item { CardEnterAnimation(5) { TestInferenceCard(state, onTestInference) } }
-                item { CardEnterAnimation(6) { AllowedAppsCard() } }
+                item { CardEnterAnimation(6) { AllowedAppsCard(onRevokeAidl = onRevokeApp) } }
                 item { Spacer(Modifier.height(8.dp)) }
             }
         }

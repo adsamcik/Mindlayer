@@ -43,7 +43,7 @@ class AllowlistStoreTest {
 
     @Test
     fun `approve then isAllowed succeeds`() {
-        store.approve("com.example", "abc123", "Example App")
+        store.approveDirect("com.example", "abc123", "Example App")
         assertTrue(store.isAllowed("com.example", "abc123"))
         assertEquals(1, store.list().size)
         assertEquals("Example App", store.list().first().displayName)
@@ -51,19 +51,19 @@ class AllowlistStoreTest {
 
     @Test
     fun `isAllowed fails on signature mismatch`() {
-        store.approve("com.example", "abc123", null)
+        store.approveDirect("com.example", "abc123", null)
         assertFalse(store.isAllowed("com.example", "different"))
     }
 
     @Test
     fun `isAllowed is case-insensitive on signature`() {
-        store.approve("com.example", "ABCDEF", null)
+        store.approveDirect("com.example", "ABCDEF", null)
         assertTrue(store.isAllowed("com.example", "abcdef"))
     }
 
     @Test
     fun `revoke removes the entry`() {
-        store.approve("com.example", "abc123")
+        store.approveDirect("com.example", "abc123")
         store.revoke("com.example")
         assertFalse(store.isAllowed("com.example", "abc123"))
         assertTrue(store.list().isEmpty())
@@ -71,8 +71,8 @@ class AllowlistStoreTest {
 
     @Test
     fun `approve replaces existing entry for same package`() {
-        store.approve("com.example", "old")
-        store.approve("com.example", "new")
+        store.approveDirect("com.example", "old")
+        store.approveDirect("com.example", "new")
         assertEquals(1, store.list().size)
         assertTrue(store.isAllowed("com.example", "new"))
         assertFalse(store.isAllowed("com.example", "old"))
@@ -86,17 +86,22 @@ class AllowlistStoreTest {
     }
 
     @Test
-    fun `recordPending replaces entry if signature changes`() {
+    fun `recordPending appends a new row when signature changes`() {
+        // F-031: pending becomes append-only across cert mismatches so a
+        // sig-swap cannot silently overwrite the prior pending row before
+        // the user has a chance to see it.
         store.recordPending("com.example", "sig1")
         store.recordPending("com.example", "sig2")
-        assertEquals(1, store.listPending().size)
-        assertEquals("sig2", store.listPending().first().signingCertSha256)
+        assertEquals(2, store.listPending().size)
+        val sigs = store.listPending().map { it.signingCertSha256 }.toSet()
+        assertTrue(sigs.contains("sig1"))
+        assertTrue(sigs.contains("sig2"))
     }
 
     @Test
     fun `approve clears any pending entry for the same package`() {
         store.recordPending("com.example", "sig1")
-        store.approve("com.example", "sig1")
+        store.approveDirect("com.example", "sig1")
         assertTrue(store.listPending().isEmpty())
         assertTrue(store.isAllowed("com.example", "sig1"))
     }
@@ -110,7 +115,7 @@ class AllowlistStoreTest {
 
     @Test
     fun `entries persist across instances`() {
-        store.approve("com.example", "sig")
+        store.approveDirect("com.example", "sig")
         val reopened = AllowlistStore(context, dirName)
         assertTrue(reopened.isAllowed("com.example", "sig"))
     }
@@ -122,7 +127,7 @@ class AllowlistStoreTest {
         // the other's isAllowed check on the very next call — no refresh().
         val writer = AllowlistStore(context, dirName)
         val reader = AllowlistStore(context, dirName)
-        writer.approve("com.example", "sig")
+        writer.approveDirect("com.example", "sig")
         assertTrue(reader.isAllowed("com.example", "sig"))
     }
 }

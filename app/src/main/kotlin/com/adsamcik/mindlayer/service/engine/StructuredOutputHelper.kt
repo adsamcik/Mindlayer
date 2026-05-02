@@ -1,12 +1,14 @@
 package com.adsamcik.mindlayer.service.engine
 
-import android.util.Log
+import com.adsamcik.mindlayer.service.logging.MindlayerLog
+import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.google.ai.edge.litertlm.OpenApiTool
 import com.google.ai.edge.litertlm.ToolProvider
 import com.google.ai.edge.litertlm.tool
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -18,6 +20,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Provides structured JSON output via two strategies:
@@ -61,7 +64,7 @@ object StructuredOutputHelper {
             val so = root["structured_output"]?.jsonObject ?: return null
 
             val schema = so["schema"]?.jsonObject ?: run {
-                Log.w(TAG, "structured_output missing 'schema'")
+                MindlayerLog.w(TAG, "structured_output missing 'schema'")
                 return null
             }
             val strategyStr = so["strategy"]?.jsonPrimitive?.contentOrNull
@@ -82,7 +85,7 @@ object StructuredOutputHelper {
                 maxRetries = maxRetries,
             )
         } catch (t: Throwable) {
-            Log.e(TAG, "Failed to parse structured_output config", t)
+            MindlayerLog.e(TAG, "Failed to parse structured_output config: ${t.safeLabel()}")
             null
         }
     }
@@ -148,60 +151,28 @@ object StructuredOutputHelper {
     // ---- Validation ----------------------------------------------------------
 
     /**
-     * Validate that [output] is well-formed JSON conforming to the basic
-     * structure of [schema].  Checks:
-     *  - Parseable as JSON
-     *  - Required fields present (`"required"` array in schema)
-     *  - Top-level property types (string, number, integer, boolean, array,
-     *    object)
+     * Validate that [output] conforms to [schema].
      *
-     * Returns [ValidationResult.Valid] with the cleaned JSON (markdown fences
-     * stripped) or [ValidationResult.Invalid] with error descriptions.
+     * F-037: A pure-Kotlin subset JSON-Schema validator (draft-07-ish)
+     * implemented inline as [SubsetSchemaValidator]. Covered keywords:
+     * `type`, `required`, `enum`, `pattern`, `minLength`, `maxLength`,
+     * `minimum`, `maximum`, `properties`, `additionalProperties`
+     * (boolean OR schema), and `items` (single schema).
+     *
+     * Returns [ValidationResult.Valid] with the cleaned JSON (markdown
+     * fences stripped) or [ValidationResult.Invalid] with up to 20
+     * error messages.
      */
     fun validateJsonOutput(output: String, schema: JsonObject): ValidationResult {
         val cleaned = stripMarkdownFences(output.trim())
-
         val parsed = try {
             Json.parseToJsonElement(cleaned)
-        } catch (t: Throwable) {
-            return ValidationResult.Invalid(listOf("Not valid JSON: ${t.message}"))
+        } catch (_: Throwable) {
+            return ValidationResult.Invalid(listOf("Not valid JSON"))
         }
-
-        val errors = mutableListOf<String>()
-
-        val schemaType = schema["type"]?.jsonPrimitive?.contentOrNull
-        if (schemaType == "object" && parsed !is JsonObject) {
-            errors.add("Expected JSON object but got ${parsed::class.simpleName}")
-            return ValidationResult.Invalid(errors)
-        }
-
-        if (parsed is JsonObject) {
-            // Check required fields
-            val required = schema["required"]
-            if (required is JsonArray) {
-                for (field in required) {
-                    val name = field.jsonPrimitive.content
-                    if (name !in parsed) {
-                        errors.add("Missing required field: $name")
-                    }
-                }
-            }
-            // Check top-level property types
-            val properties = schema["properties"]?.jsonObject
-            if (properties != null) {
-                for ((key, propSchema) in properties) {
-                    val value = parsed[key] ?: continue
-                    val expectedType =
-                        propSchema.jsonObject["type"]?.jsonPrimitive?.contentOrNull ?: continue
-                    checkType(key, value, expectedType)?.let { errors.add(it) }
-                }
-            }
-        }
-
-        return if (errors.isEmpty()) {
-            ValidationResult.Valid(cleaned)
-        } else {
-            ValidationResult.Invalid(errors)
+        return when (val r = SubsetSchemaValidator.validate(parsed, schema)) {
+            is ValidationResult.Valid -> ValidationResult.Valid(cleaned)
+            is ValidationResult.Invalid -> ValidationResult.Invalid(r.errors.take(20))
         }
     }
 
@@ -222,38 +193,6 @@ object StructuredOutputHelper {
         return s
     }
 
-    private fun checkType(
-        key: String,
-        value: JsonElement,
-        expectedType: String,
-    ): String? = when (expectedType) {
-        "string" -> if (value !is JsonPrimitive || !value.isString) {
-            "Field '$key': expected string"
-        } else null
-
-        "number" -> if (value !is JsonPrimitive || value.doubleOrNull == null) {
-            "Field '$key': expected number"
-        } else null
-
-        "integer" -> if (value !is JsonPrimitive || value.longOrNull == null) {
-            "Field '$key': expected integer"
-        } else null
-
-        "boolean" -> if (value !is JsonPrimitive || value.booleanOrNull == null) {
-            "Field '$key': expected boolean"
-        } else null
-
-        "array" -> if (value !is JsonArray) {
-            "Field '$key': expected array"
-        } else null
-
-        "object" -> if (value !is JsonObject) {
-            "Field '$key': expected object"
-        } else null
-
-        else -> null
-    }
-
     /**
      * [OpenApiTool] that routes structured output through a synthetic tool
      * call.  [execute] is never invoked — the orchestrator intercepts the
@@ -268,6 +207,268 @@ object StructuredOutputHelper {
                 "SchemaRoutingTool.execute() should not be called — " +
                     "structured output is extracted from tool call arguments",
             )
+    }
+
+    // ---- F-037: native subset JSON-Schema validator -------------------------
+
+    /**
+     * Pure-Kotlin subset validator for JSON Schema. Replaces the previous
+     * shallow top-level checker. We deliberately avoid the
+     * `com.networknt:json-schema-validator` dep (the audit's first
+     * recommendation) because its Jackson drag-in (~1.6 MB) and reflective
+     * surface complicate R8 — given how narrow our schema needs are, a
+     * native ~250 LoC implementation is preferable.
+     *
+     * Supported keywords:
+     * - `type` — single string. One of: object, array, string, number,
+     *   integer, boolean, null.
+     * - `required` — array of property names that must be present (object).
+     * - `enum` — array of valid values. Element equality is structural.
+     * - `pattern` — regex (Java syntax). Compiled regexes are cached.
+     * - `minLength`, `maxLength` — string length bounds.
+     * - `minimum`, `maximum` — numeric bounds (inclusive).
+     * - `properties` — per-key sub-schema; recursively validated.
+     * - `additionalProperties` — boolean (allow/forbid) or schema (every
+     *   non-`properties` key validates against the schema).
+     * - `items` — single sub-schema applied to every array element.
+     *
+     * Unsupported by design: `oneOf`, `anyOf`, `allOf`, `format`, `$ref`,
+     * `not`, `if/then/else`, `dependencies`. These return Valid with no
+     * error but no enforcement either — explicitly out of scope until the
+     * audit's "draft-07 strict" requirement extends.
+     */
+    internal object SubsetSchemaValidator {
+
+        /**
+         * Cap on the regex compile cache. Schemas are typically O(sessions),
+         * so 256 entries comfortably covers a long-lived service. On
+         * overflow we evict half the cache (cheap, no LRU machinery).
+         */
+        private const val PATTERN_CACHE_CAP = 256
+
+        private val patternCache = ConcurrentHashMap<String, Regex>(PATTERN_CACHE_CAP)
+
+        /**
+         * Validate [json] against [schema]. Returns [ValidationResult.Valid]
+         * (with [json] echoed) on success or [ValidationResult.Invalid] with
+         * a list of error strings.
+         */
+        fun validate(json: JsonElement, schema: JsonObject): ValidationResult {
+            val errors = mutableListOf<String>()
+            check(json, schema, path = "$", errors = errors)
+            return if (errors.isEmpty()) {
+                ValidationResult.Valid(json.toString())
+            } else {
+                ValidationResult.Invalid(errors)
+            }
+        }
+
+        private fun check(
+            value: JsonElement,
+            schema: JsonObject,
+            path: String,
+            errors: MutableList<String>,
+        ) {
+            // ── type ─────────────────────────────────────────────────────
+            val typeStr = schema["type"]?.let {
+                if (it is JsonPrimitive && it.isString) it.content else null
+            }
+            if (typeStr != null && !matchesType(value, typeStr)) {
+                errors.add("$path: expected $typeStr, got ${describe(value)}")
+                // Fall through anyway so other keywords can still emit a
+                // hint; but skip type-specific checks below.
+            }
+
+            // ── enum ─────────────────────────────────────────────────────
+            val enumElement = schema["enum"]
+            if (enumElement is JsonArray) {
+                if (enumElement.none { it == value }) {
+                    errors.add("$path: value not in enum")
+                }
+            }
+
+            when (value) {
+                is JsonObject -> checkObject(value, schema, path, errors)
+                is JsonArray -> checkArray(value, schema, path, errors)
+                is JsonPrimitive -> checkPrimitive(value, schema, path, errors)
+                JsonNull -> { /* type already validated */ }
+            }
+        }
+
+        private fun matchesType(value: JsonElement, type: String): Boolean = when (type) {
+            "object" -> value is JsonObject
+            "array" -> value is JsonArray
+            "string" -> value is JsonPrimitive && value.isString
+            "number" -> value is JsonPrimitive && !value.isString && value.doubleOrNull != null
+            // integer must be a whole number; both `42` and `42.0` accepted
+            // if they round-trip exactly.
+            "integer" -> value is JsonPrimitive && !value.isString && isInteger(value)
+            "boolean" -> value is JsonPrimitive && !value.isString && value.booleanOrNull != null
+            "null" -> value is JsonNull
+            else -> true // unknown type — don't reject
+        }
+
+        private fun isInteger(p: JsonPrimitive): Boolean {
+            // Prefer longOrNull; fall back to doubleOrNull for `1.0` style.
+            if (p.longOrNull != null) return true
+            val d = p.doubleOrNull ?: return false
+            return d.isFinite() && d == kotlin.math.floor(d)
+        }
+
+        private fun describe(v: JsonElement): String = when (v) {
+            is JsonObject -> "object"
+            is JsonArray -> "array"
+            JsonNull -> "null"
+            is JsonPrimitive -> when {
+                v.isString -> "string"
+                v.booleanOrNull != null -> "boolean"
+                v.longOrNull != null -> "integer"
+                v.doubleOrNull != null -> "number"
+                else -> "primitive"
+            }
+        }
+
+        private fun checkObject(
+            value: JsonObject,
+            schema: JsonObject,
+            path: String,
+            errors: MutableList<String>,
+        ) {
+            // ── required ────────────────────────────────────────────────
+            val required = schema["required"]
+            if (required is JsonArray) {
+                for (rField in required) {
+                    val name = (rField as? JsonPrimitive)?.contentOrNull ?: continue
+                    if (name !in value) {
+                        errors.add("$path.$name: required field missing")
+                    }
+                }
+            }
+
+            // ── properties ──────────────────────────────────────────────
+            val properties = schema["properties"] as? JsonObject
+            if (properties != null) {
+                for ((key, propSchema) in properties) {
+                    val child = value[key] ?: continue
+                    val childSchema = propSchema as? JsonObject ?: continue
+                    check(child, childSchema, "$path.$key", errors)
+                }
+            }
+
+            // ── additionalProperties ────────────────────────────────────
+            val ap = schema["additionalProperties"]
+            if (ap != null) {
+                val knownKeys = properties?.keys ?: emptySet()
+                when (ap) {
+                    is JsonPrimitive -> {
+                        if (ap.booleanOrNull == false) {
+                            for (k in value.keys) {
+                                if (k !in knownKeys) {
+                                    errors.add("$path.$k: additional property not allowed")
+                                }
+                            }
+                        }
+                        // true (or non-bool primitive) = allow everything; no-op
+                    }
+                    is JsonObject -> {
+                        for ((k, child) in value) {
+                            if (k !in knownKeys) {
+                                check(child, ap, "$path.$k", errors)
+                            }
+                        }
+                    }
+                    else -> { /* invalid schema shape — ignore */ }
+                }
+            }
+        }
+
+        private fun checkArray(
+            value: JsonArray,
+            schema: JsonObject,
+            path: String,
+            errors: MutableList<String>,
+        ) {
+            val items = schema["items"] as? JsonObject ?: return
+            value.forEachIndexed { idx, element ->
+                check(element, items, "$path[$idx]", errors)
+            }
+        }
+
+        private fun checkPrimitive(
+            value: JsonPrimitive,
+            schema: JsonObject,
+            path: String,
+            errors: MutableList<String>,
+        ) {
+            // String constraints
+            if (value.isString) {
+                val s = value.content
+                schema["minLength"]?.let { el ->
+                    val min = (el as? JsonPrimitive)?.intOrNull
+                    if (min != null && s.length < min) {
+                        errors.add("$path: length ${s.length} < minLength $min")
+                    }
+                }
+                schema["maxLength"]?.let { el ->
+                    val max = (el as? JsonPrimitive)?.intOrNull
+                    if (max != null && s.length > max) {
+                        errors.add("$path: length ${s.length} > maxLength $max")
+                    }
+                }
+                schema["pattern"]?.let { el ->
+                    val pat = (el as? JsonPrimitive)?.contentOrNull
+                    if (pat != null) {
+                        val regex = compilePattern(pat)
+                        if (regex != null && !regex.containsMatchIn(s)) {
+                            errors.add("$path: does not match pattern")
+                        }
+                    }
+                }
+            }
+
+            // Numeric constraints
+            val asDouble = if (!value.isString) value.doubleOrNull else null
+            if (asDouble != null) {
+                schema["minimum"]?.let { el ->
+                    val min = (el as? JsonPrimitive)?.doubleOrNull
+                    if (min != null && asDouble < min) {
+                        errors.add("$path: $asDouble < minimum $min")
+                    }
+                }
+                schema["maximum"]?.let { el ->
+                    val max = (el as? JsonPrimitive)?.doubleOrNull
+                    if (max != null && asDouble > max) {
+                        errors.add("$path: $asDouble > maximum $max")
+                    }
+                }
+            }
+        }
+
+        private fun compilePattern(pattern: String): Regex? {
+            patternCache[pattern]?.let { return it }
+            val r = try {
+                Regex(pattern)
+            } catch (_: Throwable) {
+                return null
+            }
+            if (patternCache.size >= PATTERN_CACHE_CAP) {
+                // Cheap eviction: clear half the cache rather than LRU
+                // bookkeeping. Schemas are stable per session so the
+                // refill cost is bounded.
+                val drop = patternCache.keys.take(patternCache.size / 2)
+                drop.forEach { patternCache.remove(it) }
+            }
+            patternCache[pattern] = r
+            return r
+        }
+
+        /** Visible for testing: lets tests assert cache state. */
+        internal fun cacheSizeForTest(): Int = patternCache.size
+
+        /** Visible for testing: tests reset between cases. */
+        internal fun resetCacheForTest() {
+            patternCache.clear()
+        }
     }
 }
 

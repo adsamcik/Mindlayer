@@ -10,6 +10,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
@@ -167,11 +170,19 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Build release AAB (without model)
-        run: ./gradlew :app:bundleRelease --no-daemon
+      - name: Validate model hash input
+        run: |
+          if [[ ! "${MODEL_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::MODEL_SHA256 repository variable must be a lowercase 64-character SHA-256 digest"
+            exit 1
+          fi
         env:
-          GITHUB_OWNER: ${{ github.repository_owner }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODEL_SHA256: ${{ vars.MODEL_SHA256 }}
+
+      - name: Build release AAB
+        run: ./gradlew :app:bundleRelease --no-daemon -PmodelSha256="${MODEL_SHA256}"
+        env:
+          MODEL_SHA256: ${{ vars.MODEL_SHA256 }}
 
       - name: Upload AAB
         uses: actions/upload-artifact@v7

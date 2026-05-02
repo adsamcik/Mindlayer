@@ -3,7 +3,7 @@ package com.adsamcik.mindlayer.service.engine
 import android.app.ActivityManager
 import android.content.ComponentCallbacks2
 import android.content.Context
-import android.util.Log
+import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -121,13 +121,13 @@ class MemoryBudget(
                 delay(POLL_INTERVAL_MS)
             }
         }
-        Log.i(TAG, "Memory monitor started (tier=${deviceTier})")
+        MindlayerLog.i(TAG, "Memory monitor started (tier=${deviceTier})")
     }
 
     fun stop() {
         pollJob?.cancel()
         pollJob = null
-        Log.i(TAG, "Memory monitor stopped")
+        MindlayerLog.i(TAG, "Memory monitor stopped")
     }
 
     /**
@@ -166,7 +166,7 @@ class MemoryBudget(
         _snapshot.value = snap
 
         if (next != previous) {
-            Log.w(
+            MindlayerLog.w(
                 TAG, "Pressure: $previous → $next " +
                     "(avail=${snap.availableMb} MB, low=${snap.lowMemory})"
             )

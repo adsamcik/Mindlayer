@@ -22,11 +22,18 @@ dependencyResolutionManagement {
 }
 ```
 
-Add to your `~/.gradle/gradle.properties` (or project-level):
+Add to your `~/.gradle/gradle.properties` (user-level only — never project-level):
 ```properties
 GITHUB_OWNER=your-github-username
 GITHUB_TOKEN=ghp_your_personal_access_token
 ```
+
+> **Why user-level only?** `GITHUB_TOKEN` is a credential with `read:packages`
+> scope. Project-level `gradle.properties` is committed to the repo, so a
+> token written there leaks into git history (and any forks/clones). The
+> user-level file lives outside the repo and is never tracked. A
+> `gradle.properties.template` is provided at the repo root with the
+> placeholders pre-filled — copy it, don't edit-in-place.
 
 > **Token permissions:** The token needs `read:packages` scope. Create one at
 > [GitHub Settings → Developer settings → Personal access tokens](https://github.com/settings/tokens).
@@ -159,17 +166,45 @@ val sessionId = mindlayer.createSession {
     }]""")
 }
 
-mindlayer.chat(sessionId, "What's the weather in Prague?").collect { event ->
+val handle = mindlayer.chat(sessionId, "What's the weather in Prague?")
+handle.events.collect { event ->
     when (event) {
         is MindlayerEvent.ToolCall -> {
             val result = fetchWeather(event.arguments) // your tool implementation
-            mindlayer.submitToolResult(event.callId, event.toolName, result)
+            mindlayer.submitToolResult(handle.requestId, event.callId, event.toolName, result)
         }
         is MindlayerEvent.TextDelta -> print(event.text)
         is MindlayerEvent.Done -> println()
     }
 }
 ```
+
+### Structured JSON output
+
+```kotlin
+val sessionId = mindlayer.createSession {
+    jsonOutput {
+        schema("""{
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string" },
+                "age": { "type": "integer" }
+            }
+        }""")
+        strategy(JsonOutputStrategy.PromptAndValidate)
+    }
+}
+```
+
+Structured output validation is intentionally **shallow**. The service checks
+that the response is valid JSON, that top-level required fields exist, and that
+top-level property types match the schema (`string`, `number`, `integer`,
+`boolean`, `array`, `object`). It does **not** recursively enforce nested JSON
+Schema rules such as nested `required`, `enum`, `format`, numeric ranges,
+`pattern`, or `additionalProperties`. If a client treats structured output as a
+security or business-rule boundary, validate the returned JSON again in the
+client with a full schema validator.
 
 ### Session convenience wrapper
 

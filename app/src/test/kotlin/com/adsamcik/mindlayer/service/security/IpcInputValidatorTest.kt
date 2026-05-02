@@ -273,12 +273,29 @@ class IpcInputValidatorTest {
         IpcInputValidator.validateSessionConfig(SessionConfig())
     }
 
+    @Test
+    fun `validateSessionConfig rejects non-positive expiration`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            IpcInputValidator.validateSessionConfig(SessionConfig(expirationMs = 0))
+        }
+    }
+
+    @Test
+    fun `validateSessionConfig rejects excessive expiration`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            IpcInputValidator.validateSessionConfig(
+                SessionConfig(expirationMs = IpcInputValidator.MAX_SESSION_EXPIRATION_MS + 1),
+            )
+        }
+    }
+
     // ── F-012: ToolResult byte cap ──────────────────────────────────────
 
     @Test
     fun `validateToolResult rejects oversize resultJson`() {
         val r = ToolResult(
             requestId = "abc",
+            callId = "call-1",
             toolName = "weather",
             resultJson = "x".repeat(IpcInputValidator.MAX_TOOL_RESULT_LEN + 1),
         )
@@ -290,8 +307,17 @@ class IpcInputValidatorTest {
     @Test
     fun `validateToolResult accepts within cap`() {
         IpcInputValidator.validateToolResult(
-            ToolResult("abc", "weather", """{"answer":"ok"}"""),
+            ToolResult("abc", "call-1", "weather", """{"answer":"ok"}"""),
         )
+    }
+
+    @Test
+    fun `validateToolResult rejects invalid callId`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            IpcInputValidator.validateToolResult(
+                ToolResult("abc", "bad call id", "weather", """{"answer":"ok"}"""),
+            )
+        }
     }
 
     // ── F-017: RequestMeta textContent ──────────────────────────────────

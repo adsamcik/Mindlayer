@@ -1,5 +1,6 @@
 package com.adsamcik.mindlayer.service
 
+import android.os.Binder
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
@@ -31,6 +32,7 @@ import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
+import io.mockk.verifyOrder
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -58,6 +60,7 @@ class ServiceBinderTest {
     private lateinit var thermalMonitor: ThermalMonitor
     private lateinit var memoryBudget: MemoryBudget
     private lateinit var toolCallBridge: ToolCallBridge
+    private lateinit var rateLimiter: RateLimiter
     private lateinit var binder: ServiceBinder
 
     private val defaultPolicy = ThermalPolicy(
@@ -128,6 +131,11 @@ class ServiceBinderTest {
             every { deviceTier } returns defaultTier
         }
 
+        rateLimiter = RateLimiter(
+            maxRequestsPerMinute = 100_000,
+            maxConcurrent = 1_000,
+        )
+
         binder = ServiceBinder(
             service = service,
             engineManager = engineManager,
@@ -144,10 +152,7 @@ class ServiceBinderTest {
             },
             // Use a null store so the binder skips the allowlist gate in unit tests.
             allowlistStore = null,
-            rateLimiter = RateLimiter(
-                maxRequestsPerMinute = 100_000,
-                maxConcurrent = 1_000,
-            ),
+            rateLimiter = rateLimiter,
         )
     }
 
@@ -258,12 +263,36 @@ class ServiceBinderTest {
         verify { orchestrator.cancelInference(any<String>()) }
     }
 
+    @Test
+    fun `client disconnect cancels active inference before closing owned sessions without manual slot release`() {
+        val uid = Binder.getCallingUid()
+        val meta = RequestMeta(requestId = "r1", sessionId = "s1")
+        val pfd = mockk<ParcelFileDescriptor>(relaxed = true)
+        every { orchestrator.getSessionOwner("s1") } returns uid
+
+        binder.infer(meta, image = null, audio = null, eventWriteEnd = pfd)
+        assertEquals(1, rateLimiter.concurrentFor(uid))
+
+        binder.onClientDisconnected(uid)
+
+        verifyOrder {
+            orchestrator.cancelInference("$uid:r1")
+            orchestrator.closeAllOwnedBy(uid)
+        }
+        assertEquals(
+            "slot release must stay with orchestrator completion callback",
+            1,
+            rateLimiter.concurrentFor(uid),
+        )
+    }
+
     // ---- Tool results -------------------------------------------------------
 
     @Test
     fun `submitToolResult delegates to toolCallBridge`() {
         val result = ToolResult(
             requestId = "r1",
+            callId = "call-1",
             toolName = "calculator",
             resultJson = """{"answer": 42}""",
         )
@@ -273,6 +302,7 @@ class ServiceBinderTest {
         verify {
             toolCallBridge.submitResult(
                 scopedKey = any<String>(),
+                callId = "call-1",
                 toolName = "calculator",
                 resultJson = """{"answer": 42}""",
             )

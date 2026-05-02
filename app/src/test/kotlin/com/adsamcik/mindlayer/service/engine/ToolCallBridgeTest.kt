@@ -37,6 +37,17 @@ class ToolCallBridgeTest {
         unmockkStatic(Log::class)
     }
 
+    private fun submitResult(
+        scopedKey: String,
+        calls: List<ToolCallBridge.PendingToolCall>,
+        toolName: String,
+        resultJson: String,
+        occurrence: Int = 0,
+    ) {
+        val call = calls.filter { it.toolName == toolName }[occurrence]
+        bridge.submitResult(scopedKey, call.callId, toolName, resultJson)
+    }
+
     // ─── Basic flow ────────────────────────────────────────────────────
 
     @Test
@@ -54,8 +65,8 @@ class ToolCallBridgeTest {
 
     @Test
     fun `single tool call register-submit-await roundtrip`() = runTest {
-        bridge.registerPendingToolCalls("req-1", listOf("search" to """{"q":"hello"}"""))
-        bridge.submitResult("req-1", "search", """{"answer":"world"}""")
+        val calls = bridge.registerPendingToolCalls("req-1", listOf("search" to """{"q":"hello"}"""))
+        submitResult("req-1", calls, "search", """{"answer":"world"}""")
 
         val results = bridge.awaitResults("req-1")
         assertEquals(1, results.size)
@@ -64,7 +75,7 @@ class ToolCallBridgeTest {
 
     @Test
     fun `register multiple tool calls and submit all returns all in registration order`() = runTest {
-        bridge.registerPendingToolCalls(
+        val calls = bridge.registerPendingToolCalls(
             "req-1",
             listOf(
                 "toolA" to "argsA",
@@ -73,9 +84,9 @@ class ToolCallBridgeTest {
             ),
         )
 
-        bridge.submitResult("req-1", "toolA", "resultA")
-        bridge.submitResult("req-1", "toolB", "resultB")
-        bridge.submitResult("req-1", "toolC", "resultC")
+        submitResult("req-1", calls, "toolA", "resultA")
+        submitResult("req-1", calls, "toolB", "resultB")
+        submitResult("req-1", calls, "toolC", "resultC")
 
         val results = bridge.awaitResults("req-1")
         assertEquals(
@@ -98,12 +109,12 @@ class ToolCallBridgeTest {
 
     @Test
     fun `submit result from different coroutine while another awaits`() = runTest {
-        bridge.registerPendingToolCalls("req-1", listOf("tool" to "args"))
+        val calls = bridge.registerPendingToolCalls("req-1", listOf("tool" to "args"))
 
         val awaiting = async { bridge.awaitResults("req-1") }
 
         launch {
-            bridge.submitResult("req-1", "tool", "result-from-other-coroutine")
+            submitResult("req-1", calls, "tool", "result-from-other-coroutine")
         }
 
         val results = awaiting.await()
@@ -112,8 +123,8 @@ class ToolCallBridgeTest {
 
     @Test
     fun `submit result before await is called still resolves`() = runTest {
-        bridge.registerPendingToolCalls("req-1", listOf("tool" to "args"))
-        bridge.submitResult("req-1", "tool", "early-result")
+        val calls = bridge.registerPendingToolCalls("req-1", listOf("tool" to "args"))
+        submitResult("req-1", calls, "tool", "early-result")
 
         val results = bridge.awaitResults("req-1")
         assertEquals(listOf("tool" to "early-result"), results)
@@ -121,11 +132,11 @@ class ToolCallBridgeTest {
 
     @Test
     fun `multiple requests registered simultaneously do not interfere`() = runTest {
-        bridge.registerPendingToolCalls("req-A", listOf("toolX" to "a1"))
-        bridge.registerPendingToolCalls("req-B", listOf("toolY" to "b1"))
+        val callsA = bridge.registerPendingToolCalls("req-A", listOf("toolX" to "a1"))
+        val callsB = bridge.registerPendingToolCalls("req-B", listOf("toolY" to "b1"))
 
-        bridge.submitResult("req-A", "toolX", "resultA")
-        bridge.submitResult("req-B", "toolY", "resultB")
+        submitResult("req-A", callsA, "toolX", "resultA")
+        submitResult("req-B", callsB, "toolY", "resultB")
 
         val resA = bridge.awaitResults("req-A")
         val resB = bridge.awaitResults("req-B")
@@ -138,24 +149,24 @@ class ToolCallBridgeTest {
 
     @Test
     fun `submitResult for non-existent requestId does not crash and logs warning`() {
-        bridge.submitResult("ghost-request", "tool", "result")
+        bridge.submitResult("ghost-request", "call-1", "tool", "result")
 
         verify { Log.w("Mindlayer.ToolCallBridge", match<String> { it.contains("ghost-request") }) }
     }
 
     @Test
     fun `submitResult for non-existent tool name does not crash and logs warning`() {
-        bridge.registerPendingToolCalls("req-1", listOf("realTool" to "args"))
-        bridge.submitResult("req-1", "nonexistentTool", "result")
+        val calls = bridge.registerPendingToolCalls("req-1", listOf("realTool" to "args"))
+        bridge.submitResult("req-1", calls[0].callId, "nonexistentTool", "result")
 
         verify { Log.w("Mindlayer.ToolCallBridge", match<String> { it.contains("nonexistentTool") }) }
     }
 
     @Test
     fun `submitResult for already-completed tool call is ignored`() = runTest {
-        bridge.registerPendingToolCalls("req-1", listOf("tool" to "args"))
-        bridge.submitResult("req-1", "tool", "first")
-        bridge.submitResult("req-1", "tool", "second") // should be ignored
+        val calls = bridge.registerPendingToolCalls("req-1", listOf("tool" to "args"))
+        submitResult("req-1", calls, "tool", "first")
+        submitResult("req-1", calls, "tool", "second") // should be ignored
 
         val results = bridge.awaitResults("req-1")
         assertEquals(listOf("tool" to "first"), results)
@@ -169,9 +180,9 @@ class ToolCallBridgeTest {
     @Test
     fun `register overwrites previous pending calls for same requestId`() = runTest {
         bridge.registerPendingToolCalls("req-1", listOf("oldTool" to "oldArgs"))
-        bridge.registerPendingToolCalls("req-1", listOf("newTool" to "newArgs"))
+        val calls = bridge.registerPendingToolCalls("req-1", listOf("newTool" to "newArgs"))
 
-        bridge.submitResult("req-1", "newTool", "newResult")
+        submitResult("req-1", calls, "newTool", "newResult")
 
         val results = bridge.awaitResults("req-1")
         assertEquals(listOf("newTool" to "newResult"), results)
@@ -249,8 +260,8 @@ class ToolCallBridgeTest {
 
     @Test
     fun `await succeeds when results arrive before timeout`() = runTest {
-        bridge.registerPendingToolCalls("req-1", listOf("tool" to "args"))
-        bridge.submitResult("req-1", "tool", "fast-result")
+        val calls = bridge.registerPendingToolCalls("req-1", listOf("tool" to "args"))
+        submitResult("req-1", calls, "tool", "fast-result")
 
         val results = bridge.awaitResults("req-1", timeoutMs = 5_000L)
         assertEquals(listOf("tool" to "fast-result"), results)
@@ -279,14 +290,35 @@ class ToolCallBridgeTest {
     // ─── Multiple tool calls matching ──────────────────────────────────
 
     @Test
-    fun `two calls with same tool name - submit matches first unfinished`() = runTest {
-        bridge.registerPendingToolCalls(
+    fun `two calls with same tool name are correlated by callId`() = runTest {
+        val calls = bridge.registerPendingToolCalls(
             "req-1",
             listOf("search" to "query1", "search" to "query2"),
         )
 
-        bridge.submitResult("req-1", "search", "result-for-first")
-        bridge.submitResult("req-1", "search", "result-for-second")
+        bridge.submitResult("req-1", calls[1].callId, "search", "result-for-second")
+        bridge.submitResult("req-1", calls[0].callId, "search", "result-for-first")
+
+        val results = bridge.awaitResults("req-1")
+        assertEquals(
+            listOf("search" to "result-for-first", "search" to "result-for-second"),
+            results,
+        )
+    }
+
+    @Test
+    fun `same-name tool result with wrong callId is ignored`() = runTest {
+        val calls = bridge.registerPendingToolCalls(
+            "req-1",
+            listOf("search" to "query1", "search" to "query2"),
+        )
+
+        bridge.submitResult("req-1", "missing-call", "search", "wrong")
+        assertFalse(calls[0].resultDeferred.isCompleted)
+        assertFalse(calls[1].resultDeferred.isCompleted)
+
+        bridge.submitResult("req-1", calls[0].callId, "search", "result-for-first")
+        bridge.submitResult("req-1", calls[1].callId, "search", "result-for-second")
 
         val results = bridge.awaitResults("req-1")
         assertEquals(
@@ -297,15 +329,15 @@ class ToolCallBridgeTest {
 
     @Test
     fun `submit results in different order than registration`() = runTest {
-        bridge.registerPendingToolCalls(
+        val calls = bridge.registerPendingToolCalls(
             "req-1",
             listOf("alpha" to "a", "beta" to "b", "gamma" to "g"),
         )
 
         // Submit in reverse order
-        bridge.submitResult("req-1", "gamma", "result-g")
-        bridge.submitResult("req-1", "alpha", "result-a")
-        bridge.submitResult("req-1", "beta", "result-b")
+        submitResult("req-1", calls, "gamma", "result-g")
+        submitResult("req-1", calls, "alpha", "result-a")
+        submitResult("req-1", calls, "beta", "result-b")
 
         val results = bridge.awaitResults("req-1")
         // Results should be in registration order, not submission order
@@ -326,16 +358,16 @@ class ToolCallBridgeTest {
             listOf("fetch" to "url1", "fetch" to "url2", "fetch" to "url3"),
         )
 
-        bridge.submitResult("req-1", "fetch", "res1")
+        submitResult("req-1", calls, "fetch", "res1")
         assertTrue(calls[0].resultDeferred.isCompleted)
         assertFalse(calls[1].resultDeferred.isCompleted)
         assertFalse(calls[2].resultDeferred.isCompleted)
 
-        bridge.submitResult("req-1", "fetch", "res2")
+        submitResult("req-1", calls, "fetch", "res2", occurrence = 1)
         assertTrue(calls[1].resultDeferred.isCompleted)
         assertFalse(calls[2].resultDeferred.isCompleted)
 
-        bridge.submitResult("req-1", "fetch", "res3")
+        submitResult("req-1", calls, "fetch", "res3", occurrence = 2)
         assertTrue(calls[2].resultDeferred.isCompleted)
 
         val results = bridge.awaitResults("req-1")
@@ -349,8 +381,8 @@ class ToolCallBridgeTest {
 
     @Test
     fun `successful await removes entry from pending map`() = runTest {
-        bridge.registerPendingToolCalls("req-1", listOf("tool" to "args"))
-        bridge.submitResult("req-1", "tool", "result")
+        val calls = bridge.registerPendingToolCalls("req-1", listOf("tool" to "args"))
+        submitResult("req-1", calls, "tool", "result")
         bridge.awaitResults("req-1")
 
         // Second await should fail because the first cleaned up
@@ -364,7 +396,7 @@ class ToolCallBridgeTest {
 
     @Test
     fun `awaitResults with deferred completed from separate launch`() = runTest {
-        bridge.registerPendingToolCalls(
+        val calls = bridge.registerPendingToolCalls(
             "req-1",
             listOf("slow" to "args1", "fast" to "args2"),
         )
@@ -372,8 +404,8 @@ class ToolCallBridgeTest {
         val awaiter = async { bridge.awaitResults("req-1", timeoutMs = 10_000L) }
 
         launch {
-            bridge.submitResult("req-1", "fast", "fast-result")
-            bridge.submitResult("req-1", "slow", "slow-result")
+            submitResult("req-1", calls, "fast", "fast-result")
+            submitResult("req-1", calls, "slow", "slow-result")
         }
 
         val results = awaiter.await()
@@ -387,12 +419,12 @@ class ToolCallBridgeTest {
     fun `concurrent registrations and submissions across many requests`() = runTest {
         val requestIds = (1..10).map { "req-$it" }
 
-        requestIds.forEach { id ->
+        val callsByRequest = requestIds.associateWith { id ->
             bridge.registerPendingToolCalls(id, listOf("tool" to "args-$id"))
         }
 
         requestIds.forEach { id ->
-            bridge.submitResult(id, "tool", "result-$id")
+            submitResult(id, callsByRequest.getValue(id), "tool", "result-$id")
         }
 
         requestIds.forEach { id ->
@@ -403,11 +435,11 @@ class ToolCallBridgeTest {
 
     @Test
     fun `partial submit then cancel leaves no pending state`() {
-        bridge.registerPendingToolCalls(
+        val calls = bridge.registerPendingToolCalls(
             "req-1",
             listOf("a" to "1", "b" to "2"),
         )
-        bridge.submitResult("req-1", "a", "done-a")
+        submitResult("req-1", calls, "a", "done-a")
         bridge.cancel("req-1")
 
         // Nothing should be pending
@@ -420,7 +452,10 @@ class ToolCallBridgeTest {
     }
 
     @Test
-    fun `default timeout constant is 60 seconds`() {
-        assertEquals(60_000L, ToolCallBridge.DEFAULT_TIMEOUT_MS)
+    fun `default timeout constant is 30 seconds (F-061)`() {
+        // F-061: reduced from 60s to 30s — total wall-clock cap on the
+        // outer inference is now 5 minutes, so a per-tool cap of 30s
+        // gives ~10 rounds before the wall-clock cap kicks in.
+        assertEquals(30_000L, ToolCallBridge.DEFAULT_TIMEOUT_MS)
     }
 }

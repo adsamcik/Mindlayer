@@ -141,6 +141,33 @@ class DashboardViewModel : ViewModel() {
         }
     }
 
+    /**
+     * F-055: ask the `:ml` service (over self-UID AIDL) to revoke a caller
+     * package. The service:
+     *   1. Removes the entry from `entries.json` under the file lock.
+     *   2. Tears down any sessions currently owned by the revoked UID
+     *      (in-flight inferences are killed cleanly).
+     *   3. Logs a SECURITY_DECISION audit row.
+     *
+     * The dashboard's own `AllowlistStore` picks up the change on its next
+     * `refresh()` cycle (it polls every 2 s) since the file is shared between
+     * the main process and `:ml`.
+     */
+    fun revokeApp(packageName: String) {
+        val svc = service ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                svc.revokeApp(packageName)
+            } catch (t: Throwable) {
+                _uiState.update { current ->
+                    current.copy(
+                        statusErrorMessage = "Revoke failed: ${t.toDashboardMessage()}",
+                    )
+                }
+            }
+        }
+    }
+
     private fun startPolling() {
         statusPollingJob?.cancel()
         statusPollingJob = viewModelScope.launch {

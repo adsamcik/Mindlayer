@@ -15,8 +15,9 @@ class RateLimiterTest {
     fun `allows requests up to burst capacity once bucket fills`() {
         val clock = FakeClock()
         val rl = RateLimiter(maxRequestsPerMinute = 5, timeSource = clock)
-        // F-027: fresh buckets start empty; advance the clock by one full
-        // minute so the bucket refills to capacity.
+        assertFalse("fresh uid starts empty", rl.tryAcquire(1000))
+        // F-027: fresh buckets start empty; after one full minute the bucket
+        // refills to capacity.
         clock.now = 60_000
         repeat(5) { assertTrue("call $it", rl.tryAcquire(1000)) }
         assertFalse(rl.tryAcquire(1000))
@@ -24,14 +25,14 @@ class RateLimiterTest {
 
     @Test
     fun `fresh uid starts with empty bucket (F-027)`() {
-        val clock = FakeClock()
+        val clock = FakeClock(now = 123_456L)
         val rl = RateLimiter(maxRequestsPerMinute = 60, timeSource = clock)
         // Brand-new UID at t=0 must NOT be able to burst immediately —
         // that was the documented evasion (burst, idle past 10-min
         // eviction, repeat). The first request fails at clock 0.
-        assertFalse("fresh uid burst at t=0", rl.tryAcquire(1000))
+        assertFalse("fresh uid burst at current uptime", rl.tryAcquire(1000))
         // After 1s of refill (60/min => 1 token/s), one acquire succeeds.
-        clock.now = 1_000
+        clock.now += 1_000
         assertTrue(rl.tryAcquire(1000))
         assertFalse(rl.tryAcquire(1000))
     }
@@ -40,7 +41,8 @@ class RateLimiterTest {
     fun `refills tokens over time`() {
         val clock = FakeClock()
         val rl = RateLimiter(maxRequestsPerMinute = 60, timeSource = clock)
-        // Fill the bucket first by advancing the clock.
+        assertFalse("fresh uid starts empty", rl.tryAcquire(1000))
+        // Fill the bucket by advancing the clock after bucket creation.
         clock.now = 60_000
         repeat(60) { assertTrue(rl.tryAcquire(1000)) }
         assertFalse(rl.tryAcquire(1000))
@@ -54,13 +56,13 @@ class RateLimiterTest {
     fun `per-uid buckets are independent`() {
         val clock = FakeClock()
         val rl = RateLimiter(maxRequestsPerMinute = 2, timeSource = clock)
-        // Fully refill BOTH uids' buckets via clock advance.
+        assertFalse(rl.tryAcquire(1000))
+        assertFalse(rl.tryAcquire(2000))
+        // Fully refill BOTH uids' buckets after their empty buckets exist.
         clock.now = 60_000
         assertTrue(rl.tryAcquire(1000))
         assertTrue(rl.tryAcquire(1000))
         assertFalse(rl.tryAcquire(1000))
-        // 2000 is brand-new, but the same clock advance gave it
-        // capacity tokens too.
         assertTrue(rl.tryAcquire(2000))
     }
 

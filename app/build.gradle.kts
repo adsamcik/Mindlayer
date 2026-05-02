@@ -22,6 +22,20 @@ val keystoreProperties = Properties().apply {
 val hasReleaseKeystore = keystoreProperties.getProperty("storeFile")?.let {
     rootProject.file(it).exists()
 } ?: false
+val modelSha256 = project.findProperty("modelSha256")?.toString()?.trim().orEmpty()
+val modelSha256Pattern = Regex("^[0-9a-f]{64}$")
+
+val validateReleaseModelSha256 by tasks.registering {
+    group = "verification"
+    description = "Fails release builds unless -PmodelSha256 is a lowercase SHA-256 digest."
+    doLast {
+        if (!modelSha256Pattern.matches(modelSha256)) {
+            throw GradleException(
+                "Release builds require -PmodelSha256=<64 lowercase hex SHA-256 of the bundled .litertlm model>.",
+            )
+        }
+    }
+}
 
 android {
     namespace = "com.adsamcik.mindlayer.service"
@@ -45,8 +59,7 @@ android {
         // model becomes part of the artifact pipeline; an empty string
         // keeps verification advisory (logged warning only) so debug
         // builds work without the manifest.
-        val modelSha = (project.findProperty("modelSha256") as? String)?.lowercase()?.trim() ?: ""
-        buildConfigField("String", "MODEL_SHA256", "\"$modelSha\"")
+        buildConfigField("String", "MODEL_SHA256", "\"${modelSha256.lowercase()}\"")
     }
 
     signingConfigs {
@@ -116,6 +129,14 @@ android {
     }
 }
 
+tasks.configureEach {
+    val isReleasePackageTask = name.contains("Release") &&
+        (name.startsWith("assemble") || name.startsWith("bundle") || name.startsWith("package"))
+    if (isReleasePackageTask) {
+        dependsOn(validateReleaseModelSha256)
+    }
+}
+
 kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
@@ -127,6 +148,16 @@ tasks.withType<Test> {
     // avoid Gradle's toolchain resolver auto-provisioning Temurin 21.0.10,
     // which has a deterministic SIGSEGV in G1SATBMarkQueueSet::filter under
     // Robolectric's classloading pattern.
+    //
+    // The same SIGSEGV reproduces on JBR-21.0.9 with the default -Xmx512m
+    // gradle worker heap; switching to ParallelGC and bumping the heap
+    // sidesteps the G1 marking bug. Both flags are safe across Temurin /
+    // JBR / Microsoft / Azul.
+    maxHeapSize = "2g"
+    jvmArgs(
+        "-XX:+UseParallelGC",
+        "-XX:-UseG1GC",
+    )
 }
 
 dependencies {
@@ -146,6 +177,10 @@ dependencies {
     implementation(libs.lifecycle.runtime.compose)
     implementation(libs.navigation.compose)
     debugImplementation(libs.compose.ui.tooling)
+
+    // F-029: BiometricPrompt for sensitive Approve / Revoke actions; FragmentActivity host.
+    implementation(libs.androidx.biometric)
+    implementation(libs.androidx.fragment.ktx)
 
     // Room (for logging database)
     implementation(libs.room.runtime)

@@ -14,14 +14,19 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
+import java.io.OutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.nio.ByteBuffer
@@ -82,7 +87,7 @@ class TokenStreamWriterTest {
     // =========================================================================
 
     @Test
-    fun `writeHeader produces valid StreamHeader JSON`() {
+    fun `writeHeader produces valid StreamHeader JSON`() = runBlocking {
         val pipeIn = PipedInputStream()
         val pipeOut = PipedOutputStream(pipeIn)
         val writer = TokenStreamWriter.forTesting(pipeOut)
@@ -103,7 +108,7 @@ class TokenStreamWriterTest {
     // =========================================================================
 
     @Test
-    fun `writeTokenDelta produces StreamEvent with type token_delta and text`() {
+    fun `writeTokenDelta produces StreamEvent with type token_delta and text`() = runBlocking {
         val pipeIn = PipedInputStream()
         val pipeOut = PipedOutputStream(pipeIn)
         val writer = TokenStreamWriter.forTesting(pipeOut)
@@ -125,7 +130,7 @@ class TokenStreamWriterTest {
     // =========================================================================
 
     @Test
-    fun `writeToolCall produces StreamEvent with callId, name, args`() {
+    fun `writeToolCall produces StreamEvent with callId, name, args`() = runBlocking {
         val pipeIn = PipedInputStream()
         val pipeOut = PipedOutputStream(pipeIn)
         val writer = TokenStreamWriter.forTesting(pipeOut)
@@ -149,7 +154,7 @@ class TokenStreamWriterTest {
     // =========================================================================
 
     @Test
-    fun `writeMetrics produces StreamEvent with metrics payload`() {
+    fun `writeMetrics produces StreamEvent with metrics payload`() = runBlocking {
         val pipeIn = PipedInputStream()
         val pipeOut = PipedOutputStream(pipeIn)
         val writer = TokenStreamWriter.forTesting(pipeOut)
@@ -178,7 +183,7 @@ class TokenStreamWriterTest {
     // =========================================================================
 
     @Test
-    fun `writeDone produces StreamEvent with finish_reason`() {
+    fun `writeDone produces StreamEvent with finish_reason`() = runBlocking {
         val pipeIn = PipedInputStream()
         val pipeOut = PipedOutputStream(pipeIn)
         val writer = TokenStreamWriter.forTesting(pipeOut)
@@ -200,7 +205,7 @@ class TokenStreamWriterTest {
     // =========================================================================
 
     @Test
-    fun `writeError produces StreamEvent with code and message`() {
+    fun `writeError produces StreamEvent with code and message`() = runBlocking {
         val pipeIn = PipedInputStream()
         val pipeOut = PipedOutputStream(pipeIn)
         val writer = TokenStreamWriter.forTesting(pipeOut)
@@ -223,7 +228,7 @@ class TokenStreamWriterTest {
     // =========================================================================
 
     @Test
-    fun `close flushes and closes stream`() {
+    fun `close flushes and closes stream`() = runBlocking {
         val baos = ByteArrayOutputStream()
         val writer = TokenStreamWriter.forTesting(baos)
 
@@ -234,12 +239,27 @@ class TokenStreamWriterTest {
         assertTrue("Output should not be empty after write+close", baos.size() > 0)
     }
 
+    @Test
+    fun `write timeout cancels slow non-reading stream`() = runBlocking {
+        val output = BlockingOutputStream()
+        val writer = TokenStreamWriter.forTesting(output, writeTimeoutMs = 50L)
+
+        var thrown: Throwable? = null
+        try {
+            writer.writeTokenDelta(seq = 1, text = "blocked")
+        } catch (t: Throwable) {
+            thrown = t
+        }
+        assertTrue("Expected CancellationException, got $thrown", thrown is CancellationException)
+        assertTrue(output.closed)
+    }
+
     // =========================================================================
     // closeWithError()
     // =========================================================================
 
     @Test
-    fun `closeWithError writes error event then closes`() {
+    fun `closeWithError writes error event then closes`() = runBlocking {
         val pipeIn = PipedInputStream()
         val pipeOut = PipedOutputStream(pipeIn)
         val writer = TokenStreamWriter.forTesting(pipeOut)
@@ -255,12 +275,28 @@ class TokenStreamWriterTest {
         assertEquals("Something broke", event.payload["message"]?.jsonPrimitive?.contentOrNull)
     }
 
+    private class BlockingOutputStream : OutputStream() {
+        @Volatile
+        var closed: Boolean = false
+            private set
+
+        override fun write(b: Int) {
+            while (!closed) {
+                Thread.sleep(5)
+            }
+        }
+
+        override fun close() {
+            closed = true
+        }
+    }
+
     // =========================================================================
     // Writing after close → no crash
     // =========================================================================
 
     @Test
-    fun `writing after close does not crash`() {
+    fun `writing after close does not crash`() = runBlocking {
         val baos = ByteArrayOutputStream()
         val writer = TokenStreamWriter.forTesting(baos)
 
@@ -293,7 +329,7 @@ class TokenStreamWriterTest {
     // =========================================================================
 
     @Test
-    fun `forTesting factory creates writer with plain OutputStream`() {
+    fun `forTesting factory creates writer with plain OutputStream`() = runBlocking {
         val baos = ByteArrayOutputStream()
         val writer = TokenStreamWriter.forTesting(baos)
 
@@ -313,13 +349,22 @@ class TokenStreamWriterTest {
     // IPC hardening — max frame size
     // =========================================================================
 
-    @Test(expected = IllegalStateException::class)
-    fun `writeTokenDelta rejects payload exceeding MAX_FRAME_BYTES`() {
+    @Test
+    fun `writeTokenDelta rejects payload exceeding MAX_FRAME_BYTES`() = runBlocking<Unit> {
         val baos = ByteArrayOutputStream()
         val writer = TokenStreamWriter.forTesting(baos)
         // 1 MiB cap → generate a string well above it.
         val huge = "x".repeat(1_048_576 + 64)
-        writer.writeTokenDelta(seq = 1, text = huge)
+        var thrown: Throwable? = null
+        try {
+            writer.writeTokenDelta(seq = 1, text = huge)
+        } catch (t: Throwable) {
+            thrown = t
+        }
+        assertTrue(
+            "Expected IllegalStateException, got $thrown",
+            thrown is IllegalStateException,
+        )
     }
 
     // =========================================================================
@@ -327,7 +372,7 @@ class TokenStreamWriterTest {
     // =========================================================================
 
     @Test
-    fun `writeFrame re-raises pipe IOException as CancellationException`() {
+    fun `writeFrame re-raises pipe IOException as CancellationException`() = runBlocking {
         val failing = object : java.io.OutputStream() {
             override fun write(b: Int) { throw java.io.IOException("broken pipe") }
             override fun write(b: ByteArray, off: Int, len: Int) { throw java.io.IOException("broken pipe") }
@@ -345,7 +390,7 @@ class TokenStreamWriterTest {
     }
 
     @Test
-    fun `closeWithError swallows pipe failure and still closes`() {
+    fun `closeWithError swallows pipe failure and still closes`() = runBlocking {
         val failing = object : java.io.OutputStream() {
             override fun write(b: Int) { throw java.io.IOException("broken pipe") }
             override fun write(b: ByteArray, off: Int, len: Int) { throw java.io.IOException("broken pipe") }

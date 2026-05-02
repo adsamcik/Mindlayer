@@ -74,11 +74,13 @@ data class AudioTransfer(
 @Parcelize
 data class ToolResult(
     val requestId: String,
+    val callId: String,
     val toolName: String,
     val resultJson: String,
 ) : Parcelable {
     override fun toString(): String =
-        "ToolResult(requestId=$requestId, toolName=$toolName, resultJson=<redacted:${resultJson.length}>)"
+        "ToolResult(requestId=$requestId, callId=$callId, toolName=$toolName, " +
+            "resultJson=<redacted:${resultJson.length}>)"
 }
 
 @Parcelize
@@ -122,5 +124,11 @@ data class SessionInfo(
     /** Session expiration duration in milliseconds. */
     val expirationMs: Long = 14L * 24 * 60 * 60 * 1000,
     /** Absolute wall-clock time when this session expires. */
-    val expiresAtMs: Long = createdAtMs + expirationMs,
+    val expiresAtMs: Long = safeExpiresAtMs(createdAtMs, expirationMs),
 ) : Parcelable
+
+private fun safeExpiresAtMs(createdAtMs: Long, expirationMs: Long): Long {
+    if (expirationMs <= 0) return createdAtMs
+    val remaining = Long.MAX_VALUE - createdAtMs
+    return if (expirationMs > remaining) Long.MAX_VALUE else createdAtMs + expirationMs
+}
