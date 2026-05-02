@@ -110,6 +110,19 @@ class Mindlayer private constructor(
     }
 
     /**
+     * Cheap kernel-level liveness probe. Returns `true` if the service binder
+     * is alive and accepting transactions, `false` if the binder is dead, the
+     * remote process has crashed, or this client has not yet connected.
+     *
+     * Implemented via [android.os.IBinder.pingBinder] so it does **not**
+     * consume rate-limit budget and does not exercise the service's own
+     * threading — a deadlocked service may still pass this check. Use
+     * [getStatus] (which goes through the auth gate at quarter-cost) when you
+     * need real service-state liveness.
+     */
+    fun isAlive(): Boolean = connection.getService()?.asBinder()?.pingBinder() == true
+
+    /**
      * Unbind from the Mindlayer service and release resources.
      *
      * Active inference flows will complete with [MindlayerEvent.Error] (code: "DISCONNECTED").

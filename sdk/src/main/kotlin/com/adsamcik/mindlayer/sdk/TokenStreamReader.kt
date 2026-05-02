@@ -145,8 +145,20 @@ object TokenStreamReader {
     // -- Parsing --------------------------------------------------------------
 
     /**
+     * Stable wire identifier for the current pipe protocol. The reader emits
+     * a [MindlayerEvent.Error] with code `PROTOCOL_MISMATCH` if the service
+     * advertises any other value in its [StreamHeader].
+     */
+    internal const val EXPECTED_PIPE_PROTOCOL = "mindlayer.stream.v1"
+
+    /**
      * Tries [StreamEvent] first (common case), then falls back to
      * [StreamHeader] (first frame only). Returns `null` for unparseable frames.
+     *
+     * The header is validated against [EXPECTED_PIPE_PROTOCOL]; a mismatch
+     * yields a synthetic [MindlayerEvent.Error] frame so old SDKs talking to
+     * a future service that bumped the protocol fail loudly instead of
+     * silently misinterpreting later frames.
      */
     private fun parseFrame(jsonStr: String): MindlayerEvent? {
         return try {
@@ -155,7 +167,17 @@ object TokenStreamReader {
         } catch (_: Exception) {
             try {
                 val header = json.decodeFromString<StreamHeader>(jsonStr)
-                MindlayerEvent.Started(header.requestId)
+                if (header.protocol != EXPECTED_PIPE_PROTOCOL) {
+                    MindlayerEvent.Error(
+                        message = "Unsupported pipe protocol: '${header.protocol}' " +
+                            "(SDK expects '$EXPECTED_PIPE_PROTOCOL')",
+                        code = "PROTOCOL_MISMATCH",
+                        seq = -1,
+                        tsMs = null,
+                    )
+                } else {
+                    MindlayerEvent.Started(header.requestId)
+                }
             } catch (_: Exception) {
                 null
             }
