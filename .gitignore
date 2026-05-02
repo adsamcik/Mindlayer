@@ -63,4 +63,9 @@ Thumbs.db
 test-results/
 reports/
 
+# F-047: ad-hoc logcat dumps may contain device serials, package
+# names, prompt text and other PII. Captured locally for debugging,
+# never committed. Delete from your working tree once you're done.
 logcat*.txt
+*.logcat
+adb-*.log
