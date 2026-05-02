@@ -42,6 +42,13 @@ interface IMindlayerService {
     // Pre-warm the engine in the background (fire-and-forget)
     oneway void prewarm(String backend);
 
+    // v0.4: synchronous prewarm. Suspends the binder transaction until the
+    // engine is initialized (or the wall-clock timeout expires) and returns
+    // the actually-active backend (which may differ from the requested one
+    // when the requested backend was unavailable and a fallback kicked in).
+    // Capability-gated via ServiceCapabilities.FEATURE_PREWARM_AWAIT.
+    String prewarmAndAwait(String backend, long timeoutMs);
+
     // Revoke approval for an installed caller package and tear down any
     // sessions it currently owns. Self-UID only (the dashboard process)
     // — external callers are rejected at the ServiceBinder authz gate.

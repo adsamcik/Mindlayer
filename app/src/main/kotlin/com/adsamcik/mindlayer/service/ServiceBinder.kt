@@ -117,9 +117,10 @@ class ServiceBinder(
         /**
          * Logical API version surfaced via [getCapabilities]. Bumped whenever
          * a new method is appended to the AIDL interface. v1 was the pre-
-         * `inferMulti` surface; v2 added [inferMulti].
+         * `inferMulti` surface; v2 added [inferMulti]; v3 added
+         * [prewarmAndAwait].
          */
-        const val CURRENT_API_VERSION = 2
+        const val CURRENT_API_VERSION = 3
 
         /**
          * Maximum [com.adsamcik.mindlayer.MediaPart] entries accepted in a
@@ -129,6 +130,17 @@ class ServiceBinder(
          * loosens and this constant rises without a wire-level change.
          */
         const val MAX_MEDIA_PARTS_PER_REQUEST = 2
+
+        /** Lower bound on the caller-supplied [prewarmAndAwait] timeout (ms). */
+        const val PREWARM_AWAIT_MIN_TIMEOUT_MS: Long = 1_000L
+
+        /**
+         * Upper bound on the caller-supplied [prewarmAndAwait] timeout (ms).
+         * 30 s is generous — engine init is typically 5-10 s but cold cache
+         * misses on slow internal storage can stretch it. Caps higher than
+         * this risk pinning a binder thread for unacceptable durations.
+         */
+        const val PREWARM_AWAIT_MAX_TIMEOUT_MS: Long = 30_000L
 
         /**
          * Capability strings the current service implementation supports.
@@ -144,6 +156,7 @@ class ServiceBinder(
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_HISTORY_RECOVERY,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_STRUCTURED_OUTPUT,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_MEDIA_LIST,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_PREWARM_AWAIT,
         )
     }
 
@@ -962,6 +975,72 @@ class ServiceBinder(
 
     /** Coalesces concurrent prewarms (F-057). */
     private val prewarmJob = AtomicReference<kotlinx.coroutines.Job?>(null)
+
+    /**
+     * v0.4 synchronous prewarm. Suspends the binder transaction (occupying a
+     * binder thread) until either the engine is initialized or [timeoutMs]
+     * elapses, then returns the actually-active backend. Useful when the
+     * caller wants to surface init failures or know which fallback backend
+     * was selected — `oneway prewarm` cannot do either.
+     *
+     * The caller-supplied [timeoutMs] is clamped to a safe upper bound
+     * (`PREWARM_AWAIT_MAX_TIMEOUT_MS`) so a misbehaving caller cannot pin
+     * a binder thread indefinitely. Engine init itself is mutex-protected
+     * inside `EngineManager.initialize`, so concurrent prewarmAndAwait
+     * calls coalesce on the same in-flight init job.
+     */
+    override fun prewarmAndAwait(backend: String?, timeoutMs: Long): String {
+        val identity = authorizeCall()
+        val safeBackend = try {
+            IpcInputValidator.validateBackendName(backend)
+        } catch (e: IllegalArgumentException) {
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_REQUEST,
+                "Invalid backend: ${e.message}",
+            )
+        }
+        val cappedTimeout = timeoutMs.coerceIn(
+            PREWARM_AWAIT_MIN_TIMEOUT_MS,
+            PREWARM_AWAIT_MAX_TIMEOUT_MS,
+        )
+
+        // Already initialized? Return the active backend immediately.
+        if (engineManager.isInitialized) {
+            MindlayerLog.d(
+                TAG,
+                "prewarmAndAwait: engine already initialized (backend=${engineManager.currentBackend})",
+            )
+            return engineManager.currentBackend
+        }
+
+        MindlayerLog.d(
+            TAG,
+            "prewarmAndAwait from ${identity.packageName} backend=$safeBackend timeout=${cappedTimeout}ms",
+        )
+        return try {
+            runBlocking {
+                kotlinx.coroutines.withTimeout(cappedTimeout) {
+                    engineManager.initialize(
+                        preferredBackend = safeBackend,
+                        maxTokens = 4096,
+                    )
+                    engineManager.currentBackend
+                }
+            }
+        } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+            // Timed out before init completed — return the current backend
+            // (could still be "NONE" if init is mid-flight; caller polls
+            // getStatus.isEngineLoaded to confirm).
+            MindlayerLog.w(TAG, "prewarmAndAwait timed out after ${cappedTimeout}ms")
+            engineManager.currentBackend
+        } catch (e: Exception) {
+            MindlayerLog.w(TAG, "prewarmAndAwait failed: ${e.message}")
+            throw typedBinderException(
+                MindlayerErrorCode.ENGINE_LOAD_FAILED,
+                "Engine init failed: ${e.javaClass.simpleName}",
+            )
+        }
+    }
 
     // ---- Status ------------------------------------------------------------
 
