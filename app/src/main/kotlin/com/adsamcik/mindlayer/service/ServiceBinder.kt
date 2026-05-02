@@ -24,14 +24,20 @@ import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
 import com.adsamcik.mindlayer.service.security.AllowlistStore
 import com.adsamcik.mindlayer.service.security.CallerIdentity
 import com.adsamcik.mindlayer.service.security.CallerVerifier
+import com.adsamcik.mindlayer.service.security.IpcInputValidator
 import com.adsamcik.mindlayer.service.security.RateLimiter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * AIDL binder implementation. Every entry point enforces:
@@ -59,8 +65,23 @@ class ServiceBinder(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    /** requestId → UID that owns the concurrency slot. */
+    /**
+     * Scoped key (`uid:publicRequestId`) → UID that owns the concurrency slot.
+     *
+     * Namespaced by UID so that two callers with colliding `requestId` values
+     * (UUID collision or malicious co-signed peer) cannot collide on
+     * concurrency accounting nor cancel each other's inference. See
+     * `inferenceKey` for the canonical key shape.
+     */
     private val activeInferenceUids = ConcurrentHashMap<String, Int>()
+
+    /**
+     * Bound concurrent diagnostic dumps to one. Each dump holds a binder
+     * thread for Room I/O — without this an authorized attacker could
+     * cheaply exhaust the binder pool while still under the per-UID
+     * rate-limit RPM cap (see SECURITY_REVIEW F-019).
+     */
+    private val diagnosticsLock = Mutex()
 
     /**
      * Client liveness tokens keyed by UID. Value is the DeathRecipient linked
@@ -149,25 +170,41 @@ class ServiceBinder(
      * sessions owned by the caller's UID are torn down. Safe to call multiple
      * times — subsequent calls from the same UID replace the prior recipient.
      */
-    override fun registerClient(clientToken: IBinder) {
+    override fun registerClient(clientToken: IBinder?) {
+        // AIDL `IBinder` parameters can carry null over the wire even when
+        // the Kotlin stub marks them non-null — fail closed before touching
+        // the prior death-recipient state (F-042).
+        val token = requireNotNull(clientToken) { "clientToken must not be null" }
         authorizeCall()
         val uid = Binder.getCallingUid()
 
-        val prior = clientDeathRecipients.remove(uid)
-        prior?.let { (oldToken, oldRecipient) ->
-            try { oldToken.unlinkToDeath(oldRecipient, 0) } catch (_: Throwable) { /* fine */ }
-        }
-
-        val recipient = IBinder.DeathRecipient {
+        // Build the recipient first so it can capture itself by reference
+        // for the F-050 self-identity check inside binderDied.
+        lateinit var recipient: IBinder.DeathRecipient
+        recipient = IBinder.DeathRecipient {
             MindlayerLog.w(TAG, "Client uid=$uid died; cleaning up owned sessions")
-            clientDeathRecipients.remove(uid)
+            // Only act if our recipient is still the registered one — guards
+            // against late-firing recipients overwriting newer registrations
+            // (F-050).
+            val cur = clientDeathRecipients[uid]
+            if (cur != null && cur.second === recipient) {
+                clientDeathRecipients.remove(uid, cur)
+            }
             onClientDisconnected(uid)
         }
         try {
-            clientToken.linkToDeath(recipient, 0)
-            clientDeathRecipients[uid] = clientToken to recipient
+            // linkToDeath may throw RemoteException if the token is already
+            // dead; only after a successful link do we replace any prior
+            // recipient. This avoids ending up with no recipient at all if
+            // the new token is dead at registration time (F-042).
+            token.linkToDeath(recipient, 0)
+            val prior = clientDeathRecipients.put(uid, token to recipient)
+            prior?.let { (oldToken, oldRecipient) ->
+                try { oldToken.unlinkToDeath(oldRecipient, 0) } catch (_: Throwable) { /* fine */ }
+            }
         } catch (e: RemoteException) {
-            // Token already dead — run cleanup immediately.
+            // Token already dead — run cleanup immediately. Don't disturb
+            // any existing live recipient for this UID.
             MindlayerLog.w(TAG, "Client token for uid=$uid already dead at registration")
             onClientDisconnected(uid)
         }
@@ -199,9 +236,33 @@ class ServiceBinder(
     override fun createSession(config: SessionConfig): String {
         val identity = authorizeCall()
         val uid = Binder.getCallingUid()
+        // Validate every client-supplied string in SessionConfig against
+        // explicit byte budgets and identifier shape constraints. See
+        // IpcInputValidator for the rules.
+        try {
+            IpcInputValidator.validateSessionConfig(config)
+        } catch (e: IllegalArgumentException) {
+            throw SecurityException("Invalid SessionConfig: ${e.message}")
+        }
+        // External callers may NOT choose their own sessionId — that lets a
+        // co-signed peer overwrite a victim's session by guessing/harvesting
+        // the id (see SECURITY_REVIEW F-008). Self-UID dashboard keeps full
+        // control because it owns every session it creates.
+        val safeConfig = if (uid == Process.myUid()) {
+            config
+        } else if (config.sessionId != null) {
+            MindlayerLog.w(
+                TAG,
+                "Ignoring client-supplied sessionId from ${identity.packageName} " +
+                    "(only self-UID may pin sessionIds)",
+            )
+            config.copy(sessionId = null)
+        } else {
+            config
+        }
         MindlayerLog.d(TAG, "createSession from ${identity.packageName}")
         return try {
-            orchestrator.createSession(config, uid)
+            orchestrator.createSession(safeConfig, uid)
         } catch (e: IllegalArgumentException) {
             throw SecurityException("Invalid SessionConfig: ${e.message}")
         }
@@ -209,6 +270,11 @@ class ServiceBinder(
 
     override fun destroySession(sessionId: String) {
         authorizeCall()
+        try {
+            IpcInputValidator.validateId(sessionId, "sessionId")
+        } catch (e: IllegalArgumentException) {
+            throw SecurityException("Invalid sessionId: ${e.message}")
+        }
         requireOwnership(sessionId)
         MindlayerLog.d(TAG, "destroySession: $sessionId", sessionId = sessionId)
         orchestrator.destroySession(sessionId)
@@ -216,6 +282,11 @@ class ServiceBinder(
 
     override fun getSessionInfo(sessionId: String): SessionInfo? {
         authorizeCall()
+        try {
+            IpcInputValidator.validateId(sessionId, "sessionId")
+        } catch (e: IllegalArgumentException) {
+            throw SecurityException("Invalid sessionId: ${e.message}")
+        }
         val uid = Binder.getCallingUid()
         if (uid != Process.myUid()) {
             val owner = orchestrator.getSessionOwner(sessionId) ?: return null
@@ -248,6 +319,24 @@ class ServiceBinder(
         val identity = authorizeCall()
         val uid = Binder.getCallingUid()
 
+        // Validate every client-supplied identifier and string at AIDL
+        // ingress so the downstream code never sees malformed values.
+        try {
+            IpcInputValidator.validateRequestMeta(meta)
+            image?.let { IpcInputValidator.validateImageTransfer(it, MAX_MEDIA_BYTES) }
+            audio?.let { IpcInputValidator.validateAudioTransfer(it) }
+            // Inbound media transfer requestId must agree with meta.requestId
+            // — defends against staging-cleanup keying mismatches.
+            require(image == null || image.requestId == meta.requestId) {
+                "ImageTransfer.requestId must equal RequestMeta.requestId"
+            }
+            require(audio == null || audio.requestId == meta.requestId) {
+                "AudioTransfer.requestId must equal RequestMeta.requestId"
+            }
+        } catch (e: IllegalArgumentException) {
+            throw SecurityException("Invalid request: ${e.message}")
+        }
+
         // Caller must own the target session.
         requireOwnership(meta.sessionId)
 
@@ -269,17 +358,24 @@ class ServiceBinder(
         )
         // Namespace the active-request map by UID so two callers that coin the
         // same requestId (UUID collision / malicious) cannot collide on our
-        // concurrency accounting, nor cancel each other's inference.
-        val key = inferenceKey(uid, meta.requestId)
-        activeInferenceUids[key] = uid
+        // concurrency accounting, nor cancel each other's inference. The
+        // public requestId still flows to the SDK in stream events; the
+        // scoped key is purely an in-process invariant.
+        val scopedKey = inferenceKey(uid, meta.requestId)
+        // F-028: putIfAbsent guarantees a duplicate (uid, requestId) is
+        // rejected up-front rather than overwriting the slot accounting.
+        if (activeInferenceUids.putIfAbsent(scopedKey, uid) != null) {
+            rateLimiter.endInference(uid)
+            throw SecurityException("Duplicate requestId: ${meta.requestId}")
+        }
         try {
-            orchestrator.infer(meta, image, audio, eventWriteEnd) {
-                if (activeInferenceUids.remove(key) != null) {
+            orchestrator.infer(scopedKey, meta, image, audio, eventWriteEnd) {
+                if (activeInferenceUids.remove(scopedKey) != null) {
                     rateLimiter.endInference(uid)
                 }
             }
         } catch (t: Throwable) {
-            if (activeInferenceUids.remove(key) != null) {
+            if (activeInferenceUids.remove(scopedKey) != null) {
                 rateLimiter.endInference(uid)
             }
             throw t
@@ -288,10 +384,22 @@ class ServiceBinder(
 
     override fun cancelInference(requestId: String) {
         authorizeCall()
+        try {
+            IpcInputValidator.validateId(requestId, "requestId")
+        } catch (e: IllegalArgumentException) {
+            throw SecurityException("Invalid requestId: ${e.message}")
+        }
         val uid = Binder.getCallingUid()
-        // Self-UID dashboard can cancel anything (support/diagnostics); external
-        // callers may only cancel their own requests.
-        if (uid != Process.myUid()) {
+        // Self-UID dashboard can cancel anything (support/diagnostics);
+        // external callers may only cancel their OWN requests, even if the
+        // id collides with another UID's in-flight request.
+        val scopedKey: String = if (uid == Process.myUid()) {
+            // Dashboard may not have its own scoped entry; look up any UID's
+            // active mapping. If none exists, fall back to the public id (so
+            // dashboard cancel still works for self-UID requests).
+            activeInferenceUids.keys.firstOrNull { it.endsWith(":$requestId") }
+                ?: inferenceKey(uid, requestId)
+        } else {
             val key = inferenceKey(uid, requestId)
             if (!activeInferenceUids.containsKey(key)) {
                 // Either already completed, never existed, or belongs to another UID.
@@ -299,22 +407,36 @@ class ServiceBinder(
                 MindlayerLog.d(TAG, "cancelInference: no active request owned by uid=$uid", requestId = requestId)
                 return
             }
+            key
         }
         MindlayerLog.d(TAG, "cancelInference: $requestId", requestId = requestId)
         // Concurrency slot is released by the orchestrator's completion hook.
-        orchestrator.cancelInference(requestId)
+        orchestrator.cancelInference(scopedKey)
     }
 
     // ---- Tool results -------------------------------------------------------
 
     override fun submitToolResult(requestId: String, result: ToolResult) {
         authorizeCall()
+        try {
+            IpcInputValidator.validateId(requestId, "requestId")
+            IpcInputValidator.validateToolResult(result)
+            require(result.requestId == requestId) {
+                "ToolResult.requestId must equal AIDL requestId"
+            }
+        } catch (e: IllegalArgumentException) {
+            throw SecurityException("Invalid ToolResult: ${e.message}")
+        }
         val uid = Binder.getCallingUid()
-        if (uid != Process.myUid()) {
+        val scopedKey: String = if (uid == Process.myUid()) {
+            activeInferenceUids.keys.firstOrNull { it.endsWith(":$requestId") }
+                ?: inferenceKey(uid, requestId)
+        } else {
             val key = inferenceKey(uid, requestId)
             if (!activeInferenceUids.containsKey(key)) {
                 throw SecurityException("No active request owned by caller")
             }
+            key
         }
         MindlayerLog.d(
             TAG,
@@ -322,7 +444,7 @@ class ServiceBinder(
             requestId = requestId,
         )
         orchestrator.toolCallBridge.submitResult(
-            requestId = requestId,
+            scopedKey = scopedKey,
             toolName = result.toolName,
             resultJson = result.resultJson,
         )
@@ -330,22 +452,59 @@ class ServiceBinder(
 
     private fun inferenceKey(uid: Int, requestId: String): String = "$uid:$requestId"
 
+    /**
+     * Hard cap on a single media payload accepted from a client. Matches
+     * `SharedMemoryPool.MAX_MEDIA_BYTES` — kept here to validate before
+     * the AIDL transaction returns.
+     */
+    private val MAX_MEDIA_BYTES: Int = 100 * 1024 * 1024
+
     // ---- Prewarm -----------------------------------------------------------
 
     override fun prewarm(backend: String?) {
-        authorizeCall()
-        MindlayerLog.d(TAG, "prewarm: backend=${backend ?: "GPU"}")
-        scope.launch {
+        val identity = try {
+            authorizeCall()
+        } catch (e: SecurityException) {
+            // `prewarm` is `oneway` so RemoteException doesn't propagate. We
+            // still want the authz failure visible in our own log so that
+            // brute-force / spamming behaviour from un-approved peers shows
+            // up in diagnostics.
+            MindlayerLog.w(TAG, "prewarm rejected at authz gate: ${e.message}")
+            return
+        }
+        val safeBackend = try {
+            IpcInputValidator.validateBackendName(backend)
+        } catch (e: IllegalArgumentException) {
+            MindlayerLog.w(
+                TAG,
+                "Rejecting prewarm with invalid backend from ${identity.packageName}: ${e.message}",
+            )
+            return
+        }
+        // Coalesce concurrent prewarms — the engine is mutex-protected
+        // internally but we don't need to spawn more than one waiting
+        // launcher per UID (defends against `oneway` flooding).
+        val existing = prewarmJob.get()
+        if (existing != null && existing.isActive) {
+            MindlayerLog.d(TAG, "prewarm already in progress; coalescing")
+            return
+        }
+        MindlayerLog.d(TAG, "prewarm: backend=$safeBackend")
+        val job = scope.launch {
             try {
                 engineManager.initialize(
-                    preferredBackend = backend ?: "GPU",
+                    preferredBackend = safeBackend,
                     maxTokens = 4096,
                 )
             } catch (e: Exception) {
                 MindlayerLog.w(TAG, "Prewarm failed: ${e.message}")
             }
         }
+        prewarmJob.set(job)
     }
+
+    /** Coalesces concurrent prewarms (F-057). */
+    private val prewarmJob = AtomicReference<kotlinx.coroutines.Job?>(null)
 
     // ---- Status ------------------------------------------------------------
 
@@ -373,7 +532,22 @@ class ServiceBinder(
 
     override fun getDiagnostics(): String {
         authorizeCall()
-        return runBlocking { diagnosticExporter.export() }
+        val uid = Binder.getCallingUid()
+        // F-005: external callers see only their own sessions/logs to
+        // prevent the diagnostic dump from being used as a force-multiplier
+        // for cross-UID attacks (it was previously the easiest way to
+        // harvest victim sessionIds and requestIds).
+        // F-019: cap concurrency + apply a deadline so a single hostile
+        // (but authorized) caller cannot wedge multiple binder threads on
+        // Room I/O even within the per-UID rate-limit budget.
+        val scopeUid: Int? = if (uid == Process.myUid()) null else uid
+        return runBlocking {
+            withTimeout(2_000L) {
+                diagnosticsLock.withLock {
+                    diagnosticExporter.export(scopeUid)
+                }
+            }
+        }
     }
 
     override fun getEngineInfo(): EngineInfo {

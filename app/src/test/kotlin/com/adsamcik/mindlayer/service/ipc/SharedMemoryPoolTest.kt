@@ -71,9 +71,9 @@ class SharedMemoryPoolTest {
             isSharedMemory = false,
         )
 
-        val result = pool.stageAudio(transfer)
+        val result = pool.stageAudio("req-audio-1", transfer)
 
-        assertEquals("req-audio-1", result.requestId)
+        assertEquals("req-audio-1", result.scopedKey)
         assertEquals("audio/wav", result.mimeType)
         assertTrue("Staged file should exist", File(result.filePath).exists())
         assertTrue("File path should end with .wav", result.filePath.endsWith(".wav"))
@@ -92,7 +92,7 @@ class SharedMemoryPoolTest {
             isSharedMemory = false,
         )
 
-        val result = pool.stageAudio(transfer)
+        val result = pool.stageAudio("req-audio-2", transfer)
         val staged = File(result.filePath)
 
         assertTrue("Staged file should exist", staged.exists())
@@ -122,9 +122,9 @@ class SharedMemoryPoolTest {
             mimeType = "image/jpeg",
         )
 
-        val result = pool.stageImage(transfer)
+        val result = pool.stageImage("req-img-1", transfer)
 
-        assertEquals("req-img-1", result.requestId)
+        assertEquals("req-img-1", result.scopedKey)
         assertEquals("image/jpeg", result.mimeType)
         assertTrue("File path should end with .jpg", result.filePath.endsWith(".jpg"))
         assertTrue("Staged file should exist", File(result.filePath).exists())
@@ -134,7 +134,7 @@ class SharedMemoryPoolTest {
     }
 
     // =========================================================================
-    // cleanup(requestId)
+    // cleanup(scopedKey)
     // =========================================================================
 
     @Test
@@ -145,7 +145,7 @@ class SharedMemoryPoolTest {
             mimeType = "audio/wav",
             source = pfd,
         )
-        val result = pool.stageAudio(transfer)
+        val result = pool.stageAudio("req-clean-1", transfer)
         val staged = File(result.filePath)
         assertTrue("File should exist before cleanup", staged.exists())
 
@@ -169,8 +169,8 @@ class SharedMemoryPoolTest {
         val pfd1 = createPfdFromBytes(byteArrayOf(1), "wav")
         val pfd2 = createPfdFromBytes(byteArrayOf(2), "mp3")
 
-        val r1 = pool.stageAudio(AudioTransfer("req-all-1", "audio/wav", pfd1))
-        val r2 = pool.stageAudio(AudioTransfer("req-all-2", "audio/mp3", pfd2))
+        val r1 = pool.stageAudio("req-all-1", AudioTransfer("req-all-1", "audio/wav", pfd1))
+        val r2 = pool.stageAudio("req-all-2", AudioTransfer("req-all-2", "audio/mp3", pfd2))
 
         val f1 = File(r1.filePath)
         val f2 = File(r2.filePath)
@@ -192,8 +192,8 @@ class SharedMemoryPoolTest {
         val pfdA = createPfdFromBytes(byteArrayOf(0xAA.toByte()), "wav")
         val pfdB = createPfdFromBytes(byteArrayOf(0xBB.toByte()), "wav")
 
-        val rA = pool.stageAudio(AudioTransfer("req-A", "audio/wav", pfdA))
-        val rB = pool.stageAudio(AudioTransfer("req-B", "audio/wav", pfdB))
+        val rA = pool.stageAudio("req-A", AudioTransfer("req-A", "audio/wav", pfdA))
+        val rB = pool.stageAudio("req-B", AudioTransfer("req-B", "audio/wav", pfdB))
 
         val fA = File(rA.filePath)
         val fB = File(rB.filePath)
@@ -213,9 +213,9 @@ class SharedMemoryPoolTest {
         val pfd = createPfdFromBytes(byteArrayOf(42), "ogg")
         val transfer = AudioTransfer("req-staged", "audio/ogg", pfd)
 
-        val result = pool.stageAudio(transfer)
+        val result = pool.stageAudio("req-staged", transfer)
 
-        assertEquals("req-staged", result.requestId)
+        assertEquals("req-staged", result.scopedKey)
         assertEquals("audio/ogg", result.mimeType)
         assertTrue(result.filePath.isNotEmpty())
 
@@ -247,7 +247,7 @@ class SharedMemoryPoolTest {
             mimeType = "image/png",
         )
         try {
-            pool.stageImage(transfer)
+            pool.stageImage("123:req-oversized", transfer)
         } finally {
             try { pfd.close() } catch (_: Throwable) {}
         }
@@ -268,7 +268,7 @@ class SharedMemoryPoolTest {
             mimeType = "image/png",
         )
         try {
-            pool.stageImage(transfer)
+            pool.stageImage("123:req-zero", transfer)
         } finally {
             try { pfd.close() } catch (_: Throwable) {}
         }

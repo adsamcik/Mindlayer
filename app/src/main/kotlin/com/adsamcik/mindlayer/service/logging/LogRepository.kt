@@ -1,6 +1,9 @@
 package com.adsamcik.mindlayer.service.logging
 
 import kotlinx.coroutines.*
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 class LogRepository(private val dao: LogDao) {
 
@@ -53,7 +56,10 @@ class LogRepository(private val dao: LogDao) {
             category = LogCategory.THERMAL,
             event = LogEvent.BAND_CHANGE,
             thermalBand = toBand, backend = backend,
-            extraJson = """{"from":"$fromBand","to":"$toBand"}""",
+            extraJson = buildJsonObject {
+                put("from", JsonPrimitive(fromBand))
+                put("to", JsonPrimitive(toBand))
+            }.toString(),
         ))
     }
 
@@ -63,7 +69,7 @@ class LogRepository(private val dao: LogDao) {
             category = LogCategory.SESSION,
             event = LogEvent.SESSION_CREATED,
             sessionId = sessionId, backend = backend,
-            extraJson = """{"maxTokens":$maxTokens}""",
+            extraJson = buildJsonObject { put("maxTokens", maxTokens) }.toString(),
         ))
     }
 
@@ -82,7 +88,7 @@ class LogRepository(private val dao: LogDao) {
             category = LogCategory.SESSION,
             event = LogEvent.SESSION_EVICTED,
             sessionId = sessionId,
-            extraJson = """{"reason":"$reason"}""",
+            extraJson = buildJsonObject { put("reason", JsonPrimitive(reason)) }.toString(),
         ))
     }
 
@@ -93,7 +99,7 @@ class LogRepository(private val dao: LogDao) {
             event = LogEvent.PRESSURE_CHANGE,
             memoryAvailableMb = availableMb,
             memoryUsedMb = totalMb - availableMb,
-            extraJson = """{"pressure":"$pressure"}""",
+            extraJson = buildJsonObject { put("pressure", JsonPrimitive(pressure)) }.toString(),
         ))
     }
 
@@ -103,7 +109,7 @@ class LogRepository(private val dao: LogDao) {
             category = LogCategory.ENGINE,
             event = LogEvent.ENGINE_INIT,
             backend = backend, durationMs = durationMs,
-            extraJson = """{"modelPath":"$modelPath"}""",
+            extraJson = buildJsonObject { put("modelPath", JsonPrimitive(modelPath)) }.toString(),
         ))
     }
 
@@ -113,6 +119,30 @@ class LogRepository(private val dao: LogDao) {
             category = LogCategory.ENGINE,
             event = LogEvent.ENGINE_SHUTDOWN,
             backend = backend,
+        ))
+    }
+
+    /**
+     * Log a security decision (approve / deny / revoke / pending). Persists
+     * package + signing-cert SHA prefix so an audit trail exists for the
+     * dashboard, addressing SECURITY_REVIEW F-056.
+     */
+    fun logSecurityDecision(
+        action: String,
+        packageName: String,
+        sigShaPrefix: String,
+        extra: String? = null,
+    ) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.SECURITY,
+            event = LogEvent.SECURITY_DECISION,
+            extraJson = buildJsonObject {
+                put("action", JsonPrimitive(action))
+                put("pkg", JsonPrimitive(packageName))
+                put("sigPrefix", JsonPrimitive(sigShaPrefix))
+                extra?.let { put("note", JsonPrimitive(it)) }
+            }.toString(),
         ))
     }
 
@@ -128,7 +158,7 @@ class LogRepository(private val dao: LogDao) {
             event = LogEvent.USER_MESSAGE,
             requestId = requestId,
             sessionId = sessionId,
-            extraJson = """{"tokenCount":$tokenCount}""",
+            extraJson = buildJsonObject { put("tokenCount", tokenCount) }.toString(),
         ))
     }
 
@@ -144,7 +174,7 @@ class LogRepository(private val dao: LogDao) {
             event = LogEvent.MODEL_RESPONSE,
             requestId = requestId,
             sessionId = sessionId,
-            extraJson = """{"tokenCount":$tokenCount}""",
+            extraJson = buildJsonObject { put("tokenCount", tokenCount) }.toString(),
         ))
     }
 

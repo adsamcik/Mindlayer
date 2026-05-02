@@ -54,6 +54,13 @@ mindlayer.chat(sessionId, "Hello!").collect { event ->
 
 ### Building
 
+> **JDK 21 required.** LiteRT-LM is compiled for Java 21 class-file
+> version 65. Set `JAVA_HOME` to a JDK 21+ install before invoking
+> `./gradlew` — older JDKs hit `UnsupportedClassVersionError` on every
+> test class that touches the engine. CI uses `setup-java@v4` with
+> `java-version: 21`; locally point at any JDK 21 (Temurin, JetBrains
+> Runtime, Microsoft Build of OpenJDK).
+
 ```bash
 # Build debug APK
 ./gradlew :app:assembleDebug

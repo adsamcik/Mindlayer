@@ -27,6 +27,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // F-023: prevent screen recording / screenshot capture of the
+        // dashboard. The dashboard renders session/request IDs and (until
+        // F-006 fully lands) raw `errorMessage` strings that may contain
+        // prompt fragments.
+        window.setFlags(
+            android.view.WindowManager.LayoutParams.FLAG_SECURE,
+            android.view.WindowManager.LayoutParams.FLAG_SECURE,
+        )
+        // F-029: refuse touches that arrive through transparent overlays
+        // — defends the (Approve/Revoke) buttons against tap-jacking.
+        window.decorView.filterTouchesWhenObscured = true
         enableEdgeToEdge()
         setContent {
             MindlayerTheme {

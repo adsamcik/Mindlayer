@@ -89,23 +89,26 @@ class SessionManager(
             )
         }
 
+        // F-013: clamp maxTokens to the runtime ceiling BEFORE engine init
+        // so we never pass a 32k value into native KV-cache allocation on
+        // a tier whose ceiling is 2k (the previous code clamped only AFTER
+        // initialize() and could OOM the inference process).
+        val runtimeCeiling = snap.recommendedMaxTokens.coerceAtMost(tier.maxMaxTokens)
+        val effectiveMaxTokens = config.maxTokens.coerceIn(1, runtimeCeiling)
+
         // Auto-initialize engine if not yet loaded
         if (!engineManager.isInitialized) {
             MindlayerLog.i(TAG, "Engine not initialized — triggering lazy init for session creation")
             kotlinx.coroutines.runBlocking {
                 engineManager.initialize(
                     preferredBackend = config.backend,
-                    maxTokens = config.maxTokens,
+                    maxTokens = effectiveMaxTokens,
                 )
             }
         }
 
         val engine = engineManager.requireEngine()
         val sessionId = config.sessionId ?: UUID.randomUUID().toString()
-
-        // Clamp to the lesser of the static tier ceiling and runtime recommendation
-        val runtimeCeiling = snap.recommendedMaxTokens.coerceAtMost(tier.maxMaxTokens)
-        val effectiveMaxTokens = config.maxTokens.coerceIn(1, runtimeCeiling)
 
         val samplerConfig = SamplerConfig(
             topK = config.samplerTopK,
@@ -160,7 +163,7 @@ class SessionManager(
         val conversation = engine.createConversation(conversationConfig)
 
         val now = System.currentTimeMillis()
-        sessions[sessionId] = SessionHandle(
+        val handle = SessionHandle(
             sessionId = sessionId,
             conversation = conversation,
             config = config,
@@ -169,6 +172,18 @@ class SessionManager(
             structuredOutputConfig = structuredOutputConfig,
             ownerToken = ownerToken,
         )
+        // F-008: putIfAbsent rejects a request to create a session whose id
+        // is already in use rather than silently overwriting the prior
+        // entry. The conversation we just opened is closed on the failure
+        // path so we don't leak the native KV cache.
+        val prior = sessions.putIfAbsent(sessionId, handle)
+        if (prior != null) {
+            try { conversation.close() } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "Failed to close orphan conversation on duplicate sessionId", throwable = t)
+            }
+            MindlayerLog.w(TAG, "Rejected duplicate sessionId: $sessionId", sessionId = sessionId)
+            throw IllegalArgumentException("Session already exists: $sessionId")
+        }
 
         MindlayerLog.i(
             TAG, "Session created: $sessionId " +
@@ -388,15 +403,16 @@ class SessionManager(
     }
 
     /**
-     * Validate client-supplied sampler + token parameters. Throws
-     * [IllegalArgumentException] for out-of-range values — callers at the
-     * AIDL boundary translate this into a [SecurityException].
+     * Validate client-supplied sampler + token parameters AND every
+     * client-controlled string. Throws [IllegalArgumentException] for
+     * out-of-range values — callers at the AIDL boundary translate this
+     * into a [SecurityException]. Delegates the byte budgets to
+     * [com.adsamcik.mindlayer.service.security.IpcInputValidator] so
+     * tests of either path see identical limits.
      */
     private fun validateSessionConfig(config: SessionConfig) {
-        require(config.samplerTopK > 0) { "samplerTopK must be > 0" }
-        require(config.samplerTopP in 0.0f..1.0f) { "samplerTopP must be in [0.0, 1.0]" }
-        require(config.samplerTemperature in 0.0f..5.0f) { "samplerTemperature out of range" }
-        require(config.maxTokens in 1..32_768) { "maxTokens out of range" }
+        com.adsamcik.mindlayer.service.security.IpcInputValidator
+            .validateSessionConfig(config)
     }
 
     /** Destroy all sessions. Called during service teardown. */
@@ -426,7 +442,21 @@ class SessionManager(
             if (array.isEmpty()) return null
 
             array.map { element ->
-                val description = element.jsonObject.toString()
+                val obj = element.jsonObject
+                // F-066: client-supplied tool names beginning with "__"
+                // are reserved for internal use (e.g. the synthetic
+                // `__structured_output` tool). Reject them at parse time
+                // so they cannot collide with engine machinery.
+                val nameElement = obj["name"]
+                val name: String? = if (nameElement is kotlinx.serialization.json.JsonPrimitive) {
+                    if (nameElement.isString) nameElement.content else null
+                } else null
+                val reservedPrefix = com.adsamcik.mindlayer.service.security.IpcInputValidator
+                    .RESERVED_TOOL_PREFIX
+                require(name == null || !name.startsWith(reservedPrefix)) {
+                    "tool name '$name' uses reserved prefix"
+                }
+                val description = obj.toString()
                 tool(JsonDefinedTool(description))
             }.also {
                 MindlayerLog.d(TAG, "Parsed ${it.size} tool definition(s)")

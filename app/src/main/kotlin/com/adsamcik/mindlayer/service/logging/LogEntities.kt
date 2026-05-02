@@ -29,6 +29,9 @@ object LogCategory {
     const val MEMORY = "MEMORY"
     const val ENGINE = "ENGINE"
     const val ERROR = "ERROR"
+    // F-056: audit trail for approve / deny / revoke / cert-rotation
+    // events. Surfaced in dashboard logs for the user to inspect.
+    const val SECURITY = "SECURITY"
 }
 
 object LogEvent {
@@ -57,4 +60,6 @@ object LogEvent {
     const val ENGINE_FALLBACK = "engine_fallback"
     // Error
     const val GENERAL_ERROR = "general_error"
+    // Security
+    const val SECURITY_DECISION = "security_decision"
 }
