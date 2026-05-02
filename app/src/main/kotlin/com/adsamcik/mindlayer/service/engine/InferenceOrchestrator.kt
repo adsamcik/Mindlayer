@@ -70,7 +70,14 @@ class InferenceOrchestrator(
 
     companion object {
         private const val TAG = "InferenceOrchestrator"
-        private const val MAX_TOOL_ROUNDS = 25
+
+        /**
+         * Hard cap on the number of tool-call rounds per inference. Surfaced
+         * via `ServiceCapabilities.maxToolRounds` so client SDKs can plan
+         * their tool-runner loops; bumped from internal `private const`
+         * to `const` for the v0.2 capability handshake.
+         */
+        const val MAX_TOOL_ROUNDS = 25
 
         /**
          * F-041: fallback policy applied when the live ThermalMonitor read

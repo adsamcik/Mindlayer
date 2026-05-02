@@ -8,6 +8,7 @@ import com.adsamcik.mindlayer.ToolResult;
 import com.adsamcik.mindlayer.ServiceStatus;
 import com.adsamcik.mindlayer.EngineInfo;
 import com.adsamcik.mindlayer.SessionInfo;
+import com.adsamcik.mindlayer.ServiceCapabilities;
 
 interface IMindlayerService {
     // Client liveness — caller passes a Binder token; service linkToDeath's on it
@@ -44,4 +45,11 @@ interface IMindlayerService {
     // sessions it currently owns. Self-UID only (the dashboard process)
     // — external callers are rejected at the ServiceBinder authz gate.
     void revokeApp(String packageName);
+
+    // Capability handshake. SDK calls this once after registerClient and
+    // caches the result. Old SDKs that don't know about the method ignore
+    // it; new SDKs against old services catch NoSuchMethodError and fall
+    // back to ServiceCapabilities.v0Baseline.
+    ServiceCapabilities getCapabilities();
 }
+
