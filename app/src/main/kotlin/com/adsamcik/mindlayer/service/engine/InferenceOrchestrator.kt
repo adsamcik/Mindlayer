@@ -17,6 +17,7 @@ import com.adsamcik.mindlayer.service.MindlayerMlService
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.ipc.StagedMedia
 import com.adsamcik.mindlayer.service.ipc.TokenStreamWriter
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -147,11 +148,21 @@ class InferenceOrchestrator(
         return sessionManager.closeAllOwnedBy(ownerToken)
     }
 
-    fun getSessionOwner(sessionId: String): Any? =
+    fun closeAllOwnedByUid(ownerUid: Int): List<String> {
+        sessionManager.activeRequestIdsOwnedByUid(ownerUid).forEach { scopedKey ->
+            cancelInference(scopedKey)
+        }
+        return sessionManager.closeAllOwnedByUid(ownerUid)
+    }
+
+    fun getSessionOwner(sessionId: String): Int? =
         sessionManager.getSessionOwner(sessionId)
 
-    fun listSessionsOwnedBy(ownerToken: Any): List<SessionInfo> =
-        sessionManager.listSessionsOwnedBy(ownerToken)
+    fun getSessionOwnerToken(sessionId: String): Any? =
+        sessionManager.getSessionOwnerToken(sessionId)
+
+    fun listSessionsOwnedBy(ownerUid: Int): List<SessionInfo> =
+        sessionManager.listSessionsOwnedBy(ownerUid)
 
     fun destroySession(sessionId: String) {
         sessionManager.activeRequestIdForSession(sessionId)?.let { scopedKey ->
@@ -220,15 +231,22 @@ class InferenceOrchestrator(
     }
 
     fun cancelInference(scopedKey: String) {
+        val publicRequestId = scopedKey.substringAfter(':', scopedKey)
         val handle = sessionManager.findSessionByActiveRequest(scopedKey)
         if (handle != null) {
-            MindlayerLog.i(TAG, "Cancelling native inference for scopedKey=$scopedKey", sessionId = handle.sessionId)
+            MindlayerLog.i(
+                TAG,
+                "Cancelling native inference",
+                requestId = publicRequestId,
+                sessionId = handle.sessionId,
+            )
             try {
                 handle.conversation.cancelProcess()
             } catch (t: Throwable) {
                 MindlayerLog.w(TAG, "cancelProcess() failed: ${t.safeLabel()}")
             }
         }
+        sharedMemoryPool.cleanup(scopedKey)
         toolCallBridge.cancel(scopedKey)
         activeJobs[scopedKey]?.cancel()
         logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
@@ -237,10 +255,15 @@ class InferenceOrchestrator(
             event = com.adsamcik.mindlayer.service.logging.LogEvent.REQUEST_CANCEL,
             // Strip the uid namespace prefix so the persisted requestId
             // matches what the client recognises.
-            requestId = scopedKey.substringAfter(':'),
+            requestId = publicRequestId,
             sessionId = handle?.sessionId,
         ))
-        MindlayerLog.i(TAG, "Cancelled scopedKey=$scopedKey", sessionId = handle?.sessionId)
+        MindlayerLog.i(
+            TAG,
+            "Cancelled inference request",
+            requestId = publicRequestId,
+            sessionId = handle?.sessionId,
+        )
     }
 
     fun shutdown() {
@@ -278,7 +301,11 @@ class InferenceOrchestrator(
     ) {
         val handle = sessionManager.getSession(meta.sessionId) ?: run {
             val writer = writerFactory(pipeWriteEnd)
-            writer.closeWithError(0, "Unknown session: ${meta.sessionId}")
+            writer.closeWithError(
+                0,
+                "Unknown session: ${meta.sessionId}",
+                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+            )
             return
         }
 
@@ -292,9 +319,7 @@ class InferenceOrchestrator(
         var stagedAudio: StagedMedia? = null
         try {
             if (image != null) {
-                stagedImage = withContext(Dispatchers.IO) {
-                    sharedMemoryPool.stageImage(scopedKey, image)
-                }
+                stagedImage = sharedMemoryPool.stageImageWithTimeout(scopedKey, image)
                 MindlayerLog.d(TAG, "Staged image: ${stagedImage.filePath}", requestId = meta.requestId, sessionId = meta.sessionId)
             }
             if (audio != null) {
@@ -302,10 +327,19 @@ class InferenceOrchestrator(
                 MindlayerLog.d(TAG, "Staged audio: ${stagedAudio.filePath}", requestId = meta.requestId, sessionId = meta.sessionId)
             }
         } catch (t: Throwable) {
-            MindlayerLog.e(TAG, "Media staging failed for request ${meta.requestId}: ${t.safeLabel()}", requestId = meta.requestId, sessionId = meta.sessionId)
+            MindlayerLog.e(
+                TAG,
+                "Media staging failed: ${t.safeLabel()}",
+                requestId = meta.requestId,
+                sessionId = meta.sessionId,
+            )
             sharedMemoryPool.cleanup(scopedKey)
             val writer = writerFactory(pipeWriteEnd)
-            writer.closeWithError(0, "media_staging_failed: ${t.safeLabel()}")
+            writer.closeWithError(
+                0,
+                "media_staging_failed: ${t.safeLabel()}",
+                MindlayerErrorCode.INVALID_REQUEST,
+            )
             return
         }
 
@@ -343,7 +377,11 @@ class InferenceOrchestrator(
                         requestId = meta.requestId,
                         sessionId = meta.sessionId,
                     )
-                    writer.closeWithError(0, "thermal_critical")
+                    writer.closeWithError(
+                        0,
+                        "thermal_critical",
+                        MindlayerErrorCode.THERMAL_CRITICAL,
+                    )
                     return@withTimeout
                 }
                 writer.writeHeader(meta.requestId)
@@ -515,8 +553,12 @@ class InferenceOrchestrator(
                     }
 
                     toolCallRound++
-                    MindlayerLog.i(TAG, "Tool call round $toolCallRound for request ${meta.requestId} " +
-                        "(${accumulatedToolCalls.size} call(s))", requestId = meta.requestId, sessionId = meta.sessionId)
+                    MindlayerLog.i(
+                        TAG,
+                        "Tool call round $toolCallRound (${accumulatedToolCalls.size} call(s))",
+                        requestId = meta.requestId,
+                        sessionId = meta.sessionId,
+                    )
 
                     val pending = toolCallBridge.registerPendingToolCalls(
                         scopedKey, accumulatedToolCalls.toList()
@@ -611,12 +653,23 @@ class InferenceOrchestrator(
                     MindlayerLog.w(TAG, "cancelProcess() after timeout raised ${t.safeLabel()}", requestId = meta.requestId, sessionId = meta.sessionId)
                 }
                 trace.markError("inference_timeout")
-                MindlayerLog.w(TAG, "Inference exceeded wall-clock cap (${maxInferenceMs} ms) for request ${meta.requestId}", requestId = meta.requestId, sessionId = meta.sessionId)
+                MindlayerLog.w(
+                    TAG,
+                    "Inference exceeded wall-clock cap (${maxInferenceMs} ms)",
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                )
                 logRepository?.logInferenceError(
                     meta.requestId, meta.sessionId, "inference_timeout"
                 )
                 kotlinx.coroutines.withContext(NonCancellable) {
-                    try { writer.closeWithError(0, "inference_timeout") } catch (_: Throwable) { }
+                    try {
+                        writer.closeWithError(
+                            0,
+                            "inference_timeout",
+                            MindlayerErrorCode.INTERNAL,
+                        )
+                    } catch (_: Throwable) { }
                 }
                 // Don't re-throw — caller treats timeout as a clean termination
                 // for the slot/concurrency accounting. The job completes normally.
@@ -632,7 +685,12 @@ class InferenceOrchestrator(
                     MindlayerLog.w(TAG, "cancelProcess() after CancellationException raised ${t.safeLabel()}", requestId = meta.requestId, sessionId = meta.sessionId)
                 }
                 trace.markError("cancelled")
-                MindlayerLog.i(TAG, "Inference cancelled for request ${meta.requestId}", requestId = meta.requestId, sessionId = meta.sessionId)
+                MindlayerLog.i(
+                    TAG,
+                    "Inference cancelled",
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                )
                 // F-009: writer.writeDone() is suspend, but we are in a
                 // CancellationException catch — coroutine is being torn
                 // down. Wrap with NonCancellable so the terminal frame
@@ -647,11 +705,16 @@ class InferenceOrchestrator(
                 toolCallBridge.cancel(scopedKey)
                 val safe = t.safeLabel()
                 trace.markError(safe)
-                MindlayerLog.e(TAG, "Inference failed for request ${meta.requestId}: $safe", requestId = meta.requestId, sessionId = meta.sessionId)
+                MindlayerLog.e(
+                    TAG,
+                    "Inference failed: $safe",
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                )
                 logRepository?.logInferenceError(
                     meta.requestId, meta.sessionId, safe
                 )
-                writer.closeWithError(0, safe)
+                writer.closeWithError(0, safe, MindlayerErrorCode.INTERNAL)
                 return
             }finally {
                 writer.close()
@@ -769,7 +832,11 @@ class InferenceOrchestrator(
                             meta.requestId, meta.sessionId,
                             "structured_output_validation_failed",
                         )
-                        writer.closeWithError(0, "structured_output_validation_failed")
+                        writer.closeWithError(
+                            0,
+                            "structured_output_validation_failed",
+                            MindlayerErrorCode.INVALID_REQUEST,
+                        )
                         return null
                     }
                     MindlayerLog.w(
