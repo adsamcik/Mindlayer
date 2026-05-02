@@ -225,16 +225,62 @@ class Mindlayer private constructor(
     // -- Prewarm --------------------------------------------------------------
 
     /**
-     * Pre-warms the LLM engine in the background. Call this early (e.g., when
-     * scan screen opens) so the first [createSession] doesn't pay the 5-10s
-     * init cost. Safe to call multiple times — subsequent calls are no-ops if
-     * the engine is already loaded.
+     * Pre-warm the LLM engine in the background (fire-and-forget). Call this
+     * early (e.g. when an inference-bound screen opens) so the first
+     * [createSession] doesn't pay the ~5-10 s cold-start cost. Safe to call
+     * multiple times — subsequent calls are no-ops if the engine is already
+     * loaded.
+     *
+     * **Returns immediately** regardless of whether the engine has finished
+     * initializing — use [prewarmAndAwait] if you need to know when init
+     * completes or which fallback backend was selected.
      *
      * @param backend the preferred backend to initialize.
      */
     suspend fun prewarm(backend: InferenceBackend = InferenceBackend.GPU) {
         val service = connection.awaitConnected()
         service.prewarm(backend.value)
+    }
+
+    /**
+     * Synchronously pre-warm the engine and return the actually-active
+     * [InferenceBackend]. Suspends until either init completes or the
+     * service-side timeout (clamped to ≤30 s) elapses.
+     *
+     * If the connected service does not advertise
+     * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_PREWARM_AWAIT]
+     * (talking to a pre-v0.4 binary), this falls back to the legacy
+     * fire-and-forget [prewarm] path and returns the requested [backend]
+     * without waiting.
+     *
+     * @param backend the preferred backend.
+     * @param timeoutMs upper bound on how long the SDK is willing to wait
+     *   for the service to confirm engine readiness. Service may clamp
+     *   this further to its own MIN/MAX bounds. Default 15 s.
+     */
+    suspend fun prewarmAndAwait(
+        backend: InferenceBackend = InferenceBackend.GPU,
+        timeoutMs: Long = 15_000L,
+    ): InferenceBackend {
+        val caps = getCapabilities()
+        if (!caps.supports(com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_PREWARM_AWAIT)) {
+            // Old service — fire-and-forget and return the requested backend.
+            prewarm(backend)
+            return backend
+        }
+        val activeBackend = try {
+            withTypedErrors {
+                it.prewarmAndAwait(backend.value, timeoutMs)
+            }
+        } catch (_: NoSuchMethodError) {
+            prewarm(backend)
+            return backend
+        } catch (_: AbstractMethodError) {
+            prewarm(backend)
+            return backend
+        }
+        return InferenceBackend.values().firstOrNull { it.value == activeBackend }
+            ?: backend
     }
 
     // -- Session management ---------------------------------------------------
