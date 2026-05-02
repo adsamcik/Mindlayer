@@ -2,4 +2,21 @@
 <resources>
     <string name="app_name" translatable="false">Mindlayer</string>
     <string name="fgs_special_use_description" translatable="false">On-device LLM inference for active, user-visible requests initiated from authorized apps on the same device.</string>
+
+    <!-- F-030: claimed (attacker-controlled) label is rendered as secondary, prefixed. -->
+    <string name="allowlist_claimed_label">claimed: %1$s</string>
+    <!-- F-030: tap-to-copy SHA-256 fingerprint accessibility description. -->
+    <string name="allowlist_sig_fingerprint_a11y">SHA-256 fingerprint, tap to copy</string>
+    <!-- F-031: surfaced when re-verify at approve tap finds the live signer changed. -->
+    <string name="allowlist_cert_changed_blocked">Approval blocked: signing certificate changed since this request was shown.</string>
+    <!-- F-032: cert-rotation banner. -->
+    <string name="allowlist_signing_key_changed">Signing key changed</string>
+    <string name="allowlist_signing_key_changed_body">This package was previously approved with a different signing certificate. A re-signed APK could be a key rotation, a malicious replacement, or a Play Store compromise. Verify the new fingerprint before approving.</string>
+    <string name="allowlist_understand_signing_change">I understand — this is a new signing key</string>
+    <!-- F-029: BiometricPrompt strings. -->
+    <string name="biometric_approve_title">Approve app access</string>
+    <string name="biometric_approve_subtitle">Confirm with biometrics or device PIN to approve this app.</string>
+    <string name="biometric_revoke_title">Revoke app access</string>
+    <string name="biometric_revoke_subtitle">Confirm with biometrics or device PIN to revoke this app.</string>
+    <string name="biometric_unavailable">Set up a screen lock or biometric to approve apps.</string>
 </resources>

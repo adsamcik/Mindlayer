@@ -91,7 +91,10 @@ release: 0.4.0
 ### 2.2 Build the signed AAB
 
 ```powershell
-./gradlew.bat clean :app:bundleRelease
+$modelPath = Get-ChildItem gemma_model -Recurse -Filter *.litertlm | Select-Object -First 1
+if ($null -eq $modelPath) { throw "Place the release .litertlm model under gemma_model before building." }
+$modelSha256 = (Get-FileHash $modelPath.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+./gradlew.bat clean :app:bundleRelease -PmodelSha256=$modelSha256
 ```
 
 Output:
@@ -110,8 +113,10 @@ This is the file you upload to Play. It is:
 > ⚠️ The Gemma `.litertlm` model is **not** checked into git. For a Play
 > Store release, place the real model binary at the path expected by the
 > `:gemma_model` module before running `:app:bundleRelease`. If the model is
-> absent, the AAB will still build but the AI-Pack will ship empty and the
-> installed app won't find the model at runtime.
+> absent, the release build should fail. Release builds also require
+> `-PmodelSha256=<64 lowercase hex SHA-256>` for the exact `.litertlm` file
+> being bundled; debug builds keep advisory model-hash behavior for local
+> development.
 
 ### 2.3 (Optional) Build a signed universal APK for side-loading
 
@@ -180,12 +185,12 @@ bundletool dump manifest --bundle app\build\outputs\bundle\release\app-release.a
 | `:app:testDebugUnitTest`        | ✅ every push                 | ✅                                        |
 | `:app:connectedDebugAndroidTest`| ✅ every push (API 33 AVD)    | ✅ with connected device                  |
 | `lintDebug`                     | ✅ every push                 | ✅                                        |
-| `:app:bundleRelease` (unsigned) | ✅ on `main` only, for sanity | ✅                                        |
+| `:app:bundleRelease` (unsigned) | ✅ on `main` only with `MODEL_SHA256` repo variable | ✅ with `-PmodelSha256=...` |
 | `:app:bundleRelease` (signed)   | ❌ never                      | ✅ only when `keystore.properties` is set |
 
 CI's unsigned `app-release.aab` artifact on `main` is **not** uploadable to
 Play — it's just proof that R8 + resource shrinking still succeeds end-to-end
-before you cut a real release locally.
+with the same model hash manifest that a real release must provide.
 
 ---
 

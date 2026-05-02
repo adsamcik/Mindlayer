@@ -35,7 +35,7 @@ sealed class MindlayerEvent {
     /** An incremental chunk of generated text. Collect and concatenate these for the full response. */
     data class TextDelta(val text: String, val seq: Long) : MindlayerEvent()
 
-    /** The model is requesting a tool invocation. Respond with [Mindlayer.submitToolResult]. */
+    /** The model is requesting a tool invocation. Respond with [Mindlayer.submitToolResult] using [callId]. */
     data class ToolCall(
         val toolName: String,
         val arguments: String,

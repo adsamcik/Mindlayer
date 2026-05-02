@@ -121,6 +121,7 @@ class InferencePipelineTest {
         engineManager = mockk(relaxed = true) {
             every { requireEngine() } returns mockEngine
             every { currentBackend } returns "GPU"
+            every { isInitialized } returns true
         }
 
         val generousTier = DeviceTier(

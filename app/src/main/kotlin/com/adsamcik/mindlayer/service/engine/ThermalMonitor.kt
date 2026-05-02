@@ -4,7 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
-import android.util.Log
+import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -94,7 +94,7 @@ class ThermalMonitor(
         // Register status listener (API 29+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val listener = PowerManager.OnThermalStatusChangedListener { status ->
-                Log.d(TAG, "Thermal status callback: $status")
+                MindlayerLog.d(TAG, "Thermal status callback: $status")
                 processSample()
             }
             pm.addThermalStatusListener(listener)
@@ -109,7 +109,7 @@ class ThermalMonitor(
             }
         }
 
-        Log.i(TAG, "Thermal monitor started")
+        MindlayerLog.i(TAG, "Thermal monitor started")
     }
 
     fun stop() {
@@ -123,7 +123,7 @@ class ThermalMonitor(
             statusListener = null
         }
 
-        Log.i(TAG, "Thermal monitor stopped")
+        MindlayerLog.i(TAG, "Thermal monitor stopped")
     }
 
     /**
@@ -152,7 +152,7 @@ class ThermalMonitor(
 
         if (newBand != _currentBand.value) {
             val oldBand = _currentBand.value
-            Log.i(
+            MindlayerLog.i(
                 TAG, "Thermal band: $oldBand → $newBand " +
                     "(status=${sample.status}, headroom10s=${sample.headroom10s})"
             )

@@ -156,9 +156,14 @@ class Mindlayer private constructor(
         }
         historyStore?.prepareConversation(tentativeId, configWithId)
 
-        // 2. Create remote session
+        // 2. Create remote session.
+        // F-018: if the service responds with `engine_initializing`, the
+        // engine is doing its (~5–10 s) cold-start init on a dedicated
+        // background slot. Retry with exponential backoff up to ~10 s
+        // total before giving up so first-launch UX matches the
+        // documented "5–10 s cold-start wait" contract.
         val sessionId = try {
-            connection.awaitConnected().createSession(configWithId)
+            createSessionWithInitRetry(configWithId)
         } catch (e: Exception) {
             // Remote creation failed — clean up local CREATING record
             historyStore?.cleanupConversation(tentativeId)
@@ -169,6 +174,29 @@ class Mindlayer private constructor(
         historyStore?.confirmConversation(sessionId)
 
         return sessionId
+    }
+
+    private suspend fun createSessionWithInitRetry(configWithId: SessionConfig): String {
+        // Backoff schedule: 50ms → 200ms → 800ms (caps total wait ≈ 10 s
+        // when combined with the underlying engine init time).
+        val backoffMs = longArrayOf(50L, 200L, 800L)
+        var attempt = 0
+        val deadline = System.currentTimeMillis() + 10_000L
+        while (true) {
+            try {
+                return connection.awaitConnected().createSession(configWithId)
+            } catch (e: SecurityException) {
+                if (e.message?.contains("engine_initializing") == true &&
+                    attempt < backoffMs.size &&
+                    System.currentTimeMillis() < deadline
+                ) {
+                    kotlinx.coroutines.delay(backoffMs[attempt])
+                    attempt++
+                    continue
+                }
+                throw e
+            }
+        }
     }
 
     /** Destroy a session and free server-side resources. */
@@ -272,14 +300,18 @@ class Mindlayer private constructor(
 
     /**
      * Submit a tool result back to the service for continued inference.
+     *
+     * Use the [MindlayerEvent.ToolCall.callId] from the tool-call event being answered.
      */
     suspend fun submitToolResult(
         requestId: String,
+        callId: String,
         toolName: String,
         resultJson: String,
     ) {
         val result = ToolResult(
             requestId = requestId,
+            callId = callId,
             toolName = toolName,
             resultJson = resultJson,
         )
@@ -767,6 +799,9 @@ class SessionConfigBuilder {
      *
      * The service validates the model's response against the supplied schema
      * and (for [JsonOutputStrategy.PromptAndValidate]) retries on mismatch.
+     * Validation is shallow: parseable JSON, top-level required fields, and
+     * top-level property types. Clients that rely on schema output as a
+     * security or business-rule boundary must run full validation locally.
      * If the connected Mindlayer service predates this feature, the config
      * is silently ignored and generation proceeds normally — making this a
      * zero-risk opt-in.

@@ -14,7 +14,13 @@
 # ── AIDL ─────────────────────────────────────────────────────────────────────
 # AIDL-generated Stub/Proxy classes are referenced across process boundaries
 # and via reflection by Binder. Don't rename or strip them.
--keep class com.adsamcik.mindlayer.service.** { *; }
+# F-045: narrowed from `com.adsamcik.mindlayer.service.**` (kept everything,
+# including private internals) to: the manifest-declared service entry point
+# plus any AIDL stub implementer. Other service-package classes can be
+# shrunk/obfuscated normally — Parcelables, AIDL interfaces, Binder, and
+# kotlinx.serialization rules below cover their reflective surfaces.
+-keep class com.adsamcik.mindlayer.service.MindlayerMlService
+-keep class * implements com.adsamcik.mindlayer.IMindlayerService { *; }
 -keep class com.adsamcik.mindlayer.IMindlayerService { *; }
 -keep class com.adsamcik.mindlayer.IMindlayerService$* { *; }
 -keep class com.adsamcik.mindlayer.IStreamingCallback { *; }

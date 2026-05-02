@@ -53,6 +53,7 @@ object IpcInputValidator {
     const val MAX_HISTORY_TURNS = 64
     const val MAX_HISTORY_TURN_LEN = 16 * 1024
     const val MAX_BACKEND_NAME_LEN = 16
+    const val MAX_SESSION_EXPIRATION_MS = 90L * 24L * 60L * 60L * 1000L
 
     // ── Image budgets ─────────────────────────────────────────────────────
     const val MAX_IMG_DIMENSION = 8192
@@ -166,7 +167,9 @@ object IpcInputValidator {
             "samplerTemperature out of range"
         }
         require(config.maxTokens in 1..32_768) { "maxTokens out of range" }
-        require(config.expirationMs > 0) { "expirationMs must be > 0" }
+        require(config.expirationMs in 1..MAX_SESSION_EXPIRATION_MS) {
+            "expirationMs out of range"
+        }
     }
 
     private fun validateHistoryTurn(turn: HistoryTurn, index: Int) {
@@ -181,6 +184,7 @@ object IpcInputValidator {
 
     fun validateToolResult(result: ToolResult) {
         validateId(result.requestId, "ToolResult.requestId")
+        validateId(result.callId, "ToolResult.callId")
         require(result.toolName.isNotEmpty()) { "toolName must not be empty" }
         require(result.toolName.length <= MAX_TOOL_NAME_LEN) {
             "toolName too long"

@@ -59,6 +59,7 @@ class MemoryPressurePipelineTest {
         engineManager = mockk(relaxed = true) {
             every { requireEngine() } returns mockEngine
             every { currentBackend } returns "GPU"
+            every { isInitialized } returns true
         }
 
         context = mockk(relaxed = true)

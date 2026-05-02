@@ -41,19 +41,19 @@ class ScopedKeyIsolationTest {
     @Test
     fun `toolCallBridge keys by scopedKey not bare requestId`() = runTest {
         val bridge = ToolCallBridge()
-        bridge.registerPendingToolCalls(
+        val callsA = bridge.registerPendingToolCalls(
             "1234:req-A", listOf("toolA" to "argsA"),
         )
-        bridge.registerPendingToolCalls(
+        val callsB = bridge.registerPendingToolCalls(
             "5678:req-A", listOf("toolB" to "argsB"),
         )
 
-        bridge.submitResult("5678:req-A", "toolB", "ok-B")
+        bridge.submitResult("5678:req-A", callsB[0].callId, "toolB", "ok-B")
         val resB = bridge.awaitResults("5678:req-A", timeoutMs = 1_000)
         assertEquals(1, resB.size)
         assertEquals("toolB" to "ok-B", resB[0])
 
-        bridge.submitResult("1234:req-A", "toolA", "ok-A")
+        bridge.submitResult("1234:req-A", callsA[0].callId, "toolA", "ok-A")
         val resA = bridge.awaitResults("1234:req-A", timeoutMs = 1_000)
         assertEquals(1, resA.size)
         assertEquals("toolA" to "ok-A", resA[0])
@@ -62,7 +62,7 @@ class ScopedKeyIsolationTest {
     @Test
     fun `toolCallBridge cancel of one scopedKey does not affect another`() = runTest {
         val bridge = ToolCallBridge()
-        bridge.registerPendingToolCalls(
+        val callsA = bridge.registerPendingToolCalls(
             "1234:req-A", listOf("toolA" to "argsA"),
         )
         bridge.registerPendingToolCalls(
@@ -70,7 +70,7 @@ class ScopedKeyIsolationTest {
         )
 
         bridge.cancel("5678:req-A")
-        bridge.submitResult("1234:req-A", "toolA", "ok-A")
+        bridge.submitResult("1234:req-A", callsA[0].callId, "toolA", "ok-A")
         val resA = bridge.awaitResults("1234:req-A", timeoutMs = 1_000)
         assertEquals("ok-A", resA[0].second)
     }

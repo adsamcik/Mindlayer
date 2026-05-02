@@ -1,6 +1,8 @@
 package com.adsamcik.mindlayer.service.logging
 
 import android.util.Log
+import androidx.annotation.VisibleForTesting
+import com.adsamcik.mindlayer.service.BuildConfig
 
 /**
  * Structured logcat wrapper that prefixes all messages with correlation context.
@@ -11,9 +13,25 @@ import android.util.Log
  *
  * All tags are prefixed with "Mindlayer." for easy logcat filtering:
  *   adb logcat -s "Mindlayer.*:D"
+ *
+ * F-046: in non-debug builds, request- and session-IDs are truncated to the
+ * first 8 chars in the formatted logcat line so that a logcat dump from a
+ * production device does not surface full UUIDs that could be cross-correlated
+ * with traffic from the SDK side. The persisted [LogEntry] columns continue
+ * to carry the full IDs — DB-side correlation still works, only the logcat
+ * line is shortened. The truncation is gated by [BuildConfig.DEBUG] so
+ * developers building debug variants still see full IDs for cross-grep.
  */
 object MindlayerLog {
     private const val PREFIX = "Mindlayer"
+
+    /**
+     * F-046 test seam: defaults to `!BuildConfig.DEBUG`. Tests flip this to
+     * exercise both code paths without needing a separate release build.
+     */
+    @VisibleForTesting
+    @JvmField
+    var truncateIdsInLogcat: Boolean = !BuildConfig.DEBUG
 
     fun d(component: String, message: String, requestId: String? = null, sessionId: String? = null) {
         Log.d(tag(component), format(message, requestId, sessionId))
@@ -39,12 +57,15 @@ object MindlayerLog {
         if (requestId == null && sessionId == null) return message
         val ctx = buildString {
             append("[")
-            requestId?.let { append("req=$it ") }
-            sessionId?.let { append("sess=$it") }
+            requestId?.let { append("req=${formatId(it)} ") }
+            sessionId?.let { append("sess=${formatId(it)}") }
             append("]")
         }.replace("  ", " ").replace(" ]", "]")
         return "$ctx $message"
     }
+
+    private fun formatId(id: String): String =
+        if (truncateIdsInLogcat && id.length > 8) id.take(8) else id
 }
 
 /**

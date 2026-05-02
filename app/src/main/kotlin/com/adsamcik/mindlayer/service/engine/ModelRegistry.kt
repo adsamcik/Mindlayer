@@ -1,8 +1,9 @@
 package com.adsamcik.mindlayer.service.engine
 
 import android.content.Context
-import android.util.Log
 import com.adsamcik.mindlayer.service.BuildConfig
+import com.adsamcik.mindlayer.service.logging.MindlayerLog
+import com.adsamcik.mindlayer.service.logging.safeLabel
 import java.io.File
 import java.util.Locale
 
@@ -57,7 +58,7 @@ object ModelRegistry {
                 ?.forEach { file ->
                     if (file.name in seen) return@forEach
                     if (!SAFE_NAME_PATTERN.matches(file.name)) {
-                        Log.w(TAG, "Skipping model with unexpected name: ${file.name}")
+                        MindlayerLog.w(TAG, "Skipping model with unexpected name: ${file.name}")
                         return@forEach
                     }
                     seen += file.name
@@ -74,25 +75,25 @@ object ModelRegistry {
             for (name in assetNames) {
                 if (!name.endsWith(MODEL_EXTENSION)) continue
                 if (!SAFE_NAME_PATTERN.matches(name)) {
-                    Log.w(TAG, "Skipping AI-Pack asset with unexpected name: $name")
+                    MindlayerLog.w(TAG, "Skipping AI-Pack asset with unexpected name: $name")
                     continue
                 }
 
                 val extracted = File(context.filesDir, name)
                 if (!extracted.exists()) {
-                    Log.i(TAG, "Extracting model from AI pack: $name")
+                    MindlayerLog.i(TAG, "Extracting model from AI pack: $name")
                     context.assets.open(name).use { input ->
                         extracted.outputStream().use { output ->
                             input.copyTo(output, bufferSize = 8 * 1024 * 1024)
                         }
                     }
-                    Log.i(TAG, "Extracted: ${extracted.length() / 1_048_576}MB")
+                    MindlayerLog.i(TAG, "Extracted: ${extracted.length() / 1_048_576}MB")
                 }
                 seen += name
                 models += Origin.AI_PACK to buildModelInfo(extracted)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "AI pack asset scan failed: ${e.message}")
+            MindlayerLog.w(TAG, "AI pack asset scan failed: ${e.safeLabel()}")
         }
 
         // 2-4: Standard app storage
@@ -109,7 +110,7 @@ object ModelRegistry {
             }
         }
 
-        Log.i(TAG, "Discovered ${models.size} model(s)")
+        MindlayerLog.i(TAG, "Discovered ${models.size} model(s)")
         // Most-trusted origin first, then largest within tier.
         return models
             .sortedWith(

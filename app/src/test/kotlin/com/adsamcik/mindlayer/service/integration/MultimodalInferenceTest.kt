@@ -27,6 +27,8 @@ import com.adsamcik.mindlayer.service.ipc.TokenStreamWriter
 import com.adsamcik.mindlayer.service.testutil.TestPipeHelper
 import com.adsamcik.mindlayer.shared.StreamEvent
 import com.adsamcik.mindlayer.shared.StreamHeader
+import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -133,6 +135,7 @@ class MultimodalInferenceTest {
         engineManager = mockk(relaxed = true) {
             every { requireEngine() } returns mockEngine
             every { currentBackend } returns "GPU"
+            every { isInitialized } returns true
         }
 
         val generousTier = DeviceTier(
@@ -165,7 +168,7 @@ class MultimodalInferenceTest {
                     cleanup = {},
                 )
             }
-            every { stageAudio(any(), any()) } answers {
+            coEvery { stageAudioWithTimeout(any(), any()) } answers {
                 val key = firstArg<String>()
                 val transfer = secondArg<AudioTransfer>()
                 StagedMedia(
@@ -307,7 +310,7 @@ class MultimodalInferenceTest {
 
         // Verify SharedMemoryPool was NOT called for staging
         verify(exactly = 0) { sharedMemoryPool.stageImage(any(), any()) }
-        verify(exactly = 0) { sharedMemoryPool.stageAudio(any(), any()) }
+        coVerify(exactly = 0) { sharedMemoryPool.stageAudioWithTimeout(any(), any()) }
 
         // Verify the Content parts contain only Text
         val parts = lastCapturedParts()
@@ -333,7 +336,7 @@ class MultimodalInferenceTest {
 
         // Verify stageImage was called with the transfer
         verify(exactly = 1) { sharedMemoryPool.stageImage(any(), image) }
-        verify(exactly = 0) { sharedMemoryPool.stageAudio(any(), any()) }
+        coVerify(exactly = 0) { sharedMemoryPool.stageAudioWithTimeout(any(), any()) }
 
         // Verify Content parts: ImageFile only (no text was provided)
         val parts = lastCapturedParts()
@@ -384,7 +387,7 @@ class MultimodalInferenceTest {
         val events = inferAndCollect(sessionId, null, requestId = requestId, audio = audio)
 
         verify(exactly = 0) { sharedMemoryPool.stageImage(any(), any()) }
-        verify(exactly = 1) { sharedMemoryPool.stageAudio(any(), audio) }
+        coVerify(exactly = 1) { sharedMemoryPool.stageAudioWithTimeout(any(), audio) }
 
         val parts = lastCapturedParts()
         assertEquals("Should have 1 content part", 1, parts.size)
@@ -407,7 +410,7 @@ class MultimodalInferenceTest {
             sessionId, "Transcribe this", requestId = requestId, audio = audio,
         )
 
-        verify(exactly = 1) { sharedMemoryPool.stageAudio(any(), audio) }
+        coVerify(exactly = 1) { sharedMemoryPool.stageAudioWithTimeout(any(), audio) }
 
         val parts = lastCapturedParts()
         assertEquals("Should have 2 content parts", 2, parts.size)
@@ -436,7 +439,7 @@ class MultimodalInferenceTest {
         )
 
         verify(exactly = 1) { sharedMemoryPool.stageImage(any(), image) }
-        verify(exactly = 1) { sharedMemoryPool.stageAudio(any(), audio) }
+        coVerify(exactly = 1) { sharedMemoryPool.stageAudioWithTimeout(any(), audio) }
 
         // Verify Content parts order: Text, ImageFile, AudioFile
         val parts = lastCapturedParts()
@@ -492,7 +495,7 @@ class MultimodalInferenceTest {
 
     @Test
     fun audioStaging_failsGracefully() {
-        every { sharedMemoryPool.stageAudio(any(), any()) } throws
+        coEvery { sharedMemoryPool.stageAudioWithTimeout(any(), any()) } throws
             IOException("PFD read error")
 
         val requestId = "req-aud-fail"
@@ -713,7 +716,7 @@ class MultimodalInferenceTest {
         verify(exactly = 1) { sharedMemoryPool.stageImage(any(), any()) }
         // Audio staging should NOT have been attempted (image failed first in the
         // orchestrator's sequential staging order)
-        verify(exactly = 0) { sharedMemoryPool.stageAudio(any(), any()) }
+        coVerify(exactly = 0) { sharedMemoryPool.stageAudioWithTimeout(any(), any()) }
         // Cleanup should still be called
         Thread.sleep(200)
         verify(atLeast = 1) { sharedMemoryPool.cleanup("test:" + requestId) }
@@ -725,7 +728,7 @@ class MultimodalInferenceTest {
 
     @Test
     fun audioStagingFails_afterImageSucceeds() {
-        every { sharedMemoryPool.stageAudio(any(), any()) } throws
+        coEvery { sharedMemoryPool.stageAudioWithTimeout(any(), any()) } throws
             RuntimeException("Audio PFD closed")
 
         val requestId = "req-aud-fail-second"
@@ -740,7 +743,7 @@ class MultimodalInferenceTest {
         // Image staging succeeded
         verify(exactly = 1) { sharedMemoryPool.stageImage(any(), any()) }
         // Audio staging was attempted and failed
-        verify(exactly = 1) { sharedMemoryPool.stageAudio(any(), any()) }
+        coVerify(exactly = 1) { sharedMemoryPool.stageAudioWithTimeout(any(), any()) }
 
         val errorEvent = events.find { it.kind == "error" }
         assertNotNull("Should contain an error event", errorEvent)
@@ -764,7 +767,7 @@ class MultimodalInferenceTest {
         inferAndCollect(sessionId, "Just text, no media")
 
         verify(exactly = 0) { sharedMemoryPool.stageImage(any(), any()) }
-        verify(exactly = 0) { sharedMemoryPool.stageAudio(any(), any()) }
+        coVerify(exactly = 0) { sharedMemoryPool.stageAudioWithTimeout(any(), any()) }
         // cleanup IS still called in the finally block (with requestId)
         Thread.sleep(200)
         verify(atLeast = 1) { sharedMemoryPool.cleanup(any()) }

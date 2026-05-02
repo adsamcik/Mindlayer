@@ -1,14 +1,24 @@
 package com.adsamcik.mindlayer.service.ipc
 
 import android.os.ParcelFileDescriptor
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
+import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.adsamcik.mindlayer.shared.StreamEvent
 import com.adsamcik.mindlayer.shared.StreamEventType
 import com.adsamcik.mindlayer.shared.StreamHeader
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.IOException
@@ -36,36 +46,59 @@ private const val MAX_FRAME_BYTES = 1_048_576
  */
 class TokenStreamWriter private constructor(
     private val output: OutputStream,
+    private val writeTimeoutMs: Long,
+    private val pfd: ParcelFileDescriptor?,
 ) {
 
     /** Production constructor — wraps the pipe's write-end. */
     constructor(writeEnd: ParcelFileDescriptor) : this(
         ParcelFileDescriptor.AutoCloseOutputStream(writeEnd) as OutputStream,
-    )
+        DEFAULT_WRITE_TIMEOUT_MS,
+        writeEnd,
+    ) {
+        // F-009: switch the pipe write end to non-blocking so a peer holding
+        // the read end open without draining surfaces as EAGAIN rather than
+        // wedging the worker thread. Best-effort — failure is logged and the
+        // existing watchdog (writeTimeoutMs) still bounds latency.
+        try {
+            val flags = Os.fcntlInt(writeEnd.fileDescriptor, OsConstants.F_GETFL, 0)
+            Os.fcntlInt(
+                writeEnd.fileDescriptor,
+                OsConstants.F_SETFL,
+                flags or OsConstants.O_NONBLOCK,
+            )
+        } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "fcntl O_NONBLOCK failed: ${t.safeLabel()}")
+        }
+    }
 
     companion object {
         private const val TAG = "TokenStreamWriter"
+        internal const val DEFAULT_WRITE_TIMEOUT_MS = 5_000L
+        internal const val EAGAIN_BACKOFF_MS = 5L
 
         /** Test-only factory that accepts a plain [OutputStream]. */
-        internal fun forTesting(output: OutputStream): TokenStreamWriter =
-            TokenStreamWriter(output)
+        internal fun forTesting(
+            output: OutputStream,
+            writeTimeoutMs: Long = DEFAULT_WRITE_TIMEOUT_MS,
+        ): TokenStreamWriter = TokenStreamWriter(output, writeTimeoutMs, pfd = null)
     }
 
     private val json = Json { encodeDefaults = true }
-    private var closed = false
+    @Volatile private var closed = false
 
     // ---- Public API --------------------------------------------------------
 
-    fun writeHeader(requestId: String) {
+    suspend fun writeHeader(requestId: String) {
         val header = StreamHeader(requestId = requestId)
         writeFrame(json.encodeToString(StreamHeader.serializer(), header))
     }
 
-    fun writeTokenDelta(seq: Long, text: String) {
+    suspend fun writeTokenDelta(seq: Long, text: String) {
         writeEvent(seq, StreamEventType.TOKEN_DELTA, buildJsonObject { put("text", text) })
     }
 
-    fun writeToolCall(seq: Long, callId: String, name: String, argsJson: String) {
+    suspend fun writeToolCall(seq: Long, callId: String, name: String, argsJson: String) {
         writeEvent(seq, StreamEventType.TOOL_CALL, buildJsonObject {
             put("callId", callId)
             put("name", name)
@@ -73,15 +106,15 @@ class TokenStreamWriter private constructor(
         })
     }
 
-    fun writeMetrics(seq: Long, metrics: JsonObject) {
+    suspend fun writeMetrics(seq: Long, metrics: JsonObject) {
         writeEvent(seq, StreamEventType.METRICS, metrics)
     }
 
-    fun writeDone(seq: Long, finishReason: String) {
+    suspend fun writeDone(seq: Long, finishReason: String) {
         writeEvent(seq, StreamEventType.DONE, buildJsonObject { put("finish_reason", finishReason) })
     }
 
-    fun writeError(seq: Long, code: String, message: String) {
+    suspend fun writeError(seq: Long, code: String, message: String) {
         writeEvent(seq, StreamEventType.ERROR, buildJsonObject {
             put("code", code)
             put("message", message)
@@ -98,16 +131,16 @@ class TokenStreamWriter private constructor(
         try { output.flush() } catch (e: IOException) {
             MindlayerLog.w(TAG, "IOException flushing pipe (client may have disconnected)", throwable = e)
         } catch (t: Throwable) {
-            MindlayerLog.w(TAG, "Non-IOException flushing pipe", throwable = t)
+            MindlayerLog.w(TAG, "Non-IOException flushing pipe: ${t.safeLabel()}")
         }
         try { output.close() } catch (e: IOException) {
             MindlayerLog.w(TAG, "IOException closing pipe (client may have disconnected)", throwable = e)
         } catch (t: Throwable) {
-            MindlayerLog.w(TAG, "Non-IOException closing pipe", throwable = t)
+            MindlayerLog.w(TAG, "Non-IOException closing pipe: ${t.safeLabel()}")
         }
     }
 
-    fun closeWithError(seq: Long, message: String) {
+    suspend fun closeWithError(seq: Long, message: String) {
         try {
             writeError(seq, "internal_error", message)
         } catch (_: IOException) {
@@ -122,7 +155,7 @@ class TokenStreamWriter private constructor(
 
     // ---- Internals ---------------------------------------------------------
 
-    private fun writeEvent(seq: Long, type: String, payload: JsonObject) {
+    private suspend fun writeEvent(seq: Long, type: String, payload: JsonObject) {
         val event = StreamEvent(
             seq = seq,
             type = type,
@@ -132,27 +165,74 @@ class TokenStreamWriter private constructor(
         writeFrame(json.encodeToString(StreamEvent.serializer(), event))
     }
 
-    private fun writeFrame(payload: String) {
+    private suspend fun writeFrame(payload: String) {
         if (closed) return
         val bytes = payload.encodeToByteArray()
         check(bytes.size <= MAX_FRAME_BYTES) {
             "Frame too large: ${bytes.size} bytes (max=$MAX_FRAME_BYTES)"
         }
+        val header = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(bytes.size)
+            .array()
         try {
-            val header = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
-                .putInt(bytes.size)
-                .array()
-            output.write(header)
-            output.write(bytes)
-            output.flush()
+            withTimeout(writeTimeoutMs) {
+                writeAllNonBlocking(header)
+                writeAllNonBlocking(bytes)
+                runInterruptible(Dispatchers.IO) { output.flush() }
+            }
+        } catch (e: TimeoutCancellationException) {
+            // F-009: backpressure timeout. Force-close the underlying FD
+            // (rubber-duck correction: pfd.close() in addition to OutputStream.close
+            // so a stuck native syscall actually returns).
+            MindlayerLog.w(TAG, "Pipe write timed out after ${writeTimeoutMs}ms; closing", throwable = null)
+            closed = true
+            try { pfd?.close() } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "pfd.close() after timeout raised: ${t.safeLabel()}")
+            }
+            try { output.close() } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "output.close() after timeout raised: ${t.safeLabel()}")
+            }
+            throw CancellationException("backpressure_timeout").apply { initCause(e) }
         } catch (e: IOException) {
             MindlayerLog.w(TAG, "IOException writing frame (client may have disconnected)", throwable = e)
             closed = true
             // Re-raise as CancellationException so the enclosing inference
             // coroutine unwinds promptly and native cancelProcess() fires.
-            // Callers outside a coroutine context (e.g. closeWithError) catch
-            // CancellationException explicitly.
             throw CancellationException("Pipe write failed; client likely disconnected").apply { initCause(e) }
         }
+    }
+
+    /**
+     * EAGAIN-aware loop: with `O_NONBLOCK` set on the underlying pipe FD,
+     * a wedged peer surfaces as `IOException` whose cause is
+     * `ErrnoException(EAGAIN)`. We retry with a tiny [delay] so the
+     * outer [withTimeout] can race the wait.
+     */
+    private suspend fun writeAllNonBlocking(buf: ByteArray) = withContext(Dispatchers.IO) {
+        var written = 0
+        while (written < buf.size) {
+            try {
+                runInterruptible {
+                    output.write(buf, written, buf.size - written)
+                }
+                written = buf.size
+            } catch (e: IOException) {
+                if (isEagain(e)) {
+                    delay(EAGAIN_BACKOFF_MS)
+                } else {
+                    throw e
+                }
+            }
+        }
+    }
+
+    private fun isEagain(e: IOException): Boolean {
+        var cause: Throwable? = e
+        while (cause != null) {
+            if (cause is ErrnoException && cause.errno == OsConstants.EAGAIN) return true
+            cause = cause.cause
+        }
+        // Fallback: bionic message is "write failed: EAGAIN (Try again)"
+        return e.message?.contains("EAGAIN") == true
     }
 }

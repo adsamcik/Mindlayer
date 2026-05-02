@@ -87,7 +87,18 @@ internal object DbKeyProvider {
         if (wrappedB64 != null && ivB64 != null) {
             try {
                 val key = loadKeystoreKey()
-                    ?: error("Keystore key missing despite wrapped blob present")
+                if (key == null) {
+                    // F-026: a wrapped blob exists in prefs but the Keystore
+                    // entry is gone (uninstall/restore, factory reset of the
+                    // Keystore alone, or aggressive cleaner). The blob is
+                    // unrecoverable — don't fail-closed; recover the same way
+                    // we do for GeneralSecurityException: wipe the orphaned
+                    // ciphertext DB + prefs, regenerate, and persist a fresh
+                    // wrapped passphrase.
+                    MindlayerLog.w(TAG, "Keystore entry missing despite wrapped blob present; regenerating DB passphrase and wiping $databaseName.")
+                    forceReset(context, prefs, databaseName)
+                    return createAndPersist(prefs)
+                }
                 val wrapped = Base64.decode(wrappedB64, Base64.NO_WRAP)
                 val iv = Base64.decode(ivB64, Base64.NO_WRAP)
                 val cipher = Cipher.getInstance(AES_GCM_TRANSFORM)
@@ -175,7 +186,46 @@ internal object DbKeyProvider {
 
     private fun generateKeystoreKey(): SecretKey {
         val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        val spec = KeyGenParameterSpec.Builder(
+        // F-048: prefer a hardware-isolated StrongBox-backed key whose use
+        // requires the device to be in the unlocked state. On devices without
+        // StrongBox (or whose StrongBox is at capacity), fall back to a
+        // TEE-backed key with the same unlocked-device requirement; on older
+        // devices fall back to the baseline spec.
+        return try {
+            gen.init(buildKeySpec(strongBox = true))
+            gen.generateKey()
+        } catch (_: Exception) {
+            try {
+                gen.init(buildKeySpec(strongBox = false))
+                gen.generateKey()
+            } catch (_: Exception) {
+                gen.init(buildBaselineKeySpec())
+                gen.generateKey()
+            }
+        }
+    }
+
+    private fun buildKeySpec(strongBox: Boolean): KeyGenParameterSpec {
+        val builder = KeyGenParameterSpec.Builder(
+            KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .setUserAuthenticationRequired(false)
+            .setRandomizedEncryptionRequired(true)
+        // setUnlockedDeviceRequired + setIsStrongBoxBacked are API 28+. The
+        // module's minSdk is 26, so guard explicitly.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            builder.setUnlockedDeviceRequired(true)
+            if (strongBox) builder.setIsStrongBoxBacked(true)
+        }
+        return builder.build()
+    }
+
+    private fun buildBaselineKeySpec(): KeyGenParameterSpec =
+        KeyGenParameterSpec.Builder(
             KEY_ALIAS,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
         )
@@ -185,7 +235,4 @@ internal object DbKeyProvider {
             .setUserAuthenticationRequired(false)
             .setRandomizedEncryptionRequired(true)
             .build()
-        gen.init(spec)
-        return gen.generateKey()
-    }
 }

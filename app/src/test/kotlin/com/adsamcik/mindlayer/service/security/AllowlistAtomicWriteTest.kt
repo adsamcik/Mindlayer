@@ -45,7 +45,7 @@ class AllowlistAtomicWriteTest {
 
     @Test
     fun `approve writes a valid JSON array (no half-write artefact)`() {
-        store.approve("com.example.a", "ABC123", "Example A")
+        store.approveDirect("com.example.a", "ABC123", "Example A")
 
         // The temp sidecar must not survive after a successful write.
         val tmp = File(dir, "entries.json.tmp")
@@ -66,8 +66,8 @@ class AllowlistAtomicWriteTest {
 
     @Test
     fun `revoke does not corrupt the file (atomic move)`() {
-        store.approve("com.a", "AAAA")
-        store.approve("com.b", "BBBB")
+        store.approveDirect("com.a", "AAAA")
+        store.approveDirect("com.b", "BBBB")
         store.revoke("com.a")
 
         val arr = JSONArray(entriesFile.readText())

@@ -37,12 +37,13 @@ class MindlayerSession internal constructor(
     suspend fun chatWithImageOnce(text: String, bitmap: Bitmap): String =
         client.chatWithImageOnce(sessionId, text, bitmap)
 
-    /** Submit a tool result for continued inference. */
+    /** Submit a tool result for continued inference using the ToolCall callId. */
     suspend fun submitToolResult(
         requestId: String,
+        callId: String,
         toolName: String,
         resultJson: String,
-    ) = client.submitToolResult(requestId, toolName, resultJson)
+    ) = client.submitToolResult(requestId, callId, toolName, resultJson)
 
     /** Cancel an in-flight inference. */
     suspend fun cancelInference(requestId: String) =

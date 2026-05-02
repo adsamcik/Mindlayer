@@ -2,7 +2,6 @@ package com.adsamcik.mindlayer.service.engine
 
 import android.content.Context
 import android.os.Build
-import android.util.Log
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
@@ -109,7 +108,7 @@ class EngineManager(
 
         // Fast-path: the selected device model is already loaded.
         engine?.let { eng ->
-            Log.i(TAG, "Engine already initialized with model=${target.id}, backend=$currentBackend")
+            MindlayerLog.i(TAG, "Engine already initialized with model=${target.id}, backend=$currentBackend")
             return eng
         }
 
@@ -131,11 +130,11 @@ class EngineManager(
         val memInfo = android.app.ActivityManager.MemoryInfo()
         activityManager.getMemoryInfo(memInfo)
         val requiredBytes = modelSizeBytes + (512L * 1024 * 1024) // model + 512MB headroom
-        Log.i(TAG, "Loading model '${target.id}' (${target.displayName})")
-        Log.i(TAG, "Memory check: available=${memInfo.availMem / 1024 / 1024}MB, " +
+        MindlayerLog.i(TAG, "Loading model '${target.id}' (${target.displayName})")
+        MindlayerLog.i(TAG, "Memory check: available=${memInfo.availMem / 1024 / 1024}MB, " +
             "model=${modelSizeBytes / 1024 / 1024}MB, required=${requiredBytes / 1024 / 1024}MB")
         if (memInfo.availMem < requiredBytes) {
-            Log.w(TAG, "Low memory: ${memInfo.availMem / 1024 / 1024}MB available, " +
+            MindlayerLog.w(TAG, "Low memory: ${memInfo.availMem / 1024 / 1024}MB available, " +
                 "need ${requiredBytes / 1024 / 1024}MB. Engine init may fail.")
         }
 
@@ -144,7 +143,7 @@ class EngineManager(
 
         for (backend in backends) {
             val name = backendName(backend)
-            Log.i(TAG, "Attempting init with backend=$name, model=${target.id}")
+            MindlayerLog.i(TAG, "Attempting init with backend=$name, model=${target.id}")
 
             try {
                 val startNs = System.nanoTime()
@@ -162,7 +161,7 @@ class EngineManager(
 
                 val elapsed = (System.nanoTime() - startNs) / 1_000_000_000f
                 val durationMs = ((System.nanoTime() - startNs) / 1_000_000)
-                Log.i(TAG, "Engine initialized: model=${target.id}, backend=$name, time=${elapsed}s (tried ${backends.map { backendName(it) }})")
+                MindlayerLog.i(TAG, "Engine initialized: model=${target.id}, backend=$name, time=${elapsed}s (tried ${backends.map { backendName(it) }})")
 
                 if (name == "GPU") {
                     lastGpuFailureReason = null
@@ -178,12 +177,9 @@ class EngineManager(
             } catch (t: Throwable) {
                 // F-006: never persist or surface raw native exception text.
                 // LiteRT-LM tokenizer/template exceptions can inline prompt
-                // fragments; safeLabel() returns class names only. The full
-                // stack trace still reaches logcat (passing throwable=t)
-                // for debug builds, but production storage / diagnostic
-                // export must use the redacted form.
+                // fragments; safeLabel() returns class names only.
                 val safeDetail = t.safeLabel()
-                MindlayerLog.w(TAG, "Backend $name failed: $safeDetail", throwable = t)
+                MindlayerLog.w(TAG, "Backend $name failed: $safeDetail")
                 if (name == "GPU") {
                     lastGpuFailureReason = safeDetail
                 }
@@ -282,7 +278,7 @@ class EngineManager(
         newBackend: String,
         maxTokens: Int = 4096,
     ): Engine {
-        Log.i(TAG, "Switching backend: $currentBackend → $newBackend")
+        MindlayerLog.i(TAG, "Switching backend: $currentBackend → $newBackend")
         shutdown()
         return initialize(
             preferredBackend = newBackend,
@@ -302,12 +298,12 @@ class EngineManager(
     private suspend fun shutdownInternal() {
         engine?.let { eng ->
             val backend = currentBackend
-            Log.i(TAG, "Shutting down engine (backend=$backend, model=${currentModel?.id})")
+            MindlayerLog.i(TAG, "Shutting down engine (backend=$backend, model=${currentModel?.id})")
             withContext(Dispatchers.IO) {
                 try {
                     eng.close()
                 } catch (t: Throwable) {
-                    Log.e(TAG, "Error closing engine", t)
+                    MindlayerLog.e(TAG, "Error closing engine: ${t.safeLabel()}")
                 }
             }
             engine = null
@@ -317,7 +313,7 @@ class EngineManager(
             initTimeSeconds = 0f
             lastGpuFailureReason = null
             logRepository?.logEngineShutdown(backend)
-            Log.i(TAG, "Engine shutdown complete")
+            MindlayerLog.i(TAG, "Engine shutdown complete")
         }
     }
 

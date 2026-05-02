@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentHashMap
  *  1. Streaming detects tool calls → [registerPendingToolCalls] stores them
  *  2. Tool call events are written to the pipe for the client
  *  3. Streaming suspends on [awaitResults] until the client submits every
- *     pending result via [submitResult]
+ *     pending result via [submitResult], correlated by callId and tool name
  *  4. Results are returned to the orchestrator for injection into the
  *     conversation
  *
@@ -30,7 +30,13 @@ class ToolCallBridge {
 
     companion object {
         private const val TAG = "ToolCallBridge"
-        const val DEFAULT_TIMEOUT_MS = 60_000L
+        /**
+         * F-061: a single tool round-trip times out after 30 s. Reduced from
+         * the previous 60 s because the orchestrator now enforces a
+         * 5-minute total wall-clock cap on the whole inference; long tool
+         * round-trips were the dominant way to get close to the old cap.
+         */
+        const val DEFAULT_TIMEOUT_MS = 30_000L
     }
 
     data class PendingToolCall(
@@ -73,10 +79,10 @@ class ToolCallBridge {
      *
      * [scopedKey] is the binder-side namespaced key derived from the caller's
      * UID and the public requestId. Completes the [CompletableDeferred] of
-     * the first unfinished pending call matching [toolName], unblocking the
-     * streaming coroutine in [awaitResults].
+     * the unfinished pending call matching both [callId] and [toolName],
+     * unblocking the streaming coroutine in [awaitResults].
      */
-    fun submitResult(scopedKey: String, toolName: String, resultJson: String) {
+    fun submitResult(scopedKey: String, callId: String, toolName: String, resultJson: String) {
         val calls = pending[scopedKey]
         if (calls == null) {
             MindlayerLog.w(TAG, "submitResult: no pending calls for scopedKey=$scopedKey")
@@ -84,16 +90,21 @@ class ToolCallBridge {
         }
 
         val match = synchronized(calls) {
-            calls.firstOrNull { it.toolName == toolName && !it.resultDeferred.isCompleted }
+            calls.firstOrNull {
+                it.callId == callId && it.toolName == toolName && !it.resultDeferred.isCompleted
+            }
         }
 
         if (match == null) {
-            MindlayerLog.w(TAG, "submitResult: no pending call for tool '$toolName' in scopedKey=$scopedKey")
+            MindlayerLog.w(
+                TAG,
+                "submitResult: no pending call for callId=$callId tool='$toolName' in scopedKey=$scopedKey",
+            )
             return
         }
 
         match.resultDeferred.complete(resultJson)
-        MindlayerLog.d(TAG, "Result submitted for tool '$toolName' in scopedKey=$scopedKey")
+        MindlayerLog.d(TAG, "Result submitted for callId=$callId tool='$toolName' in scopedKey=$scopedKey")
     }
 
     /**

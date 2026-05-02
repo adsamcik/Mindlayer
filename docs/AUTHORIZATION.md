@@ -106,8 +106,11 @@ Called as the first statement of every AIDL entry point. Sequence:
 ```
 uid = Binder.getCallingUid()
 if (uid == Process.myUid())      -> return SELF_IDENTITY   # dashboard
-identity = CallerVerifier.identifyCaller(ctx, uid) ?: throw SecurityException
+identity = CallerVerifier.identifyCaller(ctx, uid)
+    ?: { rateLimiter.tryAcquireRejected(uid) || throw "Rate limit"
+         throw SecurityException }                          # F-033 reject bucket
 if (!allowlistStore.isAllowed(identity.pkg, identity.sig)) {
+    rateLimiter.tryAcquireRejected(uid) || throw "Rate limit"   # F-033 reject bucket
     allowlistStore.recordPending(identity.pkg, identity.sig, identity.displayName)
     throw SecurityException("... user approval required")
 }
@@ -119,6 +122,24 @@ The self-UID bypass is there because the built-in dashboard binds to its
 own `:ml` service over AIDL (cross-process within the same app). Without
 the bypass it would self-deny (never user-approved) and self-throttle
 (polling ~3 RPCs every 2s exceeds the 60 RPM default).
+
+#### Two-tier rate limiting (F-033)
+
+There are now **two** independent token buckets per UID:
+
+- **Main bucket** (`tryAcquire`, default 60 RPM) — consumed only by callers
+  that have already cleared identity + allowlist. Sized for normal traffic.
+- **Rejected bucket** (`tryAcquireRejected`, default 6 RPM) — consumed
+  *before* `recordPending` whenever a caller fails identity verification or
+  is not in the allowlist. This bounds the disk I/O a hostile flooder can
+  trigger; the FileLock + fsync on `pending.json` was previously the
+  cheapest way to saturate the service.
+
+Order matters: the rejected bucket is consumed strictly **after** the
+allowlist decision, so its timing cannot leak allowlist state to a probing
+attacker. An additional in-memory `(pkg, sig)` dedup TTL inside
+`AllowlistStore.recordPending` (30 s) short-circuits hot retries before
+they even touch the file lock.
 
 Session-scoped entry points add a second hop: `requireOwnership(sessionId)`
 looks up the session's creator UID in the `InferenceOrchestrator` and
@@ -202,11 +223,29 @@ Key points:
 - The dashboard does not have to be open when the client first calls.
   Pending entries persist on disk until the user reviews them.
 - Multiple retries by an un-approved caller are idempotent: `recordPending`
-  de-duplicates by `packageName` as long as the signing cert matches.
-- If the caller *rotates their signing cert*, `recordPending` upserts the
-  entry with the new sig (so the user can see the change and re-approve);
-  any prior `entries.json` entry is *not* auto-migrated — it still pins
-  the old sig and therefore still fails `isAllowed()`.
+  short-circuits on a 30-second in-memory dedup, then de-duplicates by
+  `(packageName, sig)` under the file lock. The pending list is **append-only**
+  across cert mismatches (F-031) — a sig swap appends a new row instead of
+  silently overwriting the prior one, so the user always sees what was on
+  screen.
+- If the caller *rotates their signing cert*, the new pending row carries
+  `previousSigSha256` and the dashboard renders a red banner + an "I
+  understand" gate before the Approve button enables (F-032). A successful
+  approval after rotation is logged with a distinct
+  `approve_after_cert_rotation` audit event for grep-ability.
+- The dashboard's Approve / Revoke / Deny buttons are gated by
+  `BiometricPrompt` with `BIOMETRIC_STRONG | DEVICE_CREDENTIAL` fallback
+  (F-029). A device with no enrolled biometric AND no screen lock cannot
+  approve — this is intentional default-deny.
+- At the moment the user taps Approve, `AllowlistStore.approve(context, …)`
+  re-resolves the live signing certificate via
+  `CallerVerifier.identifyByPackage` *under the file lock* and throws
+  `CertificateMismatchException` if it disagrees with the sig the user saw
+  (F-031). This closes the TOCTOU window between dashboard render and tap.
+- The pending list is FIFO-capped at `MAX_PENDING_ROWS = 32` so a flooder
+  cannot push the file to unbounded size; combined with the 6 RPM rejected
+  bucket per UID it would take >5 minutes to evict a real user-driven
+  request, by which time the user will have noticed.
 
 ## Revocation
 

@@ -42,6 +42,10 @@ object LogEvent {
     const val REQUEST_ERROR = "request_error"
     const val TOOL_CALL = "tool_call"
     const val TOOL_RESULT = "tool_result"
+    // F-036: model fabricated an unknown tool name OR emitted oversized
+    // arguments; the orchestrator dropped/truncated the call. Logged
+    // under LogCategory.SECURITY so the dashboard surfaces it.
+    const val TOOL_CALL_REJECTED = "tool_call_rejected"
     const val USER_MESSAGE = "user_message"
     const val MODEL_RESPONSE = "model_response"
     // Thermal

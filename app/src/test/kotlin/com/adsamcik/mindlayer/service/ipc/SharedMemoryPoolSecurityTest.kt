@@ -15,6 +15,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Pins SECURITY_REVIEW F-001 / F-004 / F-011 / F-016 / F-060 — staging
@@ -143,6 +146,53 @@ class SharedMemoryPoolSecurityTest {
             pool.stageImage("u:abc", xfer)
         } finally {
             try { pfd.close() } catch (_: Throwable) {}
+        }
+    }
+
+    @Test
+    fun `stageImage rejects encoded sharedMemory declared larger than backing fd`() {
+        val pfd = createPfdFromBytes(byteArrayOf(1, 2, 3), "png")
+        val xfer = ImageTransfer(
+            requestId = "abc",
+            width = 0, height = 0,
+            pixelFormat = 0, rowStride = 0,
+            payloadBytes = 64,
+            source = pfd, isSharedMemory = true, mimeType = "image/png",
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            pool.stageImage("u:abc", xfer)
+        }
+    }
+
+    @org.junit.Ignore(
+        "Robolectric does not faithfully emulate Linux pipe semantics — a " +
+            "blocking AutoCloseInputStream.read() on a never-drained pipe " +
+            "doesn't actually block under Robolectric's JVM-pipe shim, so " +
+            "the cleanup-cancels-the-read assertion is meaningless here. " +
+            "The behavior is exercised on-device by the orchestrator's audio " +
+            "staging timeout (F-010) and verified by " +
+            "InferenceOrchestratorBackpressureTest. Re-enable as an " +
+            "instrumented (androidTest) test if/when one is added."
+    )
+    @Test
+    fun `cleanup closes active blocking media source`() {
+        val (readEnd, writeEnd) = ParcelFileDescriptor.createPipe()
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val future = executor.submit {
+                pool.stageAudio("u:block", AudioTransfer("block", "audio/wav", readEnd))
+            }
+
+            Thread.sleep(100)
+            pool.cleanup("u:block")
+
+            assertThrows(ExecutionException::class.java) {
+                future.get(2, TimeUnit.SECONDS)
+            }
+            assertFalse("active PFD should be closed by cleanup", readEnd.fileDescriptor.valid())
+        } finally {
+            try { writeEnd.close() } catch (_: Throwable) {}
+            executor.shutdownNow()
         }
     }
 
