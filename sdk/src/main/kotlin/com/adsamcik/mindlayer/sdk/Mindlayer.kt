@@ -537,9 +537,85 @@ class Mindlayer private constructor(
         withTypedErrors(requestId = requestId) { it.submitToolResult(requestId, result) }
     }
 
+    /**
+     * Submit a tool result and receive a tri-state outcome (`ACCEPTED` /
+     * `NO_PENDING_CALL` / `REQUEST_GONE`). Capability-gated via
+     * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL];
+     * falls back to the legacy [submitToolResult] (which always reports
+     * success) when the connected service is older.
+     */
+    suspend fun submitToolResultDetailed(
+        requestId: String,
+        callId: String,
+        toolName: String,
+        resultJson: String,
+    ): com.adsamcik.mindlayer.ToolSubmitResult {
+        val caps = getCapabilities()
+        val result = ToolResult(
+            requestId = requestId,
+            callId = callId,
+            toolName = toolName,
+            resultJson = resultJson,
+        )
+        if (!caps.supports(com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL)) {
+            withTypedErrors(requestId = requestId) { it.submitToolResult(requestId, result) }
+            return com.adsamcik.mindlayer.ToolSubmitResult(
+                outcome = com.adsamcik.mindlayer.ToolSubmitResult.ACCEPTED,
+            )
+        }
+        return try {
+            withTypedErrors(requestId = requestId) {
+                it.submitToolResultV2(requestId, result)
+            }
+        } catch (_: NoSuchMethodError) {
+            withTypedErrors(requestId = requestId) { it.submitToolResult(requestId, result) }
+            com.adsamcik.mindlayer.ToolSubmitResult(
+                outcome = com.adsamcik.mindlayer.ToolSubmitResult.ACCEPTED,
+            )
+        } catch (_: AbstractMethodError) {
+            withTypedErrors(requestId = requestId) { it.submitToolResult(requestId, result) }
+            com.adsamcik.mindlayer.ToolSubmitResult(
+                outcome = com.adsamcik.mindlayer.ToolSubmitResult.ACCEPTED,
+            )
+        }
+    }
+
     /** Cancel an in-flight inference request. */
     suspend fun cancelInference(requestId: String) {
         withTypedErrors(requestId = requestId) { it.cancelInference(requestId) }
+    }
+
+    /**
+     * Cancel an in-flight inference and receive a tri-state outcome
+     * (`CANCELLED` / `ALREADY_FINISHED` / `UNKNOWN`). Capability-gated via
+     * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL];
+     * falls back to legacy [cancelInference] (which silently swallows all
+     * outcomes) when the connected service is older.
+     *
+     * `UNKNOWN` covers both "we never saw this requestId" and "owned by
+     * another UID" — the anti-enumeration property is preserved.
+     */
+    suspend fun cancelInferenceDetailed(requestId: String): com.adsamcik.mindlayer.CancelResult {
+        val caps = getCapabilities()
+        if (!caps.supports(com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL)) {
+            withTypedErrors(requestId = requestId) { it.cancelInference(requestId) }
+            return com.adsamcik.mindlayer.CancelResult(
+                outcome = com.adsamcik.mindlayer.CancelResult.UNKNOWN,
+            )
+        }
+        return try {
+            withTypedErrors(requestId = requestId) { it.cancelInferenceV2(requestId) }
+        } catch (_: NoSuchMethodError) {
+            withTypedErrors(requestId = requestId) { it.cancelInference(requestId) }
+            com.adsamcik.mindlayer.CancelResult(
+                outcome = com.adsamcik.mindlayer.CancelResult.UNKNOWN,
+            )
+        } catch (_: AbstractMethodError) {
+            withTypedErrors(requestId = requestId) { it.cancelInference(requestId) }
+            com.adsamcik.mindlayer.CancelResult(
+                outcome = com.adsamcik.mindlayer.CancelResult.UNKNOWN,
+            )
+        }
     }
 
     // -- Service status -------------------------------------------------------

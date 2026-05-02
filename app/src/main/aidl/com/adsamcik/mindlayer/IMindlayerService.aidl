@@ -10,6 +10,8 @@ import com.adsamcik.mindlayer.ServiceStatus;
 import com.adsamcik.mindlayer.EngineInfo;
 import com.adsamcik.mindlayer.SessionInfo;
 import com.adsamcik.mindlayer.ServiceCapabilities;
+import com.adsamcik.mindlayer.CancelResult;
+import com.adsamcik.mindlayer.ToolSubmitResult;
 
 interface IMindlayerService {
     // Client liveness — caller passes a Binder token; service linkToDeath's on it
@@ -65,5 +67,12 @@ interface IMindlayerService {
     // via ServiceCapabilities.FEATURE_MEDIA_LIST.
     void inferMulti(in RequestMeta meta, in List<MediaPart> media,
                     in ParcelFileDescriptor eventWriteEnd);
+
+    // v0.4 detailed cancel/submit results. Capability-gated via
+    // ServiceCapabilities.FEATURE_DETAILED_CANCEL. Anti-enumeration:
+    // UNKNOWN/REQUEST_GONE collapse "never existed" with "owned by
+    // another UID" so cross-UID information doesn't leak.
+    CancelResult cancelInferenceV2(String requestId);
+    ToolSubmitResult submitToolResultV2(String requestId, in ToolResult result);
 }
 

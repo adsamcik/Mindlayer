@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.service.engine
 
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
+import com.adsamcik.mindlayer.service.logging.loggable
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
 import java.util.UUID
@@ -50,6 +51,9 @@ class ToolCallBridge {
     /** scopedKey → list of pending tool calls for that inference request. */
     private val pending = ConcurrentHashMap<String, MutableList<PendingToolCall>>()
 
+    private fun requestLabel(scopedKey: String): String =
+        scopedKey.substringAfter(':', scopedKey).loggable()
+
     /**
      * Register tool calls that the model wants executed.
      *
@@ -70,7 +74,10 @@ class ToolCallBridge {
             )
         }
         pending[scopedKey] = calls.toMutableList()
-        MindlayerLog.d(TAG, "Registered ${calls.size} pending tool call(s) for scopedKey=$scopedKey")
+        MindlayerLog.d(
+            TAG,
+            "Registered ${calls.size} pending tool call(s) for request ${requestLabel(scopedKey)}",
+        )
         return calls
     }
 
@@ -81,12 +88,21 @@ class ToolCallBridge {
      * UID and the public requestId. Completes the [CompletableDeferred] of
      * the unfinished pending call matching both [callId] and [toolName],
      * unblocking the streaming coroutine in [awaitResults].
+     *
+     * @return `true` when a matching pending call was found and the result
+     *   was delivered; `false` when the request has no pending calls or no
+     *   call with the given (callId, toolName) is awaiting a result. The
+     *   return value powers the v0.4 [com.adsamcik.mindlayer.ToolSubmitResult]
+     *   tri-state.
      */
-    fun submitResult(scopedKey: String, callId: String, toolName: String, resultJson: String) {
+    fun submitResult(scopedKey: String, callId: String, toolName: String, resultJson: String): Boolean {
         val calls = pending[scopedKey]
         if (calls == null) {
-            MindlayerLog.w(TAG, "submitResult: no pending calls for scopedKey=$scopedKey")
-            return
+            MindlayerLog.w(
+                TAG,
+                "submitResult: no pending calls for request ${requestLabel(scopedKey)}",
+            )
+            return false
         }
 
         val match = synchronized(calls) {
@@ -98,13 +114,19 @@ class ToolCallBridge {
         if (match == null) {
             MindlayerLog.w(
                 TAG,
-                "submitResult: no pending call for callId=$callId tool='$toolName' in scopedKey=$scopedKey",
+                "submitResult: no pending call for call ${callId.loggable()} " +
+                    "tool='$toolName' request ${requestLabel(scopedKey)}",
             )
-            return
+            return false
         }
 
         match.resultDeferred.complete(resultJson)
-        MindlayerLog.d(TAG, "Result submitted for callId=$callId tool='$toolName' in scopedKey=$scopedKey")
+        MindlayerLog.d(
+            TAG,
+            "Result submitted for call ${callId.loggable()} tool='$toolName' " +
+                "request ${requestLabel(scopedKey)}",
+        )
+        return true
     }
 
     /**
@@ -119,7 +141,9 @@ class ToolCallBridge {
         timeoutMs: Long = DEFAULT_TIMEOUT_MS,
     ): List<Pair<String, String>> {
         val calls = pending[scopedKey]
-            ?: throw IllegalStateException("No pending tool calls for scopedKey=$scopedKey")
+            ?: throw IllegalStateException(
+                "No pending tool calls for request ${requestLabel(scopedKey)}"
+            )
 
         return try {
             withTimeout(timeoutMs) {
