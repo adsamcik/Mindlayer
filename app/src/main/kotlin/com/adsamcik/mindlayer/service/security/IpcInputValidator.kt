@@ -6,6 +6,7 @@ import com.adsamcik.mindlayer.ImageTransfer
 import com.adsamcik.mindlayer.RequestMeta
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.ToolResult
+import com.adsamcik.mindlayer.shared.Role
 
 /**
  * Centralised AIDL ingress validation.
@@ -123,10 +124,10 @@ object IpcInputValidator {
             }
         }
         require(meta.role.length <= 16) { "role too long" }
-        require(meta.role in ALLOWED_ROLES) { "role must be one of $ALLOWED_ROLES" }
+        require(Role.isValid(meta.role)) { "role must be one of ${Role.ALL}" }
     }
 
-    private val ALLOWED_ROLES = setOf("user", "model", "tool", "system")
+    private val ALLOWED_ROLES = Role.ALL
 
     fun validateSessionConfig(config: SessionConfig) {
         validateOptionalId(config.sessionId, "sessionId")
@@ -173,8 +174,8 @@ object IpcInputValidator {
     }
 
     private fun validateHistoryTurn(turn: HistoryTurn, index: Int) {
-        require(turn.role in ALLOWED_ROLES) {
-            "initialHistory[$index].role must be one of $ALLOWED_ROLES"
+        require(Role.isValid(turn.role)) {
+            "initialHistory[$index].role must be one of ${Role.ALL}"
         }
         require(turn.text.length <= MAX_HISTORY_TURN_LEN) {
             "initialHistory[$index].text too long " +
@@ -253,10 +254,11 @@ object IpcInputValidator {
                     "(${transfer.width * bpp})"
             }
         } else {
-            transfer.mimeType?.let {
-                require(it in ALLOWED_IMAGE_MIME) {
-                    "image mimeType not supported: $it"
-                }
+            val mime = requireNotNull(transfer.mimeType) {
+                "encoded image requires mimeType"
+            }
+            require(mime in ALLOWED_IMAGE_MIME) {
+                "image mimeType not supported: $mime"
             }
         }
     }
