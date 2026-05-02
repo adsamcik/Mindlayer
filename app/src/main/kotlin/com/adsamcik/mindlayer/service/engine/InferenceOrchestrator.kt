@@ -822,6 +822,12 @@ class InferenceOrchestrator(
         writer: TokenStreamWriter,
         isToolRouting: Boolean,
     ): String? {
+        // v0.5: caller can opt out of server-side validation entirely via
+        // JsonValidationDepth.NONE / CALLER_VALIDATES. The model output is
+        // returned verbatim — caller is expected to validate locally.
+        if (!config.serverValidate) {
+            return initialOutput
+        }
         var output = initialOutput
         for (attempt in 0..config.maxRetries) {
             when (val result = StructuredOutputHelper.validateJsonOutput(output, config.schema)) {

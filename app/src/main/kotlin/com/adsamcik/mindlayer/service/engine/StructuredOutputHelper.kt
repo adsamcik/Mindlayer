@@ -79,10 +79,17 @@ object StructuredOutputHelper {
                 // the practical limit before we admit defeat.
                 .coerceIn(0, 5)
 
+            // v0.5: validation_depth. Wire values: "shallow" (default) or
+            // "none" (caller opts out of server validation). Unknown
+            // values fall back to "shallow" for backward compat.
+            val depthStr = so["validation_depth"]?.jsonPrimitive?.contentOrNull
+            val serverValidate = depthStr?.lowercase() != "none"
+
             StructuredOutputConfig(
                 schema = schema,
                 strategy = strategy,
                 maxRetries = maxRetries,
+                serverValidate = serverValidate,
             )
         } catch (t: Throwable) {
             MindlayerLog.e(TAG, "Failed to parse structured_output config: ${t.safeLabel()}")
@@ -245,8 +252,13 @@ object StructuredOutputHelper {
          * overflow we evict half the cache (cheap, no LRU machinery).
          */
         private const val PATTERN_CACHE_CAP = 256
+        private const val MAX_SAFE_PATTERN_LEN = 256
 
         private val patternCache = ConcurrentHashMap<String, Regex>(PATTERN_CACHE_CAP)
+        private val backreferencePattern = Regex("""\\[1-9]""")
+        private val lookaroundPattern = Regex("""\(\?([=!]|<[=!])""")
+        private val nestedQuantifierPattern =
+            Regex("""\((?:[^()\\]|\\.)*(?:[+*]|\{\d+(?:,\d*)?})(?:[^()\\]|\\.)*\)(?:[+*]|\{\d+(?:,\d*)?})""")
 
         /**
          * Validate [json] against [schema]. Returns [ValidationResult.Valid]
@@ -419,7 +431,9 @@ object StructuredOutputHelper {
                     val pat = (el as? JsonPrimitive)?.contentOrNull
                     if (pat != null) {
                         val regex = compilePattern(pat)
-                        if (regex != null && !regex.containsMatchIn(s)) {
+                        if (regex == null) {
+                            errors.add("$path: unsupported pattern")
+                        } else if (!regex.containsMatchIn(s)) {
                             errors.add("$path: does not match pattern")
                         }
                     }
@@ -446,6 +460,9 @@ object StructuredOutputHelper {
 
         private fun compilePattern(pattern: String): Regex? {
             patternCache[pattern]?.let { return it }
+            if (!isSafePattern(pattern)) {
+                return null
+            }
             val r = try {
                 Regex(pattern)
             } catch (_: Throwable) {
@@ -460,6 +477,14 @@ object StructuredOutputHelper {
             }
             patternCache[pattern] = r
             return r
+        }
+
+        private fun isSafePattern(pattern: String): Boolean {
+            if (pattern.length > MAX_SAFE_PATTERN_LEN) return false
+            if (backreferencePattern.containsMatchIn(pattern)) return false
+            if (lookaroundPattern.containsMatchIn(pattern)) return false
+            if (nestedQuantifierPattern.containsMatchIn(pattern)) return false
+            return true
         }
 
         /** Visible for testing: lets tests assert cache state. */
@@ -483,6 +508,13 @@ data class StructuredOutputConfig(
     val schema: JsonObject,
     val strategy: StructuredOutputStrategy,
     val maxRetries: Int = 3,
+    /**
+     * v0.5: server-side validation depth. When `false`, the orchestrator
+     * skips server-side schema checks entirely and emits whatever the model
+     * produced — the SDK opted out via `JsonValidationDepth.NONE` /
+     * `CALLER_VALIDATES`. Defaults to `true` for backward compat.
+     */
+    val serverValidate: Boolean = true,
 )
 
 sealed class ValidationResult {
