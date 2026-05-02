@@ -1381,11 +1381,70 @@ class SessionConfigBuilder {
     }
 
     /**
-     * Register tools (function calling) for this session.
-     * Pass a JSON array of OpenAPI-style tool definitions.
+     * Register tools (function calling) for this session via the typed DSL.
+     * Each [ToolsBuilder.tool] call validates the name and parameters shape
+     * at builder time so malformed configs fail fast instead of being
+     * silently dropped at session-create time.
+     *
+     * ```kotlin
+     * mindlayer.createSession {
+     *     tools {
+     *         tool("get_weather") {
+     *             description("Get current weather for a city")
+     *             parameters("""{"type":"object","required":["city"],"properties":{"city":{"type":"string"}}}""")
+     *         }
+     *     }
+     * }
+     * ```
+     *
      * See [MindlayerEvent.ToolCall] for handling tool invocations.
      */
-    fun tools(json: String) { toolsJson = json }
+    fun tools(configure: ToolsBuilder.() -> Unit) {
+        toolsJson = ToolsBuilder().apply(configure).build()
+    }
+
+    /**
+     * Register tools (function calling) for this session via raw JSON.
+     * Pass a JSON array of OpenAPI-style tool definitions. Prefer the
+     * typed [tools] DSL for in-code tool catalogs — this overload is the
+     * escape hatch for callers that already have a JSON tool registry.
+     *
+     * @throws IllegalArgumentException if [json] is not a valid JSON array
+     *   of objects with `name` and `parameters` keys.
+     */
+    fun tools(json: String) {
+        val parsed = try {
+            kotlinx.serialization.json.Json.parseToJsonElement(json)
+        } catch (t: Throwable) {
+            throw IllegalArgumentException("tools(json) is not valid JSON", t)
+        }
+        require(parsed is kotlinx.serialization.json.JsonArray) {
+            "tools(json) must be a JSON array"
+        }
+        require(parsed.size <= ToolsBuilder.MAX_TOOLS) {
+            "too many tools (${parsed.size} > ${ToolsBuilder.MAX_TOOLS})"
+        }
+        for ((i, tool) in parsed.withIndex()) {
+            require(tool is kotlinx.serialization.json.JsonObject) {
+                "tools[$i] must be a JSON object"
+            }
+            val nameElement = tool["name"] as? kotlinx.serialization.json.JsonPrimitive
+            val name = nameElement?.content
+            require(!name.isNullOrBlank()) { "tools[$i] missing 'name'" }
+            require(!name.startsWith(ToolsBuilder.RESERVED_PREFIX)) {
+                "tools[$i].name '$name' uses reserved prefix"
+            }
+            // parameters is optional — service substitutes an empty
+            // {"type":"object"} schema for missing/null. Validate type
+            // when present.
+            tool["parameters"]?.let {
+                require(it is kotlinx.serialization.json.JsonObject) {
+                    "tools[$i].parameters must be a JSON object when present"
+                }
+            }
+        }
+        toolsJson = json
+    }
 
     /**
      * Additional context passed to the model as grounding data.
@@ -1428,6 +1487,18 @@ class SessionConfigBuilder {
 
     /** Set session expiration in milliseconds. Internal — consumers use [ConversationBuilder.expiration]. */
     internal fun expirationMs(ms: Long) { expirationMs = ms }
+
+    /**
+     * Internal escape hatch: set `toolsJson` directly without running the
+     * v0.3 client-side shape validation. Used by [SessionRecovery] to
+     * preserve a previously-stored tools config across recovery — that
+     * JSON was already accepted by some SDK version (possibly older,
+     * less strict) and re-validating could reject otherwise-fine data.
+     *
+     * **Do not** expose this on the public API surface — public callers
+     * should go through [tools] so they get the shape check.
+     */
+    internal fun toolsJsonRaw(json: String?) { toolsJson = json }
 
     internal fun build(): SessionConfig = SessionConfig(
         sessionId = sessionId,

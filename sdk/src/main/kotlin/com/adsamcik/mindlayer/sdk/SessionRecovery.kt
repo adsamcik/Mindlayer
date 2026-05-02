@@ -85,7 +85,7 @@ class SessionRecovery internal constructor(
             topK(replay.config.samplerTopK)
             topP(replay.config.samplerTopP)
             temperature(replay.config.samplerTemperature)
-            replay.config.toolsJson?.let { tools(it) }
+            replay.config.toolsJson?.let { toolsJsonRaw(it) }
             replay.config.extraContextJson?.let { extraContext(it) }
             if (historyTurns.isNotEmpty()) {
                 initialHistory(historyTurns)

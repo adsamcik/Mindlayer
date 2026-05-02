@@ -129,6 +129,64 @@ object IpcInputValidator {
 
     private val ALLOWED_ROLES = Role.ALL
 
+    /**
+     * v0.3 server-side toolsJson shape check. Beyond the size cap, parses
+     * the JSON array and enforces:
+     *
+     * - top-level is an array
+     * - each entry is a JSON object with a non-blank `name` (≤
+     *   [MAX_TOOL_NAME_LEN])
+     * - no `name` starts with [RESERVED_TOOL_PREFIX] (which the service
+     *   reserves for the structured-output synthetic tool)
+     * - each entry has a `parameters` object
+     *
+     * Mirrors the same checks the SDK's [com.adsamcik.mindlayer.sdk.ToolsBuilder]
+     * runs at construction time — defense in depth so a hand-crafted JSON
+     * blob from an SDK escape hatch still gets the same shape validation.
+     * Throws [IllegalArgumentException] which `ServiceBinder.createSession`
+     * translates to `INVALID_SESSION_CONFIG`.
+     */
+    private fun validateToolsJsonShape(json: String) {
+        val parsed = try {
+            kotlinx.serialization.json.Json.parseToJsonElement(json)
+        } catch (t: Throwable) {
+            throw IllegalArgumentException("toolsJson is not valid JSON")
+        }
+        require(parsed is kotlinx.serialization.json.JsonArray) {
+            "toolsJson must be a JSON array"
+        }
+        require(parsed.size <= 64) {
+            "too many tools (${parsed.size} > 64)"
+        }
+        val seenNames = mutableSetOf<String>()
+        for ((i, tool) in parsed.withIndex()) {
+            require(tool is kotlinx.serialization.json.JsonObject) {
+                "tools[$i] must be a JSON object"
+            }
+            val nameElement =
+                tool["name"] as? kotlinx.serialization.json.JsonPrimitive
+            val name = nameElement?.content
+            require(!name.isNullOrBlank()) { "tools[$i] missing 'name'" }
+            require(name.length <= MAX_TOOL_NAME_LEN) {
+                "tools[$i].name too long (${name.length} > $MAX_TOOL_NAME_LEN)"
+            }
+            require(!name.startsWith(RESERVED_TOOL_PREFIX)) {
+                "tools[$i].name uses reserved prefix '$RESERVED_TOOL_PREFIX'"
+            }
+            require(seenNames.add(name)) {
+                "tools[$i].name '$name' is duplicated"
+            }
+            // parameters is optional — service substitutes an empty
+            // {"type":"object"} schema for missing/null. Validate the
+            // type when present.
+            tool["parameters"]?.let {
+                require(it is kotlinx.serialization.json.JsonObject) {
+                    "tools[$i].parameters must be a JSON object when present"
+                }
+            }
+        }
+    }
+
     fun validateSessionConfig(config: SessionConfig) {
         validateOptionalId(config.sessionId, "sessionId")
         config.systemPrompt?.let {
@@ -140,6 +198,7 @@ object IpcInputValidator {
             require(it.length <= MAX_TOOLS_JSON_LEN) {
                 "toolsJson too long (${it.length} > $MAX_TOOLS_JSON_LEN)"
             }
+            validateToolsJsonShape(it)
         }
         config.extraContextJson?.let {
             require(it.length <= MAX_EXTRA_CONTEXT_JSON_LEN) {
