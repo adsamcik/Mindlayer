@@ -6,6 +6,7 @@ import android.system.Os
 import android.system.OsConstants
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import com.adsamcik.mindlayer.shared.StreamEvent
 import com.adsamcik.mindlayer.shared.StreamEventType
 import com.adsamcik.mindlayer.shared.StreamHeader
@@ -60,15 +61,17 @@ class TokenStreamWriter private constructor(
         // the read end open without draining surfaces as EAGAIN rather than
         // wedging the worker thread. Best-effort — failure is logged and the
         // existing watchdog (writeTimeoutMs) still bounds latency.
-        try {
-            val flags = Os.fcntlInt(writeEnd.fileDescriptor, OsConstants.F_GETFL, 0)
-            Os.fcntlInt(
-                writeEnd.fileDescriptor,
-                OsConstants.F_SETFL,
-                flags or OsConstants.O_NONBLOCK,
-            )
-        } catch (t: Throwable) {
-            MindlayerLog.w(TAG, "fcntl O_NONBLOCK failed: ${t.safeLabel()}")
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            try {
+                val flags = Os.fcntlInt(writeEnd.fileDescriptor, OsConstants.F_GETFL, 0)
+                Os.fcntlInt(
+                    writeEnd.fileDescriptor,
+                    OsConstants.F_SETFL,
+                    flags or OsConstants.O_NONBLOCK,
+                )
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "fcntl O_NONBLOCK failed: ${t.safeLabel()}")
+            }
         }
     }
 
@@ -121,6 +124,17 @@ class TokenStreamWriter private constructor(
         })
     }
 
+    /**
+     * Write an [StreamEventType.ERROR] frame using a typed wire code from
+     * [MindlayerErrorCode]. Prefer this overload over the raw-string
+     * [writeError] so the SDK side can react via
+     * [com.adsamcik.mindlayer.sdk.MindlayerEvent.Error.code] symbolic names.
+     */
+    suspend fun writeError(seq: Long, code: Int, message: String) {
+        val name = MindlayerErrorCode.nameOf(code) ?: "INTERNAL"
+        writeError(seq, name, message)
+    }
+
     fun close() {
         if (closed) return
         closed = true
@@ -140,9 +154,22 @@ class TokenStreamWriter private constructor(
         }
     }
 
-    suspend fun closeWithError(seq: Long, message: String) {
+    /**
+     * Close the pipe after emitting a final [StreamEventType.ERROR] frame.
+     *
+     * The [code] should come from [MindlayerErrorCode] so the SDK side sees a
+     * symbolic [com.adsamcik.mindlayer.sdk.MindlayerEvent.Error.code]. The
+     * default [MindlayerErrorCode.INTERNAL] is the safe choice when the
+     * call site is a generic catch — prefer a more specific code at the
+     * call site so client-side retry logic has signal.
+     */
+    suspend fun closeWithError(
+        seq: Long,
+        message: String,
+        code: Int = MindlayerErrorCode.INTERNAL,
+    ) {
         try {
-            writeError(seq, "internal_error", message)
+            writeError(seq, code, message)
         } catch (_: IOException) {
             // Best-effort
         } catch (_: CancellationException) {
