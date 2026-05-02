@@ -18,15 +18,15 @@ class MindlayerSession internal constructor(
     val sessionId: String,
 ) {
     /** Send a text message and return an [InferenceHandle]. */
-    fun chat(text: String): InferenceHandle =
+    suspend fun chat(text: String): InferenceHandle =
         client.chat(sessionId, text)
 
     /** Send a text + bitmap message and return an [InferenceHandle]. */
-    fun chatWithImage(text: String, bitmap: Bitmap): InferenceHandle =
+    suspend fun chatWithImage(text: String, bitmap: Bitmap): InferenceHandle =
         client.chatWithImage(sessionId, text, bitmap)
 
     /** Send a text + audio file message and return an [InferenceHandle]. */
-    fun chatWithAudio(text: String, audioFile: File): InferenceHandle =
+    suspend fun chatWithAudio(text: String, audioFile: File): InferenceHandle =
         client.chatWithAudio(sessionId, text, audioFile)
 
     /** @see Mindlayer.chatOnce */

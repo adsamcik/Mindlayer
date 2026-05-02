@@ -385,6 +385,11 @@ class Mindlayer private constructor(
     /**
      * Send a text message and stream back inference events.
      *
+     * Suspends until the service is connected, then issues the inference
+     * request and returns an [InferenceHandle]. The handle's [requestId]
+     * is generated synchronously before the suspend, so callers can wire
+     * up cancel callbacks ahead of time even before this returns.
+     *
      * Creates a reliable pipe, hands the write end to the service via AIDL,
      * and returns an [InferenceHandle] that provides the [requestId], event
      * [Flow], and a [cancel][InferenceHandle.cancel] function that reaches
@@ -394,7 +399,7 @@ class Mindlayer private constructor(
      * assistant turn is marked COMPLETED only after the [MindlayerEvent.Done]
      * event.
      */
-    fun chat(sessionId: String, text: String): InferenceHandle {
+    suspend fun chat(sessionId: String, text: String): InferenceHandle {
         val requestId = UUID.randomUUID().toString()
         val flow = startTrackedInference(
             sessionId = sessionId,
@@ -415,7 +420,7 @@ class Mindlayer private constructor(
     /**
      * Send a text + Bitmap message and stream back inference events.
      */
-    fun chatWithImage(
+    suspend fun chatWithImage(
         sessionId: String,
         text: String,
         bitmap: Bitmap,
@@ -441,7 +446,7 @@ class Mindlayer private constructor(
     /**
      * Send a text + audio file message and stream back inference events.
      */
-    fun chatWithAudio(
+    suspend fun chatWithAudio(
         sessionId: String,
         text: String,
         audioFile: File,
@@ -492,7 +497,7 @@ class Mindlayer private constructor(
      * limit). Callers should still build via this entry point — the
      * fallback is transparent.
      */
-    fun chatWithMedia(
+    suspend fun chatWithMedia(
         sessionId: String,
         text: String,
         vararg parts: com.adsamcik.mindlayer.MediaPart,
@@ -839,7 +844,10 @@ class Mindlayer private constructor(
      * ```
      */
     fun chatTextFlow(sessionId: String, text: String): kotlinx.coroutines.flow.Flow<String> =
-        textDeltaFlow(chat(sessionId, text), sessionId)
+        kotlinx.coroutines.flow.flow {
+            val handle = chat(sessionId, text)
+            textDeltaFlow(handle, sessionId).collect { emit(it) }
+        }
 
     /**
      * Like [chatTextFlow] but emits the **cumulative** text after each delta.
@@ -853,7 +861,8 @@ class Mindlayer private constructor(
     fun chatFullTextFlow(sessionId: String, text: String): kotlinx.coroutines.flow.Flow<String> =
         kotlinx.coroutines.flow.flow {
             val acc = StringBuilder()
-            textDeltaFlow(chat(sessionId, text), sessionId).collect { delta ->
+            val handle = chat(sessionId, text)
+            textDeltaFlow(handle, sessionId).collect { delta ->
                 acc.append(delta)
                 emit(acc.toString())
             }
@@ -1037,7 +1046,7 @@ class Mindlayer private constructor(
      *    text.
      * 4. On error/cancellation: mark assistant turn INTERRUPTED.
      */
-    private fun startTrackedInference(
+    private suspend fun startTrackedInference(
         sessionId: String,
         userText: String,
         meta: RequestMeta,
@@ -1047,48 +1056,50 @@ class Mindlayer private constructor(
         if (historyStore == null) {
             return startInference(meta, image, audio)
         }
-
+        // Capture the eagerly-issued flow before returning the wrapper so
+        // the IPC + history hook fire under the suspend caller's context.
+        val historyStoreLocal = historyStore
+        val innerFlow = startInference(meta, image, audio)
         return flow {
-            val userTurnId = historyStore.persistUserTurn(sessionId, userText)
+            val userTurnId = historyStoreLocal.persistUserTurn(sessionId, userText)
             var assistantTurnId: String? = null
             val textAccumulator = StringBuilder()
             var completed = false
 
             try {
-                startInference(meta, image, audio)
-                    .collect { event ->
-                        when (event) {
-                            is MindlayerEvent.Started -> {
-                                historyStore.markUserTurnCompleted(userTurnId)
-                                assistantTurnId = historyStore.beginAssistantTurn(sessionId)
-                            }
-                            is MindlayerEvent.TextDelta -> {
-                                textAccumulator.append(event.text)
-                            }
-                            is MindlayerEvent.Done -> {
-                                val finalText = event.fullText
-                                    ?: textAccumulator.toString()
-                                val aid = assistantTurnId
-                                if (aid != null) {
-                                    historyStore.markTurnCompleted(aid, finalText)
-                                }
-                                completed = true
-                            }
-                            is MindlayerEvent.Error -> {
-                                val aid = assistantTurnId
-                                if (aid != null) {
-                                    historyStore.markTurnInterrupted(aid)
-                                }
-                            }
-                            else -> { /* ToolCall, Metrics — pass through */ }
+                innerFlow.collect { event ->
+                    when (event) {
+                        is MindlayerEvent.Started -> {
+                            historyStoreLocal.markUserTurnCompleted(userTurnId)
+                            assistantTurnId = historyStoreLocal.beginAssistantTurn(sessionId)
                         }
-                        emit(event)
+                        is MindlayerEvent.TextDelta -> {
+                            textAccumulator.append(event.text)
+                        }
+                        is MindlayerEvent.Done -> {
+                            val finalText = event.fullText
+                                ?: textAccumulator.toString()
+                            val aid = assistantTurnId
+                            if (aid != null) {
+                                historyStoreLocal.markTurnCompleted(aid, finalText)
+                            }
+                            completed = true
+                        }
+                        is MindlayerEvent.Error -> {
+                            val aid = assistantTurnId
+                            if (aid != null) {
+                                historyStoreLocal.markTurnInterrupted(aid)
+                            }
+                        }
+                        else -> { /* ToolCall, Metrics — pass through */ }
                     }
+                    emit(event)
+                }
             } catch (e: Exception) {
                 if (!completed) {
                     val aid = assistantTurnId
                     if (aid != null) {
-                        historyStore.markTurnInterrupted(aid)
+                        historyStoreLocal.markTurnInterrupted(aid)
                     }
                 }
                 throw e
@@ -1107,7 +1118,7 @@ class Mindlayer private constructor(
      * service duplicates the fd internally). The read-end PFD is closed
      * by [TokenStreamReader] when the flow completes or is cancelled.
      */
-    private fun startInference(
+    private suspend fun startInference(
         meta: RequestMeta,
         image: com.adsamcik.mindlayer.ImageTransfer?,
         audio: com.adsamcik.mindlayer.AudioTransfer?,
@@ -1117,7 +1128,7 @@ class Mindlayer private constructor(
         val writeEnd = pipe[1]
 
         try {
-            val service = connection.requireService()
+            val service = connection.awaitConnected()
             withTypedErrorsSync(
                 service,
                 requestId = meta.requestId,
@@ -1141,7 +1152,7 @@ class Mindlayer private constructor(
      * (talking to a pre-v0.4 binary that doesn't implement `inferMulti`) —
      * the fallback caps at one image + one audio per the legacy shape.
      */
-    private fun startInferenceMulti(
+    private suspend fun startInferenceMulti(
         meta: RequestMeta,
         media: List<com.adsamcik.mindlayer.MediaPart>,
     ): Flow<MindlayerEvent> {
@@ -1150,7 +1161,7 @@ class Mindlayer private constructor(
         val writeEnd = pipe[1]
 
         try {
-            val service = connection.requireService()
+            val service = connection.awaitConnected()
             try {
                 withTypedErrorsSync(
                     service,
@@ -1224,7 +1235,7 @@ class Mindlayer private constructor(
      * point. Same history-persistence semantics; just routes through the
      * new ordered-media wire shape.
      */
-    private fun startTrackedInferenceMulti(
+    private suspend fun startTrackedInferenceMulti(
         sessionId: String,
         userText: String,
         meta: RequestMeta,
@@ -1234,47 +1245,48 @@ class Mindlayer private constructor(
             return startInferenceMulti(meta, media)
         }
 
+        val historyStoreLocal = historyStore
+        val innerFlow = startInferenceMulti(meta, media)
         return flow {
-            val userTurnId = historyStore.persistUserTurn(sessionId, userText)
+            val userTurnId = historyStoreLocal.persistUserTurn(sessionId, userText)
             var assistantTurnId: String? = null
             val textAccumulator = StringBuilder()
             var completed = false
 
             try {
-                startInferenceMulti(meta, media)
-                    .collect { event ->
-                        when (event) {
-                            is MindlayerEvent.Started -> {
-                                historyStore.markUserTurnCompleted(userTurnId)
-                                assistantTurnId = historyStore.beginAssistantTurn(sessionId)
-                            }
-                            is MindlayerEvent.TextDelta -> {
-                                textAccumulator.append(event.text)
-                            }
-                            is MindlayerEvent.Done -> {
-                                val finalText = event.fullText
-                                    ?: textAccumulator.toString()
-                                val aid = assistantTurnId
-                                if (aid != null) {
-                                    historyStore.markTurnCompleted(aid, finalText)
-                                }
-                                completed = true
-                            }
-                            is MindlayerEvent.Error -> {
-                                val aid = assistantTurnId
-                                if (aid != null) {
-                                    historyStore.markTurnInterrupted(aid)
-                                }
-                            }
-                            else -> { /* ToolCall, Metrics — pass through */ }
+                innerFlow.collect { event ->
+                    when (event) {
+                        is MindlayerEvent.Started -> {
+                            historyStoreLocal.markUserTurnCompleted(userTurnId)
+                            assistantTurnId = historyStoreLocal.beginAssistantTurn(sessionId)
                         }
-                        emit(event)
+                        is MindlayerEvent.TextDelta -> {
+                            textAccumulator.append(event.text)
+                        }
+                        is MindlayerEvent.Done -> {
+                            val finalText = event.fullText
+                                ?: textAccumulator.toString()
+                            val aid = assistantTurnId
+                            if (aid != null) {
+                                historyStoreLocal.markTurnCompleted(aid, finalText)
+                            }
+                            completed = true
+                        }
+                        is MindlayerEvent.Error -> {
+                            val aid = assistantTurnId
+                            if (aid != null) {
+                                historyStoreLocal.markTurnInterrupted(aid)
+                            }
+                        }
+                        else -> { /* ToolCall, Metrics — pass through */ }
                     }
+                    emit(event)
+                }
             } catch (e: Exception) {
                 if (!completed) {
                     val aid = assistantTurnId
                     if (aid != null) {
-                        historyStore.markTurnInterrupted(aid)
+                        historyStoreLocal.markTurnInterrupted(aid)
                     }
                 }
                 throw e
