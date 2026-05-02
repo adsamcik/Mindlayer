@@ -6,6 +6,7 @@ import android.os.ParcelFileDescriptor
 import com.adsamcik.mindlayer.EngineInfo
 import com.adsamcik.mindlayer.HistoryTurn
 import com.adsamcik.mindlayer.RequestMeta
+import com.adsamcik.mindlayer.ServiceCapabilities
 import com.adsamcik.mindlayer.ServiceStatus
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.SessionInfo
@@ -107,6 +108,53 @@ class Mindlayer private constructor(
     /** Suspend until the service binder is available. */
     suspend fun awaitConnected() {
         connection.awaitConnected()
+    }
+
+    // -- Capabilities ---------------------------------------------------------
+
+    @Volatile private var cachedCapabilities: ServiceCapabilities? = null
+
+    /**
+     * Probe and cache the [ServiceCapabilities] of the connected service.
+     *
+     * The first call after [awaitConnected] performs the AIDL handshake and
+     * caches the result for the lifetime of this [Mindlayer] instance.
+     * Subsequent calls return the cached value without crossing the wire.
+     *
+     * **Old service compatibility**: if the connected service predates the
+     * `getCapabilities` AIDL method (built before v0.2), this falls back to
+     * [ServiceCapabilities.v0Baseline] so feature-gated SDK code can still
+     * make conservative decisions.
+     *
+     * Use [ServiceCapabilities.supports] to test a specific feature flag:
+     *
+     * ```kotlin
+     * val caps = mindlayer.getCapabilities()
+     * if (caps.supports(ServiceCapabilities.FEATURE_TOKEN_BATCH)) {
+     *     // request batched token deltas
+     * }
+     * ```
+     */
+    suspend fun getCapabilities(): ServiceCapabilities {
+        cachedCapabilities?.let { return it }
+        val service = connection.awaitConnected()
+        val caps = try {
+            service.capabilities
+        } catch (_: NoSuchMethodError) {
+            // AIDL stub from an older SDK; binder dispatch returned no
+            // implementation for this method on the remote side.
+            ServiceCapabilities.v0Baseline()
+        } catch (_: AbstractMethodError) {
+            // Same shape, different exception class on some Android versions.
+            ServiceCapabilities.v0Baseline()
+        } catch (e: SecurityException) {
+            // Auth-gate refusal — propagate. Capabilities are NOT typed-error
+            // gated; an un-prefixed SecurityException here means the caller
+            // isn't on the allowlist and this binding is going to be torn down.
+            throw e
+        }
+        cachedCapabilities = caps
+        return caps
     }
 
     /**

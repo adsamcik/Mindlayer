@@ -113,6 +113,28 @@ class ServiceBinder(
         private const val TAG = "ServiceBinder"
         /** F-051: lifetime per-UID registerClient cap. */
         const val MAX_REGISTRATIONS_PER_UID = 64
+
+        /**
+         * Logical API version surfaced via [getCapabilities]. Bumped whenever
+         * a new method is appended to the AIDL interface. Today's surface
+         * (`registerClient` … `revokeApp`, `getCapabilities`) is v1.
+         */
+        const val CURRENT_API_VERSION = 1
+
+        /**
+         * Capability strings the current service implementation supports.
+         * Append to this set when a new feature lands; never repurpose
+         * existing strings. Documented in `docs/AIDL_STABILITY.md`.
+         */
+        val SUPPORTED_FEATURES: Set<String> = setOf(
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TYPED_ERRORS,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_PIPE_PROTO_V1,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_PIPE_STREAM_V1,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_SHARED_MEMORY_MEDIA,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TOOL_RESULTS,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_HISTORY_RECOVERY,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_STRUCTURED_OUTPUT,
+        )
     }
 
     private data class ClientRegistration(
@@ -892,6 +914,30 @@ class ServiceBinder(
             initTimeSeconds = engineManager.initTimeSeconds,
             lastPrefillToksPerSec = 0f,
             lastDecodeToksPerSec = 0f,
+        )
+    }
+
+    override fun getCapabilities(): com.adsamcik.mindlayer.ServiceCapabilities {
+        // Cheap probe — quarter-cost so first-launch handshake doesn't burn
+        // budget. Still gated by authorizeCall so un-approved peers go
+        // through the standard pending-approval path rather than getting a
+        // free fingerprinting endpoint.
+        authorizeCall(cost = 0.25)
+        return com.adsamcik.mindlayer.ServiceCapabilities(
+            apiVersion = CURRENT_API_VERSION,
+            supportedFeatures = SUPPORTED_FEATURES,
+            pipeProtocol = "mindlayer.stream.v1",
+            maxFrameBytes = 1_048_576,
+            maxToolRounds = com.adsamcik.mindlayer.service.engine.InferenceOrchestrator.MAX_TOOL_ROUNDS,
+            maxToolArgsLen = com.adsamcik.mindlayer.service.engine.InferenceOrchestrator.MAX_TOOL_ARGS_LEN,
+            maxRequestsPerMinute = RateLimiter.DEFAULT_RPM,
+            maxConcurrentInferences = RateLimiter.DEFAULT_MAX_CONCURRENT,
+            maxConcurrentSessions = memoryBudget.deviceTier.maxSessions,
+            maxSessionExpirationMs = IpcInputValidator.MAX_SESSION_EXPIRATION_MS,
+            // Today's infer() takes at most one image + one audio = 2 attachments
+            // in a single call; v0.4 inferMulti will lift this when it ships.
+            maxMediaPartsPerRequest = 2,
+            maxTotalMediaBytesPerRequest = MAX_MEDIA_BYTES.toLong() * 2,
         )
     }
 
