@@ -3,6 +3,7 @@ package com.adsamcik.mindlayer.sdk
 import android.util.Log
 import com.adsamcik.mindlayer.HistoryTurn
 import com.adsamcik.mindlayer.sdk.db.TurnRole
+import com.adsamcik.mindlayer.shared.Role
 
 /**
  * Orchestrates session recovery after an OOM kill or service crash.
@@ -58,10 +59,10 @@ class SessionRecovery internal constructor(
         val historyTurns = replay.turns.map { turn ->
             HistoryTurn(
                 role = when (turn.role) {
-                    TurnRole.USER -> "user"
-                    TurnRole.ASSISTANT -> "model"
-                    TurnRole.TOOL -> "tool"
-                    else -> "user"
+                    TurnRole.USER -> Role.USER
+                    TurnRole.ASSISTANT -> Role.MODEL  // wire spells assistant as "model"
+                    TurnRole.TOOL -> Role.TOOL
+                    else -> Role.USER
                 },
                 text = turn.textContent ?: "",
             )

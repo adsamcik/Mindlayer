@@ -19,7 +19,14 @@ data class ConversationSummary(
  * Preview of a single turn in a conversation.
  */
 data class TurnPreview(
-    val role: String,      // "user", "assistant"
+    /**
+     * One of [com.adsamcik.mindlayer.shared.Role] (`"user"`, `"model"`, `"tool"`,
+     * `"system"`). Note: the wire vocabulary uses `"model"` for assistant
+     * responses — the SDK's local Room enum [com.adsamcik.mindlayer.sdk.db.TurnRole]
+     * spells the same value as `ASSISTANT`. Mapping happens in
+     * [com.adsamcik.mindlayer.sdk.SessionRecovery].
+     */
+    val role: String,
     val text: String?,     // First 200 chars of content
     val timestamp: Long,
 )
