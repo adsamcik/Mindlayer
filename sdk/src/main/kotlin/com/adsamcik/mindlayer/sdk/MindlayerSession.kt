@@ -37,6 +37,18 @@ class MindlayerSession internal constructor(
     suspend fun chatWithImageOnce(text: String, bitmap: Bitmap): String =
         client.chatWithImageOnce(sessionId, text, bitmap)
 
+    /** @see Mindlayer.chatWithAudioOnce */
+    suspend fun chatWithAudioOnce(text: String, audioFile: File): String =
+        client.chatWithAudioOnce(sessionId, text, audioFile)
+
+    /** @see Mindlayer.chatTextFlow */
+    fun chatTextFlow(text: String): kotlinx.coroutines.flow.Flow<String> =
+        client.chatTextFlow(sessionId, text)
+
+    /** @see Mindlayer.chatFullTextFlow */
+    fun chatFullTextFlow(text: String): kotlinx.coroutines.flow.Flow<String> =
+        client.chatFullTextFlow(sessionId, text)
+
     /** Submit a tool result for continued inference using the ToolCall callId. */
     suspend fun submitToolResult(
         requestId: String,
