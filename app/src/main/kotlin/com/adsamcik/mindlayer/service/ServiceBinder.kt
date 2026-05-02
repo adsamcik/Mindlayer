@@ -94,8 +94,19 @@ class ServiceBinder(
     private val clientDeathRecipients =
         ConcurrentHashMap<Int, Pair<IBinder, IBinder.DeathRecipient>>()
 
+    /**
+     * F-051: lifetime registerClient counter per UID. Hostile or buggy
+     * clients that re-register on a tight loop are blocked once they
+     * cross [MAX_REGISTRATIONS_PER_UID]. The cap is intentionally
+     * generous — legitimate first-party SDKs will typically register
+     * once per process; reconnect-after-rebind retries are rare.
+     */
+    private val registrationAttempts = ConcurrentHashMap<Int, Int>()
+
     companion object {
         private const val TAG = "ServiceBinder"
+        /** F-051: lifetime per-UID registerClient cap. */
+        const val MAX_REGISTRATIONS_PER_UID = 64
     }
 
     // ---- Security gate -----------------------------------------------------
@@ -205,6 +216,54 @@ class ServiceBinder(
         val token = requireNotNull(clientToken) { "clientToken must not be null" }
         authorizeCall()
         val uid = Binder.getCallingUid()
+
+        // F-051: the death-recipient mechanism is the wrong defence layer
+        // for a hostile client, but a self-UID dashboard caller may
+        // accidentally pass a system Binder (e.g. a service token from
+        // another binding it holds) that never dies until the system
+        // server crashes. We can't *prove* the token comes from the
+        // calling process — `Binder` doesn't expose an owner UID — but we
+        // can refuse two pathological cases:
+        //  1. tokens that are local to *our* process (i.e. the caller is
+        //     trying to register OUR own service Binder back at us, which
+        //     would `binderDied` only when *our* process dies),
+        //  2. tokens that already advertise an interface descriptor for a
+        //     different AIDL contract than `IMindlayerService`.
+        // Combined with the per-UID registration cap below, this turns an
+        // edge-case foot-gun into a deterministic SecurityException.
+        if (token === asBinder()) {
+            throw SecurityException("clientToken must not be the service's own binder")
+        }
+        val descriptor = try { token.interfaceDescriptor } catch (_: Throwable) { null }
+        if (descriptor != null && descriptor.isNotEmpty() &&
+            descriptor != "android.os.IBinder" &&
+            descriptor != IMindlayerService.DESCRIPTOR
+        ) {
+            // The token implements some other AIDL contract — almost
+            // certainly a misuse. Reject loudly.
+            MindlayerLog.w(
+                TAG,
+                "Rejecting registerClient: clientToken descriptor='$descriptor' " +
+                    "is neither anonymous IBinder nor ${IMindlayerService.DESCRIPTOR}",
+            )
+            throw SecurityException("clientToken descriptor mismatch")
+        }
+        // Cap repeat registrations from a single UID. The map is keyed by
+        // UID so a hostile caller can't grow it past one entry, but a
+        // buggy client repeatedly invoking registerClient with new tokens
+        // each time would still churn through linkToDeath/unlinkToDeath
+        // pairs. This counter is best-effort (concurrent registrations
+        // from the same UID race), but caps the worst-case cost.
+        val attempts = registrationAttempts.merge(uid, 1, Int::plus) ?: 1
+        if (attempts > MAX_REGISTRATIONS_PER_UID) {
+            registrationAttempts[uid] = MAX_REGISTRATIONS_PER_UID
+            MindlayerLog.w(
+                TAG,
+                "Rejecting registerClient: uid=$uid exceeded " +
+                    "$MAX_REGISTRATIONS_PER_UID lifetime registrations",
+            )
+            throw SecurityException("registerClient cap exceeded")
+        }
 
         // Build the recipient first so it can capture itself by reference
         // for the F-050 self-identity check inside binderDied.

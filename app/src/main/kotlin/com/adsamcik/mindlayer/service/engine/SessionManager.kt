@@ -123,6 +123,34 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         val tier = memoryBudget.deviceTier
         val snap = memoryBudget.currentSnapshot()
 
+        // F-039: per-UID quota. A single ownerToken cannot occupy more
+        // than `perUidCap` of the tier's session slots — guards against a
+        // hostile or buggy authorized caller monopolising the cap and
+        // forcing other UIDs to evict their warm sessions. The cap is a
+        // ceil-half of the tier limit (so 2-of-4, 3-of-6 etc.) which
+        // leaves room for a single dominant caller without forcing the
+        // 1-tier device to hard-fail.
+        if (ownerToken != null) {
+            val perUidCap = ((tier.maxSessions + 1) / 2).coerceAtLeast(1)
+            val ownedNow = sessions.values.count { it.ownerToken == ownerToken }
+            if (ownedNow >= perUidCap) {
+                // Try evicting one of the caller's own sessions before
+                // hard-failing — they are the cheapest to lose.
+                val evicted = evictLowestPriorityOwnedBy(ownerToken)
+                if (!evicted) {
+                    MindlayerLog.w(
+                        TAG,
+                        "Per-UID session quota exhausted (owned=$ownedNow, " +
+                            "cap=$perUidCap, tier=${tier.maxSessions})",
+                    )
+                    throw IllegalStateException(
+                        "Per-caller session quota reached " +
+                            "($ownedNow/$perUidCap); destroy an existing session first",
+                    )
+                }
+            }
+        }
+
         if (sessions.size >= tier.maxSessions) {
             val evicted = if (ownerToken != null) {
                 MindlayerLog.w(

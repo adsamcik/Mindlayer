@@ -34,13 +34,35 @@ internal object DbKeyProvider {
     private const val TAG = "DbKeyProvider"
     private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
     private const val KEY_ALIAS = "mindlayer.db.key.app"
+    /**
+     * F-049: separate Keystore alias holding the HMAC key that signs the
+     * unwrap-failure counter. Living under a different alias means an
+     * attacker who plants a corrupted wrapped blob in `SharedPreferences`
+     * cannot also pre-set the failure counter to `MAX_UNWRAP_FAILS - 1`
+     * to coerce the next legitimate unwrap-failure into an immediate
+     * destructive `forceReset`.
+     */
+    private const val KEY_ALIAS_HMAC = "mindlayer.db.key.app.hmac"
     private const val PREF_FILE = "mindlayer_db_key"
     private const val PREF_WRAPPED = "wrapped_key"
     private const val PREF_IV = "wrapped_iv"
+    /** F-049: persisted unwrap-failure strike counter. Tamper-evident via HMAC. */
+    private const val PREF_FAIL_COUNT = "unwrap_fail_count"
+    /** F-049: HMAC-SHA256 over `unwrap_fail_count` value, base-64 encoded. */
+    private const val PREF_FAIL_MAC = "unwrap_fail_mac"
     private const val LOCK_FILE = "mindlayer_db_key.lock"
     private const val PASSPHRASE_LEN = 32
     private const val GCM_TAG_BITS = 128
     private const val AES_GCM_TRANSFORM = "AES/GCM/NoPadding"
+    private const val HMAC_ALGORITHM = "HmacSHA256"
+    /**
+     * F-049: number of consecutive verified unwrap failures we will tolerate
+     * before destructively wiping the DB. Three strikes is enough to make a
+     * one-shot planted-blob attack obviously expensive (the attacker has to
+     * plant three different corrupted blobs across three service starts) but
+     * still bounded — a genuinely corrupted disk recovers in `N` restarts.
+     */
+    private const val MAX_UNWRAP_FAILS = 3
 
     private val lock = Any()
 
@@ -103,13 +125,45 @@ internal object DbKeyProvider {
                 val iv = Base64.decode(ivB64, Base64.NO_WRAP)
                 val cipher = Cipher.getInstance(AES_GCM_TRANSFORM)
                 cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
-                return cipher.doFinal(wrapped)
+                val passphrase = cipher.doFinal(wrapped)
+                // F-049: a successful unwrap clears the strike counter so a
+                // single transient failure (e.g. a Keystore service restart
+                // mid-init) doesn't inch the device toward a destructive
+                // reset over time.
+                resetFailCount(prefs)
+                return passphrase
             } catch (e: KeyPermanentlyInvalidatedException) {
                 MindlayerLog.w(TAG, "Keystore key invalidated; regenerating DB passphrase and wiping $databaseName.", throwable = e)
                 forceReset(context, prefs, databaseName)
             } catch (e: GeneralSecurityException) {
-                MindlayerLog.w(TAG, "Failed to unwrap DB passphrase (${e.javaClass.simpleName}); regenerating and wiping $databaseName.", throwable = e)
-                forceReset(context, prefs, databaseName)
+                // F-049: instead of force-resetting on the very first
+                // GeneralSecurityException (which is the destructive
+                // outcome an attacker who plants a corrupt blob is trying
+                // to force), increment a tamper-evident strike counter
+                // and only wipe after `MAX_UNWRAP_FAILS` verified strikes.
+                val strikes = incrementVerifiedFailCount(prefs)
+                if (strikes >= MAX_UNWRAP_FAILS) {
+                    MindlayerLog.w(
+                        TAG,
+                        "Failed to unwrap DB passphrase (${e.javaClass.simpleName}); " +
+                            "$strikes/$MAX_UNWRAP_FAILS strikes — regenerating and wiping $databaseName.",
+                        throwable = e,
+                    )
+                    forceReset(context, prefs, databaseName)
+                } else {
+                    MindlayerLog.w(
+                        TAG,
+                        "Failed to unwrap DB passphrase (${e.javaClass.simpleName}); " +
+                            "$strikes/$MAX_UNWRAP_FAILS strikes — refusing to start to avoid " +
+                            "destructive reset on a possibly transient failure.",
+                        throwable = e,
+                    )
+                    throw IllegalStateException(
+                        "DB unwrap failed (strike $strikes of $MAX_UNWRAP_FAILS); " +
+                            "retry on next launch or clear app data manually",
+                        e,
+                    )
+                }
             } catch (e: IllegalStateException) {
                 throw e
             } catch (e: Exception) {
@@ -134,11 +188,20 @@ internal object DbKeyProvider {
         if (!context.deleteDatabase(databaseName)) {
             MindlayerLog.w(TAG, "deleteDatabase($databaseName) returned false during key-reset; the file may persist and open with the new key will fail.")
         }
-        val ok = prefs.edit().remove(PREF_WRAPPED).remove(PREF_IV).commit()
+        // F-049: reset is the strike-counter terminator — clear it so the
+        // post-reset session starts from zero strikes. Both keys and the
+        // counter MAC are dropped.
+        val ok = prefs.edit()
+            .remove(PREF_WRAPPED)
+            .remove(PREF_IV)
+            .remove(PREF_FAIL_COUNT)
+            .remove(PREF_FAIL_MAC)
+            .commit()
         if (!ok) {
             throw IllegalStateException("Could not persist DB-key reset to SharedPreferences")
         }
         deleteKeystoreKey()
+        deleteHmacKey()
     }
 
     private fun createAndPersist(prefs: android.content.SharedPreferences): ByteArray {
@@ -179,6 +242,100 @@ internal object DbKeyProvider {
         try {
             val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
             if (ks.containsAlias(KEY_ALIAS)) ks.deleteEntry(KEY_ALIAS)
+        } catch (_: Exception) {
+            // best effort
+        }
+    }
+
+    /**
+     * F-049: read the persisted strike counter and verify its HMAC against
+     * the dedicated keystore alias. If the MAC is missing or doesn't
+     * verify, treat the counter as untrustworthy and return 0 — a planted
+     * counter cannot bias the decision toward an immediate reset.
+     */
+    private fun verifiedFailCount(prefs: android.content.SharedPreferences): Int {
+        val count = prefs.getInt(PREF_FAIL_COUNT, 0)
+        if (count <= 0) return 0
+        val storedMac = prefs.getString(PREF_FAIL_MAC, null) ?: return 0
+        val key = try { loadOrCreateHmacKey() } catch (_: Exception) { return 0 }
+        val computed = computeFailCountMac(count, key)
+        return if (constantTimeEquals(computed, storedMac)) count else {
+            MindlayerLog.w(
+                TAG,
+                "Unwrap-fail-count HMAC mismatch — counter rejected as tampered",
+            )
+            // Drop the tampered counter so it can't keep biasing future decisions.
+            prefs.edit().remove(PREF_FAIL_COUNT).remove(PREF_FAIL_MAC).apply()
+            0
+        }
+    }
+
+    /**
+     * F-049: increment the strike counter under HMAC and return the new
+     * value. The HMAC is computed over the decimal text of the count
+     * using the dedicated keystore alias so an attacker who can write
+     * `SharedPreferences` cannot also forge the MAC.
+     */
+    private fun incrementVerifiedFailCount(prefs: android.content.SharedPreferences): Int {
+        val newCount = verifiedFailCount(prefs) + 1
+        try {
+            val key = loadOrCreateHmacKey()
+            val mac = computeFailCountMac(newCount, key)
+            prefs.edit()
+                .putInt(PREF_FAIL_COUNT, newCount)
+                .putString(PREF_FAIL_MAC, mac)
+                .apply()
+        } catch (e: Exception) {
+            // If we can't HMAC the counter (e.g. Keystore busy), don't bias
+            // the next decision either way — clear the counter rather than
+            // persisting an unauthenticated value.
+            MindlayerLog.w(TAG, "Failed to persist strike counter HMAC", throwable = e)
+            prefs.edit().remove(PREF_FAIL_COUNT).remove(PREF_FAIL_MAC).apply()
+        }
+        return newCount
+    }
+
+    /** F-049: clear strikes after a successful unwrap. Best-effort. */
+    private fun resetFailCount(prefs: android.content.SharedPreferences) {
+        val current = prefs.getInt(PREF_FAIL_COUNT, 0)
+        if (current == 0 && prefs.getString(PREF_FAIL_MAC, null) == null) return
+        prefs.edit().remove(PREF_FAIL_COUNT).remove(PREF_FAIL_MAC).apply()
+    }
+
+    private fun computeFailCountMac(count: Int, key: javax.crypto.SecretKey): String {
+        val mac = javax.crypto.Mac.getInstance(HMAC_ALGORITHM)
+        mac.init(key)
+        val bytes = mac.doFinal(count.toString().toByteArray(Charsets.US_ASCII))
+        return Base64.encodeToString(bytes, Base64.NO_WRAP)
+    }
+
+    private fun constantTimeEquals(a: String, b: String): Boolean {
+        if (a.length != b.length) return false
+        var diff = 0
+        for (i in a.indices) {
+            diff = diff or (a[i].code xor b[i].code)
+        }
+        return diff == 0
+    }
+
+    private fun loadOrCreateHmacKey(): javax.crypto.SecretKey {
+        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        val existing = ks.getEntry(KEY_ALIAS_HMAC, null) as? KeyStore.SecretKeyEntry
+        if (existing != null) return existing.secretKey
+        val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_HMAC_SHA256, KEYSTORE_PROVIDER)
+        gen.init(
+            KeyGenParameterSpec.Builder(
+                KEY_ALIAS_HMAC,
+                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY,
+            ).setDigests(KeyProperties.DIGEST_SHA256).build()
+        )
+        return gen.generateKey()
+    }
+
+    private fun deleteHmacKey() {
+        try {
+            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+            if (ks.containsAlias(KEY_ALIAS_HMAC)) ks.deleteEntry(KEY_ALIAS_HMAC)
         } catch (_: Exception) {
             // best effort
         }

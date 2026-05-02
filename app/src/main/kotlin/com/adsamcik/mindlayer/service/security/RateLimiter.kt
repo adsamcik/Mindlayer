@@ -16,6 +16,17 @@ class RateLimiter(
     private val maxConcurrent: Int = DEFAULT_MAX_CONCURRENT,
     private val idleEvictMs: Long = DEFAULT_IDLE_EVICT_MS,
     private val maxRejectedPerMinute: Int = DEFAULT_REJECT_RPM,
+    /**
+     * F-040: hard cap on the total number of in-flight inferences across
+     * all UIDs combined. A single UID is already bounded by [maxConcurrent];
+     * this prevents N authorized callers from each saturating their own
+     * per-UID budget and collectively pinning more native engine slots
+     * than the device can actually serve. The default is generous (the
+     * project's per-UID `MAX_CONCURRENT = 4` × 4 typical clients = 16)
+     * and is the upper bound on what `MAX_TOOL_ROUNDS × tool wait` can
+     * pin even after F-061's wall-clock cap.
+     */
+    private val maxGlobalConcurrent: Int = DEFAULT_MAX_GLOBAL_CONCURRENT,
     private val timeSource: () -> Long = { SystemClock.elapsedRealtime() },
 ) {
 
@@ -67,24 +78,50 @@ class RateLimiter(
     }
 
     fun beginInference(uid: Int): Boolean {
+        // F-040: check the global cap first so a single UID's per-UID
+        // budget cannot let it claim a slot that has already been
+        // collectively exhausted by other UIDs. If the global cap is
+        // tripped we leave the per-UID counter alone (no false positive).
+        val nextGlobal = globalConcurrent.incrementAndGet()
+        if (nextGlobal > maxGlobalConcurrent) {
+            globalConcurrent.decrementAndGet()
+            return false
+        }
         val bucket = buckets.getOrPut(uid) { newEmptyBucket() }
         synchronized(bucket) {
             bucket.lastAccessMs = timeSource()
-            if (bucket.concurrent >= maxConcurrent) return false
+            if (bucket.concurrent >= maxConcurrent) {
+                globalConcurrent.decrementAndGet()
+                return false
+            }
             bucket.concurrent += 1
             return true
         }
     }
 
     fun endInference(uid: Int) {
-        val bucket = buckets[uid] ?: return
+        val bucket = buckets[uid] ?: run {
+            // Even if the per-UID bucket has been GC'd, we still owe a
+            // global decrement (e.g. inference completed after a long
+            // idle window where opportunistic eviction removed the UID).
+            // Decrement defensively but never below zero.
+            globalConcurrent.updateAndGet { (it - 1).coerceAtLeast(0) }
+            return
+        }
         synchronized(bucket) {
             bucket.concurrent = (bucket.concurrent - 1).coerceAtLeast(0)
             bucket.lastAccessMs = timeSource()
         }
+        globalConcurrent.updateAndGet { (it - 1).coerceAtLeast(0) }
     }
 
     fun concurrentFor(uid: Int): Int = buckets[uid]?.let { synchronized(it) { it.concurrent } } ?: 0
+
+    /** F-040: current count of inferences in-flight across all UIDs. */
+    fun globalConcurrent(): Int = globalConcurrent.get()
+
+    private val globalConcurrent: java.util.concurrent.atomic.AtomicInteger =
+        java.util.concurrent.atomic.AtomicInteger(0)
 
     /**
      * F-033: try to consume one token from the per-UID *rejected* bucket.
@@ -166,6 +203,14 @@ class RateLimiter(
          * for a flooder to drive disk I/O.
          */
         const val DEFAULT_REJECT_RPM = 6
+        /**
+         * F-040: hard cap on simultaneous inferences across all UIDs. Set
+         * to 4 × per-UID cap so up to four typical first-party clients
+         * can each fully utilise their per-UID budget without colliding,
+         * but a fleet of co-signed apps cannot collectively flood the
+         * native engine.
+         */
+        const val DEFAULT_MAX_GLOBAL_CONCURRENT = 16
         private const val EVICT_SCAN_INTERVAL_MS = 30_000L
 
         /**

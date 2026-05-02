@@ -52,11 +52,38 @@ class InferenceOrchestrator(
      * full production budget.
      */
     private val maxInferenceMs: Long = MAX_INFERENCE_MS,
+    /**
+     * F-041: thermal policy provider. Default reads the live policy from
+     * the service's `ThermalMonitor` so the orchestrator can refuse GPU
+     * work in CRITICAL and pace tool-round retries on HOT. Tests inject
+     * a fixed policy via this lambda. Failures from the live read fall
+     * back to a COOL policy so a misconfigured `service` mock or a
+     * partially-initialised service can't accidentally close every
+     * inference with `thermal_critical`.
+     */
+    private val thermalPolicy: () -> ThermalPolicy = {
+        try { service.thermalMonitor.currentPolicy.value ?: COOL_POLICY }
+        catch (_: Throwable) { COOL_POLICY }
+    },
 ) {
 
     companion object {
         private const val TAG = "InferenceOrchestrator"
         private const val MAX_TOOL_ROUNDS = 25
+
+        /**
+         * F-041: fallback policy applied when the live ThermalMonitor read
+         * fails (typically: a test using a relaxed `service` mock). COOL
+         * means "no thermal interventions" so the orchestrator behaves as
+         * it did before F-041.
+         */
+        private val COOL_POLICY = ThermalPolicy(
+            band = ThermalBand.COOL,
+            recommendedBackend = "GPU",
+            burstSeconds = 12,
+            restSeconds = 0,
+            chunkTokens = 128,
+        )
 
         /**
          * F-036: cap on the JSON-encoded length of model-emitted tool
@@ -299,6 +326,26 @@ class InferenceOrchestrator(
             )
             try {
                 kotlinx.coroutines.withTimeout(maxInferenceMs) {
+                // F-041: thermal duty-cycle gate. CRITICAL band on GPU
+                // means the device is at the edge of throttling; refuse
+                // new GPU work outright so the engine isn't asked to
+                // sustain a long decode loop while the SoC is too hot.
+                // The recommended-backend signal flips to CPU when
+                // CRITICAL is reached, but the engine doesn't switch
+                // mid-session — refusing here lets the client reconnect
+                // when thermal headroom recovers.
+                val initialPolicy = thermalPolicy()
+                val currentBackend = service.engineManager.currentBackend
+                if (initialPolicy.band == ThermalBand.CRITICAL && currentBackend == "GPU") {
+                    MindlayerLog.w(
+                        TAG,
+                        "Refusing inference under CRITICAL thermal band on GPU backend",
+                        requestId = meta.requestId,
+                        sessionId = meta.sessionId,
+                    )
+                    writer.closeWithError(0, "thermal_critical")
+                    return@withTimeout
+                }
                 writer.writeHeader(meta.requestId)
 
                 // Build multimodal content parts.
@@ -308,7 +355,14 @@ class InferenceOrchestrator(
                 val parts = mutableListOf<Content>()
                 val textContent = meta.textContent
                 if (textContent != null) {
-                    parts.add(Content.Text(textContent))
+                    // F-069: defense-in-depth scrub of user-supplied text.
+                    // LiteRT-LM's `Content.Text` is structurally separated
+                    // from system/tool roles, but the chat template
+                    // flattens to a single string at tokenisation time —
+                    // strip Gemma turn / image / sentinel tokens and any
+                    // C0 controls so a hostile client cannot smuggle a
+                    // role-flip marker via `RequestMeta.textContent`.
+                    parts.add(Content.Text(ToolOutputSanitizer.scrub(textContent)))
                 }
                 if (stagedImage != null) {
                     parts.add(Content.ImageFile(stagedImage.filePath))
@@ -414,6 +468,25 @@ class InferenceOrchestrator(
 
                 // --- Tool call loop -----------------------------------------
                 while (accumulatedToolCalls.isNotEmpty() && toolCallRound < MAX_TOOL_ROUNDS) {
+                    // F-041: between tool rounds, sample the live thermal
+                    // policy and insert a `restSeconds` delay if the
+                    // device is in HOT / CRITICAL. This duty-cycles GPU
+                    // pressure across multi-round tool conversations
+                    // without aborting the request — tools that aren't
+                    // dominated by inference time will barely notice.
+                    if (toolCallRound > 0) {
+                        val pol = thermalPolicy()
+                        if (pol.restSeconds > 0) {
+                            MindlayerLog.d(
+                                TAG,
+                                "Thermal duty-cycle: pausing ${pol.restSeconds}s " +
+                                    "(band=${pol.band}) before tool round ${toolCallRound + 1}",
+                                requestId = meta.requestId,
+                                sessionId = meta.sessionId,
+                            )
+                            kotlinx.coroutines.delay(pol.restSeconds * 1000L)
+                        }
+                    }
                     // TOOL_ROUTING: intercept synthetic tool before forwarding
                     if (isToolRouting) {
                         val structuredResult = StructuredOutputHelper

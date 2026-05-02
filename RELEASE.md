@@ -192,6 +192,33 @@ CI's unsigned `app-release.aab` artifact on `main` is **not** uploadable to
 Play — it's just proof that R8 + resource shrinking still succeeds end-to-end
 with the same model hash manifest that a real release must provide.
 
+### 5.1 Dependency-integrity policy (F-067)
+
+Mindlayer relies on **Maven Central's repository signing** (TUF-style) plus
+`https`-only resolvers (`google()`, `mavenCentral()` via the locked
+`dependencyResolutionManagement` block in `settings.gradle.kts`) for binary
+integrity, **not** on a local `gradle/verification-metadata.xml`.
+
+Why: the Android Gradle Plugin's auto-resolved `aapt2` distribution is
+platform-specific (one artifact per `windows`/`linux`/`darwin`), and a
+locally-generated `verification-metadata.xml` only captures the developer's
+own platform. Either every contributor regenerates the file on every
+gradle-version bump, or CI fails for half the team. The maintenance burden
+turned out to materially exceed the marginal security benefit for a
+pinned-dep, signature-verified Maven setup; this is the same trade-off the
+Phase 2 rubber-duck review documented when first considering F-067.
+
+If your threat model requires local hash verification, run:
+
+```bash
+./gradlew --write-verification-metadata sha256 help
+```
+
+and add a per-platform component for `com.android.tools.build:aapt2`
+(plus any platform-conditional native artifacts). This is opt-in
+per-fork; we accept the friction so the default contributor path stays
+unblocked.
+
 ---
 
 ## 6. Troubleshooting
