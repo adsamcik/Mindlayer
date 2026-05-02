@@ -116,10 +116,19 @@ class ServiceBinder(
 
         /**
          * Logical API version surfaced via [getCapabilities]. Bumped whenever
-         * a new method is appended to the AIDL interface. Today's surface
-         * (`registerClient` … `revokeApp`, `getCapabilities`) is v1.
+         * a new method is appended to the AIDL interface. v1 was the pre-
+         * `inferMulti` surface; v2 added [inferMulti].
          */
-        const val CURRENT_API_VERSION = 1
+        const val CURRENT_API_VERSION = 2
+
+        /**
+         * Maximum [com.adsamcik.mindlayer.MediaPart] entries accepted in a
+         * single [inferMulti] call. Today's engine consumes at most one
+         * image + one audio (validator enforces this) so the effective cap
+         * is `2`; once litert-lm #1874 lifts multi-image, the validator
+         * loosens and this constant rises without a wire-level change.
+         */
+        const val MAX_MEDIA_PARTS_PER_REQUEST = 2
 
         /**
          * Capability strings the current service implementation supports.
@@ -134,6 +143,7 @@ class ServiceBinder(
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TOOL_RESULTS,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_HISTORY_RECOVERY,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_STRUCTURED_OUTPUT,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_MEDIA_LIST,
         )
     }
 
@@ -615,6 +625,136 @@ class ServiceBinder(
         }
     }
 
+    /**
+     * v0.4 multimodal inference. Successor to [infer] — accepts an ordered
+     * list of [com.adsamcik.mindlayer.MediaPart] so future engines can
+     * consume multiple images / video / documents without another wire-break.
+     *
+     * Today's engine constraint (see `MediaPart` KDoc): the validator
+     * rejects multi-image, multi-audio, and any [com.adsamcik.mindlayer.MediaPart.KIND_VIDEO]
+     * / [com.adsamcik.mindlayer.MediaPart.KIND_DOCUMENT]. Within those
+     * limits the binder picks the first image and first audio (preserving
+     * ordering by extracting in list order) and dispatches to the existing
+     * orchestrator. When litert-lm #1874 lifts multi-image, the orchestrator
+     * gains an ordered-list path and the validator caps loosen — wire shape
+     * doesn't change.
+     */
+    override fun inferMulti(
+        meta: RequestMeta,
+        media: List<com.adsamcik.mindlayer.MediaPart>?,
+        eventWriteEnd: ParcelFileDescriptor,
+    ) {
+        val identity = authorizeCall()
+        val uid = Binder.getCallingUid()
+        val ownerToken = requireRegisteredClient()
+
+        val parts = media ?: emptyList()
+        try {
+            IpcInputValidator.validateRequestMeta(meta)
+            IpcInputValidator.validateMediaParts(
+                parts,
+                maxPerPartBytes = MAX_MEDIA_BYTES,
+                maxParts = MAX_MEDIA_PARTS_PER_REQUEST,
+            )
+            for ((i, p) in parts.withIndex()) {
+                require(p.requestId == meta.requestId) {
+                    "media[$i].requestId must equal RequestMeta.requestId"
+                }
+            }
+        } catch (e: IllegalArgumentException) {
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_REQUEST,
+                "Invalid request: ${e.message}",
+            )
+        }
+
+        // Caller must own the target session.
+        requireOwnership(meta.sessionId)
+
+        if (!rateLimiter.beginInference(uid)) {
+            MindlayerLog.w(
+                TAG,
+                "Concurrent inference limit exceeded for ${identity.packageName}",
+            )
+            throw typedBinderException(
+                MindlayerErrorCode.CONCURRENT_LIMIT,
+                "Concurrent inference limit exceeded for ${identity.packageName}",
+            )
+        }
+
+        MindlayerLog.d(
+            TAG,
+            "inferMulti request from ${identity.packageName} (parts=${parts.size})",
+            requestId = meta.requestId,
+            sessionId = meta.sessionId,
+        )
+
+        val scopedKey = inferenceKey(uid, meta.requestId)
+        if (activeInferenceUids.putIfAbsent(scopedKey, uid) != null) {
+            rateLimiter.endInference(uid)
+            throw typedBinderException(
+                MindlayerErrorCode.DUPLICATE_REQUEST,
+                "Duplicate requestId: ${meta.requestId}",
+            )
+        }
+        if (ownerToken != null) {
+            activeInferenceOwners[scopedKey] = ownerToken
+        }
+
+        // Decompose ordered List<MediaPart> into the (image, audio) pair
+        // the orchestrator currently consumes. Validator already enforces
+        // ≤1 of each kind, so firstOrNull is exhaustive. Order between the
+        // two collapses to image-first per legacy behavior; documented in
+        // MediaPart KDoc as a temporary engine constraint.
+        val imagePart = parts.firstOrNull { it.kind == com.adsamcik.mindlayer.MediaPart.KIND_IMAGE }
+        val audioPart = parts.firstOrNull { it.kind == com.adsamcik.mindlayer.MediaPart.KIND_AUDIO }
+        val image: ImageTransfer? = imagePart?.let { mediaPartToImageTransfer(it) }
+        val audio: AudioTransfer? = audioPart?.let { mediaPartToAudioTransfer(it) }
+
+        try {
+            orchestrator.infer(scopedKey, meta, image, audio, eventWriteEnd) {
+                activeInferenceOwners.remove(scopedKey)
+                if (activeInferenceUids.remove(scopedKey) != null) {
+                    rateLimiter.endInference(uid)
+                }
+            }
+        } catch (t: Throwable) {
+            activeInferenceOwners.remove(scopedKey)
+            if (activeInferenceUids.remove(scopedKey) != null) {
+                rateLimiter.endInference(uid)
+            }
+            throw t
+        }
+    }
+
+    /**
+     * Convert a [com.adsamcik.mindlayer.MediaPart] of [com.adsamcik.mindlayer.MediaPart.KIND_IMAGE]
+     * to the legacy [ImageTransfer] shape consumed by the orchestrator. Truncates
+     * `payloadBytes: Long` → `Int` — validator already capped this at [MAX_MEDIA_BYTES]
+     * so the cast is safe.
+     */
+    private fun mediaPartToImageTransfer(p: com.adsamcik.mindlayer.MediaPart): ImageTransfer =
+        ImageTransfer(
+            requestId = p.requestId,
+            width = p.width,
+            height = p.height,
+            pixelFormat = p.pixelFormat,
+            rowStride = p.rowStride,
+            payloadBytes = p.payloadBytes.toInt(),
+            source = p.source,
+            isSharedMemory = p.isSharedMemory,
+            mimeType = p.mimeType,
+        )
+
+    private fun mediaPartToAudioTransfer(p: com.adsamcik.mindlayer.MediaPart): AudioTransfer =
+        AudioTransfer(
+            requestId = p.requestId,
+            mimeType = p.mimeType ?: "audio/wav",
+            source = p.source,
+            isSharedMemory = p.isSharedMemory,
+            durationMs = p.durationMs,
+        )
+
     override fun cancelInference(requestId: String) {
         authorizeCall()
         try {
@@ -934,10 +1074,11 @@ class ServiceBinder(
             maxConcurrentInferences = RateLimiter.DEFAULT_MAX_CONCURRENT,
             maxConcurrentSessions = memoryBudget.deviceTier.maxSessions,
             maxSessionExpirationMs = IpcInputValidator.MAX_SESSION_EXPIRATION_MS,
-            // Today's infer() takes at most one image + one audio = 2 attachments
-            // in a single call; v0.4 inferMulti will lift this when it ships.
-            maxMediaPartsPerRequest = 2,
-            maxTotalMediaBytesPerRequest = MAX_MEDIA_BYTES.toLong() * 2,
+            // Effective cap (engine constraint), not the wire ceiling.
+            // Today: at most 1 image + 1 audio per request. When litert-lm
+            // #1874 lifts multi-image, this rises with the validator caps.
+            maxMediaPartsPerRequest = MAX_MEDIA_PARTS_PER_REQUEST,
+            maxTotalMediaBytesPerRequest = IpcInputValidator.MAX_TOTAL_MEDIA_BYTES_PER_REQUEST,
         )
     }
 

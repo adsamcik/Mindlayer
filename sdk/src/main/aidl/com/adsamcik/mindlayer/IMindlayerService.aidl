@@ -4,6 +4,7 @@ import com.adsamcik.mindlayer.SessionConfig;
 import com.adsamcik.mindlayer.RequestMeta;
 import com.adsamcik.mindlayer.ImageTransfer;
 import com.adsamcik.mindlayer.AudioTransfer;
+import com.adsamcik.mindlayer.MediaPart;
 import com.adsamcik.mindlayer.ToolResult;
 import com.adsamcik.mindlayer.ServiceStatus;
 import com.adsamcik.mindlayer.EngineInfo;
@@ -51,5 +52,11 @@ interface IMindlayerService {
     // it; new SDKs against old services catch NoSuchMethodError and fall
     // back to ServiceCapabilities.v0Baseline.
     ServiceCapabilities getCapabilities();
+
+    // v0.4 multimodal: ordered list of media attachments. Successor to
+    // infer() — the legacy method stays for compatibility. Capability-gated
+    // via ServiceCapabilities.FEATURE_MEDIA_LIST.
+    void inferMulti(in RequestMeta meta, in List<MediaPart> media,
+                    in ParcelFileDescriptor eventWriteEnd);
 }
 

@@ -281,6 +281,144 @@ object IpcInputValidator {
         }
     }
 
+    // ── MediaPart validation (v0.4 inferMulti) ────────────────────────────
+
+    /** Maximum total media bytes summed across all parts in one request. */
+    const val MAX_TOTAL_MEDIA_BYTES_PER_REQUEST: Long = 200L * 1024 * 1024
+
+    /**
+     * Validate an ordered [List] of [MediaPart] supplied via
+     * `inferMulti`. Per-part rules mirror the legacy `validateImageTransfer`
+     * / `validateAudioTransfer` semantics; aggregate caps protect against a
+     * single request claiming more total bytes than [MAX_TOTAL_MEDIA_BYTES_PER_REQUEST].
+     *
+     * Engine-constraint bookkeeping (today: at most one image + one audio) is
+     * enforced here too — multi-image rejects with a clear "not yet supported"
+     * message until litert-lm #1874 lifts the restriction.
+     */
+    fun validateMediaParts(
+        parts: List<com.adsamcik.mindlayer.MediaPart>,
+        maxPerPartBytes: Int,
+        maxParts: Int,
+    ) {
+        require(parts.size <= maxParts) {
+            "too many media parts: ${parts.size} > $maxParts"
+        }
+        var totalBytes = 0L
+        var imageCount = 0
+        var audioCount = 0
+        for ((index, part) in parts.withIndex()) {
+            require(part.schemaVersion == com.adsamcik.mindlayer.MediaPart.CURRENT_SCHEMA_VERSION) {
+                "media[$index].schemaVersion ${part.schemaVersion} unsupported " +
+                    "(expected ${com.adsamcik.mindlayer.MediaPart.CURRENT_SCHEMA_VERSION})"
+            }
+            require(part.kind in com.adsamcik.mindlayer.MediaPart.ALL_KINDS) {
+                "media[$index].kind unknown: ${part.kind}"
+            }
+            require(part.payloadBytes in 1L..maxPerPartBytes.toLong()) {
+                "media[$index].payloadBytes out of bounds: ${part.payloadBytes}"
+            }
+            try {
+                totalBytes = Math.addExact(totalBytes, part.payloadBytes)
+            } catch (_: ArithmeticException) {
+                throw IllegalArgumentException("aggregate payloadBytes overflow")
+            }
+
+            when (part.kind) {
+                com.adsamcik.mindlayer.MediaPart.KIND_IMAGE -> {
+                    imageCount++
+                    validateImagePart(part, index, maxPerPartBytes)
+                }
+                com.adsamcik.mindlayer.MediaPart.KIND_AUDIO -> {
+                    audioCount++
+                    validateAudioPart(part, index)
+                }
+                com.adsamcik.mindlayer.MediaPart.KIND_VIDEO,
+                com.adsamcik.mindlayer.MediaPart.KIND_DOCUMENT -> {
+                    // Wire-reserved but engine doesn't serve them yet.
+                    throw IllegalArgumentException(
+                        "media[$index].kind ${part.kind} reserved for future use; " +
+                            "this service version does not serve it"
+                    )
+                }
+            }
+        }
+        require(totalBytes <= MAX_TOTAL_MEDIA_BYTES_PER_REQUEST) {
+            "aggregate media bytes ($totalBytes) > $MAX_TOTAL_MEDIA_BYTES_PER_REQUEST"
+        }
+        // Today's engine constraint — see MediaPart KDoc.
+        require(imageCount <= 1) {
+            "multi-image not yet supported (got $imageCount images)"
+        }
+        require(audioCount <= 1) {
+            "multi-audio not yet supported (got $audioCount audio parts)"
+        }
+    }
+
+    private fun validateImagePart(
+        part: com.adsamcik.mindlayer.MediaPart,
+        index: Int,
+        maxMediaBytes: Int,
+    ) {
+        require(part.width in 0..MAX_IMG_DIMENSION) {
+            "media[$index].width out of bounds: ${part.width}"
+        }
+        require(part.height in 0..MAX_IMG_DIMENSION) {
+            "media[$index].height out of bounds: ${part.height}"
+        }
+        val isRawPixels = part.isSharedMemory && part.mimeType == null
+        if (isRawPixels) {
+            require(part.width > 0 && part.height > 0) {
+                "media[$index] raw pixels require positive width and height"
+            }
+            val pixels: Long = try {
+                Math.multiplyExact(part.width.toLong(), part.height.toLong())
+            } catch (_: ArithmeticException) {
+                throw IllegalArgumentException("media[$index] width × height overflow")
+            }
+            require(pixels <= MAX_IMG_PIXELS) {
+                "media[$index].pixel count out of bounds: $pixels"
+            }
+            require(part.pixelFormat in ALLOWED_PIXEL_FORMATS) {
+                "media[$index].pixelFormat not supported: ${part.pixelFormat}"
+            }
+            val bpp = bytesPerPixel(part.pixelFormat)
+            val expected: Long = try {
+                Math.multiplyExact(pixels, bpp.toLong())
+            } catch (_: ArithmeticException) {
+                throw IllegalArgumentException("media[$index] payload size overflow")
+            }
+            require(expected == part.payloadBytes) {
+                "media[$index].payloadBytes (${part.payloadBytes}) does not match " +
+                    "width × height × bpp ($expected) for raw pixels"
+            }
+            require(part.rowStride >= part.width * bpp) {
+                "media[$index].rowStride (${part.rowStride}) < width × bpp"
+            }
+        } else {
+            val mime = requireNotNull(part.mimeType) {
+                "media[$index] encoded image requires mimeType"
+            }
+            require(mime in ALLOWED_IMAGE_MIME) {
+                "media[$index].image mimeType not supported: $mime"
+            }
+        }
+    }
+
+    private fun validateAudioPart(
+        part: com.adsamcik.mindlayer.MediaPart,
+        index: Int,
+    ) {
+        require(part.mimeType in ALLOWED_AUDIO_MIME) {
+            "media[$index].audio mimeType not supported: ${part.mimeType}"
+        }
+        part.durationMs?.let {
+            require(it in 0..(60L * 60L * 1000L)) {
+                "media[$index].durationMs out of bounds: $it"
+            }
+        }
+    }
+
     /**
      * Validate the `backend` argument to `prewarm`. Returns the validated
      * value (or `"GPU"` when the input is null).

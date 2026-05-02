@@ -180,6 +180,7 @@ class Mindlayer private constructor(
      * Safe to call from any thread. Idempotent — multiple calls are harmless.
      */
     fun disconnect() {
+        cachedCapabilities = null
         connection.disconnect()
     }
 
@@ -411,6 +412,59 @@ class Mindlayer private constructor(
             ),
             image = null,
             audio = audioTransfer,
+        )
+        return buildHandle(requestId, flow)
+    }
+
+    /**
+     * Send a text message with an ordered list of media attachments. v0.4
+     * successor to [chatWithImage] / [chatWithAudio] — accepts varargs of
+     * [com.adsamcik.mindlayer.MediaPart] so future engines can consume
+     * multi-image / video / document inputs without another wire-break.
+     *
+     * Build parts via the helpers on [MediaTransfer]:
+     *
+     * ```kotlin
+     * mindlayer.chatWithMedia(
+     *     sessionId,
+     *     "Compare these two coffee bags",
+     *     MediaTransfer.imagePart(bagA),
+     *     MediaTransfer.imagePart(bagB),
+     * ).events.collect { ... }
+     * ```
+     *
+     * **Today's engine constraint** (see `MediaPart` KDoc): at most one
+     * image + one audio per request. The wire allows ordered lists for
+     * forward compatibility but the service rejects multi-image with
+     * `INVALID_REQUEST`. Order between the kinds is wire-stable from day
+     * one — clients should pass parts in their preferred order.
+     *
+     * **Old service compatibility**: if the connected service does not
+     * advertise [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_MEDIA_LIST],
+     * this method delegates to the legacy [chat] / [chatWithImage] /
+     * [chatWithAudio] surface (with the corresponding 1-image / 1-audio
+     * limit). Callers should still build via this entry point — the
+     * fallback is transparent.
+     */
+    fun chatWithMedia(
+        sessionId: String,
+        text: String,
+        vararg parts: com.adsamcik.mindlayer.MediaPart,
+    ): InferenceHandle {
+        val requestId = UUID.randomUUID().toString()
+        // Re-tag every part with this requestId so the service's
+        // requestId-cross-check passes — callers built parts via the
+        // MediaTransfer helpers without knowing this requestId yet.
+        val rebound = parts.map { it.copy(requestId = requestId) }
+        val flow = startTrackedInferenceMulti(
+            sessionId = sessionId,
+            userText = text,
+            meta = RequestMeta(
+                requestId = requestId,
+                sessionId = sessionId,
+                textContent = text,
+            ),
+            media = rebound,
         )
         return buildHandle(requestId, flow)
     }
@@ -934,6 +988,154 @@ class Mindlayer private constructor(
         }
 
         return TokenStreamReader.readStream(readEnd)
+    }
+
+    /**
+     * v0.4 inference setup that uses [IMindlayerService.inferMulti] with an
+     * ordered list of media parts. Falls back to the legacy [startInference]
+     * path if the service throws [NoSuchMethodError] / [AbstractMethodError]
+     * (talking to a pre-v0.4 binary that doesn't implement `inferMulti`) —
+     * the fallback caps at one image + one audio per the legacy shape.
+     */
+    private fun startInferenceMulti(
+        meta: RequestMeta,
+        media: List<com.adsamcik.mindlayer.MediaPart>,
+    ): Flow<MindlayerEvent> {
+        val pipe = ParcelFileDescriptor.createReliablePipe()
+        val readEnd = pipe[0]
+        val writeEnd = pipe[1]
+
+        try {
+            val service = connection.requireService()
+            try {
+                withTypedErrorsSync(
+                    service,
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                ) { it.inferMulti(meta, media, writeEnd) }
+            } catch (_: NoSuchMethodError) {
+                // Old service without the v0.4 method — fall back.
+                inferMultiLegacyFallback(service, meta, media, writeEnd)
+            } catch (_: AbstractMethodError) {
+                inferMultiLegacyFallback(service, meta, media, writeEnd)
+            }
+        } catch (e: Exception) {
+            readEnd.close()
+            throw e
+        } finally {
+            writeEnd.close()
+        }
+
+        return TokenStreamReader.readStream(readEnd)
+    }
+
+    /**
+     * Pre-v0.4 fallback: extract the first image and first audio from the
+     * [media] list and call legacy [IMindlayerService.infer]. Same engine
+     * constraints apply as `chatWithImage` / `chatWithAudio`.
+     */
+    private fun inferMultiLegacyFallback(
+        service: com.adsamcik.mindlayer.IMindlayerService,
+        meta: RequestMeta,
+        media: List<com.adsamcik.mindlayer.MediaPart>,
+        writeEnd: ParcelFileDescriptor,
+    ) {
+        val imagePart = media.firstOrNull {
+            it.kind == com.adsamcik.mindlayer.MediaPart.KIND_IMAGE
+        }
+        val audioPart = media.firstOrNull {
+            it.kind == com.adsamcik.mindlayer.MediaPart.KIND_AUDIO
+        }
+        val image = imagePart?.let {
+            com.adsamcik.mindlayer.ImageTransfer(
+                requestId = it.requestId,
+                width = it.width,
+                height = it.height,
+                pixelFormat = it.pixelFormat,
+                rowStride = it.rowStride,
+                payloadBytes = it.payloadBytes.toInt(),
+                source = it.source,
+                isSharedMemory = it.isSharedMemory,
+                mimeType = it.mimeType,
+            )
+        }
+        val audio = audioPart?.let {
+            com.adsamcik.mindlayer.AudioTransfer(
+                requestId = it.requestId,
+                mimeType = it.mimeType ?: "audio/wav",
+                source = it.source,
+                isSharedMemory = it.isSharedMemory,
+                durationMs = it.durationMs,
+            )
+        }
+        withTypedErrorsSync(
+            service,
+            requestId = meta.requestId,
+            sessionId = meta.sessionId,
+        ) { it.infer(meta, image, audio, writeEnd) }
+    }
+
+    /**
+     * Variant of [startTrackedInference] for the [chatWithMedia] entry
+     * point. Same history-persistence semantics; just routes through the
+     * new ordered-media wire shape.
+     */
+    private fun startTrackedInferenceMulti(
+        sessionId: String,
+        userText: String,
+        meta: RequestMeta,
+        media: List<com.adsamcik.mindlayer.MediaPart>,
+    ): Flow<MindlayerEvent> {
+        if (historyStore == null) {
+            return startInferenceMulti(meta, media)
+        }
+
+        return flow {
+            val userTurnId = historyStore.persistUserTurn(sessionId, userText)
+            var assistantTurnId: String? = null
+            val textAccumulator = StringBuilder()
+            var completed = false
+
+            try {
+                startInferenceMulti(meta, media)
+                    .collect { event ->
+                        when (event) {
+                            is MindlayerEvent.Started -> {
+                                historyStore.markUserTurnCompleted(userTurnId)
+                                assistantTurnId = historyStore.beginAssistantTurn(sessionId)
+                            }
+                            is MindlayerEvent.TextDelta -> {
+                                textAccumulator.append(event.text)
+                            }
+                            is MindlayerEvent.Done -> {
+                                val finalText = event.fullText
+                                    ?: textAccumulator.toString()
+                                val aid = assistantTurnId
+                                if (aid != null) {
+                                    historyStore.markTurnCompleted(aid, finalText)
+                                }
+                                completed = true
+                            }
+                            is MindlayerEvent.Error -> {
+                                val aid = assistantTurnId
+                                if (aid != null) {
+                                    historyStore.markTurnInterrupted(aid)
+                                }
+                            }
+                            else -> { /* ToolCall, Metrics — pass through */ }
+                        }
+                        emit(event)
+                    }
+            } catch (e: Exception) {
+                if (!completed) {
+                    val aid = assistantTurnId
+                    if (aid != null) {
+                        historyStore.markTurnInterrupted(aid)
+                    }
+                }
+                throw e
+            }
+        }
     }
 }
 
