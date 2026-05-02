@@ -78,11 +78,18 @@ class Mindlayer private constructor(
         /**
          * Create a [Mindlayer] instance and start binding to the service.
          * Use [awaitConnected] or observe [connectionState] before issuing RPCs.
+         *
+         * History is metadata-only by default. Pass [HistoryPolicy.FULL_CONTENT]
+         * only if the client explicitly needs local replay/recovery and has its
+         * own consent/retention controls for prompt and model-output content.
          */
-        fun connect(context: Context): Mindlayer {
+        fun connect(
+            context: Context,
+            historyPolicy: HistoryPolicy = HistoryPolicy.METADATA_ONLY,
+        ): Mindlayer {
             val mgr = ConnectionManager()
             mgr.connect(context)
-            val store = HistoryStore(context)
+            val store = HistoryStore(context, historyPolicy)
             return Mindlayer(mgr, store)
         }
     }
@@ -113,6 +120,44 @@ class Mindlayer private constructor(
      */
     fun disconnect() {
         connection.disconnect()
+    }
+
+    // -- Internal: AIDL error chokepoint --------------------------------------
+
+    /**
+     * Suspend chokepoint that converts service-thrown
+     * Mindlayer-coded Binder runtime exceptions into typed [MindlayerException]s.
+     *
+     * Wrap every public AIDL call site through this so callers see one error
+     * vocabulary regardless of which method threw. [SecurityException] from the
+     * auth gate (allowlist rejection, registration precondition) propagates
+     * unchanged — it remains the canonical "you don't have the right to do
+     * this" signal so IDS / Play Protect doesn't lose meaning.
+     */
+    private suspend inline fun <R> withTypedErrors(
+        requestId: String? = null,
+        sessionId: String? = null,
+        crossinline block: suspend (com.adsamcik.mindlayer.IMindlayerService) -> R,
+    ): R = try {
+        block(connection.awaitConnected())
+    } catch (e: SecurityException) {
+        throw MindlayerException.fromAidlSecurityException(e, requestId, sessionId) ?: throw e
+    }
+
+    /**
+     * Non-suspend variant for paths that already hold a connected service
+     * reference (e.g. [startInference], where the AIDL call kicks off a cold
+     * flow and must run synchronously to produce a request handle).
+     */
+    private inline fun <R> withTypedErrorsSync(
+        service: com.adsamcik.mindlayer.IMindlayerService,
+        requestId: String? = null,
+        sessionId: String? = null,
+        block: (com.adsamcik.mindlayer.IMindlayerService) -> R,
+    ): R = try {
+        block(service)
+    } catch (e: SecurityException) {
+        throw MindlayerException.fromAidlSecurityException(e, requestId, sessionId) ?: throw e
     }
 
     // -- Prewarm --------------------------------------------------------------
@@ -186,7 +231,11 @@ class Mindlayer private constructor(
             try {
                 return connection.awaitConnected().createSession(configWithId)
             } catch (e: SecurityException) {
-                if (e.message?.contains("engine_initializing") == true &&
+                val typed = MindlayerException.fromAidlSecurityException(
+                    e,
+                    sessionId = configWithId.sessionId,
+                ) ?: throw e
+                if (typed.code == com.adsamcik.mindlayer.shared.MindlayerErrorCode.ENGINE_INITIALIZING &&
                     attempt < backoffMs.size &&
                     System.currentTimeMillis() < deadline
                 ) {
@@ -194,24 +243,24 @@ class Mindlayer private constructor(
                     attempt++
                     continue
                 }
-                throw e
+                throw typed
             }
         }
     }
 
     /** Destroy a session and free server-side resources. */
     suspend fun destroySession(sessionId: String) {
-        connection.awaitConnected().destroySession(sessionId)
+        withTypedErrors(sessionId = sessionId) { it.destroySession(sessionId) }
     }
 
     /** Get info for a single session. */
     suspend fun getSessionInfo(sessionId: String): SessionInfo {
-        return connection.awaitConnected().getSessionInfo(sessionId)
+        return withTypedErrors(sessionId = sessionId) { it.getSessionInfo(sessionId) }
     }
 
     /** List all active sessions. */
     suspend fun listSessions(): List<SessionInfo> {
-        return connection.awaitConnected().listSessions()
+        return withTypedErrors { it.listSessions() }
     }
 
     // -- Chat (text only) -----------------------------------------------------
@@ -315,29 +364,29 @@ class Mindlayer private constructor(
             toolName = toolName,
             resultJson = resultJson,
         )
-        connection.awaitConnected().submitToolResult(requestId, result)
+        withTypedErrors(requestId = requestId) { it.submitToolResult(requestId, result) }
     }
 
     /** Cancel an in-flight inference request. */
     suspend fun cancelInference(requestId: String) {
-        connection.awaitConnected().cancelInference(requestId)
+        withTypedErrors(requestId = requestId) { it.cancelInference(requestId) }
     }
 
     // -- Service status -------------------------------------------------------
 
     /** Get the current service status (engine loaded, thermals, etc.). */
     suspend fun getStatus(): ServiceStatus {
-        return connection.awaitConnected().status
+        return withTypedErrors { it.status }
     }
 
     /** Get engine info (selected model, perf stats, etc.). */
     suspend fun getEngineInfo(): EngineInfo {
-        return connection.awaitConnected().engineInfo
+        return withTypedErrors { it.engineInfo }
     }
 
     /** Get a diagnostic JSON dump for bug reports and troubleshooting. */
     suspend fun getDiagnostics(): String {
-        return connection.awaitConnected().diagnostics
+        return withTypedErrors { it.diagnostics }
     }
 
     // ── Simple API ──────────────────────────────────────────────────────
@@ -467,13 +516,17 @@ class Mindlayer private constructor(
                 is MindlayerEvent.Done -> {
                     result = event.fullText ?: accumulator.toString()
                 }
-                is MindlayerEvent.Error -> throw MindlayerException(
+                is MindlayerEvent.Error -> throw MindlayerException.fromStreamError(
                     message = event.message,
-                    code = event.code,
+                    codeName = event.code,
+                    seq = event.seq,
+                    tsMs = event.tsMs,
+                    sessionId = sessionId,
                 )
                 is MindlayerEvent.ToolCall -> throw MindlayerException(
                     message = TOOL_CALL_IN_ONESHOT_MSG,
-                    code = "UNSUPPORTED_TOOL_CALL",
+                    codeName = "UNSUPPORTED_TOOL_CALL",
+                    sessionId = sessionId,
                 )
                 else -> { /* Started, Metrics — ignored */ }
             }
@@ -503,13 +556,17 @@ class Mindlayer private constructor(
                 is MindlayerEvent.Done -> {
                     result = event.fullText ?: accumulator.toString()
                 }
-                is MindlayerEvent.Error -> throw MindlayerException(
+                is MindlayerEvent.Error -> throw MindlayerException.fromStreamError(
                     message = event.message,
-                    code = event.code,
+                    codeName = event.code,
+                    seq = event.seq,
+                    tsMs = event.tsMs,
+                    sessionId = sessionId,
                 )
                 is MindlayerEvent.ToolCall -> throw MindlayerException(
                     message = TOOL_CALL_IN_ONESHOT_MSG,
-                    code = "UNSUPPORTED_TOOL_CALL",
+                    codeName = "UNSUPPORTED_TOOL_CALL",
+                    sessionId = sessionId,
                 )
                 else -> {}
             }
@@ -683,7 +740,11 @@ class Mindlayer private constructor(
 
         try {
             val service = connection.requireService()
-            service.infer(meta, image, audio, writeEnd)
+            withTypedErrorsSync(
+                service,
+                requestId = meta.requestId,
+                sessionId = meta.sessionId,
+            ) { it.infer(meta, image, audio, writeEnd) }
         } catch (e: Exception) {
             readEnd.close()
             throw e

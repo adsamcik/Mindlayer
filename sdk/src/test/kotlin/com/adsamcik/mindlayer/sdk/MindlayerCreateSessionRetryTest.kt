@@ -7,6 +7,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.adsamcik.mindlayer.IMindlayerService
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.sdk.db.MindlayerDatabase
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -25,13 +26,14 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * F-018: SDK-side one-shot retry-with-backoff for the
- * `engine_initializing` SecurityException path.
+ * F-018: SDK-side one-shot retry-with-backoff for the engine-initializing
+ * path.
  *
- * The service throws `SecurityException("engine_initializing")` while the
- * LiteRT-LM engine is doing its (~5–10 s) cold-start init. The SDK must
- * not surface this to user code on first launch — instead retry with
- * exponential backoff up to 10 s total.
+ * As of v02-error-codes the service throws Binder-safe runtime exceptions with
+ * a prefixed [MindlayerErrorCode] while LiteRT-LM is doing its (~5–10 s)
+ * cold-start init. The SDK must not surface this to user code on first launch
+ * — instead retry with exponential backoff up to 10 s total. Other typed errors
+ * propagate immediately wrapped as [MindlayerException].
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -87,7 +89,10 @@ class MindlayerCreateSessionRetryTest {
         every { mockService.createSession(any()) } answers {
             attempts++
             if (attempts <= 1) {
-                throw SecurityException("engine_initializing")
+                throw codedException(
+                    MindlayerErrorCode.ENGINE_INITIALIZING,
+                    "engine_initializing",
+                )
             } else {
                 "session-ready"
             }
@@ -106,7 +111,10 @@ class MindlayerCreateSessionRetryTest {
         every { mockService.createSession(any()) } answers {
             attempts++
             if (attempts <= 3) {
-                throw SecurityException("engine_initializing")
+                throw codedException(
+                    MindlayerErrorCode.ENGINE_INITIALIZING,
+                    "engine_initializing",
+                )
             } else {
                 "session-after-3"
             }
@@ -118,7 +126,34 @@ class MindlayerCreateSessionRetryTest {
     }
 
     @Test
-    fun `non-engine_initializing SecurityException propagates immediately`() = runTest {
+    fun `non-engine_initializing typed error propagates as MindlayerException`() = runTest {
+        var attempts = 0
+        every { mockService.createSession(any()) } answers {
+            attempts++
+            throw codedException(
+                MindlayerErrorCode.INVALID_SESSION_CONFIG,
+                "Invalid SessionConfig: bad",
+            )
+        }
+
+        var thrown: Throwable? = null
+        try {
+            mindlayer.createSession { }
+        } catch (e: Throwable) {
+            thrown = e
+        }
+        assertTrue("Expected MindlayerException, got $thrown", thrown is MindlayerException)
+        val mle = thrown as MindlayerException
+        assertEquals(MindlayerErrorCode.INVALID_SESSION_CONFIG, mle.code)
+        assertEquals("INVALID_SESSION_CONFIG", mle.codeName)
+        assertEquals(MindlayerErrorCode.Category.VALIDATION, mle.category)
+        assertEquals("Should not retry on non-engine_initializing error", 1, attempts)
+    }
+
+    @Test
+    fun `auth-gate SecurityException still propagates as SecurityException`() = runTest {
+        // Rate-limit / allowlist failures stay as SecurityException after
+        // v02-error-codes — they're auth-gate signals, not typed business errors.
         var attempts = 0
         every { mockService.createSession(any()) } answers {
             attempts++
@@ -131,14 +166,20 @@ class MindlayerCreateSessionRetryTest {
         } catch (e: Throwable) {
             thrown = e
         }
-        assertTrue("Expected SecurityException, got $thrown", thrown is SecurityException)
-        assertEquals("Should not retry on non-engine_initializing error", 1, attempts)
+        assertTrue(
+            "Expected SecurityException for auth gate, got $thrown",
+            thrown is SecurityException,
+        )
+        assertEquals("Should not retry on SecurityException", 1, attempts)
     }
 
     @Test
     fun `gives up after backoff schedule exhausted`() = runTest {
         every { mockService.createSession(any()) } answers {
-            throw SecurityException("engine_initializing")
+            throw codedException(
+                MindlayerErrorCode.ENGINE_INITIALIZING,
+                "engine_initializing",
+            )
         }
         var thrown: Throwable? = null
         try {
@@ -146,7 +187,12 @@ class MindlayerCreateSessionRetryTest {
         } catch (e: Throwable) {
             thrown = e
         }
-        assertTrue("Expected SecurityException after retries, got $thrown", thrown is SecurityException)
+        assertTrue(
+            "Expected MindlayerException after retries, got $thrown",
+            thrown is MindlayerException,
+        )
+        val mle = thrown as MindlayerException
+        assertEquals(MindlayerErrorCode.ENGINE_INITIALIZING, mle.code)
         // backoff schedule is 50/200/800 ms → 4 attempts total
         verify(atLeast = 1) { mockService.createSession(any()) }
     }
@@ -173,4 +219,7 @@ class MindlayerCreateSessionRetryTest {
         ctor.isAccessible = true
         return ctor.newInstance(conn, historyStore)
     }
+
+    private fun codedException(code: Int, message: String): RuntimeException =
+        SecurityException(MindlayerErrorCode.wireMessage(code, message))
 }

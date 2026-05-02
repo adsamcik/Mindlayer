@@ -52,7 +52,12 @@ sealed class MindlayerEvent {
     ) : MindlayerEvent()
 
     /** Terminal event indicating an error. No further events will follow. */
-    data class Error(val message: String, val code: String?, val seq: Long) : MindlayerEvent()
+    data class Error(
+        val message: String,
+        val code: String?,
+        val seq: Long,
+        val tsMs: Long? = null,
+    ) : MindlayerEvent()
 
     /** Terminal event indicating successful completion. [fullText] contains the accumulated response if available. */
     data class Done(
@@ -128,6 +133,7 @@ object TokenStreamReader {
                         message = "Service pipe error: ${e.message}",
                         code = "PIPE_ERROR",
                         seq = -1,
+                        tsMs = null,
                     ),
                 )
             }
@@ -188,6 +194,7 @@ object TokenStreamReader {
             message = event.payload["message"]?.jsonPrimitive?.contentOrNull ?: "Unknown error",
             code = event.payload["code"]?.jsonPrimitive?.contentOrNull,
             seq = event.seq,
+            tsMs = event.tsMs.takeIf { it > 0 },
         )
 
         StreamEventType.DONE -> MindlayerEvent.Done(

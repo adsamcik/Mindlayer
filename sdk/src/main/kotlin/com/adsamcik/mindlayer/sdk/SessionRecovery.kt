@@ -42,7 +42,7 @@ class SessionRecovery internal constructor(
         sessionId: String,
         maxReplayTokens: Int = FOREGROUND_REPLAY_BUDGET,
     ): RecoveryResult? {
-        Log.i(TAG, "Starting recovery for session $sessionId")
+        Log.i(TAG, "Starting session recovery")
 
         // 1. Clean up streaming/interrupted assistant turns
         val cleaned = historyStore.cleanupInterruptedTurns(sessionId)
@@ -50,7 +50,7 @@ class SessionRecovery internal constructor(
         // 2. Load replay data from Room
         val replay = historyStore.getReplayHistory(sessionId, maxReplayTokens)
         if (replay == null) {
-            Log.w(TAG, "No local history found for $sessionId")
+            Log.w(TAG, "No replayable local history found")
             return null
         }
 
@@ -67,8 +67,13 @@ class SessionRecovery internal constructor(
             )
         }
 
-        // Destroy old session (best-effort) before creating replacement
-        try { mindlayer.connection.awaitConnected().destroySession(sessionId) } catch (_: Exception) {}
+        // Destroy old session (best-effort) before creating replacement.
+        // Best-effort: any service-thrown error here is informational only.
+        try {
+            mindlayer.connection.awaitConnected().destroySession(sessionId)
+        } catch (_: Exception) {
+            // Already gone, evicted, or service shutting down — fine.
+        }
 
         // 4. Create a fresh server session seeded with history via initialHistory
         val config = SessionConfigBuilder().apply {
@@ -86,12 +91,15 @@ class SessionRecovery internal constructor(
             }
         }.build()
 
-        val newSessionId = mindlayer.connection.awaitConnected().createSession(config)
+        val newSessionId = try {
+            mindlayer.connection.awaitConnected().createSession(config)
+        } catch (e: SecurityException) {
+            throw MindlayerException.fromAidlSecurityException(e, sessionId = sessionId) ?: throw e
+        }
 
         Log.i(
             TAG,
-            "Recovered session $sessionId → $newSessionId " +
-                "(${replay.turns.size} turns replayed, $cleaned cleaned)",
+            "Recovered session (${replay.turns.size} turns replayed, $cleaned cleaned)",
         )
 
         return RecoveryResult(

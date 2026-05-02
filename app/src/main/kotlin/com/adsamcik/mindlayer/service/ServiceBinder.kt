@@ -19,14 +19,17 @@ import com.adsamcik.mindlayer.ToolResult
 import com.adsamcik.mindlayer.service.engine.EngineManager
 import com.adsamcik.mindlayer.service.engine.InferenceOrchestrator
 import com.adsamcik.mindlayer.service.engine.MemoryBudget
+import com.adsamcik.mindlayer.service.engine.SessionOwnerToken
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
 import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
 import com.adsamcik.mindlayer.service.logging.LogRepository
+import com.adsamcik.mindlayer.service.logging.loggable
 import com.adsamcik.mindlayer.service.security.AllowlistStore
 import com.adsamcik.mindlayer.service.security.CallerIdentity
 import com.adsamcik.mindlayer.service.security.CallerVerifier
 import com.adsamcik.mindlayer.service.security.IpcInputValidator
 import com.adsamcik.mindlayer.service.security.RateLimiter
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,6 +40,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 
@@ -76,6 +80,7 @@ class ServiceBinder(
      * `inferenceKey` for the canonical key shape.
      */
     private val activeInferenceUids = ConcurrentHashMap<String, Int>()
+    private val activeInferenceOwners = ConcurrentHashMap<String, Any>()
 
     /**
      * Bound concurrent diagnostic dumps to one. Each dump holds a binder
@@ -86,13 +91,14 @@ class ServiceBinder(
     private val diagnosticsLock = Mutex()
 
     /**
-     * Client liveness tokens keyed by UID. Value is the DeathRecipient linked
-     * to the client's binder; we keep a reference so we can unlinkToDeath on
-     * explicit teardown if needed. One entry per UID is sufficient — multiple
-     * registerClient calls from the same UID are coalesced.
+     * Client liveness tokens keyed by per-registration owner tokens. Multiple
+     * registrations from the same UID are retained independently so a later
+     * process cannot mask an earlier process's death.
      */
     private val clientDeathRecipients =
-        ConcurrentHashMap<Int, Pair<IBinder, IBinder.DeathRecipient>>()
+        ConcurrentHashMap<ClientRegistration, Pair<IBinder, IBinder.DeathRecipient>>()
+
+    private val currentRegistrationByUid = ConcurrentHashMap<Int, ClientRegistration>()
 
     /**
      * F-051: lifetime registerClient counter per UID. Hostile or buggy
@@ -108,6 +114,11 @@ class ServiceBinder(
         /** F-051: lifetime per-UID registerClient cap. */
         const val MAX_REGISTRATIONS_PER_UID = 64
     }
+
+    private data class ClientRegistration(
+        override val ownerUid: Int,
+        val registrationId: String,
+    ) : SessionOwnerToken
 
     // ---- Security gate -----------------------------------------------------
 
@@ -188,17 +199,55 @@ class ServiceBinder(
 
     /**
      * Assert that the caller owns the session, or is the self-UID dashboard.
-     * Unknown sessions are treated as not-owned (SecurityException) so we
-     * don't leak their existence to arbitrary callers via a 404.
+     * Unknown sessions are treated as not-owned ([SESSION_NOT_FOUND_OR_NOT_OWNED])
+     * so we don't leak their existence to arbitrary callers via a 404. The
+     * single shared error code is the F-008 anti-enumeration property.
      */
     private fun requireOwnership(sessionId: String) {
         val uid = Binder.getCallingUid()
         if (uid == Process.myUid()) return
         val owner = orchestrator.getSessionOwner(sessionId)
         if (owner == null || owner != uid) {
-            MindlayerLog.w(TAG, "Ownership violation: uid=$uid tried to touch session=$sessionId (owner=$owner)", sessionId = sessionId)
-            throw SecurityException("Session not found or not owned by caller")
+            MindlayerLog.w(
+                TAG,
+                "Ownership violation: uid=$uid tried to touch session owned by $owner",
+                sessionId = sessionId,
+            )
+            throw typedBinderException(
+                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                "Session not found or not owned by caller",
+            )
         }
+    }
+
+    private fun typedBinderException(code: Int, message: String): RuntimeException {
+        return SecurityException(MindlayerErrorCode.wireMessage(code, message))
+    }
+
+    private fun requireRegisteredClient(): ClientRegistration? {
+        val uid = Binder.getCallingUid()
+        if (uid == Process.myUid()) return null
+        return currentRegistrationByUid[uid]
+            ?: throw SecurityException("Client must call registerClient before stateful operations")
+    }
+
+    private fun requireRequestOwner(scopedKey: String): ClientRegistration? {
+        val uid = Binder.getCallingUid()
+        if (uid == Process.myUid()) return null
+        val registration = currentRegistrationByUid[uid]
+            ?: throw SecurityException("Client must call registerClient before stateful operations")
+        val owner = activeInferenceOwners[scopedKey]
+            ?: throw typedBinderException(
+                MindlayerErrorCode.NO_ACTIVE_REQUEST,
+                "No active request owned by caller",
+            )
+        if (owner != registration) {
+            throw typedBinderException(
+                MindlayerErrorCode.NO_ACTIVE_REQUEST,
+                "No active request owned by caller",
+            )
+        }
+        return registration
     }
 
     // ---- Client liveness ---------------------------------------------------
@@ -265,19 +314,20 @@ class ServiceBinder(
             throw SecurityException("registerClient cap exceeded")
         }
 
-        // Build the recipient first so it can capture itself by reference
-        // for the F-050 self-identity check inside binderDied.
+        val registration = ClientRegistration(uid, UUID.randomUUID().toString())
+
+        // Build the recipient first so it can capture itself by reference.
         lateinit var recipient: IBinder.DeathRecipient
         recipient = IBinder.DeathRecipient {
-            MindlayerLog.w(TAG, "Client uid=$uid died; cleaning up owned sessions")
-            // Only act if our recipient is still the registered one — guards
-            // against late-firing recipients overwriting newer registrations
-            // (F-050).
-            val cur = clientDeathRecipients[uid]
+            MindlayerLog.w(TAG, "Client uid=$uid registration died; cleaning up owned sessions")
+            val cur = clientDeathRecipients[registration]
             if (cur != null && cur.second === recipient) {
-                clientDeathRecipients.remove(uid, cur)
+                clientDeathRecipients.remove(registration, cur)
             }
-            onClientDisconnected(uid)
+            if (currentRegistrationByUid.remove(uid, registration)) {
+                promoteRegistrationForUid(uid)
+            }
+            onClientRegistrationDisconnected(registration)
         }
         try {
             // linkToDeath may throw RemoteException if the token is already
@@ -285,15 +335,36 @@ class ServiceBinder(
             // recipient. This avoids ending up with no recipient at all if
             // the new token is dead at registration time (F-042).
             token.linkToDeath(recipient, 0)
-            val prior = clientDeathRecipients.put(uid, token to recipient)
-            prior?.let { (oldToken, oldRecipient) ->
-                try { oldToken.unlinkToDeath(oldRecipient, 0) } catch (_: Throwable) { /* fine */ }
-            }
+            clientDeathRecipients[registration] = token to recipient
+            currentRegistrationByUid[uid] = registration
         } catch (e: RemoteException) {
             // Token already dead — run cleanup immediately. Don't disturb
             // any existing live recipient for this UID.
             MindlayerLog.w(TAG, "Client token for uid=$uid already dead at registration")
-            onClientDisconnected(uid)
+            onClientRegistrationDisconnected(registration)
+        }
+    }
+
+    private fun promoteRegistrationForUid(uid: Int) {
+        val replacement = clientDeathRecipients.keys.firstOrNull { it.ownerUid == uid }
+        if (replacement != null) {
+            currentRegistrationByUid[uid] = replacement
+        }
+    }
+
+    private fun onClientRegistrationDisconnected(registration: ClientRegistration) {
+        val activeKeys = activeInferenceOwners.entries
+            .filter { it.value == registration }
+            .map { it.key }
+
+        activeKeys.forEach { key ->
+            MindlayerLog.i(TAG, "Cancelling active inference for disconnected registration")
+            orchestrator.cancelInference(key)
+        }
+
+        val orphaned = orchestrator.closeAllOwnedBy(registration)
+        if (orphaned.isNotEmpty()) {
+            MindlayerLog.i(TAG, "Released ${orphaned.size} session(s) for disconnected registration")
         }
     }
 
@@ -310,9 +381,10 @@ class ServiceBinder(
         activeKeys.forEach { key ->
             MindlayerLog.i(TAG, "Cancelling active inference for disconnected uid=$uid")
             orchestrator.cancelInference(key)
+            activeInferenceOwners.remove(key)
         }
 
-        val orphaned = orchestrator.closeAllOwnedBy(uid)
+        val orphaned = orchestrator.closeAllOwnedByUid(uid)
         if (orphaned.isNotEmpty()) {
             MindlayerLog.i(TAG, "Released ${orphaned.size} session(s) for uid=$uid")
         }
@@ -323,13 +395,17 @@ class ServiceBinder(
     override fun createSession(config: SessionConfig): String {
         val identity = authorizeCall()
         val uid = Binder.getCallingUid()
+        val ownerToken = requireRegisteredClient()
         // Validate every client-supplied string in SessionConfig against
         // explicit byte budgets and identifier shape constraints. See
         // IpcInputValidator for the rules.
         try {
             IpcInputValidator.validateSessionConfig(config)
         } catch (e: IllegalArgumentException) {
-            throw SecurityException("Invalid SessionConfig: ${e.message}")
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_SESSION_CONFIG,
+                "Invalid SessionConfig: ${e.message}",
+            )
         }
         // External callers may NOT choose their own sessionId — that lets a
         // co-signed peer overwrite a victim's session by guessing/harvesting
@@ -349,25 +425,33 @@ class ServiceBinder(
         }
         MindlayerLog.d(TAG, "createSession from ${identity.packageName}")
         return try {
-            orchestrator.createSession(safeConfig, uid)
+            orchestrator.createSession(safeConfig, ownerToken ?: uid)
         } catch (e: com.adsamcik.mindlayer.service.engine.EngineNotReadyException) {
-            // F-018: typed engine-init-in-progress signal. Translate to a
-            // SecurityException with a stable code so the SDK can detect
-            // and apply backoff retry. AIDL marshals SecurityException
-            // reliably across processes; bare IllegalStateException would
-            // not survive the trip on all OEM stacks.
-            throw SecurityException("engine_initializing")
+            // F-018: typed engine-init-in-progress signal. AIDL marshals
+            // a prefixed Binder exception losslessly so the SDK can detect
+            // the code and apply backoff retry without parsing free-form text.
+            throw typedBinderException(
+                MindlayerErrorCode.ENGINE_INITIALIZING,
+                "engine_initializing",
+            )
         } catch (e: IllegalArgumentException) {
-            throw SecurityException("Invalid SessionConfig: ${e.message}")
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_SESSION_CONFIG,
+                "Invalid SessionConfig: ${e.message}",
+            )
         }
     }
 
     override fun destroySession(sessionId: String) {
         authorizeCall()
+        requireRegisteredClient()
         try {
             IpcInputValidator.validateId(sessionId, "sessionId")
         } catch (e: IllegalArgumentException) {
-            throw SecurityException("Invalid sessionId: ${e.message}")
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_REQUEST,
+                "Invalid sessionId: ${e.message}",
+            )
         }
         requireOwnership(sessionId)
         MindlayerLog.d(TAG, "destroySession: $sessionId", sessionId = sessionId)
@@ -379,7 +463,10 @@ class ServiceBinder(
         try {
             IpcInputValidator.validateId(sessionId, "sessionId")
         } catch (e: IllegalArgumentException) {
-            throw SecurityException("Invalid sessionId: ${e.message}")
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_REQUEST,
+                "Invalid sessionId: ${e.message}",
+            )
         }
         val uid = Binder.getCallingUid()
         if (uid != Process.myUid()) {
@@ -412,6 +499,7 @@ class ServiceBinder(
     ) {
         val identity = authorizeCall()
         val uid = Binder.getCallingUid()
+        val ownerToken = requireRegisteredClient()
 
         // Validate every client-supplied identifier and string at AIDL
         // ingress so the downstream code never sees malformed values.
@@ -428,7 +516,10 @@ class ServiceBinder(
                 "AudioTransfer.requestId must equal RequestMeta.requestId"
             }
         } catch (e: IllegalArgumentException) {
-            throw SecurityException("Invalid request: ${e.message}")
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_REQUEST,
+                "Invalid request: ${e.message}",
+            )
         }
 
         // Caller must own the target session.
@@ -439,14 +530,15 @@ class ServiceBinder(
                 TAG,
                 "Concurrent inference limit exceeded for ${identity.packageName}",
             )
-            throw SecurityException(
-                "Concurrent inference limit exceeded for ${identity.packageName}"
+            throw typedBinderException(
+                MindlayerErrorCode.CONCURRENT_LIMIT,
+                "Concurrent inference limit exceeded for ${identity.packageName}",
             )
         }
 
         MindlayerLog.d(
             TAG,
-            "infer: requestId=${meta.requestId}, session=${meta.sessionId} from ${identity.packageName}",
+            "infer request from ${identity.packageName}",
             requestId = meta.requestId,
             sessionId = meta.sessionId,
         )
@@ -460,15 +552,23 @@ class ServiceBinder(
         // rejected up-front rather than overwriting the slot accounting.
         if (activeInferenceUids.putIfAbsent(scopedKey, uid) != null) {
             rateLimiter.endInference(uid)
-            throw SecurityException("Duplicate requestId: ${meta.requestId}")
+            throw typedBinderException(
+                MindlayerErrorCode.DUPLICATE_REQUEST,
+                "Duplicate requestId: ${meta.requestId}",
+            )
+        }
+        if (ownerToken != null) {
+            activeInferenceOwners[scopedKey] = ownerToken
         }
         try {
             orchestrator.infer(scopedKey, meta, image, audio, eventWriteEnd) {
+                activeInferenceOwners.remove(scopedKey)
                 if (activeInferenceUids.remove(scopedKey) != null) {
                     rateLimiter.endInference(uid)
                 }
             }
         } catch (t: Throwable) {
+            activeInferenceOwners.remove(scopedKey)
             if (activeInferenceUids.remove(scopedKey) != null) {
                 rateLimiter.endInference(uid)
             }
@@ -481,9 +581,15 @@ class ServiceBinder(
         try {
             IpcInputValidator.validateId(requestId, "requestId")
         } catch (e: IllegalArgumentException) {
-            throw SecurityException("Invalid requestId: ${e.message}")
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_REQUEST,
+                "Invalid requestId: ${e.message}",
+            )
         }
         val uid = Binder.getCallingUid()
+        if (uid != Process.myUid()) {
+            requireRegisteredClient()
+        }
         // Self-UID dashboard can cancel anything (support/diagnostics);
         // external callers may only cancel their OWN requests, even if the
         // id collides with another UID's in-flight request.
@@ -498,12 +604,17 @@ class ServiceBinder(
             if (!activeInferenceUids.containsKey(key)) {
                 // Either already completed, never existed, or belongs to another UID.
                 // Swallow silently — raising here would leak whether the id exists elsewhere.
-                MindlayerLog.d(TAG, "cancelInference: no active request owned by uid=$uid", requestId = requestId)
+                MindlayerLog.d(
+                    TAG,
+                    "cancelInference: no active request owned by uid=$uid",
+                    requestId = requestId,
+                )
                 return
             }
+            requireRequestOwner(key)
             key
         }
-        MindlayerLog.d(TAG, "cancelInference: $requestId", requestId = requestId)
+        MindlayerLog.d(TAG, "cancelInference request", requestId = requestId)
         // Concurrency slot is released by the orchestrator's completion hook.
         orchestrator.cancelInference(scopedKey)
     }
@@ -519,7 +630,10 @@ class ServiceBinder(
                 "ToolResult.requestId must equal AIDL requestId"
             }
         } catch (e: IllegalArgumentException) {
-            throw SecurityException("Invalid ToolResult: ${e.message}")
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_TOOL_RESULT,
+                "Invalid ToolResult: ${e.message}",
+            )
         }
         val uid = Binder.getCallingUid()
         val scopedKey: String = if (uid == Process.myUid()) {
@@ -528,13 +642,17 @@ class ServiceBinder(
         } else {
             val key = inferenceKey(uid, requestId)
             if (!activeInferenceUids.containsKey(key)) {
-                throw SecurityException("No active request owned by caller")
+                throw typedBinderException(
+                    MindlayerErrorCode.NO_ACTIVE_REQUEST,
+                    "No active request owned by caller",
+                )
             }
+            requireRequestOwner(key)
             key
         }
         MindlayerLog.d(
             TAG,
-            "submitToolResult: $requestId, callId=${result.callId}, tool=${result.toolName}",
+            "submitToolResult for call ${result.callId.loggable()} tool=${result.toolName}",
             requestId = requestId,
         )
         orchestrator.toolCallBridge.submitResult(
@@ -672,17 +790,29 @@ class ServiceBinder(
         // F-064: cheap call — quarter-cost so dashboard polling doesn't
         // dominate the per-UID budget for external callers either.
         authorizeCall(cost = 0.25)
+        val uid = Binder.getCallingUid()
+        val isSelfUid = uid == Process.myUid()
         val thermalPolicy = thermalMonitor.currentPolicy.value
         val thermalSample = thermalMonitor.latestSample.value
         val memSnapshot = memoryBudget.currentSnapshot()
+        val visibleActiveSessions = if (isSelfUid) {
+            orchestrator.listSessions().size
+        } else {
+            orchestrator.listSessionsOwnedBy(uid).size
+        }
+        val visibleActiveInferences = if (isSelfUid) {
+            service.activeInferenceCount
+        } else {
+            activeInferenceUids.values.count { it == uid }
+        }
 
         return ServiceStatus(
             isEngineLoaded = engineManager.isInitialized,
-            activeSessionCount = orchestrator.listSessions().size,
-            activeInferenceCount = service.activeInferenceCount,
+            activeSessionCount = visibleActiveSessions,
+            activeInferenceCount = visibleActiveInferences,
             backend = engineManager.currentBackend,
             thermalBand = thermalPolicy.band.name,
-            isForeground = service.activeInferenceCount > 0,
+            isForeground = visibleActiveInferences > 0,
             uptimeMs = android.os.SystemClock.elapsedRealtime() - service.createdAtMs,
             memoryPressure = memSnapshot.pressure.name,
             availableRamMb = memSnapshot.availableMb,
