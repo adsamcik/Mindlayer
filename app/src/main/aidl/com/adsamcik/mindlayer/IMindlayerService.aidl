@@ -12,6 +12,7 @@ import com.adsamcik.mindlayer.SessionInfo;
 import com.adsamcik.mindlayer.ServiceCapabilities;
 import com.adsamcik.mindlayer.CancelResult;
 import com.adsamcik.mindlayer.ToolSubmitResult;
+import com.adsamcik.mindlayer.DiagnosticsSnapshot;
 
 interface IMindlayerService {
     // Client liveness — caller passes a Binder token; service linkToDeath's on it
@@ -74,5 +75,11 @@ interface IMindlayerService {
     // another UID" so cross-UID information doesn't leak.
     CancelResult cancelInferenceV2(String requestId);
     ToolSubmitResult submitToolResultV2(String requestId, in ToolResult result);
+
+    // v0.4 typed diagnostics snapshot for programmatic consumers
+    // (dashboard polling, external monitoring). Capability-gated via
+    // ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS. Legacy
+    // getDiagnostics() stays as the human-readable bug-report surface.
+    DiagnosticsSnapshot getDiagnosticsTyped();
 }
 

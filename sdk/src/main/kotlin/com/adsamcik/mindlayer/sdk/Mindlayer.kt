@@ -635,6 +635,28 @@ class Mindlayer private constructor(
         return withTypedErrors { it.diagnostics }
     }
 
+    /**
+     * v0.4 typed diagnostics snapshot. Returns a small struct
+     * ([com.adsamcik.mindlayer.DiagnosticsSnapshot]) suitable for
+     * dashboard polling and external monitoring. Capability-gated via
+     * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS];
+     * returns `null` when talking to a pre-v0.4 service. Callers wanting
+     * the human-readable JSON dump should use [getDiagnostics].
+     */
+    suspend fun getDiagnosticsTyped(): com.adsamcik.mindlayer.DiagnosticsSnapshot? {
+        val caps = getCapabilities()
+        if (!caps.supports(com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS)) {
+            return null
+        }
+        return try {
+            withTypedErrors { it.diagnosticsTyped }
+        } catch (_: NoSuchMethodError) {
+            null
+        } catch (_: AbstractMethodError) {
+            null
+        }
+    }
+
     // ── Simple API ──────────────────────────────────────────────────────
 
     /**
