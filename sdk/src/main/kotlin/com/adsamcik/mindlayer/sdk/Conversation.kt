@@ -1,9 +1,11 @@
 package com.adsamcik.mindlayer.sdk
 
 import android.graphics.Bitmap
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import kotlin.coroutines.coroutineContext
 
 /**
  * A multi-turn conversation with the LLM. Manages session lifecycle,
@@ -26,8 +28,12 @@ class Conversation internal constructor(
     private val client: Mindlayer,
     private val config: ConversationConfig,
 ) : AutoCloseable {
-    private var sessionId: String? = null
-    private var closed = false
+    // @Volatile so the non-suspend [close] and the suspend reads inside the
+    // mutex see consistent values. The Mutex still serializes the create-
+    // session logic and the retry path; volatile covers the cross-thread
+    // visibility for the two non-mutex read sites ([close], [history]).
+    @Volatile private var sessionId: String? = null
+    @Volatile private var closed = false
     private val mutex = Mutex()
 
     /**
@@ -125,7 +131,9 @@ class Conversation internal constructor(
      * If the call fails due to session eviction/expiration/missing-or-not-owned,
      * recreate and retry once. Only retries on [android.os.RemoteException] or
      * [MindlayerException] codes that indicate a remote session-state mismatch
-     * (not protocol/logic errors).
+     * (not protocol/logic errors). Cooperative cancellation is respected at
+     * every retry boundary so a cancelled coroutine never re-charges quota
+     * or duplicates a persisted user turn.
      *
      * Until v0.2 these retries were dead code: the service emitted untyped
      * `SecurityException("Session not found or not owned by caller")` which
@@ -140,7 +148,9 @@ class Conversation internal constructor(
             block(sid)
         } catch (e: android.os.RemoteException) {
             if (closed) throw e
+            coroutineContext.ensureActive()
             mutex.withLock { sessionId = null }
+            coroutineContext.ensureActive()
             val newSid = ensureSession()
             block(newSid)
         } catch (e: MindlayerException) {
@@ -149,7 +159,9 @@ class Conversation internal constructor(
                 e.code == com.adsamcik.mindlayer.shared.MindlayerErrorCode.SESSION_EXPIRED
             ) {
                 if (closed) throw e
+                coroutineContext.ensureActive()
                 mutex.withLock { sessionId = null }
+                coroutineContext.ensureActive()
                 val newSid = ensureSession()
                 block(newSid)
             } else {
