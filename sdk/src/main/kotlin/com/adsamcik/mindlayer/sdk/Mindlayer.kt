@@ -271,7 +271,16 @@ class Mindlayer private constructor(
         return withTypedErrors(sessionId = sessionId) { it.getSessionInfo(sessionId) }
     }
 
-    /** List all active sessions. */
+    /** List all live server-side sessions owned by this caller.
+     *
+     *  This goes to the **service** and returns only sessions that the
+     *  service still knows about — it does **not** include conversations
+     *  whose sessions were destroyed, evicted, or expired. For the durable
+     *  view of every conversation this app has tracked locally, see
+     *  [listHistory]. The two views are intentionally distinct: live
+     *  sessions are server state, history is encrypted local persistence
+     *  with a different threat model.
+     */
     suspend fun listSessions(): List<SessionInfo> {
         return withTypedErrors { it.listSessions() }
     }
@@ -446,17 +455,29 @@ class Mindlayer private constructor(
     // ── History ─────────────────────────────────────────────
 
     /**
-     * List past conversations with turn previews.
-     * Returns conversations from the local history database, including
-     * both active and destroyed sessions.
+     * List past conversations from the SDK's encrypted local history database.
+     *
+     * This is the **durable view**: every conversation this app has tracked
+     * locally, including ones whose service-side sessions were evicted,
+     * expired, destroyed, or never re-bound after a service restart. Each
+     * entry's [ConversationSummary.isActive] is augmented from a fresh
+     * [listSessions] call so callers can tell which conversations still have
+     * a live remote session attached.
+     *
+     * **Compare to [listSessions]**:
+     * - `listHistory` = "every conversation this app remembers" (local-only,
+     *   survives service restart, lost on reinstall because the SQLCipher
+     *   keystore key doesn't move with backups).
+     * - `listSessions` = "live remote sessions the service has for me right
+     *   now" (subset of `listHistory`'s active rows).
+     *
+     * The two have different threat models. **Do not unify** — a future
+     * third-party caller story will preserve this split.
      *
      * ```kotlin
      * val history = mindlayer.listHistory(limit = 20)
      * history.forEach { conv ->
-     *     println("${conv.conversationId}: ${conv.turnCount} turns")
-     *     conv.preview.forEach { turn ->
-     *         println("  ${turn.role}: ${turn.text?.take(50)}")
-     *     }
+     *     println("${conv.conversationId}: ${conv.turnCount} turns, active=${conv.isActive}")
      * }
      * ```
      */
@@ -472,7 +493,15 @@ class Mindlayer private constructor(
     }
 
     /**
-     * Get full conversation history for a specific session.
+     * Get the full turn history for a single conversation from local storage.
+     *
+     * Returns turns in chronological order, including completed assistant
+     * responses, pending user turns, and any interrupted streaming turns. The
+     * service is not consulted — this is a pure local read.
+     *
+     * @return the turn list, or an empty list if [conversationId] is unknown
+     *   to the local history store (the SDK was constructed without history,
+     *   or the conversation was pruned).
      */
     suspend fun getHistory(conversationId: String): List<TurnPreview> {
         return historyStore?.getConversationHistory(conversationId) ?: emptyList()

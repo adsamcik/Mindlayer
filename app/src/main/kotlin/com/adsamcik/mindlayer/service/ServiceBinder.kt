@@ -470,10 +470,27 @@ class ServiceBinder(
         }
         val uid = Binder.getCallingUid()
         if (uid != Process.myUid()) {
-            val owner = orchestrator.getSessionOwner(sessionId) ?: return null
-            if (owner != uid) return null
+            // Anti-enumeration: same code for "no such session" and "exists
+            // but owned by another UID". Throw the typed error instead of
+            // returning null so the SDK declaration (non-null SessionInfo)
+            // is honoured and consumers can react via MindlayerException.
+            val owner = orchestrator.getSessionOwner(sessionId)
+                ?: throw typedBinderException(
+                    MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                    "Session not found or not owned by caller",
+                )
+            if (owner != uid) {
+                throw typedBinderException(
+                    MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                    "Session not found or not owned by caller",
+                )
+            }
         }
         return orchestrator.getSessionInfo(sessionId)
+            ?: throw typedBinderException(
+                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                "Session not found or not owned by caller",
+            )
     }
 
     override fun listSessions(): List<SessionInfo> {
