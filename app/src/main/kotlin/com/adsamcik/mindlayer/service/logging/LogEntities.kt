@@ -62,6 +62,12 @@ object LogEvent {
     const val ENGINE_INIT = "engine_init"
     const val ENGINE_SHUTDOWN = "engine_shutdown"
     const val ENGINE_FALLBACK = "engine_fallback"
+    // F-077: typed init-failure category. The variant name lands in
+    // `extraJson` under "failureCategory"; the optional safeLabel goes
+    // in `errorMessage` (already F-006-clean — class-name-only). The
+    // dashboard reads the latest row to render variant-specific
+    // remediation copy.
+    const val INIT_FAILURE_CATEGORIZED = "init_failure_categorized"
     // Error
     const val GENERAL_ERROR = "general_error"
     // Security

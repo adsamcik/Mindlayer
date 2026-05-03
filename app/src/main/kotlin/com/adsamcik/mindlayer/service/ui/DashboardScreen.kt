@@ -551,16 +551,79 @@ private fun StatusSection(state: DashboardUiState) {
                 )
             }
 
-            state.gpuFailureReason?.let { reason ->
-                if (state.backend.equals("CPU", ignoreCase = true)) {
-                    Text(
-                        text = "⚠ GPU init failed: $reason",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
+            // F-077: typed init-failure rendering. Each variant gets a
+            // specific message + suggested remediation. When the typed
+            // signal is absent (e.g. legacy `engine_fallback` rows from
+            // before this build) fall through to the GPU-only string
+            // shim so existing dashboards don't go silent during the
+            // upgrade window.
+            val initFailure = state.lastInitFailure
+            if (initFailure != null) {
+                val (tone, message) = describeInitFailure(initFailure, state.backend)
+                DiagnosticCallout(message = message, tone = tone)
+            } else {
+                state.gpuFailureReason?.let { reason ->
+                    if (state.backend.equals("CPU", ignoreCase = true)) {
+                        Text(
+                            text = "⚠ GPU init failed: $reason",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
             }
         }
+    }
+}
+
+/**
+ * F-077: render an [com.adsamcik.mindlayer.service.engine.InitFailure] as
+ * a `(tone, message)` pair for the dashboard's StatusSection callout.
+ *
+ * The mapping:
+ *  - [InitFailure.LowMemory] → ERROR, "Free up memory and retry"
+ *  - [InitFailure.ModelMissing] → ERROR, "install the AI Pack"
+ *  - [InitFailure.IntegrityMismatch] → ERROR, "reinstall"
+ *  - [InitFailure.BackendUnavailable] → WARNING when a fallback is in
+ *    use (engine still works on CPU), ERROR otherwise (backend === "NONE"
+ *    means the whole chain failed)
+ *  - [InitFailure.NativeError] → ERROR, surfaces the safeLabel so
+ *    operators can correlate with logs
+ *
+ * Visible (`internal`) for testing; the table is the contract that
+ * pins which variant maps to which user-facing copy.
+ */
+internal fun describeInitFailure(
+    failure: com.adsamcik.mindlayer.service.engine.InitFailure,
+    currentBackend: String,
+): Pair<DashboardMessageTone, String> = when (failure) {
+    com.adsamcik.mindlayer.service.engine.InitFailure.LowMemory -> {
+        DashboardMessageTone.ERROR to
+            "Engine init refused: insufficient memory. Free up memory and retry."
+    }
+    com.adsamcik.mindlayer.service.engine.InitFailure.ModelMissing -> {
+        DashboardMessageTone.ERROR to
+            "Model file missing — install the AI Pack."
+    }
+    com.adsamcik.mindlayer.service.engine.InitFailure.IntegrityMismatch -> {
+        DashboardMessageTone.ERROR to
+            "Model file corrupted — reinstall."
+    }
+    is com.adsamcik.mindlayer.service.engine.InitFailure.BackendUnavailable -> {
+        val recovered = currentBackend.isNotBlank() &&
+            !currentBackend.equals("NONE", ignoreCase = true) &&
+            !currentBackend.equals(failure.backend, ignoreCase = true)
+        if (recovered) {
+            DashboardMessageTone.WARNING to
+                "${failure.backend} backend failed (${failure.safeLabel}) — running on $currentBackend."
+        } else {
+            DashboardMessageTone.ERROR to
+                "${failure.backend} backend failed (${failure.safeLabel})."
+        }
+    }
+    is com.adsamcik.mindlayer.service.engine.InitFailure.NativeError -> {
+        DashboardMessageTone.ERROR to
+            "Native runtime error (${failure.safeLabel})."
     }
 }
 
