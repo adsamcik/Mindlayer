@@ -233,8 +233,21 @@ class InferenceOrchestratorCancelTest {
         orchestrator.cancelInference("100:req-direct-cancel")
 
         // The whole point of this test: the public cancel API MUST drive
-        // cancelProcess so native LiteRT-LM stops decoding.
-        verify(timeout = 2_000L, exactly = 1) { mockConversation.cancelProcess() }
+        // cancelProcess so native LiteRT-LM stops decoding. We use
+        // `atLeast = 1` rather than `exactly = 1` because cancelInference
+        // is intentionally defence-in-depth: it calls cancelProcess()
+        // directly AND cancels the underlying Job, which propagates
+        // CancellationException into runInference's catch — and that
+        // catch ALSO calls cancelProcess(). Both calls are correct by
+        // design (the direct call guarantees native shutdown even when
+        // the coroutine is blocked in a non-cancellable region; the
+        // catch covers parent-scope cancels that bypass cancelInference).
+        // LiteRT-LM cancelProcess is idempotent and both call sites are
+        // wrapped in try/catch, so two invocations are harmless. Pinning
+        // `exactly = 1` was a flaky over-specification: under fork-
+        // parallel test contention the second call sometimes lands
+        // inside the verify's 2 s window and the test failed.
+        verify(timeout = 2_000L, atLeast = 1) { mockConversation.cancelProcess() }
 
         // The active job must also be torn down — cancelInference is the
         // single source of truth for "this request is over".
