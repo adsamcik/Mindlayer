@@ -17,6 +17,7 @@ import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.MemoryPressure
 import com.adsamcik.mindlayer.service.engine.SessionManager
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
+import com.adsamcik.mindlayer.service.health.MlHealthRecorder
 import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
 import com.adsamcik.mindlayer.service.logging.LogCategory
 import com.adsamcik.mindlayer.service.logging.LogDatabase
@@ -62,6 +63,8 @@ class MindlayerMlService : Service() {
         private set
     lateinit var thermalMonitor: ThermalMonitor
         private set
+    lateinit var mlHealthRecorder: MlHealthRecorder
+        private set
     private lateinit var sharedMemoryPool: SharedMemoryPool
     private lateinit var binder: ServiceBinder
     private lateinit var logRepository: LogRepository
@@ -81,11 +84,42 @@ class MindlayerMlService : Service() {
     var createdAtMs: Long = 0L
         private set
 
+    /**
+     * F-074: hold a reference to the prior default uncaught-exception
+     * handler so we can chain to it after recording the abnormal death.
+     * Skipping the chain would suppress the framework's own crash
+     * reporting (e.g. ActivityThread's process-dump trigger).
+     */
+    private var previousUncaughtHandler: Thread.UncaughtExceptionHandler? = null
+
     override fun onCreate() {
         super.onCreate()
         createdAtMs = android.os.SystemClock.elapsedRealtime()
         MindlayerLog.i(TAG, "Service created in process ${android.os.Process.myPid()}")
         createNotificationChannel()
+
+        // F-074: install the crash-loop watchdog *before* anything else
+        // touches the engine. recordHealthyBoot() runs the missed-death
+        // detection (previous boot ran but neither cleanly destroyed nor
+        // raised an uncaught exception — i.e. OOM-killer SIGKILL) and the
+        // 5-minute decay reset. The uncaught handler chains to whatever
+        // was installed before us so framework crash reporting still
+        // fires.
+        mlHealthRecorder = MlHealthRecorder(this)
+        try {
+            mlHealthRecorder.recordHealthyBoot()
+        } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "MlHealthRecorder.recordHealthyBoot raised: ${t.safeLabel()}")
+        }
+        previousUncaughtHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            try {
+                mlHealthRecorder.recordAbnormalDeath()
+            } catch (_: Throwable) {
+                // Never block the death path on I/O failure.
+            }
+            previousUncaughtHandler?.uncaughtException(thread, error)
+        }
 
         val logDb = LogDatabase.getInstance(this)
         logRepository = LogRepository(logDb.logDao())
@@ -100,7 +134,7 @@ class MindlayerMlService : Service() {
         val diagnosticExporter = DiagnosticExporter(
             engineManager, thermalMonitor, memoryBudget, sessionManager, logDb.logDao()
         )
-        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, logRepository = logRepository)
+        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, logRepository = logRepository, mlHealthRecorder = mlHealthRecorder)
 
         logRepository.log(LogEntry(
             timestampMs = System.currentTimeMillis(),
@@ -189,6 +223,19 @@ class MindlayerMlService : Service() {
         orchestrator.shutdown()
         logRepository.shutdown()
         serviceScope.cancel()
+        // F-074: stamp the clean-shutdown marker last so the next boot's
+        // missed-death check (which compares lastBootAt to lastCleanShutdownAt)
+        // sees a fresh timestamp. Failure here is best-effort — if the
+        // file system is unhappy we'd rather not block the rest of the
+        // teardown chain. Worst case the next boot bumps the death
+        // count by one, which decays in 5 minutes anyway.
+        if (::mlHealthRecorder.isInitialized) {
+            try {
+                mlHealthRecorder.recordCleanShutdown()
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "MlHealthRecorder.recordCleanShutdown raised: ${t.safeLabel()}")
+            }
+        }
         super.onDestroy()
     }
 
