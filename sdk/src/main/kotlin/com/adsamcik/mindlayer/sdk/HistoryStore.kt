@@ -20,7 +20,10 @@ import java.util.UUID
  * persistence. This is the SDK's local source of truth — the service is
  * stateless from the client's perspective after an OOM kill.
  */
-class HistoryStore internal constructor(context: Context) {
+class HistoryStore internal constructor(
+    context: Context,
+    private val historyPolicy: HistoryPolicy = HistoryPolicy.METADATA_ONLY,
+) {
 
     companion object {
         private const val TAG = "HistoryStore"
@@ -52,12 +55,12 @@ class HistoryStore internal constructor(context: Context) {
         conversationDao.upsert(
             ConversationEntity(
                 conversationId = sessionId,
-                systemPrompt = config.systemPrompt,
+                systemPrompt = config.systemPrompt.takeIf { historyPolicy.persistSystemPrompt },
                 backend = config.backend,
                 maxTokens = config.maxTokens,
                 samplerConfigJson = samplerJson,
-                toolsJson = config.toolsJson,
-                extraContextJson = config.extraContextJson,
+                toolsJson = config.toolsJson.takeIf { historyPolicy.persistToolContext },
+                extraContextJson = config.extraContextJson.takeIf { historyPolicy.persistToolContext },
                 createdAtMs = now,
                 updatedAtMs = now,
             ),
@@ -79,12 +82,12 @@ class HistoryStore internal constructor(context: Context) {
         conversationDao.upsert(
             ConversationEntity(
                 conversationId = sessionId,
-                systemPrompt = config.systemPrompt,
+                systemPrompt = config.systemPrompt.takeIf { historyPolicy.persistSystemPrompt },
                 backend = config.backend,
                 maxTokens = config.maxTokens,
                 samplerConfigJson = samplerJson,
-                toolsJson = config.toolsJson,
-                extraContextJson = config.extraContextJson,
+                toolsJson = config.toolsJson.takeIf { historyPolicy.persistToolContext },
+                extraContextJson = config.extraContextJson.takeIf { historyPolicy.persistToolContext },
                 createdAtMs = now,
                 updatedAtMs = now,
                 state = ConversationState.CREATING,
@@ -139,7 +142,7 @@ class HistoryStore internal constructor(context: Context) {
                 seq = 0, // placeholder — overwritten by insertWithAutoSeq
                 role = TurnRole.USER,
                 state = TurnState.PENDING,
-                textContent = text,
+                textContent = text.takeIf { historyPolicy.persistContent },
                 tokenEstimate = tokens,
                 startedAtMs = System.currentTimeMillis(),
             ),
@@ -183,7 +186,7 @@ class HistoryStore internal constructor(context: Context) {
         val tokens = estimateTokens(text)
         turnDao.completeWithText(
             turnId = turnId,
-            text = text,
+            text = text.takeIf { historyPolicy.persistContent },
             tokens = tokens,
         )
     }
@@ -204,7 +207,7 @@ class HistoryStore internal constructor(context: Context) {
     suspend fun cleanupInterruptedTurns(sessionId: String): Int {
         val deleted = turnDao.deleteUnstableAssistantTurns(sessionId)
         if (deleted > 0) {
-            Log.i(TAG, "Cleaned up $deleted unstable assistant turns for $sessionId")
+            Log.i(TAG, "Cleaned up $deleted unstable assistant turns")
         }
         return deleted
     }
@@ -218,6 +221,7 @@ class HistoryStore internal constructor(context: Context) {
         maxTokens: Int,
     ): ReplayData? {
         val conversation = conversationDao.get(sessionId) ?: return null
+        if (!historyPolicy.persistContent) return null
 
         // Walk backwards from newest turn, accumulating until budget exhausted
         val allCompleted = turnDao.completedDescending(sessionId)
@@ -261,7 +265,7 @@ class HistoryStore internal constructor(context: Context) {
             val lastTurns = db.turnDao().lastNTurns(conv.conversationId, 3)
             ConversationSummary(
                 conversationId = conv.conversationId,
-                systemPrompt = conv.systemPrompt,
+                systemPrompt = conv.systemPrompt.takeIf { historyPolicy.persistSystemPrompt },
                 turnCount = turnCount,
                 tokenEstimate = conv.tokenEstimateTotal,
                 createdAt = conv.createdAtMs,
@@ -270,7 +274,9 @@ class HistoryStore internal constructor(context: Context) {
                 preview = lastTurns.reversed().map { turn ->
                     TurnPreview(
                         role = turn.role,
-                        text = turn.textContent?.take(200),
+                        text = turn.textContent
+                            ?.takeIf { historyPolicy.persistContent }
+                            ?.take(200),
                         timestamp = turn.startedAtMs,
                     )
                 },
@@ -286,7 +292,7 @@ class HistoryStore internal constructor(context: Context) {
         return turns.map { turn ->
             TurnPreview(
                 role = turn.role,
-                text = turn.textContent,
+                text = turn.textContent.takeIf { historyPolicy.persistContent },
                 timestamp = turn.startedAtMs,
             )
         }
@@ -329,14 +335,14 @@ class HistoryStore internal constructor(context: Context) {
         }
         return SessionConfig(
             sessionId = entity.conversationId,
-            systemPrompt = entity.systemPrompt,
+            systemPrompt = entity.systemPrompt.takeIf { historyPolicy.persistSystemPrompt },
             maxTokens = entity.maxTokens,
             backend = entity.backend,
             samplerTopK = topK,
             samplerTopP = topP,
             samplerTemperature = temperature,
-            toolsJson = entity.toolsJson,
-            extraContextJson = entity.extraContextJson,
+            toolsJson = entity.toolsJson.takeIf { historyPolicy.persistToolContext },
+            extraContextJson = entity.extraContextJson.takeIf { historyPolicy.persistToolContext },
         )
     }
 }

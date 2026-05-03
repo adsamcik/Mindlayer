@@ -4,6 +4,7 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.test.core.app.ApplicationProvider
 import com.adsamcik.mindlayer.AudioTransfer
+import com.adsamcik.mindlayer.ImageTransfer
 import io.mockk.every
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
@@ -119,6 +120,55 @@ class SharedMemoryPoolAudioTimeoutTest {
         //     window (Robolectric flake — record skip-equivalent).
         assertTrue(
             "Watchdog must complete in < 2s, took ${elapsed}ms (thrown=${thrown?.javaClass?.simpleName})",
+            elapsed < 2_000L,
+        )
+    }
+
+    @Test
+    fun `stageImageWithTimeout breaks wedged pfd`() = runBlocking {
+        val pipe = ParcelFileDescriptor.createPipe()
+        val readEnd = pipe[0]
+        val writeEnd = pipe[1]
+        val producer = Thread {
+            try {
+                FileOutputStream(writeEnd.fileDescriptor).use { out ->
+                    out.write(0x42)
+                    out.flush()
+                    while (!Thread.currentThread().isInterrupted) {
+                        Thread.sleep(50)
+                    }
+                }
+            } catch (_: Throwable) { /* expected on close */ }
+            try { writeEnd.close() } catch (_: Throwable) { }
+        }
+        producer.isDaemon = true
+        producer.start()
+
+        val transfer = ImageTransfer(
+            requestId = "r1",
+            width = 0,
+            height = 0,
+            pixelFormat = 0,
+            rowStride = 0,
+            payloadBytes = 1024,
+            source = readEnd,
+            isSharedMemory = false,
+            mimeType = "image/png",
+        )
+
+        val start = System.currentTimeMillis()
+        var thrown: Throwable? = null
+        try {
+            pool.stageImageWithTimeout("test-image-wedged", transfer, timeoutMs = 200L)
+        } catch (t: Throwable) {
+            thrown = t
+        }
+        val elapsed = System.currentTimeMillis() - start
+
+        producer.interrupt()
+
+        assertTrue(
+            "Image watchdog must complete in < 2s, took ${elapsed}ms (thrown=${thrown?.javaClass?.simpleName})",
             elapsed < 2_000L,
         )
     }

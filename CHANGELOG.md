@@ -6,6 +6,20 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+### Fixed
+- **`MediaTransfer` SharedMemory path on targetSdk 30+** — `fromBitmap` /
+  `fromAudioBytes` previously used reflection to call the hidden non-SDK
+  method `SharedMemory.getFileDescriptor()`, which Android's hidden-API
+  enforcement denies for apps targeting SDK 30 or later. The denial threw
+  silently inside the SDK and aborted every vision/audio inference call.
+  Replaced the reflection with a public Parcelable round-trip
+  (`shm.writeToParcel` → `parcel.readFileDescriptor`) that produces an
+  independent `ParcelFileDescriptor` with no hidden-API access. Wire format
+  on the AIDL boundary is unchanged; `SharedMemoryPool.reconstructSharedMemory`
+  on the service side continues to work as-is. Added an instrumented
+  regression test (`MediaTransferInstrumentedTest`) covering both image and
+  audio paths with a full round-trip through SharedMemory reconstruction.
+
 ### Added
 - **Structured output DSL** — `SessionConfigBuilder.jsonOutput { ... }` wraps
   the existing `extraContextJson` structured-output contract with a typed,

@@ -1,7 +1,9 @@
 package com.adsamcik.mindlayer.service
 
 import android.os.Binder
+import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import com.adsamcik.mindlayer.RequestMeta
@@ -15,6 +17,7 @@ import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.MemoryPressure
 import com.adsamcik.mindlayer.service.engine.MemorySnapshot
 import com.adsamcik.mindlayer.service.engine.ModelInfo
+import com.adsamcik.mindlayer.service.engine.SessionOwnerToken
 import com.adsamcik.mindlayer.service.engine.ThermalBand
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
 import com.adsamcik.mindlayer.service.engine.ThermalPolicy
@@ -25,6 +28,7 @@ import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.security.AllowlistStore
 import com.adsamcik.mindlayer.service.security.CallerIdentity
 import com.adsamcik.mindlayer.service.security.RateLimiter
+import io.mockk.CapturingSlot
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -38,6 +42,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -93,6 +98,7 @@ class ServiceBinderTest {
     @Before
     fun setUp() {
         mockkStatic(Log::class)
+        mockkStatic(Binder::class)
         mockkStatic(SystemClock::class)
         mockkObject(MindlayerLog)
 
@@ -100,6 +106,7 @@ class ServiceBinderTest {
         every { Log.i(any(), any()) } returns 0
         every { Log.w(any(), any<String>()) } returns 0
         every { Log.e(any(), any()) } returns 0
+        every { Binder.getCallingUid() } returns Process.myUid()
         every { SystemClock.elapsedRealtime() } returns 200_000L
         every { MindlayerLog.d(any(), any(), any(), any()) } returns Unit
         every { MindlayerLog.i(any(), any(), any(), any()) } returns Unit
@@ -161,6 +168,19 @@ class ServiceBinderTest {
         unmockkAll()
     }
 
+    private fun mockClientToken(
+        deathSlot: CapturingSlot<IBinder.DeathRecipient>? = null,
+    ): IBinder {
+        val token = mockk<IBinder>(relaxed = true)
+        every { token.interfaceDescriptor } returns "android.os.IBinder"
+        if (deathSlot != null) {
+            every { token.linkToDeath(capture(deathSlot), 0) } returns Unit
+        } else {
+            every { token.linkToDeath(any(), 0) } returns Unit
+        }
+        return token
+    }
+
     // ---- Session management delegation -------------------------------------
 
     @Test
@@ -172,6 +192,60 @@ class ServiceBinderTest {
 
         assertEquals("s1", result)
         verify { orchestrator.createSession(config, any()) }
+    }
+
+    @Test
+    fun `external createSession requires registerClient first`() {
+        mockkStatic(Binder::class)
+        every { Binder.getCallingUid() } returns 12_345
+
+        assertThrows(SecurityException::class.java) {
+            binder.createSession(SessionConfig(maxTokens = 2048))
+        }
+    }
+
+    @Test
+    fun `registered external createSession uses registration owner token`() {
+        val uid = 12_345
+        mockkStatic(Binder::class)
+        every { Binder.getCallingUid() } returns uid
+        val token = mockClientToken()
+        every { orchestrator.createSession(any(), any()) } returns "s1"
+
+        binder.registerClient(token)
+        val result = binder.createSession(SessionConfig(maxTokens = 2048))
+
+        assertEquals("s1", result)
+        verify {
+            orchestrator.createSession(
+                any(),
+                match { it is SessionOwnerToken && it.ownerUid == uid },
+            )
+        }
+    }
+
+    @Test
+    fun `same uid registrations retain independent death cleanup`() {
+        val uid = 12_345
+        mockkStatic(Binder::class)
+        every { Binder.getCallingUid() } returns uid
+        val deathA = CapturingSlot<IBinder.DeathRecipient>()
+        val deathB = CapturingSlot<IBinder.DeathRecipient>()
+        val tokenA = mockClientToken(deathA)
+        val tokenB = mockClientToken(deathB)
+        val ownerTokens = mutableListOf<Any>()
+        every { orchestrator.createSession(any(), capture(ownerTokens)) } returnsMany listOf("a", "b")
+        every { orchestrator.closeAllOwnedBy(any()) } returns emptyList()
+
+        binder.registerClient(tokenA)
+        binder.createSession(SessionConfig(maxTokens = 2048))
+        binder.registerClient(tokenB)
+        binder.createSession(SessionConfig(maxTokens = 2048))
+
+        deathA.captured.binderDied()
+
+        verify(exactly = 1) { orchestrator.closeAllOwnedBy(ownerTokens[0]) }
+        verify(exactly = 0) { orchestrator.closeAllOwnedBy(ownerTokens[1]) }
     }
 
     @Test
@@ -360,6 +434,46 @@ class ServiceBinderTest {
         every { service.activeInferenceCount } returns 0
 
         val status = binder.getStatus()
+        assertFalse(status.isForeground)
+    }
+
+    @Test
+    fun `getStatus scopes session and inference counts for external callers`() {
+        val uid = 12_345
+        every { Binder.getCallingUid() } returns uid
+        val token = mockClientToken()
+        val pfd = mockk<ParcelFileDescriptor>(relaxed = true)
+        val meta = RequestMeta(requestId = "r-owned", sessionId = "s-owned", textContent = "hello")
+        every { orchestrator.getSessionOwner("s-owned") } returns uid
+        every { orchestrator.listSessions() } returns listOf(
+            SessionInfo("s-owned", "GPU", 4096, 0, 0, 0, 0, false),
+            SessionInfo("s-other", "GPU", 4096, 0, 0, 0, 0, true),
+        )
+        every { orchestrator.listSessionsOwnedBy(uid) } returns listOf(
+            SessionInfo("s-owned", "GPU", 4096, 0, 0, 0, 0, false),
+        )
+
+        binder.registerClient(token)
+        binder.infer(meta, null, null, pfd)
+
+        val status = binder.getStatus()
+
+        assertEquals(1, status.activeSessionCount)
+        assertEquals(1, status.activeInferenceCount)
+        assertTrue(status.isForeground)
+    }
+
+    @Test
+    fun `getStatus hides other callers active inference state from external callers`() {
+        val uid = 12_345
+        every { Binder.getCallingUid() } returns uid
+        every { service.activeInferenceCount } returns 2
+        every { orchestrator.listSessionsOwnedBy(uid) } returns emptyList()
+
+        val status = binder.getStatus()
+
+        assertEquals(0, status.activeSessionCount)
+        assertEquals(0, status.activeInferenceCount)
         assertFalse(status.isForeground)
     }
 
