@@ -78,6 +78,16 @@ android {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
             isMinifyEnabled = false
+            // F-071 escape hatch: developer override that re-enables the
+            // pre-flight memory warn-and-proceed in debug builds when the
+            // workstation itself is under memory pressure during local
+            // testing. Pass `-Pmindlayer.allowLowMem=true` to any Gradle
+            // invocation to flip it on. Release builds always hard-fail
+            // (see the release block below) — this is *only* a developer
+            // affordance.
+            val allowLowMem = (project.findProperty("mindlayer.allowLowMem")?.toString() ?: "false")
+                .equals("true", ignoreCase = true)
+            buildConfigField("boolean", "ALLOW_LOW_MEM", allowLowMem.toString())
         }
         release {
             isMinifyEnabled = true
@@ -89,6 +99,11 @@ android {
             if (hasReleaseKeystore) {
                 signingConfig = signingConfigs.getByName("release")
             }
+            // F-071: release builds NEVER tolerate low-memory engine init.
+            // SIGABRT during model load is worse than a typed error, and
+            // production users are not in a position to "free some RAM and
+            // try again" without diagnostic surface.
+            buildConfigField("boolean", "ALLOW_LOW_MEM", "false")
         }
     }
 

@@ -16,6 +16,32 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
+ * F-071: thrown by [EngineManager.initialize] when the device's available
+ * RAM is below the model size + working-buffer headroom. Carries the
+ * concrete numbers so a diagnostic UI (or the dashboard's logs) can show
+ * the user how short the device is.
+ *
+ * **Why a typed exception, not [IllegalStateException]:** the previous
+ * implementation logged a warning and proceeded into native model load,
+ * which on 4–6 GB devices SIGABRT'd inside LiteRT-LM and bricked the
+ * service for retry-loop callers. We need a *terminal*, *typed* failure
+ * so [SessionManager] can refuse further session creation immediately
+ * (rather than waiting for the engine_initializing retry budget) and
+ * [ServiceBinder] can map it to [com.adsamcik.mindlayer.shared.MindlayerErrorCode.LOW_MEMORY]
+ * for a stable wire signal.
+ *
+ * Do not collapse this back into [IllegalStateException]. The downstream
+ * `when (e) { is LowMemoryException -> … }` discriminator pins the
+ * "no retry, surface to user" contract.
+ */
+class LowMemoryException(
+    val availMb: Long,
+    val requiredMb: Long,
+) : IllegalStateException(
+    "Insufficient memory: availMb=$availMb requiredMb=$requiredMb",
+)
+
+/**
  * Manages the LiteRT-LM [Engine] lifecycle: initialization with automatic
  * backend fallback (NPU → GPU → CPU), single-model selection via [ModelRegistry],
  * and teardown.
@@ -138,18 +164,35 @@ class EngineManager(
         // build pipeline pins the manifest, mismatches must hard-fail.
         verifyModelIntegrity(File(path))
 
-        // Pre-flight memory check: model needs ~2.5GB + working buffers
+        // Pre-flight memory check: model needs ~2.5GB + working buffers.
+        // F-071: this check now hard-fails with a typed [LowMemoryException]
+        // so SessionManager can stop the SDK retry loop. Previously this
+        // logged a warning and proceeded, which SIGABRT'd inside native
+        // model load on 4–6 GB devices. The debug-only
+        // [BuildConfig.ALLOW_LOW_MEM] override (gated behind
+        // `-Pmindlayer.allowLowMem=true`) restores the warn-and-proceed
+        // behaviour for developer machines under transient memory
+        // pressure during local debugging — release builds always
+        // hard-fail.
         val modelSizeBytes = target.sizeBytes
         val activityManager = context.getSystemService(android.app.ActivityManager::class.java)
         val memInfo = android.app.ActivityManager.MemoryInfo()
         activityManager.getMemoryInfo(memInfo)
         val requiredBytes = modelSizeBytes + (512L * 1024 * 1024) // model + 512MB headroom
+        val availMb = memInfo.availMem / 1024 / 1024
+        val requiredMb = requiredBytes / 1024 / 1024
         MindlayerLog.i(TAG, "Loading model '${target.id}' (${target.displayName})")
-        MindlayerLog.i(TAG, "Memory check: available=${memInfo.availMem / 1024 / 1024}MB, " +
-            "model=${modelSizeBytes / 1024 / 1024}MB, required=${requiredBytes / 1024 / 1024}MB")
+        MindlayerLog.i(TAG, "Memory check: available=${availMb}MB, " +
+            "model=${modelSizeBytes / 1024 / 1024}MB, required=${requiredMb}MB")
         if (memInfo.availMem < requiredBytes) {
-            MindlayerLog.w(TAG, "Low memory: ${memInfo.availMem / 1024 / 1024}MB available, " +
-                "need ${requiredBytes / 1024 / 1024}MB. Engine init may fail.")
+            if (com.adsamcik.mindlayer.service.BuildConfig.ALLOW_LOW_MEM) {
+                MindlayerLog.w(TAG, "ALLOW_LOW_MEM override active; proceeding with " +
+                    "${availMb}MB available, ${requiredMb}MB required (debug build only)")
+            } else {
+                MindlayerLog.w(TAG, "Refusing engine init: ${availMb}MB available, " +
+                    "${requiredMb}MB required for model '${target.id}'")
+                throw LowMemoryException(availMb = availMb, requiredMb = requiredMb)
+            }
         }
 
         val backends = resolveBackendChain(preferredBackend)
@@ -223,7 +266,6 @@ class EngineManager(
             }
         }
 
-        val availMb = memInfo.availMem / 1024 / 1024
         val triedBackends = backends.joinToString(",") { backendName(it) }
         throw IllegalStateException(
             "All backends failed for model '${target.id}' at $path " +
