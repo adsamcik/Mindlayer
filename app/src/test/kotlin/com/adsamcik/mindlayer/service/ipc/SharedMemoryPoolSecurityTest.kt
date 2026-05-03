@@ -164,6 +164,21 @@ class SharedMemoryPoolSecurityTest {
         }
     }
 
+    @Test
+    fun `stageImage rejects unparseable encoded image before native handoff`() {
+        val pfd = createPfdFromBytes(byteArrayOf(1, 2, 3), "png")
+        val xfer = ImageTransfer(
+            requestId = "abc",
+            width = 0, height = 0,
+            pixelFormat = 0, rowStride = 0,
+            payloadBytes = 3,
+            source = pfd, isSharedMemory = false, mimeType = "image/png",
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            pool.stageImage("u:abc", xfer)
+        }
+    }
+
     @org.junit.Ignore(
         "Robolectric does not faithfully emulate Linux pipe semantics — a " +
             "blocking AutoCloseInputStream.read() on a never-drained pipe " +

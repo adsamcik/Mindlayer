@@ -84,6 +84,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerColors
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerTheme
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerType
@@ -247,6 +248,7 @@ fun DashboardScreen(
     onTestInference: () -> Unit = {},
     onNavigateToHistory: () -> Unit = {},
     onNavigateToLogs: () -> Unit = {},
+    logRepository: LogRepository? = null,
     /**
      * F-055: cross-process revoke hook. The activity wires this to
      * [DashboardViewModel.revokeApp] so a tap in the Allowed Apps card
@@ -292,7 +294,14 @@ fun DashboardScreen(
                 item { CardEnterAnimation(3) { ActiveSessionsCard(state) } }
                 item { CardEnterAnimation(4) { ActivityNavigationCard(onNavigateToHistory, onNavigateToLogs) } }
                 item { CardEnterAnimation(5) { TestInferenceCard(state, onTestInference) } }
-                item { CardEnterAnimation(6) { AllowedAppsCard(onRevokeAidl = onRevokeApp) } }
+                item {
+                    CardEnterAnimation(6) {
+                        AllowedAppsCard(
+                            logRepository = logRepository,
+                            onRevokeAidl = onRevokeApp,
+                        )
+                    }
+                }
                 item { Spacer(Modifier.height(8.dp)) }
             }
         }

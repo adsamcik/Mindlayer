@@ -12,6 +12,7 @@ import androidx.annotation.RequiresApi
 import com.adsamcik.mindlayer.AudioTransfer
 import com.adsamcik.mindlayer.ImageTransfer
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
+import com.adsamcik.mindlayer.service.logging.loggable
 import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.adsamcik.mindlayer.service.security.IpcInputValidator
 import kotlinx.coroutines.Dispatchers
@@ -86,12 +87,21 @@ class SharedMemoryPool(cacheDir: File) {
          * forever. Adjustable per-call via [stageAudioWithTimeout].
          */
         const val AUDIO_STAGE_TIMEOUT_MS: Long = 20_000L
+
+        /**
+         * Image staging has the same read-until-EOF surface for non-shared
+         * encoded image PFDs, so it needs the same forced-close watchdog.
+         */
+        const val IMAGE_STAGE_TIMEOUT_MS: Long = 20_000L
     }
 
     private val stagingDir = File(cacheDir, STAGING_DIR).also { it.mkdirs() }
     private val stagingDirCanonical: String = stagingDir.canonicalPath
     private val stagedFiles = ConcurrentHashMap<String, MutableList<File>>()
     private val activePfds = ConcurrentHashMap<String, MutableSet<ParcelFileDescriptor>>()
+
+    private fun requestLabel(scopedKey: String): String =
+        scopedKey.substringAfter(':', scopedKey).loggable()
 
     // ---- Public API --------------------------------------------------------
 
@@ -141,7 +151,10 @@ class SharedMemoryPool(cacheDir: File) {
         }
 
         trackFile(scopedKey, staged)
-        MindlayerLog.d(TAG, "Staged image for scopedKey=$scopedKey → ${staged.name} ($mime)")
+        MindlayerLog.d(
+            TAG,
+            "Staged image for request ${requestLabel(scopedKey)} -> ${staged.name} ($mime)",
+        )
 
         return StagedMedia(
             scopedKey = scopedKey,
@@ -149,6 +162,36 @@ class SharedMemoryPool(cacheDir: File) {
             mimeType = mime,
             cleanup = { cleanup(scopedKey) },
         )
+    }
+
+    suspend fun stageImageWithTimeout(
+        scopedKey: String,
+        transfer: ImageTransfer,
+        timeoutMs: Long = IMAGE_STAGE_TIMEOUT_MS,
+    ): StagedMedia = withContext(Dispatchers.IO) {
+        coroutineScope {
+            val watchdog = launch {
+                delay(timeoutMs)
+                try { transfer.source.close() } catch (_: Throwable) { /* best-effort */ }
+                MindlayerLog.w(
+                    TAG,
+                    "Image staging watchdog fired for request ${requestLabel(scopedKey)} after ${timeoutMs}ms",
+                    throwable = null,
+                )
+            }
+            try {
+                stageImage(scopedKey, transfer)
+            } catch (e: java.io.IOException) {
+                if (watchdog.isCompleted) {
+                    throw java.util.concurrent.TimeoutException(
+                        "image_staging_timeout after ${timeoutMs}ms"
+                    ).apply { initCause(e) }
+                }
+                throw e
+            } finally {
+                watchdog.cancel()
+            }
+        }
     }
 
     /**
@@ -177,7 +220,10 @@ class SharedMemoryPool(cacheDir: File) {
         }
 
         trackFile(scopedKey, staged)
-        MindlayerLog.d(TAG, "Staged audio for scopedKey=$scopedKey → ${staged.name} (${transfer.mimeType})")
+        MindlayerLog.d(
+            TAG,
+            "Staged audio for request ${requestLabel(scopedKey)} -> ${staged.name} (${transfer.mimeType})",
+        )
 
         return StagedMedia(
             scopedKey = scopedKey,
@@ -207,7 +253,7 @@ class SharedMemoryPool(cacheDir: File) {
                 try { transfer.source.close() } catch (_: Throwable) { /* best-effort */ }
                 MindlayerLog.w(
                     TAG,
-                    "Audio staging watchdog fired for scopedKey=$scopedKey after ${timeoutMs}ms",
+                    "Audio staging watchdog fired for request ${requestLabel(scopedKey)} after ${timeoutMs}ms",
                     throwable = null,
                 )
             }
@@ -231,7 +277,10 @@ class SharedMemoryPool(cacheDir: File) {
         val closedPfds = closeActivePfds(scopedKey)
         val files = stagedFiles.remove(scopedKey) ?: run {
             if (closedPfds > 0) {
-                MindlayerLog.d(TAG, "Closed $closedPfds active media PFD(s) for scopedKey=$scopedKey")
+                MindlayerLog.d(
+                    TAG,
+                    "Closed $closedPfds active media PFD(s) for request ${requestLabel(scopedKey)}",
+                )
             }
             return
         }
@@ -242,7 +291,7 @@ class SharedMemoryPool(cacheDir: File) {
         MindlayerLog.d(
             TAG,
             "Cleaned up $deleted/${files.size} staged file(s) and closed " +
-                "$closedPfds active PFD(s) for scopedKey=$scopedKey",
+                "$closedPfds active PFD(s) for request ${requestLabel(scopedKey)}",
         )
     }
 
@@ -533,25 +582,19 @@ class SharedMemoryPool(cacheDir: File) {
      * declares 100k×100k pixels.
      *
      * Files that fail to expose dimensions via `inJustDecodeBounds` are
-     * **not** rejected here — they will fail later in the LiteRT-LM
-     * decoder pipeline. The bomb attack relies on the file PARSING
-     * successfully and reporting huge dimensions; a non-parsing file
-     * cannot allocate native pixel memory.
+     * rejected before LiteRT-LM/native decoders see them. MIME metadata is
+     * caller-controlled, so parseability is the real native-bound contract.
      */
     private fun probeAndRejectImageBomb(file: File) {
         val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         try {
             BitmapFactory.decodeFile(file.absolutePath, opts)
         } catch (t: Throwable) {
-            // Don't escalate decoder exceptions on the probe — they
-            // indicate the file isn't a real image, not that it is a
-            // bomb. Production rejection happens downstream.
-            MindlayerLog.w(TAG, "image bounds probe raised; deferring to native decoder: ${t.safeLabel()}")
-            return
+            MindlayerLog.w(TAG, "image bounds probe raised: ${t.safeLabel()}")
+            throw IllegalArgumentException("encoded image could not be parsed")
         }
         if (opts.outWidth <= 0 || opts.outHeight <= 0) {
-            // Can't read bounds — same reasoning as above.
-            return
+            throw IllegalArgumentException("encoded image could not be parsed")
         }
         require(
             opts.outWidth <= IpcInputValidator.MAX_IMG_DIMENSION &&

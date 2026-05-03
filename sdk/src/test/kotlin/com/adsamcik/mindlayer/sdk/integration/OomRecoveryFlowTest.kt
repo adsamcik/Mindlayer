@@ -9,6 +9,7 @@ import com.adsamcik.mindlayer.IMindlayerService
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.sdk.ConnectionManager
 import com.adsamcik.mindlayer.sdk.ConnectionState
+import com.adsamcik.mindlayer.sdk.HistoryPolicy
 import com.adsamcik.mindlayer.sdk.HistoryStore
 import com.adsamcik.mindlayer.sdk.Mindlayer
 import com.adsamcik.mindlayer.sdk.SessionRecovery
@@ -71,7 +72,7 @@ class OomRecoveryFlowTest {
             .build()
         setSingleton(db)
 
-        store = HistoryStore(context)
+        store = HistoryStore(context, HistoryPolicy.FULL_CONTENT)
 
         // Mock AIDL service
         mockService = mockk(relaxed = true) {

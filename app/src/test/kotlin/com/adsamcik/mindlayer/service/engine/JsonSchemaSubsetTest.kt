@@ -122,6 +122,12 @@ class JsonSchemaSubsetTest {
             put("pattern", "^[A-Z]+$")
         })
 
+    @Test fun `pattern rejects catastrophic nested quantifier`() =
+        assertInvalid("\"aaaaaaaaaaaaaaaaab\"", buildJsonObject {
+            put("type", "string")
+            put("pattern", "^(a+)+$")
+        })
+
     // ── minLength / maxLength ───────────────────────────────────────────
 
     @Test fun `minLength rejects short string`() =

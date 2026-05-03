@@ -15,7 +15,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
  */
 @Database(
     entities = [ConversationEntity::class, TurnEntity::class, TurnPartEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 abstract class MindlayerDatabase : RoomDatabase() {
@@ -37,6 +37,26 @@ abstract class MindlayerDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    UPDATE conversations
+                    SET systemPrompt = NULL,
+                        toolsJson = NULL,
+                        extraContextJson = NULL
+                    """.trimIndent(),
+                )
+                db.execSQL("UPDATE turns SET textContent = NULL")
+                db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'turn_parts'")
+                    .use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            db.execSQL("UPDATE turn_parts SET text = NULL")
+                        }
+                    }
+            }
+        }
+
         fun getInstance(context: Context): MindlayerDatabase =
             instance ?: synchronized(this) {
                 instance ?: build(context.applicationContext).also { instance = it }
@@ -50,7 +70,7 @@ abstract class MindlayerDatabase : RoomDatabase() {
                 val factory = SupportOpenHelperFactory(passphrase)
                 return Room.databaseBuilder(appContext, MindlayerDatabase::class.java, DB_NAME)
                     .openHelperFactory(factory)
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
             } finally {

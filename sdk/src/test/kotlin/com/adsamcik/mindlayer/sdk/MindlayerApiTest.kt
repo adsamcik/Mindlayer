@@ -81,7 +81,7 @@ class MindlayerApiTest {
             .build()
         setDbSingleton(db)
 
-        store = HistoryStore(context)
+        store = HistoryStore(context, HistoryPolicy.FULL_CONTENT)
 
         mockService = mockk(relaxed = true) {
             every { createSession(any()) } returns "session-abc"

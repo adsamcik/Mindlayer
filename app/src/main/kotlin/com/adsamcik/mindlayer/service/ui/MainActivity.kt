@@ -13,12 +13,15 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.adsamcik.mindlayer.service.logging.LogDatabase
+import com.adsamcik.mindlayer.service.logging.LogRepository
 
 /**
  * F-029: extends [FragmentActivity] (not the bare ComponentActivity) because
@@ -76,6 +79,9 @@ class MainActivity : FragmentActivity() {
                         ) {
                             composable(SessionHistoryNavigation.DashboardRoute) {
                                 val state by dashboardViewModel.uiState.collectAsState()
+                                val logRepository = remember {
+                                    LogRepository(LogDatabase.getInstance(this@MainActivity).logDao())
+                                }
                                 DashboardScreen(
                                     state = state,
                                     onTestInference = { dashboardViewModel.runTestInference() },
@@ -85,6 +91,7 @@ class MainActivity : FragmentActivity() {
                                     onNavigateToLogs = {
                                         navController.navigate(SessionHistoryNavigation.LogsRoute)
                                     },
+                                    logRepository = logRepository,
                                     onRevokeApp = { pkg -> dashboardViewModel.revokeApp(pkg) },
                                 )
                             }

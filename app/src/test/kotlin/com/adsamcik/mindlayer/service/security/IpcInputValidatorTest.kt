@@ -165,6 +165,21 @@ class IpcInputValidatorTest {
     }
 
     @Test
+    fun `validateImageTransfer rejects encoded image without mimeType`() {
+        val xfer = ImageTransfer(
+            requestId = "abc",
+            width = 0, height = 0,
+            pixelFormat = 0, rowStride = 0,
+            payloadBytes = 1024,
+            source = pfd(), isSharedMemory = false,
+            mimeType = null,
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            IpcInputValidator.validateImageTransfer(xfer, 100 * 1024 * 1024)
+        }
+    }
+
+    @Test
     fun `validateImageTransfer accepts encoded image with zero dims`() {
         val xfer = ImageTransfer(
             requestId = "abc",
