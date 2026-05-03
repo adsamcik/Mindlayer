@@ -60,14 +60,52 @@ jobs:
             shared/build/test-results/
           retention-days: 14
 
+  # Instrumented tests run on three API levels:
+  #   - API 26 — minSdk floor; we want to verify the integration path actually
+  #     boots and the `BIND_ML_SERVICE` permission + service binding still works
+  #     on the oldest supported platform.
+  #   - API 33 — the contracted "must pass" CI gate. Robolectric also pins to 33.
+  #   - API 34 — first OS where FGS `specialUse` property enforcement and the
+  #     predictive-back default flip are actually live; we want to catch
+  #     regressions there before they ship.
+  #
+  # Ramp plan: API 26 and API 34 are NON-BLOCKING (`continue-on-error: true`)
+  # while we observe stability. Flip `continue-on-error` to `false` for an
+  # entry once it has produced 5 consecutive green runs on `main`. API 33 is
+  # the only required entry for now.
+  #
+  # Per-entry arch/target overrides exist because system-image availability
+  # differs across API levels:
+  #   - API 26: x86_64 / default — the AOSP image is the simplest match and
+  #     covers the surface our :ml service uses (no Play Services dependency).
+  #   - API 33: x86_64 / default — historical CI pin; do not change without a
+  #     5-run regression check.
+  #   - API 34: x86_64 / google_apis — the AOSP `default` image for API 34 has
+  #     historically been slower to land and more flake-prone on Linux runners;
+  #     `google_apis` is the well-trodden path. Revisit if/when we rely on
+  #     Play-Services-only behaviour (we don't today).
+  # If any of these guesses turn out wrong, CI itself will surface it — the
+  # action will fail to download the system image and we adjust.
   instrumented-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    continue-on-error: ${{ matrix.api-level != 33 }}
     permissions:
       contents: read
     strategy:
+      fail-fast: false
       matrix:
-        api-level: [33]
+        api-level: [26, 33, 34]
+        include:
+          - api-level: 26
+            arch: x86_64
+            target: default
+          - api-level: 33
+            arch: x86_64
+            target: default
+          - api-level: 34
+            arch: x86_64
+            target: google_apis
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -97,14 +135,15 @@ jobs:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: avd-${{ matrix.api-level }}
+          key: avd-${{ matrix.api-level }}-${{ matrix.arch }}-${{ matrix.target }}
 
       - name: Create AVD and generate snapshot for caching
         if: steps.avd-cache.outputs.cache-hit != 'true'
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2
         with:
           api-level: ${{ matrix.api-level }}
-          arch: x86_64
+          arch: ${{ matrix.arch }}
+          target: ${{ matrix.target }}
           force-avd-creation: false
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: false
@@ -114,7 +153,8 @@ jobs:
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2
         with:
           api-level: ${{ matrix.api-level }}
-          arch: x86_64
+          arch: ${{ matrix.arch }}
+          target: ${{ matrix.target }}
           force-avd-creation: false
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
@@ -124,7 +164,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: instrumented-test-reports
+          name: instrumented-test-reports-api${{ matrix.api-level }}
           path: |
             app/build/reports/androidTests/
             sdk/build/reports/androidTests/
