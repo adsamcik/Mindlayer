@@ -105,7 +105,18 @@ object StructuredOutputHelper {
      * tool call whose arguments are the structured response.
      */
     fun buildSchemaToolDefinition(config: StructuredOutputConfig): ToolProvider {
-        val toolJson = buildJsonObject {
+        return tool(SchemaRoutingTool(buildSchemaToolJson(config)))
+    }
+
+    /**
+     * F-072: serialize the same JSON description that
+     * [buildSchemaToolDefinition] hands to LiteRT-LM, so [SessionManager]
+     * can budget the token cost of the synthetic tool against the KV-cache
+     * ceiling. Internal: the surface is the `ToolProvider`; only token
+     * accounting needs the raw bytes.
+     */
+    internal fun buildSchemaToolJson(config: StructuredOutputConfig): String {
+        return buildJsonObject {
             put("name", TOOL_NAME)
             put(
                 "description",
@@ -113,8 +124,7 @@ object StructuredOutputHelper {
                     "Call this tool with the complete response object as arguments.",
             )
             put("parameters", config.schema)
-        }
-        return tool(SchemaRoutingTool(toolJson.toString()))
+        }.toString()
     }
 
     /**
