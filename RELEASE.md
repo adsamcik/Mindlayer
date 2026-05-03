@@ -240,3 +240,72 @@ unblocked.
   the `<string>` element *or* provide translations. `MissingTranslation`
   is a fatal release-check (see `lint { fatal += … }` in
   `app/build.gradle.kts`).
+
+---
+
+## 7. Hardware-touching PR checklist
+
+Emulator CI catches API-level regressions but cannot exercise the NPU/GPU
+backends, real thermal throttling, true low-RAM device tiers, or the
+foreground-service lifecycle that Android imposes on physical hardware. PRs
+that touch any of the surfaces below **must** be verified on at least one
+real device by the author before merge. The **npu-soc-list-expansion
+(F-080)** work explicitly depends on this checklist as its real-device
+validation gate.
+
+### Trigger paths
+
+A PR is "hardware-touching" if it modifies any of:
+
+* `app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/**` — engine,
+  thermal, memory, NPU SoC list, session/inference orchestration
+* `app/src/main/kotlin/com/adsamcik/mindlayer/service/MindlayerMlService.kt`
+  — foreground-service lifecycle (`startForeground` / `stopForeground`,
+  `specialUse` promotion/demotion, binder-death linkage)
+* `app/src/main/AndroidManifest.xml` — `foregroundServiceType`,
+  service `<intent-filter>`, signature-level permissions, process name
+* `gemma_model/**` — the Play AI Pack module that delivers the
+  `.litertlm` weights
+
+### Verification steps
+
+Copy this block into the PR description and tick every box that applies.
+
+```markdown
+- [ ] Built and installed on at least one real device per ABI we ship
+      (`arm64-v8a` mandatory; `armeabi-v7a` only if the F-079
+      `litertlm-aar-abi-inspection` allow-list confirms the AAR exposes it).
+- [ ] Tested device-tier extremes: at least one **≤ 6 GB** device and one
+      **≥ 12 GB** device, so `MemoryBudget` tier selection is exercised at
+      both ends.
+- [ ] Captured `adb logcat -s "Mindlayer.*:D"` for a 3-message inference
+      run and attached the trimmed log to the PR description (no prompt or
+      output text — log metadata only, per the no-PII invariant).
+- [ ] Confirmed the **dashboard** renders the correct thermal band and
+      memory tier *during* inference (not just at idle).
+- [ ] **EngineManager change?** Exercised every backend (NPU / GPU / CPU)
+      that the test devices support, OR documented in the PR why a backend
+      could not be exercised on the available hardware.
+- [ ] **FGS lifecycle change?** Backgrounded the app mid-inference (Home
+      key, then a 30 s wait) and confirmed the token stream still
+      completes without `ForegroundServiceDidNotStartInTimeException` or
+      premature termination.
+- [ ] **NPU SoC list change?** (any edit to `QUALCOMM_NPU_SOCS`,
+      `MEDIATEK_NPU_SOCS`, `GOOGLE_TENSOR_NPU_SOCS`, or
+      `SAMSUNG_NPU_SOCS`): tested on a **Pixel 6 or newer** *and* a
+      **recent Samsung flagship** (Galaxy S22 or newer), since the
+      Tensor and Snapdragon NPU paths diverge.
+```
+
+### What this list deliberately leaves out
+
+* API-level matrix coverage (26 / 33 / 34) — handled by emulator CI.
+* Unit-test regressions — handled by `:app:testDebugUnitTest` and
+  `:sdk:testDebugUnitTest` on every push.
+* Static lint and AIDL drift — handled by `lintDebug` and the AIDL
+  byte-identity check.
+
+Once F-078 (extended emulator matrix) and F-079
+(litertlm-aar-abi-inspection) land, items in the checklist that those
+gates fully cover should be removed. The list above is the **upper bound**
+— too long means people skip it.
