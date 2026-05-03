@@ -335,6 +335,132 @@ class EngineManagerTest {
         assertNull(mgr.lastGpuFailureReason)
     }
 
+    // ---- initialize - partial-init cleanup (leak prevention) ----------------
+    // The LiteRT-LM Engine constructor allocates native resources BEFORE
+    // initialize() is even called. If initialize() throws, the partially-
+    // constructed engine must be close()-d or the backend-fallback loop
+    // leaks native heap on every retry. These tests pin that invariant.
+
+    /**
+     * The leak-prevention tests drive `EngineManager.initialize`, which
+     * queries `ActivityManager` for a memory pre-flight check. The
+     * top-level `context` mock is `relaxed = true` but generic
+     * `getSystemService(Class)` returns `Object` by default, which then
+     * fails the cast at `EngineManager.kt:initialize`. This helper wires
+     * `getSystemService(ActivityManager::class.java)` to a mock that
+     * answers `getMemoryInfo` with realistic values.
+     */
+    private fun stubActivityManager(availMb: Long = 4_096L, totalMb: Long = 8_192L) {
+        val activityManager = mockk<android.app.ActivityManager>(relaxed = true)
+        every { activityManager.getMemoryInfo(any()) } answers {
+            val info = firstArg<android.app.ActivityManager.MemoryInfo>()
+            info.availMem = availMb * 1024 * 1024
+            info.totalMem = totalMb * 1024 * 1024
+            info.lowMemory = false
+        }
+        every { context.getSystemService(android.app.ActivityManager::class.java) } returns activityManager
+    }
+
+    @Test
+    fun `initialize - close called on every engine when initialize throws`() = runTest {
+        File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME).writeText("fake-model")
+        stubActivityManager()
+
+        val mgr = EngineManager(context, logRepository)
+        val createdEngines = mutableListOf<Engine>()
+        mgr.engineFactory = { _ ->
+            mockk<Engine>(relaxed = true) {
+                every { initialize() } throws RuntimeException("simulated init failure")
+            }.also { createdEngines.add(it) }
+        }
+
+        try {
+            mgr.initialize(preferredBackend = null) // GPU then CPU
+        } catch (_: IllegalStateException) {
+            // expected: "All backends failed"
+        }
+
+        // Default chain is GPU + CPU; both attempts construct an engine, both
+        // throw, and BOTH must have been closed before the loop moved on.
+        assertEquals(2, createdEngines.size)
+        createdEngines.forEach { engine ->
+            verify(exactly = 1) { engine.close() }
+        }
+
+        // The leak guarantee also implies no engine is retained as the
+        // current engine after a total failure.
+        assertNull(mgr.getEngine())
+        assertFalse(mgr.isInitialized)
+    }
+
+    @Test
+    fun `initialize - secondary close exception does not mask original cause`() = runTest {
+        File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME).writeText("fake-model")
+        stubActivityManager()
+
+        val mgr = EngineManager(context, logRepository)
+        mgr.engineFactory = { _ ->
+            mockk<Engine>(relaxed = true) {
+                every { initialize() } throws RuntimeException("init failure")
+                every { close() } throws RuntimeException("close failure too")
+            }
+        }
+
+        try {
+            mgr.initialize(preferredBackend = "CPU") // single-backend chain, deterministic
+            throw AssertionError("Expected IllegalStateException for failed init")
+        } catch (e: IllegalStateException) {
+            // The "All backends failed" wrapper is what the caller should see;
+            // the secondary close() failure must not mask it. The original
+            // initialize() throwable is the wrapper's `cause`.
+            assertTrue(
+                "Wrapper message must reference all-backends failure, was: ${e.message}",
+                e.message!!.contains("All backends failed"),
+            )
+            assertNotNull("Original initialize() exception must be preserved as cause", e.cause)
+            assertEquals("init failure", e.cause!!.message)
+        }
+    }
+
+    @Test
+    fun `initialize - successful init does not call close on the engine`() = runTest {
+        File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME).writeText("fake-model")
+        stubActivityManager()
+
+        val mgr = EngineManager(context, logRepository)
+        val mockEngine = mockk<Engine>(relaxed = true) {
+            every { initialize() } returns Unit
+        }
+        mgr.engineFactory = { _ -> mockEngine }
+
+        val eng = mgr.initialize(preferredBackend = "CPU")
+
+        assertSame(mockEngine, eng)
+        verify(exactly = 0) { mockEngine.close() }
+        assertTrue(mgr.isInitialized)
+        assertEquals("CPU", mgr.currentBackend)
+    }
+
+    @Test
+    fun `initialize - engine factory throwing is treated as init failure (no close to call)`() = runTest {
+        File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME).writeText("fake-model")
+        stubActivityManager()
+
+        val mgr = EngineManager(context, logRepository)
+        mgr.engineFactory = { _ -> throw RuntimeException("constructor failure") }
+
+        try {
+            mgr.initialize(preferredBackend = "CPU")
+            throw AssertionError("Expected IllegalStateException")
+        } catch (e: IllegalStateException) {
+            // Constructor failure is caught by the same outer catch as init
+            // failure; the loop falls through cleanly to "All backends failed".
+            assertTrue(e.message!!.contains("All backends failed"))
+        }
+        assertNull(mgr.getEngine())
+        assertFalse(mgr.isInitialized)
+    }
+
     // ---- backendName (tested via resolveBackendChain path) ------------------
 
     // We can test backendName indirectly through logging. Since it's private, we
