@@ -117,6 +117,15 @@ object MindlayerErrorCode {
     /** Caller exceeded the per-UID requests-per-minute cap (throws SecurityException too). */
     const val RATE_LIMITED = 5002
 
+    /**
+     * F-074: the `:ml` service has detected a crash-loop and is throttling
+     * new binds for a cooldown window. The wire message body carries
+     * `cooldown=<wallClockMs>` — the UTC ms timestamp at which the throttle
+     * naturally expires. SDKs use this to back off the reconnect loop
+     * instead of hot-spinning until the OOM-killer is provoked again.
+     */
+    const val SERVICE_THROTTLED = 5003
+
     // ---- 6xxx auth / allowlist ---------------------------------------------
 
     /** App not on the allowlist; user approval pending in the dashboard. */
@@ -175,7 +184,7 @@ object MindlayerErrorCode {
         DUPLICATE_REQUEST, NO_ACTIVE_REQUEST,
         INPUT_EXCEEDS_CONTEXT -> Category.VALIDATION
         THERMAL_CRITICAL, MEMORY_PRESSURE, LOW_MEMORY,
-        CONCURRENT_LIMIT, RATE_LIMITED -> Category.RESOURCE
+        CONCURRENT_LIMIT, RATE_LIMITED, SERVICE_THROTTLED -> Category.RESOURCE
         ALLOWLIST_PENDING, ALLOWLIST_REVOKED, IDENTITY_UNKNOWN -> Category.AUTH
         INTERNAL -> Category.UNKNOWN
         else -> Category.UNKNOWN
@@ -204,6 +213,7 @@ object MindlayerErrorCode {
         LOW_MEMORY -> "LOW_MEMORY"
         CONCURRENT_LIMIT -> "CONCURRENT_LIMIT"
         RATE_LIMITED -> "RATE_LIMITED"
+        SERVICE_THROTTLED -> "SERVICE_THROTTLED"
         ALLOWLIST_PENDING -> "ALLOWLIST_PENDING"
         ALLOWLIST_REVOKED -> "ALLOWLIST_REVOKED"
         IDENTITY_UNKNOWN -> "IDENTITY_UNKNOWN"
