@@ -130,6 +130,18 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     private val initScope = CoroutineScope(SupervisorJob() + initDispatcher)
     private val initJob = AtomicReference<Job?>(null)
 
+    /**
+     * F-071: terminal initialisation failure cached from the most recent
+     * background init job. Today only [LowMemoryException] is stored;
+     * other failures are transient (driver crash, race with foreground
+     * preemption) and the next [createSession] should be allowed to
+     * trigger another init attempt as before. Cleared on successful
+     * `engineManager.initialize()` return so a recovered situation
+     * (user closes background apps) can re-attempt without service
+     * restart.
+     */
+    private val lastInitError = AtomicReference<Throwable?>(null)
+
     val sessionCount: Int get() = sessions.size
 
     /** Delegate to the shared [MemoryBudget] component. */
@@ -224,6 +236,16 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
 
         // Auto-initialize engine if not yet loaded
         if (!engineManager.isInitialized) {
+            // F-071: terminal init failure (today: [LowMemoryException])
+            // is cached on the bg job so subsequent createSession calls
+            // surface the typed error instead of looping on
+            // engine_initializing. ServiceBinder maps this to the
+            // LOW_MEMORY wire code; the SDK's createSession retry
+            // schedule treats it as non-retryable.
+            val cachedError = lastInitError.get()
+            if (cachedError is LowMemoryException) {
+                throw cachedError
+            }
             // F-018: never block the binder thread on engine init. Kick off
             // a single coalesced init job and fast-fail with a typed
             // exception. The caller (SDK) retries with backoff via the
@@ -690,6 +712,9 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         // dispatcher scope so we don't leak the worker thread.
         initScope.cancel()
         initJob.set(null)
+        // F-071: drop any cached terminal init failure so a fresh
+        // service instance can re-attempt cleanly.
+        lastInitError.set(null)
         val ids = sessions.keys.toList()
         for (id in ids) {
             destroySession(id)
@@ -711,7 +736,23 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
                     preferredBackend = preferredBackend,
                     maxTokens = maxTokens,
                 )
+                // F-071: clear any previously-cached terminal failure so
+                // a recovered situation (e.g. user closed background apps
+                // between attempts) can serve sessions normally.
+                lastInitError.set(null)
             } catch (t: Throwable) {
+                // F-071: cache low-memory failures so subsequent
+                // createSession callers get the typed LOW_MEMORY signal
+                // instead of EngineNotReadyException → engine_initializing
+                // → SDK retry storm. Other failures are not cached: the
+                // backend chain has its own retry semantics inside
+                // initialize() and a transient driver glitch should not
+                // permanently block session creation.
+                if (t is LowMemoryException) {
+                    lastInitError.set(t)
+                } else {
+                    lastInitError.set(null)
+                }
                 MindlayerLog.w(TAG, "Background engine init failed: ${t.safeLabel()}", throwable = null)
             }
         }

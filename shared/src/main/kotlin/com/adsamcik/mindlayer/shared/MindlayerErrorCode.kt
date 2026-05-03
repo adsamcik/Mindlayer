@@ -47,7 +47,6 @@ object MindlayerErrorCode {
     const val ENGINE_LOAD_FAILED = 1002
 
     // ---- 2xxx session lifecycle --------------------------------------------
-
     /**
      * Session does not exist OR exists but is not owned by the caller.
      *
@@ -86,6 +85,17 @@ object MindlayerErrorCode {
 
     /** Memory pressure exceeded the safe band; request rejected. */
     const val MEMORY_PRESSURE = 4002
+
+    /**
+     * Engine init refused: device available RAM is below the model size +
+     * working-buffer headroom. Carries `availMb` and `requiredMb` in the
+     * wire message (format: `"… availMb=N requiredMb=M …"`) so a diagnostic
+     * UI can show the user how short the device is. Distinct from
+     * [MEMORY_PRESSURE] (which fires for steady-state pressure on an
+     * already-running session) and [ENGINE_LOAD_FAILED] (which is the
+     * generic native-load failure).
+     */
+    const val LOW_MEMORY = 4003
 
     // ---- 5xxx quota / rate limiting ----------------------------------------
 
@@ -151,7 +161,8 @@ object MindlayerErrorCode {
         SESSION_NOT_FOUND_OR_NOT_OWNED, SESSION_EVICTED, SESSION_EXPIRED -> Category.SESSION
         INVALID_REQUEST, INVALID_SESSION_CONFIG, INVALID_TOOL_RESULT,
         DUPLICATE_REQUEST, NO_ACTIVE_REQUEST -> Category.VALIDATION
-        THERMAL_CRITICAL, MEMORY_PRESSURE, CONCURRENT_LIMIT, RATE_LIMITED -> Category.RESOURCE
+        THERMAL_CRITICAL, MEMORY_PRESSURE, LOW_MEMORY,
+        CONCURRENT_LIMIT, RATE_LIMITED -> Category.RESOURCE
         ALLOWLIST_PENDING, ALLOWLIST_REVOKED, IDENTITY_UNKNOWN -> Category.AUTH
         INTERNAL -> Category.UNKNOWN
         else -> Category.UNKNOWN
@@ -176,6 +187,7 @@ object MindlayerErrorCode {
         NO_ACTIVE_REQUEST -> "NO_ACTIVE_REQUEST"
         THERMAL_CRITICAL -> "THERMAL_CRITICAL"
         MEMORY_PRESSURE -> "MEMORY_PRESSURE"
+        LOW_MEMORY -> "LOW_MEMORY"
         CONCURRENT_LIMIT -> "CONCURRENT_LIMIT"
         RATE_LIMITED -> "RATE_LIMITED"
         ALLOWLIST_PENDING -> "ALLOWLIST_PENDING"
