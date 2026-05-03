@@ -2,6 +2,7 @@ package com.adsamcik.mindlayer.service.engine
 
 import android.content.Context
 import android.os.Build
+import androidx.annotation.VisibleForTesting
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
@@ -70,6 +71,19 @@ class EngineManager(
     @Volatile
     var lastGpuFailureReason: String? = null
         private set
+
+    /**
+     * Factory used to construct a new [Engine] from an [EngineConfig].
+     *
+     * The default delegates to the LiteRT-LM [Engine] constructor. Tests
+     * override this to inject a mock so that backend-fallback paths and
+     * partial-init cleanup can be exercised without loading native code.
+     *
+     * Backed by a single field so the constructor signature stays stable
+     * for the dashboard and `:ml` service entry points.
+     */
+    @VisibleForTesting
+    internal var engineFactory: (EngineConfig) -> Engine = { Engine(it) }
 
     /** All model files detected on the device for internal selection purposes. */
     private val installedModels: List<ModelInfo> by lazy {
@@ -156,7 +170,22 @@ class EngineManager(
                 )
 
                 val eng = withContext(Dispatchers.IO) {
-                    Engine(config).also { it.initialize() }
+                    val instance = engineFactory(config)
+                    try {
+                        instance.initialize()
+                        instance
+                    } catch (t: Throwable) {
+                        // F-070: the LiteRT-LM Engine constructor allocates native
+                        // resources before `initialize()` is even called. If init
+                        // throws (driver crash, OOM, malformed model), the
+                        // partially-constructed engine MUST be closed or the
+                        // backend-fallback loop leaks native heap on every retry.
+                        // close() can itself throw on a half-initialised handle —
+                        // best-effort, swallow secondaries so the original cause
+                        // propagates to the outer catch unchanged.
+                        try { instance.close() } catch (_: Throwable) { /* best-effort */ }
+                        throw t
+                    }
                 }
 
                 val elapsed = (System.nanoTime() - startNs) / 1_000_000_000f
