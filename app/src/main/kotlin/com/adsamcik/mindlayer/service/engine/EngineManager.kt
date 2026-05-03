@@ -224,9 +224,10 @@ class EngineManager(
         }
 
         val availMb = memInfo.availMem / 1024 / 1024
+        val triedBackends = backends.joinToString(",") { backendName(it) }
         throw IllegalStateException(
             "All backends failed for model '${target.id}' at $path " +
-                "(available RAM: ${availMb}MB, model: ${modelSizeBytes / 1024 / 1024}MB). " +
+                "(tried=[$triedBackends], available RAM: ${availMb}MB, model: ${modelSizeBytes / 1024 / 1024}MB). " +
                 "Try closing other apps to free memory.", lastError
         )
     }
