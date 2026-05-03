@@ -497,6 +497,26 @@ private fun StatusSection(state: DashboardUiState) {
                 DiagnosticCallout(message = state.statusErrorMessage, tone = DashboardMessageTone.ERROR)
             }
 
+            // F-074: surface the crash-loop watchdog throttle banner.
+            // Distinct from statusErrorMessage so it shows alongside any
+            // other failure context. Hidden while the recorder reports
+            // healthy.
+            if (state.serviceThrottled) {
+                val secs = state.throttleCooldownSecondsRemaining
+                val deathCount = state.recentDeathCount
+                val message = if (secs > 0) {
+                    "Service throttled — cooling down (${secs}s) " +
+                        "after $deathCount recent crash${if (deathCount == 1) "" else "es"}."
+                } else {
+                    "Service throttled after $deathCount recent crash" +
+                        "${if (deathCount == 1) "" else "es"} — retrying soon."
+                }
+                DiagnosticCallout(
+                    message = message,
+                    tone = DashboardMessageTone.ERROR,
+                )
+            }
+
             // Engine detail grid — 2 columns to save vertical space
             Row(
                 modifier = Modifier.fillMaxWidth(),
