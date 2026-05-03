@@ -52,6 +52,33 @@ class LowMemoryException(
 class EngineManager(
     private val context: Context,
     private val logRepository: com.adsamcik.mindlayer.service.logging.LogRepository? = null,
+    /**
+     * F-080 test seam: API level provider. Defaults to [Build.VERSION.SDK_INT]
+     * but tests inject a custom lambda because the Kotlin compiler inlines
+     * the static-final `SDK_INT` constant from the android.jar stub at every
+     * read site (typically as `0`). Static-field reflection therefore does
+     * NOT take effect for the [isNpuLikelySupported] API gate. See commit
+     * 91afbb5 for the same pattern in [ThermalMonitor].
+     */
+    private val sdkInt: () -> Int = { Build.VERSION.SDK_INT },
+    /**
+     * F-080 test seam: SoC model provider. Defaults to [Build.SOC_MODEL]
+     * (API 31+) but tests override to drive the per-SoC NPU branches.
+     * `Build.SOC_MODEL` is also a static-final field with the same inlining
+     * behaviour as `Build.VERSION.SDK_INT`, so constructor injection is the
+     * only way to reliably exercise per-SoC branches in unit tests. The
+     * default lambda gates the read on API ≥ 31 so accessing the field on
+     * older runtimes (the production [Engine] never starts on API < 31, but
+     * Robolectric can be configured below that) does not throw.
+     */
+    @Suppress("InlinedApi")
+    private val socModel: () -> String = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Build.SOC_MODEL.orEmpty()
+        } else {
+            ""
+        }
+    },
 ) {
 
     companion object {
@@ -60,15 +87,104 @@ class EngineManager(
         /** Hint filename used for Play AI Pack extraction fallback. */
         const val DEFAULT_MODEL_FILENAME = "gemma-4-E2B-it.litertlm"
 
-        // Qualcomm SoCs with NPU support
+        // Qualcomm SoCs with NPU support (LiteRT-LM Qualcomm QNN HTP backend
+        // ships `libQnn*.so` runtime). Strings match `Build.SOC_MODEL`,
+        // lowercased. Vendor binning suffixes (e.g. `sm8650-AC`, `sm8550AB`)
+        // are handled by [normalizeQualcommSoc] before set lookup.
         private val QUALCOMM_NPU_SOCS = setOf(
             "sm8450", "sm8475", "sm8550", "sm8650", "sm8750", "sm8850"
         )
 
-        // MediaTek SoCs with NPU support
+        // MediaTek SoCs with NPU support (LiteRT-LM MediaTek NeuroPilot
+        // backend ships `libmediatek*.so` / `libdispatch*.so` runtime).
         private val MEDIATEK_NPU_SOCS = setOf(
             "mt6878", "mt6897", "mt6983", "mt6985", "mt6989", "mt6990", "mt6991"
         )
+
+        /**
+         * F-080: Google Tensor SoCs with on-die Edge TPU (codename "Rio")
+         * reachable via LiteRT-LM's Tensor NPU acceleration path.
+         *
+         * `Build.SOC_MODEL` is set in each Pixel generation's `vendor.prop`
+         * by the OEM, and Google has used a different convention every
+         * generation (silicon model on G2, marketing string on G1/G3/G4).
+         * To avoid silent NPU disablement on the affected devices we
+         * accept ALL observed values per generation, lowercased.
+         *
+         * | SoC      | Pixel devices              | Observed `ro.soc.model`         |
+         * |----------|----------------------------|---------------------------------|
+         * | Tensor G1| Pixel 6 / 6 Pro / 6a       | `Tensor`, `gs101`               |
+         * | Tensor G2| Pixel 7 / 7 Pro / 7a       | `GS201`, `Tensor G2`            |
+         * | Tensor G3| Pixel 8 / 8 Pro / 8a       | `Tensor G3`, `zuma`, `gs301`    |
+         * | Tensor G4| Pixel 9 / 9 Pro / 9 Pro F. | `Tensor G4`, `zumapro`, `gs401` |
+         *
+         * Sources (LineageOS device-tree `vendor.prop` mirrors the stock
+         * factory image's `ro.soc.model` for each generation):
+         *
+         *  - Tensor G1 (gs101) — `ro.soc.model=Tensor`:
+         *    https://github.com/LineageOS/android_device_google_gs101/blob/729c1fb12ff8cd67ac05baa6cd1503ba435b0fa0/vendor.prop#L73
+         *  - Tensor G2 (gs201) — `ro.soc.model=GS201`:
+         *    https://github.com/LineageOS/android_device_google_gs201/blob/01efdd4d55249b2c67f8e702c0dbd77afe5f6959/vendor.prop
+         *  - Tensor G3 (zuma) — `ro.soc.model=Tensor G3`:
+         *    https://github.com/LineageOS/android_device_google_zuma/blob/2c4f12b36bc68a4320044d52036174a1ed6acf69/vendor.prop
+         *  - Tensor G4 (zumapro) — `ro.soc.model=Tensor G4`:
+         *    https://github.com/LineageOS/android_device_google_zumapro/blob/1483aa927180dfc881ac25e392f050eeb2f7840d/vendor.prop
+         *  - Canonical model numbers (gs101 / gs201 / gs301 / gs401):
+         *    https://wiki.postmarketos.org/wiki/Google_Tensor_G3,
+         *    https://wiki.postmarketos.org/wiki/Google_Tensor_G4
+         */
+        private val GOOGLE_TENSOR_NPU_SOCS = setOf(
+            "tensor",      // Tensor G1 (Pixel 6/6 Pro/6a, gs101)
+            "gs101",       // Tensor G1 silicon model (kernel/AOSP refs)
+            "gs201",       // Tensor G2 (Pixel 7/7 Pro/7a)
+            "tensor g2",   // Tensor G2 marketing variant
+            "tensor g3",   // Tensor G3 (Pixel 8/8 Pro/8a)
+            "zuma",        // Tensor G3 codename
+            "gs301",       // Tensor G3 silicon model
+            "tensor g4",   // Tensor G4 (Pixel 9/9 Pro/9 Pro Fold/9a)
+            "zumapro",     // Tensor G4 codename
+            "gs401",       // Tensor G4 silicon model
+        )
+
+        /**
+         * F-080: Samsung Exynos SoCs with on-die NPU exposed via the
+         * Exynos Neural Network (ENN) runtime (`libnpu_*.so` /
+         * `libenn_*.so`).
+         *
+         * `ro.soc.model` returns the silicon part number on Samsung
+         * devices, which is unique per generation:
+         *
+         * | SoC         | Devices                              | `ro.soc.model` |
+         * |-------------|--------------------------------------|----------------|
+         * | Exynos 2200 | Galaxy S22 series (Intl), S23 FE     | `s5e9925`      |
+         * | Exynos 2400 | Galaxy S24 series (Intl), S24 FE     | `s5e9945`      |
+         *
+         * Sources:
+         *  - S23FE Exynos 2200 stock build.prop reports
+         *    `ro.soc.model=s5e9925`:
+         *    https://github.com/itztusharb/s23fe_vendor_files/blob/13f871e9b679e7345e0092cdad3c6f1f183006ee/build.prop
+         *  - LiteRT Samsung Exynos backend reference (DeepWiki) confirms
+         *    the libnpu/ENN runtime is the path used:
+         *    https://deepwiki.com/google-ai-edge/LiteRT/5.4.5-samsung-exynos
+         *
+         * Older Exynos parts (990 / s5e9830, 9820, 9825) have Samsung
+         * NPU silicon but their ENN runtime is not exposed by current
+         * LiteRT builds; intentionally omitted.
+         */
+        private val SAMSUNG_NPU_SOCS = setOf(
+            "s5e9925",    // Exynos 2200 (Galaxy S22 Intl, S23 FE)
+            "s5e9945",    // Exynos 2400 (Galaxy S24 Intl, S24 FE)
+        )
+
+        /**
+         * F-080: strip Qualcomm vendor binning suffixes so a SoC like
+         * `sm8650-AC` (Snapdragon 8 Gen 3 sub-variant) still matches the
+         * canonical `sm8650` entry in [QUALCOMM_NPU_SOCS]. Snapdragon
+         * binning suffixes are appended after a `-` or after the 6-char
+         * base; we keep only the leading 6-char alphanumeric base.
+         */
+        private fun normalizeQualcommSoc(soc: String): String =
+            soc.takeWhile { it != '-' }.take(6)
     }
 
     private val mutex = Mutex()
@@ -521,28 +637,48 @@ class EngineManager(
     /**
      * Heuristic: NPU is *likely* supported when
      *  1. API ≥ 31 (required for `Build.SOC_MODEL`)
-     *  2. `SOC_MODEL` is on the allowlist
-     *  3. Vendor runtime native libs are bundled in the APK
+     *  2. `SOC_MODEL` is on the allowlist for one of the four supported
+     *     vendor families (Qualcomm, MediaTek, Google Tensor, Samsung
+     *     Exynos)
+     *  3. The matching vendor's runtime native libs are bundled in the APK
+     *
+     * F-080: lib detection is now matched per-vendor (Qualcomm SoC →
+     * `libQnn*` libs, Tensor SoC → `libtflite_*` / `libgemini_*` libs,
+     * etc.) rather than the previous "any vendor's libs are good enough"
+     * shortcut. This avoids the loophole where, e.g., a future Tensor SoC
+     * with bundled-but-unrelated Qualcomm libs would falsely report NPU
+     * support.
+     *
+     * The Tensor (`libtflite_*`, `libgemini_*`) and Exynos (`libnpu_*`,
+     * `libenn_*`) lib heuristics are forward-looking — LiteRT-LM 0.10.x
+     * does not yet ship those runtimes, so today's `isNpuLikelySupported`
+     * still returns `false` on Pixel/Galaxy hardware via the lib check
+     * even though the SoC is now allowlisted. This lets us land the SoC
+     * allowlist ahead of the runtime drop without a separate code change.
      */
     private fun isNpuLikelySupported(): Boolean {
-        if (Build.VERSION.SDK_INT < 31) return false
+        if (sdkInt() < Build.VERSION_CODES.S) return false
 
-        @Suppress("InlinedApi")
-        val soc = Build.SOC_MODEL.orEmpty().lowercase()
+        val soc = socModel().lowercase()
         if (soc.isEmpty()) return false
 
-        val socKnown = soc in QUALCOMM_NPU_SOCS || soc in MEDIATEK_NPU_SOCS
-        if (!socKnown) return false
-
-        // Verify vendor runtime libs are actually present
         val libDir = File(context.applicationInfo.nativeLibraryDir ?: return false)
         val libs = libDir.list()?.toSet().orEmpty()
-        val hasQualcomm = libs.any { it.startsWith("libQnn") }
-        val hasMediaTek = libs.any {
-            it.contains("mediatek", ignoreCase = true) ||
-            it.contains("dispatch", ignoreCase = true)
+
+        return when {
+            soc in QUALCOMM_NPU_SOCS || normalizeQualcommSoc(soc) in QUALCOMM_NPU_SOCS ->
+                libs.any { it.startsWith("libQnn") }
+            soc in MEDIATEK_NPU_SOCS ->
+                libs.any {
+                    it.contains("mediatek", ignoreCase = true) ||
+                    it.contains("dispatch", ignoreCase = true)
+                }
+            soc in GOOGLE_TENSOR_NPU_SOCS ->
+                libs.any { it.startsWith("libtflite_") || it.startsWith("libgemini_") }
+            soc in SAMSUNG_NPU_SOCS ->
+                libs.any { it.startsWith("libnpu_") || it.startsWith("libenn_") }
+            else -> false
         }
-        return hasQualcomm || hasMediaTek
     }
 
     private fun backendName(backend: Backend): String = when (backend) {
