@@ -123,6 +123,53 @@ class LogRepository(private val dao: LogDao) {
     }
 
     /**
+     * F-077: persist a categorised init-failure row so the dashboard can
+     * render variant-specific remediation copy.
+     *
+     * The variant *name* (`LowMemory`, `BackendUnavailable`,
+     * `ModelMissing`, `IntegrityMismatch`, `NativeError`) goes into
+     * `extraJson.failureCategory`. For variants that carry detail:
+     *  - [com.adsamcik.mindlayer.service.engine.InitFailure.BackendUnavailable]
+     *    populates `backend` *and* `errorMessage` (the safeLabel).
+     *  - [com.adsamcik.mindlayer.service.engine.InitFailure.NativeError]
+     *    populates `errorMessage` only (no backend context).
+     *
+     * **F-006 invariant:** the only string fields written here are the
+     * variant-name enum value (a fixed Kotlin literal) and the
+     * pre-sanitised safeLabel from the engine-side caller. No raw
+     * exception messages are persisted — the upstream
+     * [com.adsamcik.mindlayer.service.engine.EngineManager.recordInitFailure]
+     * pipeline only forwards safeLabel results from
+     * [com.adsamcik.mindlayer.service.logging.safeLabel], so prompt
+     * fragments embedded in native LiteRT-LM exceptions cannot reach
+     * this row.
+     */
+    fun logInitFailureCategorized(failure: com.adsamcik.mindlayer.service.engine.InitFailure) {
+        val (categoryName, backend, label) = when (failure) {
+            com.adsamcik.mindlayer.service.engine.InitFailure.LowMemory ->
+                Triple("LowMemory", null, null)
+            is com.adsamcik.mindlayer.service.engine.InitFailure.BackendUnavailable ->
+                Triple("BackendUnavailable", failure.backend, failure.safeLabel)
+            com.adsamcik.mindlayer.service.engine.InitFailure.ModelMissing ->
+                Triple("ModelMissing", null, null)
+            com.adsamcik.mindlayer.service.engine.InitFailure.IntegrityMismatch ->
+                Triple("IntegrityMismatch", null, null)
+            is com.adsamcik.mindlayer.service.engine.InitFailure.NativeError ->
+                Triple("NativeError", null, failure.safeLabel)
+        }
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.ENGINE,
+            event = LogEvent.INIT_FAILURE_CATEGORIZED,
+            backend = backend,
+            errorMessage = label,
+            extraJson = buildJsonObject {
+                put("failureCategory", JsonPrimitive(categoryName))
+            }.toString(),
+        ))
+    }
+
+    /**
      * Log a security decision (approve / deny / revoke / pending). Persists
      * package + signing-cert SHA prefix so an audit trail exists for the
      * dashboard, addressing SECURITY_REVIEW F-056.

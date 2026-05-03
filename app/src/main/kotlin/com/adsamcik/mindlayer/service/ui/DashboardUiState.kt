@@ -43,6 +43,21 @@ data class DashboardUiState(
     val isEngineLoaded: Boolean = false,
     val backend: String = "NONE",
     val gpuFailureReason: String? = null,
+    /**
+     * F-077: typed structured signal for the most recent
+     * [com.adsamcik.mindlayer.service.engine.EngineManager.initialize]
+     * failure, sourced from the persisted `init_failure_categorized`
+     * log row by [DashboardViewModel]. Replaces the opaque
+     * [gpuFailureReason] string for variant-specific UI rendering;
+     * [gpuFailureReason] is retained for backward compatibility with
+     * the existing `engine_fallback` log query.
+     *
+     * Each variant maps to a specific message + remediation in
+     * [DashboardScreen]'s status section. `null` means no init failure
+     * has been observed since the last engine shutdown (or the engine
+     * has never been initialised).
+     */
+    val lastInitFailure: com.adsamcik.mindlayer.service.engine.InitFailure? = null,
     val initTimeSeconds: Float = 0f,
     val uptimeMs: Long = 0,
     val modelId: String = "",
