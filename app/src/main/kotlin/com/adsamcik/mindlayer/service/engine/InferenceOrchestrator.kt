@@ -355,6 +355,12 @@ class InferenceOrchestrator(
             handle.activeRequestId = scopedKey
             handle.isStreaming = true
             val writer = writerFactory(pipeWriteEnd)
+            // v0.5: opt the writer into TOKEN_DELTA_BATCH coalescing if the
+            // session was created with `extraContextJson.token_batch=true`.
+            // Must happen BEFORE writeHeader so the header advertises v2.
+            if (handle.preferBatchedDeltas) {
+                writer.enableBatching()
+            }
             service.enterForeground()
             val inferenceStartNs = System.nanoTime()
             logRepository?.logInferenceStart(

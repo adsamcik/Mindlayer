@@ -1480,6 +1480,34 @@ class SessionConfigBuilder {
     }
 
     /**
+     * Opt this session into v0.5 [com.adsamcik.mindlayer.shared.StreamEventType.TOKEN_DELTA_BATCH]
+     * coalescing. The service writer accumulates up to 8 tokens or 16 ms
+     * (whichever comes first) into a single batched frame, cutting wire
+     * overhead at high token rates. The SDK reader expands each batched
+     * frame back into per-token [com.adsamcik.mindlayer.sdk.MindlayerEvent.TextDelta]
+     * emissions so consumers see no API change — only fewer syscalls and
+     * lower CPU on both sides.
+     *
+     * Capability-gated via
+     * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TOKEN_BATCH].
+     * If the connected service does not advertise the flag, this call is
+     * still safe — the service ignores the unknown opt-in and the stream
+     * stays on `mindlayer.stream.v1`. Callers that care about confirming
+     * the optimization is live should check capabilities first.
+     *
+     * Default: off (single-token deltas, current behavior).
+     */
+    fun tokenBatching(enabled: Boolean = true) {
+        val envelope = kotlinx.serialization.json.buildJsonObject {
+            put(
+                "token_batch",
+                kotlinx.serialization.json.JsonPrimitive(enabled),
+            )
+        }
+        extraContextJson = mergeExtraContext(extraContextJson, envelope)
+    }
+
+    /**
      * Pre-populate conversation history for session recovery.
      * Turns are injected into the model's context at creation time.
      */

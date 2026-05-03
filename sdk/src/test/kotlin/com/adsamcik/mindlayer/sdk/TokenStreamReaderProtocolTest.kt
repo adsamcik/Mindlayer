@@ -60,7 +60,8 @@ class TokenStreamReaderProtocolTest {
 
     @Test
     fun `unexpected pipe protocol yields PROTOCOL_MISMATCH error frame`() = runTest {
-        val futureHeader = StreamHeader(protocol = "mindlayer.stream.v2", requestId = "r1")
+        // v3 is not in StreamProtocol.SUPPORTED, so the reader rejects it.
+        val futureHeader = StreamHeader(protocol = "mindlayer.stream.v3", requestId = "r1")
         val frames = listOf(
             wireFrame(json.encodeToString(StreamHeader.serializer(), futureHeader)),
         )
@@ -72,7 +73,26 @@ class TokenStreamReaderProtocolTest {
         assertEquals("PROTOCOL_MISMATCH", err.code)
         assertTrue(
             "message should mention the unsupported protocol, got '${err.message}'",
-            err.message.contains("mindlayer.stream.v2"),
+            err.message.contains("mindlayer.stream.v3"),
+        )
+    }
+
+    @Test
+    fun `mindlayer-stream-v2 header is accepted as Started`() = runTest {
+        // v0.5 token-batching adds v2 to StreamProtocol.SUPPORTED.
+        val v2Header = StreamHeader(protocol = "mindlayer.stream.v2", requestId = "r2")
+        val frames = listOf(
+            wireFrame(json.encodeToString(StreamHeader.serializer(), v2Header)),
+            wireFrame(json.encodeToString(StreamEvent.serializer(), doneEvent("r2"))),
+        )
+        val pfd = pfdFor(frames)
+        val events = TokenStreamReader.readStream(pfd).toList()
+
+        assertTrue(
+            "expected Started + Done on v2, got $events",
+            events.size == 2 &&
+                events[0] is MindlayerEvent.Started &&
+                events[1] is MindlayerEvent.Done,
         )
     }
 
