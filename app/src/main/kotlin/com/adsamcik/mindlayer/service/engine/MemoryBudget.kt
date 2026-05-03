@@ -133,17 +133,57 @@ class MemoryBudget(
     /**
      * Force an immediate re-evaluation.  Called from
      * [MindlayerMlService.onTrimMemory] so we don't wait for the next poll.
+     *
+     * F-070: the previous implementation used a binary `>=` cascade
+     * (only `RUNNING_CRITICAL` and `RUNNING_LOW` were named), which had
+     * three flaws:
+     *
+     *  1. `TRIM_MEMORY_RUNNING_MODERATE` (5) fell through silently — no
+     *     pre-emptive action even when the system warned us early.
+     *  2. `TRIM_MEMORY_UI_HIDDEN` (20), `TRIM_MEMORY_BACKGROUND` (40),
+     *     `TRIM_MEMORY_MODERATE` (60), and `TRIM_MEMORY_COMPLETE` (80)
+     *     collapsed into EMERGENCY because they are all `>= 15`.
+     *     `UI_HIDDEN` / `BACKGROUND` are informational ("you've moved
+     *     to the LRU list") and do not warrant emergency token-cap
+     *     clamping.
+     *  3. The trailing call to `evaluate()` could silently downgrade a
+     *     just-applied escalation: with abundant free RAM the snapshot
+     *     would compute NORMAL and overwrite an EMERGENCY hint emitted
+     *     in the same call. The poll loop is the right place for
+     *     de-escalation; `onTrimMemory` is reactive to system signals
+     *     and must not suppress them.
+     *
+     * The explicit `when` mapping below treats foreground-pressure
+     * hints proportionally and background-LRU hints as gentle warnings
+     * until the system escalates to `MODERATE` or `COMPLETE`. Snapshot
+     * refresh is decoupled from pressure recomputation: `currentSnapshot()`
+     * updates `_snapshot.value` for the dashboard but does NOT touch
+     * `_pressure`, so the system hint always wins for the duration of
+     * this call.
      */
     @Suppress("DEPRECATION")
     fun onTrimMemory(level: Int) {
-        // Map high-severity trim levels straight to at least CRITICAL so the
-        // system can react before the next polling cycle.
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) {
-            escalateToAtLeast(MemoryPressure.EMERGENCY)
-        } else if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
-            escalateToAtLeast(MemoryPressure.CRITICAL)
+        val target = when (level) {
+            // Foreground pressure: process is running and the system
+            // is signalling proportional pressure on us specifically.
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE -> MemoryPressure.WARNING
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW      -> MemoryPressure.CRITICAL
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> MemoryPressure.EMERGENCY
+            // Background hints: process is on the LRU list and the
+            // system is choosing what to keep around.
+            ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN  -> MemoryPressure.WARNING
+            ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> MemoryPressure.WARNING
+            ComponentCallbacks2.TRIM_MEMORY_MODERATE   -> MemoryPressure.CRITICAL
+            ComponentCallbacks2.TRIM_MEMORY_COMPLETE   -> MemoryPressure.EMERGENCY
+            // Unknown / future level: refresh snapshot but don't auto-escalate.
+            else -> null
         }
-        evaluate()
+        if (target != null) {
+            escalateToAtLeast(target)
+        }
+        // Refresh _snapshot for the dashboard without re-running
+        // computePressure — the poll loop handles natural de-escalation.
+        currentSnapshot()
     }
 
     /**
