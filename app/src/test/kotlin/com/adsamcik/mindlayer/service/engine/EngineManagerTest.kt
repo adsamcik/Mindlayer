@@ -314,12 +314,19 @@ class EngineManagerTest {
     @Test
     fun `shutdown clears lastGpuFailureReason`() = runTest {
         val mgr = EngineManager(context)
-        // Set via reflection since we can't trigger a real GPU failure in unit tests
-        val field = EngineManager::class.java.getDeclaredField("lastGpuFailureReason")
-        field.isAccessible = true
-        field.set(mgr, "RuntimeException: GPU driver crash")
+        // F-077: lastGpuFailureReason is now a computed shim over
+        // lastInitFailure. Drive the source of truth — setting the typed
+        // field implicitly populates the shim. The shutdown invariant
+        // is the same as before: a clean teardown clears prior init
+        // failure state so it doesn't bleed into the next init run.
+        val initFailureField = EngineManager::class.java.getDeclaredField("lastInitFailure")
+        initFailureField.isAccessible = true
+        initFailureField.set(
+            mgr,
+            InitFailure.BackendUnavailable(backend = "GPU", safeLabel = "RuntimeException"),
+        )
 
-        assertEquals("RuntimeException: GPU driver crash", mgr.lastGpuFailureReason)
+        assertEquals("RuntimeException", mgr.lastGpuFailureReason)
 
         // Create a model file so selectedModel lazy doesn't throw during init
         File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME).writeText("fake-model")
@@ -333,6 +340,7 @@ class EngineManagerTest {
         mgr.shutdown()
 
         assertNull(mgr.lastGpuFailureReason)
+        assertNull(mgr.lastInitFailure)
     }
 
     // ---- initialize - partial-init cleanup (leak prevention) ----------------

@@ -28,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedInputStream
 import java.io.DataInputStream
@@ -284,12 +285,14 @@ class DashboardViewModel : ViewModel() {
                     val now = System.currentTimeMillis()
                     val recent = dao.getRecent(20)
                     val gpuFailure = dao.latestGpuFallbackMessage()
+                    val initFailure = dao.latestInitFailure()?.let(::parseInitFailureLogRow)
                     _uiState.update { current ->
                         current.copy(
                             isLogsLoading = false,
                             lastLogsUpdateMs = now,
                             logsErrorMessage = null,
                             gpuFailureReason = gpuFailure,
+                            lastInitFailure = initFailure,
                             recentLogs = recent.map { entry ->
                                 LogUiItem(
                                     timestampLabel = formatRelativeTimestamp(entry.timestampMs, now),
@@ -532,5 +535,44 @@ class DashboardViewModel : ViewModel() {
     private fun Throwable.toDashboardMessage(): String {
         val summary = message?.lineSequence()?.firstOrNull()?.trim().orEmpty()
         return summary.ifBlank { javaClass.simpleName }
+    }
+}
+
+/**
+ * F-077: parse a `LogEvent.INIT_FAILURE_CATEGORIZED` row back into the
+ * typed [com.adsamcik.mindlayer.service.engine.InitFailure] sealed
+ * class. Returns `null` for rows that have no `failureCategory` field
+ * in `extraJson`, an unknown category name, or malformed JSON — the
+ * dashboard simply hides the variant card in that case rather than
+ * surfacing a parse error.
+ *
+ * Visible (`internal`) for testing — the round-trip
+ * `LogRepository.logInitFailureCategorized` ⇌ `parseInitFailureLogRow`
+ * is the contract that pins F-077's wire format.
+ */
+internal fun parseInitFailureLogRow(
+    entry: LogEntry,
+): com.adsamcik.mindlayer.service.engine.InitFailure? {
+    val extra = entry.extraJson ?: return null
+    val category = try {
+        Json.parseToJsonElement(extra)
+            .jsonObject["failureCategory"]
+            ?.jsonPrimitive
+            ?.contentOrNull
+    } catch (_: Exception) {
+        null
+    } ?: return null
+    return when (category) {
+        "LowMemory" -> com.adsamcik.mindlayer.service.engine.InitFailure.LowMemory
+        "ModelMissing" -> com.adsamcik.mindlayer.service.engine.InitFailure.ModelMissing
+        "IntegrityMismatch" -> com.adsamcik.mindlayer.service.engine.InitFailure.IntegrityMismatch
+        "BackendUnavailable" -> com.adsamcik.mindlayer.service.engine.InitFailure.BackendUnavailable(
+            backend = entry.backend.orEmpty(),
+            safeLabel = entry.errorMessage.orEmpty(),
+        )
+        "NativeError" -> com.adsamcik.mindlayer.service.engine.InitFailure.NativeError(
+            safeLabel = entry.errorMessage.orEmpty(),
+        )
+        else -> null
     }
 }
