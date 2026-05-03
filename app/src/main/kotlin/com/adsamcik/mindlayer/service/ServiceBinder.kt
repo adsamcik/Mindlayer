@@ -546,6 +546,16 @@ class ServiceBinder(
                 MindlayerErrorCode.ENGINE_INITIALIZING,
                 "engine_initializing",
             )
+        } catch (e: com.adsamcik.mindlayer.service.engine.LowMemoryException) {
+            // F-071: typed low-memory signal. The bg init job hit the
+            // memory pre-flight check and refused to load — propagate
+            // the concrete numbers so a diagnostic UI can show how short
+            // the device is. Distinct code from ENGINE_LOAD_FAILED so
+            // the SDK retry budget can treat it as terminal.
+            throw typedBinderException(
+                MindlayerErrorCode.LOW_MEMORY,
+                "Insufficient memory: availMb=${e.availMb} requiredMb=${e.requiredMb}",
+            )
         } catch (e: IllegalArgumentException) {
             throw typedBinderException(
                 MindlayerErrorCode.INVALID_SESSION_CONFIG,
@@ -1263,6 +1273,19 @@ class ServiceBinder(
             // getStatus.isEngineLoaded to confirm).
             MindlayerLog.w(TAG, "prewarmAndAwait timed out after ${cappedTimeout}ms")
             engineManager.currentBackend
+        } catch (e: com.adsamcik.mindlayer.service.engine.LowMemoryException) {
+            // F-071: surface the typed LOW_MEMORY code from the
+            // synchronous prewarm path too, otherwise an explicit
+            // prewarmAndAwait caller would receive ENGINE_LOAD_FAILED
+            // and lose the avail/required diagnostic numbers.
+            MindlayerLog.w(
+                TAG,
+                "prewarmAndAwait refused: availMb=${e.availMb} requiredMb=${e.requiredMb}",
+            )
+            throw typedBinderException(
+                MindlayerErrorCode.LOW_MEMORY,
+                "Insufficient memory: availMb=${e.availMb} requiredMb=${e.requiredMb}",
+            )
         } catch (e: Exception) {
             MindlayerLog.w(TAG, "prewarmAndAwait failed: ${e.message}")
             throw typedBinderException(
