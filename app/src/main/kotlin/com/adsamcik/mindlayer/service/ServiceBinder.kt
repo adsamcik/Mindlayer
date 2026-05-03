@@ -22,6 +22,7 @@ import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.SessionOwnerToken
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
 import com.adsamcik.mindlayer.service.engine.ThermalConfidence
+import com.adsamcik.mindlayer.service.health.MlHealthRecorder
 import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.loggable
@@ -68,6 +69,7 @@ class ServiceBinder(
     private val allowlistStore: AllowlistStore? = AllowlistStore(service),
     private val rateLimiter: RateLimiter = RateLimiter(),
     private val logRepository: LogRepository? = null,
+    private val mlHealthRecorder: MlHealthRecorder? = null,
 ) : IMindlayerService.Stub() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -270,6 +272,28 @@ class ServiceBinder(
         val uid = Binder.getCallingUid()
         if (uid == Process.myUid()) {
             return SELF_IDENTITY
+        }
+        // F-074: crash-loop watchdog. When the `:ml` process has restarted
+        // abnormally [DEATH_COUNT_THRESHOLD] times in the rolling
+        // [THROTTLE_WINDOW_MS] window, refuse external binds with the
+        // typed [MindlayerErrorCode.SERVICE_THROTTLED] code so the SDK's
+        // reconnect loop backs off until the cooldown expires instead of
+        // hot-spinning and re-loading the 2.4 GB model into the OOM-killer's
+        // jaws. Self-UID dashboard already returned above so the user can
+        // still observe the throttle banner via direct file reads.
+        val healthRecorder = mlHealthRecorder
+        if (healthRecorder != null && healthRecorder.shouldThrottleBinds()) {
+            val cooldown = healthRecorder.cooldownEndsAt()
+            MindlayerLog.w(
+                TAG,
+                "Service throttled — refusing bind from uid=$uid (cooldownEndsAt=$cooldown)",
+            )
+            throw SecurityException(
+                MindlayerErrorCode.wireMessage(
+                    MindlayerErrorCode.SERVICE_THROTTLED,
+                    "service_throttled (cooldown=$cooldown)",
+                ),
+            )
         }
         val identity = callerVerifier.identify(context, uid)
             ?: run {
