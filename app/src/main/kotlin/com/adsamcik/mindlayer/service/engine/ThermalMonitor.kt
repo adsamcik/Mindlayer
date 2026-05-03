@@ -14,12 +14,46 @@ enum class ThermalBand {
     COOL, WARM, HOT, CRITICAL
 }
 
+/**
+ * Quality of the thermal signal that produced the active [ThermalPolicy].
+ *
+ * - [OBSERVED] — at least one telemetry source reported on the latest
+ *   sample (status from API 29+, headroom from API 30+). The 4-band
+ *   policy table is trusted.
+ * - [INFERRED] — no telemetry source returned data on this sample
+ *   (Android 8 / 8.1, API 26-28, where neither
+ *   [PowerManager.getCurrentThermalStatus] nor
+ *   [PowerManager.getThermalHeadroom] exists). [computeBand] always
+ *   resolves to COOL on these devices because there is literally no
+ *   signal — but "COOL on no evidence" is not the same as "COOL on
+ *   evidence." A conservative policy variant applies (shorter burst,
+ *   non-zero rest, halved chunkTokens) so a telemetry-blind device
+ *   under genuine thermal stress is not driven into shutdown by a
+ *   sustained GPU burst.
+ *
+ * Defaults to [OBSERVED] so existing test fixtures that construct
+ * [ThermalPolicy] with positional arguments continue to compile
+ * unchanged. F-073.
+ */
+enum class ThermalConfidence { OBSERVED, INFERRED }
+
 data class ThermalPolicy(
     val band: ThermalBand,
     val recommendedBackend: String,  // "GPU" or "CPU"
     val burstSeconds: Int,
     val restSeconds: Int,
     val chunkTokens: Int,
+    /**
+     * F-073: epistemic marker for the policy. [ThermalConfidence.OBSERVED]
+     * on API 29+ where thermal telemetry is real; [ThermalConfidence.INFERRED]
+     * on API 26-28 where the band defaults to COOL because no thermal
+     * API exists. Conservative pacing is baked into the table when
+     * [ThermalMonitor.policyForBand] is called with `INFERRED` — consumers
+     * that read [burstSeconds], [restSeconds], and [chunkTokens] do not
+     * need to branch on this field. Defaulted to OBSERVED for source
+     * compatibility with positional fixtures across the test suite.
+     */
+    val confidence: ThermalConfidence = ThermalConfidence.OBSERVED,
 )
 
 data class ThermalSample(
@@ -181,12 +215,22 @@ class ThermalMonitor(
         _latestSample.value = sample
 
         val newBand = computeBand(sample, _currentBand.value)
+        // F-073: derive policy confidence from the sample's telemetry signal.
+        // On API 26-28 there is no thermal API, so `telemetryAvailable` is
+        // false and the conservative variant of `policyForBand` applies.
+        val newConfidence = if (sample.telemetryAvailable) {
+            ThermalConfidence.OBSERVED
+        } else {
+            ThermalConfidence.INFERRED
+        }
+        val newPolicy = policyForBand(newBand, newConfidence)
 
         if (newBand != _currentBand.value) {
             val oldBand = _currentBand.value
             MindlayerLog.i(
                 TAG, "Thermal band: $oldBand → $newBand " +
-                    "(status=${sample.status}, headroom10s=${sample.headroom10s})"
+                    "(status=${sample.status}, headroom10s=${sample.headroom10s}, " +
+                    "confidence=$newConfidence)"
             )
             logRepository?.logThermalBandChange(
                 oldBand.name, newBand.name, _currentPolicy.value.recommendedBackend
@@ -200,7 +244,16 @@ class ThermalMonitor(
             }
 
             _currentBand.value = newBand
-            _currentPolicy.value = policyForBand(newBand)
+        }
+
+        // F-073: update the policy on every sample where it changed —
+        // including transitions of `confidence` alone (e.g. an OEM
+        // driver starts reporting mid-session). Previously we only
+        // refreshed `_currentPolicy` on band transitions, which would
+        // have left a stale OBSERVED policy in place after a flip to
+        // INFERRED on the same band.
+        if (newPolicy != _currentPolicy.value) {
+            _currentPolicy.value = newPolicy
         }
     }
 
@@ -288,14 +341,68 @@ class ThermalMonitor(
         return ThermalBand.COOL
     }
 
-    private fun policyForBand(band: ThermalBand): ThermalPolicy = when (band) {
-        ThermalBand.COOL ->
-            ThermalPolicy(band, "GPU", burstSeconds = 12, restSeconds = 0, chunkTokens = 128)
-        ThermalBand.WARM ->
-            ThermalPolicy(band, "GPU", burstSeconds = 8, restSeconds = 3, chunkTokens = 64)
-        ThermalBand.HOT ->
-            ThermalPolicy(band, "CPU", burstSeconds = 4, restSeconds = 5, chunkTokens = 32)
-        ThermalBand.CRITICAL ->
-            ThermalPolicy(band, "CPU", burstSeconds = 0, restSeconds = 8, chunkTokens = 16)
+    /**
+     * Map a [band] to its [ThermalPolicy], honouring [confidence].
+     *
+     * - [ThermalConfidence.OBSERVED] returns the canonical 4-band table.
+     *   These values are pinned by 35 [ThermalBandTest] cases and
+     *   [ThermalStateMachineTest]'s `policyMapping_allBands`; do not
+     *   change them without updating the locked tests.
+     * - [ThermalConfidence.INFERRED] returns a conservative variant
+     *   that shortens burst, lengthens rest, and halves `chunkTokens`
+     *   so a telemetry-blind device cannot accumulate enough sustained
+     *   GPU burst heat to hit thermal shutdown. F-073.
+     *
+     * Backward compatibility: the single-argument overload below
+     * preserves the original signature so existing callers (the
+     * `_currentPolicy` initialiser, internal debug helpers) keep
+     * compiling unchanged. All production updates flow through the
+     * two-argument form via [processSample].
+     */
+    internal fun policyForBand(
+        band: ThermalBand,
+        confidence: ThermalConfidence,
+    ): ThermalPolicy = when (confidence) {
+        ThermalConfidence.OBSERVED -> when (band) {
+            ThermalBand.COOL ->
+                ThermalPolicy(band, "GPU", burstSeconds = 12, restSeconds = 0, chunkTokens = 128)
+            ThermalBand.WARM ->
+                ThermalPolicy(band, "GPU", burstSeconds = 8, restSeconds = 3, chunkTokens = 64)
+            ThermalBand.HOT ->
+                ThermalPolicy(band, "CPU", burstSeconds = 4, restSeconds = 5, chunkTokens = 32)
+            ThermalBand.CRITICAL ->
+                ThermalPolicy(band, "CPU", burstSeconds = 0, restSeconds = 8, chunkTokens = 16)
+        }
+        ThermalConfidence.INFERRED -> when (band) {
+            // In practice INFERRED only ever pairs with COOL — on
+            // telemetry-blind devices `computeBand` has no signal to
+            // elevate. The other bands are filled in defensively so a
+            // future code path that forces an elevation under inferred
+            // confidence does not return a null policy.
+            ThermalBand.COOL ->
+                ThermalPolicy(
+                    band, "GPU", burstSeconds = 6, restSeconds = 4, chunkTokens = 64,
+                    confidence = ThermalConfidence.INFERRED,
+                )
+            ThermalBand.WARM ->
+                ThermalPolicy(
+                    band, "GPU", burstSeconds = 4, restSeconds = 5, chunkTokens = 32,
+                    confidence = ThermalConfidence.INFERRED,
+                )
+            ThermalBand.HOT ->
+                ThermalPolicy(
+                    band, "CPU", burstSeconds = 3, restSeconds = 6, chunkTokens = 16,
+                    confidence = ThermalConfidence.INFERRED,
+                )
+            ThermalBand.CRITICAL ->
+                ThermalPolicy(
+                    band, "CPU", burstSeconds = 0, restSeconds = 10, chunkTokens = 16,
+                    confidence = ThermalConfidence.INFERRED,
+                )
+        }
     }
+
+    /** Backward-compatible overload — defaults to [ThermalConfidence.OBSERVED]. */
+    private fun policyForBand(band: ThermalBand): ThermalPolicy =
+        policyForBand(band, ThermalConfidence.OBSERVED)
 }
