@@ -52,7 +52,35 @@ class MindlayerException @JvmOverloads constructor(
     /** Coarse category derived from [code]. Never caller-supplied. */
     val category: MindlayerErrorCode.Category = MindlayerErrorCode.categoryOf(code)
 
+    /**
+     * F-072: when [code] is [MindlayerErrorCode.INPUT_EXCEEDS_CONTEXT], the
+     * service embeds `remaining=N` in the wire message body — the number
+     * of KV-cache slots still available for user input given the session's
+     * service-owned overhead. Returns `null` for any other code or if the
+     * service did not include the marker (e.g. an old service binary).
+     *
+     * Callers can show the user how much input the session can still
+     * accept and shorten the next prompt accordingly.
+     */
+    val remainingTokens: Int?
+        get() {
+            if (code != MindlayerErrorCode.INPUT_EXCEEDS_CONTEXT) return null
+            val raw = message ?: return null
+            // Match `remaining=<digits>` — non-anchored so future fields
+            // appended to the message body don't break parsing.
+            val match = REMAINING_TOKENS_PATTERN.find(raw) ?: return null
+            return match.groupValues[1].toIntOrNull()
+        }
+
     companion object {
+        /**
+         * F-072 wire-payload regex. Matches `remaining=<digits>` anywhere
+         * in the SecurityException message body so newer services can
+         * append additional fields (e.g. `cooldown=`) without breaking
+         * older SDK parsers.
+         */
+        private val REMAINING_TOKENS_PATTERN: Regex = Regex("""remaining=(\d+)""")
+
         /**
          * Parse a wire-prefixed [SecurityException] message into a
          * [MindlayerException]. Returns `null` when the message does not carry

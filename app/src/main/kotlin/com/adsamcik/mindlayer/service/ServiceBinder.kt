@@ -559,6 +559,16 @@ class ServiceBinder(
                 MindlayerErrorCode.ENGINE_INITIALIZING,
                 "engine_initializing",
             )
+        } catch (e: com.adsamcik.mindlayer.service.engine.ContextOverflowException) {
+            // F-072: service-owned prompt overhead (system prompt + tool
+            // definitions + structured-output schema) already exhausts
+            // the device-tier KV budget — no room for any user input.
+            // The wire message body carries `remainingTokens=N` so the
+            // SDK can show the caller how much room is actually free.
+            throw typedBinderException(
+                MindlayerErrorCode.INPUT_EXCEEDS_CONTEXT,
+                e.wireMessage,
+            )
         } catch (e: IllegalArgumentException) {
             throw typedBinderException(
                 MindlayerErrorCode.INVALID_SESSION_CONFIG,
@@ -710,6 +720,21 @@ class ServiceBinder(
                 }
                 markRecentlyCompleted(scopedKey)
             }
+        } catch (e: com.adsamcik.mindlayer.service.engine.ContextOverflowException) {
+            // F-072: budget check tripped synchronously at the orchestrator
+            // gate; the request never reached `scope.launch`. Release the
+            // concurrency slot, drop ownership, and translate to a typed
+            // wire-prefixed SecurityException so the SDK surfaces the
+            // typed code + `remainingTokens=N` payload.
+            activeInferenceOwners.remove(scopedKey)
+            if (activeInferenceUids.remove(scopedKey) != null) {
+                rateLimiter.endInference(uid)
+            }
+            markRecentlyCompleted(scopedKey)
+            throw typedBinderException(
+                MindlayerErrorCode.INPUT_EXCEEDS_CONTEXT,
+                e.wireMessage,
+            )
         } catch (t: Throwable) {
             activeInferenceOwners.remove(scopedKey)
             if (activeInferenceUids.remove(scopedKey) != null) {
@@ -815,6 +840,20 @@ class ServiceBinder(
                 }
                 markRecentlyCompleted(scopedKey)
             }
+        } catch (e: com.adsamcik.mindlayer.service.engine.ContextOverflowException) {
+            // F-072: same translation as [infer]. inferMulti shares the
+            // orchestrator dispatch path, so the synchronous gate fires
+            // identically when MediaPart-derived (image,audio) push the
+            // turn over the KV ceiling.
+            activeInferenceOwners.remove(scopedKey)
+            if (activeInferenceUids.remove(scopedKey) != null) {
+                rateLimiter.endInference(uid)
+            }
+            markRecentlyCompleted(scopedKey)
+            throw typedBinderException(
+                MindlayerErrorCode.INPUT_EXCEEDS_CONTEXT,
+                e.wireMessage,
+            )
         } catch (t: Throwable) {
             activeInferenceOwners.remove(scopedKey)
             if (activeInferenceUids.remove(scopedKey) != null) {
