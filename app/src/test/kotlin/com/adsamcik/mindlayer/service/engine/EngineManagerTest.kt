@@ -461,6 +461,140 @@ class EngineManagerTest {
         assertFalse(mgr.isInitialized)
     }
 
+    // ---- initialize - backend fallback chain execution ----------------------
+    // These tests pin the NPU→GPU→CPU fallback BEHAVIOUR (not just the chain
+    // shape, which the buildBackendChain tests above already cover). The
+    // invariants: when an earlier backend fails, the next is tried; the
+    // first to succeed wins; if all fail, the diagnostic message lists what
+    // was tried; GPU failure label is preserved on lastGpuFailureReason
+    // even when the chain ultimately succeeds via CPU; GPU success clears it.
+
+    @Test
+    fun `initialize - GPU init throws then CPU succeeds, currentBackend is CPU`() = runTest {
+        File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME).writeText("fake-model")
+        stubActivityManager()
+
+        val mgr = EngineManager(context, logRepository)
+        val attemptedBackends = mutableListOf<Backend>()
+        val gpuEngine = mockk<Engine>(relaxed = true) {
+            every { initialize() } throws RuntimeException("simulated GPU failure")
+        }
+        val cpuEngine = mockk<Engine>(relaxed = true) {
+            every { initialize() } returns Unit
+        }
+        mgr.engineFactory = { config ->
+            attemptedBackends.add(config.backend)
+            when (config.backend) {
+                is Backend.GPU -> gpuEngine
+                is Backend.CPU -> cpuEngine
+                else -> error("Unexpected backend in default chain: ${config.backend}")
+            }
+        }
+
+        val resultEngine = mgr.initialize(preferredBackend = null) // chain = [GPU, CPU]
+
+        // Order is the heart of the test: GPU MUST be tried first, then CPU.
+        assertEquals(2, attemptedBackends.size)
+        assertTrue("First attempt must be GPU, was ${attemptedBackends[0]}", attemptedBackends[0] is Backend.GPU)
+        assertTrue("Fallback attempt must be CPU, was ${attemptedBackends[1]}", attemptedBackends[1] is Backend.CPU)
+
+        // CPU's engine is the one returned and tracked as current.
+        assertSame(cpuEngine, resultEngine)
+        assertEquals("CPU", mgr.currentBackend)
+        assertTrue(mgr.isInitialized)
+
+        // Stacked invariant from F-070: the failed GPU engine MUST have been
+        // closed before fallback proceeded; the surviving CPU engine MUST NOT.
+        verify(exactly = 1) { gpuEngine.close() }
+        verify(exactly = 0) { cpuEngine.close() }
+    }
+
+    @Test
+    fun `initialize - GPU failure label is captured on lastGpuFailureReason after CPU fallback`() = runTest {
+        File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME).writeText("fake-model")
+        stubActivityManager()
+
+        val mgr = EngineManager(context, logRepository)
+        mgr.engineFactory = { config ->
+            when (config.backend) {
+                is Backend.GPU -> mockk<Engine>(relaxed = true) {
+                    every { initialize() } throws RuntimeException("GPU driver crash")
+                }
+                is Backend.CPU -> mockk<Engine>(relaxed = true) {
+                    every { initialize() } returns Unit
+                }
+                else -> error("Unexpected backend in default chain: ${config.backend}")
+            }
+        }
+
+        mgr.initialize(preferredBackend = null)
+
+        // F-006: safeLabel() reports class name only — the full GPU exception
+        // detail is intentionally NOT included (could embed prompt fragments).
+        // Just assert the label is non-null and references the throwable class.
+        val reason = mgr.lastGpuFailureReason
+        assertNotNull(
+            "GPU failure reason must persist even when the chain ultimately succeeds via CPU " +
+                "(the dashboard surfaces this so operators know GPU went bad)",
+            reason,
+        )
+        assertTrue(
+            "Reason should reference the throwable class for diagnostics, was: $reason",
+            reason!!.contains("RuntimeException"),
+        )
+    }
+
+    @Test
+    fun `initialize - GPU success leaves lastGpuFailureReason null`() = runTest {
+        File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME).writeText("fake-model")
+        stubActivityManager()
+
+        val mgr = EngineManager(context, logRepository)
+        mgr.engineFactory = { _ ->
+            mockk<Engine>(relaxed = true) {
+                every { initialize() } returns Unit
+            }
+        }
+
+        mgr.initialize(preferredBackend = "GPU")
+
+        // GPU was the first (and successful) backend; no failure to record.
+        // EngineManager:166-168 clears the field on GPU success, so even if a
+        // prior GPU init had set it, the latest success wins.
+        assertNull(mgr.lastGpuFailureReason)
+        assertEquals("GPU", mgr.currentBackend)
+    }
+
+    @Test
+    fun `initialize - all-backends-failed message identifies the attempted chain`() = runTest {
+        File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME).writeText("fake-model")
+        stubActivityManager()
+
+        val mgr = EngineManager(context, logRepository)
+        mgr.engineFactory = { _ ->
+            mockk<Engine>(relaxed = true) {
+                every { initialize() } throws RuntimeException("simulated")
+            }
+        }
+
+        try {
+            mgr.initialize(preferredBackend = null) // chain = [GPU, CPU]
+            throw AssertionError("Expected IllegalStateException")
+        } catch (e: IllegalStateException) {
+            // Diagnostic invariant: when all backends fail, the operator
+            // must be told which backends were tried, so they can interpret
+            // the failure (e.g., "NPU not in chain → SoC detection probably
+            // wrong" vs "GPU and CPU both failed → model file is broken").
+            val msg = e.message ?: ""
+            assertTrue("Failure message must mention GPU was tried, was: $msg", msg.contains("GPU"))
+            assertTrue("Failure message must mention CPU was tried, was: $msg", msg.contains("CPU"))
+            assertTrue(
+                "Failure message must be identifiable as the all-backends-failed wrapper, was: $msg",
+                msg.contains("All backends failed"),
+            )
+        }
+    }
+
     // ---- backendName (tested via resolveBackendChain path) ------------------
 
     // We can test backendName indirectly through logging. Since it's private, we
