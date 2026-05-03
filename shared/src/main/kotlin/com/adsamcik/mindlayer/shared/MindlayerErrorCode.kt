@@ -126,6 +126,17 @@ object MindlayerErrorCode {
      */
     const val SERVICE_THROTTLED = 5003
 
+    /**
+     * F-076: the SharedMemoryPool refused a media-staging slot because a
+     * global cap (active PFD count or staged bytes) or the per-request
+     * count cap would be exceeded. The wire message body carries
+     * `retryAfterMs=N` so the SDK can backoff and retry — distinct from
+     * the harder-failure caps (`CONCURRENT_LIMIT`, `RATE_LIMITED`) and
+     * from the bind-side throttle (`SERVICE_THROTTLED`) because the
+     * resource will free up on its own as in-flight requests drain.
+     */
+    const val TRANSIENT_RESOURCE_EXHAUSTED = 5004
+
     // ---- 6xxx auth / allowlist ---------------------------------------------
 
     /** App not on the allowlist; user approval pending in the dashboard. */
@@ -184,7 +195,8 @@ object MindlayerErrorCode {
         DUPLICATE_REQUEST, NO_ACTIVE_REQUEST,
         INPUT_EXCEEDS_CONTEXT -> Category.VALIDATION
         THERMAL_CRITICAL, MEMORY_PRESSURE, LOW_MEMORY,
-        CONCURRENT_LIMIT, RATE_LIMITED, SERVICE_THROTTLED -> Category.RESOURCE
+        CONCURRENT_LIMIT, RATE_LIMITED, SERVICE_THROTTLED,
+        TRANSIENT_RESOURCE_EXHAUSTED -> Category.RESOURCE
         ALLOWLIST_PENDING, ALLOWLIST_REVOKED, IDENTITY_UNKNOWN -> Category.AUTH
         INTERNAL -> Category.UNKNOWN
         else -> Category.UNKNOWN
@@ -214,6 +226,7 @@ object MindlayerErrorCode {
         CONCURRENT_LIMIT -> "CONCURRENT_LIMIT"
         RATE_LIMITED -> "RATE_LIMITED"
         SERVICE_THROTTLED -> "SERVICE_THROTTLED"
+        TRANSIENT_RESOURCE_EXHAUSTED -> "TRANSIENT_RESOURCE_EXHAUSTED"
         ALLOWLIST_PENDING -> "ALLOWLIST_PENDING"
         ALLOWLIST_REVOKED -> "ALLOWLIST_REVOKED"
         IDENTITY_UNKNOWN -> "IDENTITY_UNKNOWN"
