@@ -93,10 +93,40 @@ class EngineManager(
     var currentModel: ModelInfo? = null
         private set
 
-    /** Detail string from the most recent GPU init failure, or `null` if GPU never failed (or succeeded). */
+    /**
+     * F-077: the most recent [InitFailure] observed inside [initialize], or
+     * `null` if no init has failed (or the engine has been shut down). See
+     * the [InitFailure] KDoc for full population semantics — in short, this
+     * field is reset at the start of every fresh init run, OVERWRITTEN on
+     * each per-backend failure, intentionally retained across a
+     * fallback-success so the dashboard can render "running on CPU because
+     * GPU failed", and cleared on [shutdown].
+     */
     @Volatile
-    var lastGpuFailureReason: String? = null
+    var lastInitFailure: InitFailure? = null
         private set
+
+    /**
+     * F-077: backward-compat shim over [lastInitFailure]. Returns the
+     * GPU-specific safeLabel iff the most recent failure was a
+     * [InitFailure.BackendUnavailable] for the GPU backend; otherwise `null`.
+     *
+     * The shim is kept (rather than removed) because:
+     *  - The Room log query [com.adsamcik.mindlayer.service.logging.LogDao.latestGpuFallbackMessage]
+     *    feeds the dashboard's existing `gpuFailureReason` field independently
+     *    via the persisted `engine_fallback` event; tests across modules still
+     *    inspect the property name.
+     *  - `EngineManagerTest`'s leak-prevention suite (`shutdown clears
+     *    lastGpuFailureReason`) reads this property, and the F-070 tests
+     *    rely on the same call path. Keeping the shim avoids re-touching
+     *    those tests on an unrelated structural change.
+     *
+     * New code should observe [lastInitFailure] directly.
+     */
+    val lastGpuFailureReason: String?
+        get() = (lastInitFailure as? InitFailure.BackendUnavailable)
+            ?.takeIf { it.backend == "GPU" }
+            ?.safeLabel
 
     /**
      * Factory used to construct a new [Engine] from an [EngineConfig].
@@ -110,6 +140,21 @@ class EngineManager(
      */
     @VisibleForTesting
     internal var engineFactory: (EngineConfig) -> Engine = { Engine(it) }
+
+    /**
+     * F-077 / F-002 test seam: SHA-256 manifest source.
+     *
+     * Production reads from [com.adsamcik.mindlayer.service.BuildConfig.MODEL_SHA256]
+     * (a compile-time constant inlined at every call site, so direct
+     * reflection on the constant cannot retarget verifier calls). This
+     * field lets tests force a non-empty manifest WITHOUT depending on
+     * a custom build variant — the IntegrityMismatch path can be
+     * exercised by setting `mgr.expectedModelSha256 = "wrong-hash"`
+     * before [initialize].
+     */
+    @VisibleForTesting
+    internal var expectedModelSha256: String =
+        com.adsamcik.mindlayer.service.BuildConfig.MODEL_SHA256
 
     /** All model files detected on the device for internal selection purposes. */
     private val installedModels: List<ModelInfo> by lazy {
@@ -144,13 +189,29 @@ class EngineManager(
         preferredBackend: String? = null,
         maxTokens: Int = 4096,
     ): Engine = mutex.withLock {
-        val target = selectedModel
+        val target = try {
+            selectedModel
+        } catch (e: IllegalStateException) {
+            // F-077: `selectedModel` is `by lazy { ... ?: throw noModelFoundException() }`.
+            // The only IllegalStateException reachable here is the no-model-file path
+            // — categorise it before re-throwing so the dashboard renders the
+            // ModelMissing remediation rather than a generic stale state.
+            recordInitFailure(InitFailure.ModelMissing)
+            throw e
+        }
 
         // Fast-path: the selected device model is already loaded.
         engine?.let { eng ->
             MindlayerLog.i(TAG, "Engine already initialized with model=${target.id}, backend=$currentBackend")
             return eng
         }
+
+        // F-077: a fresh init attempt supersedes the previous run's outcome.
+        // Reset only AFTER the cache fast-path so a cached-engine return
+        // continues to surface "running on CPU because GPU failed" state
+        // captured by the prior run. A real new attempt past this point
+        // populates the field via [recordInitFailure] at every failure site.
+        lastInitFailure = null
 
         val path = target.path
         val cacheDir = context.cacheDir.resolve("litert_cache").also { it.mkdirs() }
@@ -162,7 +223,15 @@ class EngineManager(
         // loads. When `BuildConfig.MODEL_SHA256` is empty (the dev/CI
         // default) we emit a loud warning instead of failing — once the
         // build pipeline pins the manifest, mismatches must hard-fail.
-        verifyModelIntegrity(File(path))
+        try {
+            verifyModelIntegrity(File(path))
+        } catch (e: SecurityException) {
+            // F-077: dashboard remediation is "Model file corrupted —
+            // reinstall." Distinct from a missing file (ModelMissing) so
+            // the user knows the file exists but failed verification.
+            recordInitFailure(InitFailure.IntegrityMismatch)
+            throw e
+        }
 
         // Pre-flight memory check: model needs ~2.5GB + working buffers.
         // F-071: this check now hard-fails with a typed [LowMemoryException]
@@ -191,6 +260,9 @@ class EngineManager(
             } else {
                 MindlayerLog.w(TAG, "Refusing engine init: ${availMb}MB available, " +
                     "${requiredMb}MB required for model '${target.id}'")
+                // F-077: categorise BEFORE throwing so observers (dashboard,
+                // logs) see the typed signal even on this terminal path.
+                recordInitFailure(InitFailure.LowMemory)
                 throw LowMemoryException(availMb = availMb, requiredMb = requiredMb)
             }
         }
@@ -235,9 +307,12 @@ class EngineManager(
                 val durationMs = ((System.nanoTime() - startNs) / 1_000_000)
                 MindlayerLog.i(TAG, "Engine initialized: model=${target.id}, backend=$name, time=${elapsed}s (tried ${backends.map { backendName(it) }})")
 
-                if (name == "GPU") {
-                    lastGpuFailureReason = null
-                }
+                // F-077: do NOT clear lastInitFailure on successful init via
+                // fallback. The dashboard relies on "GPU failed -> running on
+                // CPU" being visible (matches the previous lastGpuFailureReason
+                // semantics where the GPU label persisted across CPU-fallback
+                // success). The reset at the top of initialize() guarantees
+                // a fresh first-attempt success leaves the field null.
                 engine = eng
                 currentBackend = name
                 currentModel = target
@@ -252,9 +327,12 @@ class EngineManager(
                 // fragments; safeLabel() returns class names only.
                 val safeDetail = t.safeLabel()
                 MindlayerLog.w(TAG, "Backend $name failed: $safeDetail")
-                if (name == "GPU") {
-                    lastGpuFailureReason = safeDetail
-                }
+                // F-077: every per-backend failure now categorises into a
+                // typed [InitFailure.BackendUnavailable] — replaces the
+                // GPU-only `lastGpuFailureReason` string. The dashboard
+                // renders "X backend failed (label) — running on CPU"
+                // when the next backend in the chain succeeds.
+                recordInitFailure(InitFailure.BackendUnavailable(name, safeDetail))
                 lastError = t
                 logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
                     timestampMs = System.currentTimeMillis(),
@@ -287,7 +365,7 @@ class EngineManager(
      *    swapped backdoored model (see SECURITY_REVIEW F-002 / F-003).
      */
     private fun verifyModelIntegrity(file: File) {
-        val expected = com.adsamcik.mindlayer.service.BuildConfig.MODEL_SHA256
+        val expected = expectedModelSha256
         if (expected.isEmpty()) {
             MindlayerLog.w(
                 TAG,
@@ -383,10 +461,27 @@ class EngineManager(
             currentModel = null
             isInitialized = false
             initTimeSeconds = 0f
-            lastGpuFailureReason = null
+            // F-077: clear typed failure state on explicit shutdown.
+            // The shim `lastGpuFailureReason` resolves through this field
+            // and so is implicitly cleared in lock-step (preserves the
+            // pre-F-077 behaviour the leak-prevention tests rely on).
+            lastInitFailure = null
             logRepository?.logEngineShutdown(backend)
             MindlayerLog.i(TAG, "Engine shutdown complete")
         }
+    }
+
+    /**
+     * F-077: record a typed init failure and persist a categorised log
+     * event. Centralised so every population site goes through the same
+     * `lastInitFailure = …` + `LogRepository.logInitFailureCategorized`
+     * pair — keeps the in-memory state and the persisted dashboard signal
+     * in sync, and gives the safeLabel-only F-006 invariant a single
+     * audit point.
+     */
+    private fun recordInitFailure(failure: InitFailure) {
+        lastInitFailure = failure
+        logRepository?.logInitFailureCategorized(failure)
     }
 
     /**
