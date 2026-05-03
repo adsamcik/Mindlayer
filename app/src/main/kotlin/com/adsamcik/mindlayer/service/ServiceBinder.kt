@@ -120,6 +120,17 @@ class ServiceBinder(
     private val currentRegistrationByUid = ConcurrentHashMap<Int, ClientRegistration>()
 
     /**
+     * v0.4 eviction-callback registry. Owned exclusively by this binder so
+     * it can be cleared from `MindlayerMlService.onDestroy` and so that the
+     * [SessionManager] eviction listener has a single dispatch target.
+     *
+     * Internal visibility allows the service to call [EvictionRegistry.clear]
+     * during teardown.
+     */
+    internal val evictionRegistry = com.adsamcik.mindlayer.service.security.EvictionRegistry()
+
+
+    /**
      * F-051: lifetime registerClient counter per UID. Hostile or buggy
      * clients that re-register on a tight loop are blocked once they
      * cross [MAX_REGISTRATIONS_PER_UID]. The cap is intentionally
@@ -138,9 +149,10 @@ class ServiceBinder(
          * a new method is appended to the AIDL interface. v1 was the pre-
          * `inferMulti` surface; v2 added [inferMulti]; v3 added
          * [prewarmAndAwait]; v4 added [cancelInferenceV2] +
-         * [submitToolResultV2].
+         * [submitToolResultV2]; v5 added [getDiagnosticsTyped]; v6 added
+         * [subscribeEvictionNotices] + [unsubscribeEvictionNotices].
          */
-        const val CURRENT_API_VERSION = 5
+        const val CURRENT_API_VERSION = 6
 
         /**
          * How long after termination a scoped key remains in
@@ -197,6 +209,7 @@ class ServiceBinder(
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TOKEN_BATCH,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_EVICTION_CALLBACK,
         )
     }
 
@@ -204,6 +217,20 @@ class ServiceBinder(
         override val ownerUid: Int,
         val registrationId: String,
     ) : SessionOwnerToken
+
+    init {
+        // v0.4 eviction-callback: route every involuntary session retirement
+        // to the per-UID callback registry. The listener fires AFTER
+        // SessionManager has released its monitor and closed the conversation,
+        // so dispatching binder transactions here cannot deadlock the eviction
+        // path. Sessions with no resolved owner UID (purely internal/self-UID)
+        // notify with no recipient — silent no-op.
+        service.sessionManager.setEvictionListener { sessionId, ownerUid, reasonCode ->
+            if (ownerUid != null) {
+                evictionRegistry.notifyEviction(ownerUid, sessionId, reasonCode)
+            }
+        }
+    }
 
     // ---- Security gate -----------------------------------------------------
 
@@ -1423,5 +1450,47 @@ class ServiceBinder(
     object DefaultCallerVerifierGate : CallerVerifierGate {
         override fun identify(context: Context, callingUid: Int): CallerIdentity? =
             CallerVerifier.identifyCaller(context, callingUid)
+    }
+
+    // ---- v0.4 eviction-callback subscription -------------------------------
+
+    /**
+     * Register an [com.adsamcik.mindlayer.IClientCallback] under the calling
+     * UID. The callback fires once per involuntary session retirement
+     * (memory pressure, expiration, caller-capacity eviction). Voluntary
+     * tear-downs — caller-initiated `destroySession` and binder-death
+     * cleanup — do not fire.
+     *
+     * Idempotent per-binder: registering the same [callback] instance twice
+     * is a no-op. Bounded per-UID so a runaway reconnect loop cannot exhaust
+     * service heap. Failures (binder dead, capacity exhausted) are silent;
+     * the SDK should treat the subscribe as best-effort.
+     *
+     * No rate-limit cost: this is a setup call invoked once per connection.
+     * The standard auth gate (signature permission + allowlist) still
+     * applies via [authorizeCall].
+     */
+    override fun subscribeEvictionNotices(callback: com.adsamcik.mindlayer.IClientCallback?) {
+        authorizeCall(cost = 0.0)
+        val uid = Binder.getCallingUid()
+        if (callback == null) {
+            throw typedBinderException(
+                com.adsamcik.mindlayer.shared.MindlayerErrorCode.INVALID_REQUEST,
+                "callback required",
+            )
+        }
+        evictionRegistry.register(uid, callback)
+    }
+
+    /**
+     * Best-effort unregister. A trailing notification may still arrive if a
+     * concurrent eviction snapshotted the registry list before this call
+     * removed the entry; documented as eventual.
+     */
+    override fun unsubscribeEvictionNotices(callback: com.adsamcik.mindlayer.IClientCallback?) {
+        authorizeCall(cost = 0.0)
+        val uid = Binder.getCallingUid()
+        if (callback == null) return
+        evictionRegistry.unregister(uid, callback)
     }
 }

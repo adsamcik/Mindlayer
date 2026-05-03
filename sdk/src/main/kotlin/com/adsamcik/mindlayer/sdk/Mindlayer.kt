@@ -5,15 +5,24 @@ import android.graphics.Bitmap
 import android.os.ParcelFileDescriptor
 import com.adsamcik.mindlayer.EngineInfo
 import com.adsamcik.mindlayer.HistoryTurn
+import com.adsamcik.mindlayer.IClientCallback
 import com.adsamcik.mindlayer.RequestMeta
 import com.adsamcik.mindlayer.ServiceCapabilities
 import com.adsamcik.mindlayer.ServiceStatus
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.SessionInfo
 import com.adsamcik.mindlayer.ToolResult
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 import java.io.File
 import java.util.UUID
 
@@ -77,6 +86,14 @@ class Mindlayer private constructor(
             "Use the streaming chat() API with a ToolCall handler instead."
 
         /**
+         * Per-instance buffer for [evictionNotices]. 64 entries is enough to
+         * absorb a device-wide memory-pressure storm (which evicts every
+         * non-streaming session, typically ≤8) plus normal expiration churn
+         * without dropping anything in steady-state.
+         */
+        const val EVICTION_BUFFER: Int = 64
+
+        /**
          * Create a [Mindlayer] instance and start binding to the service.
          * Use [awaitConnected] or observe [connectionState] before issuing RPCs.
          *
@@ -108,6 +125,115 @@ class Mindlayer private constructor(
     /** Suspend until the service binder is available. */
     suspend fun awaitConnected() {
         connection.awaitConnected()
+    }
+
+    // -- v0.4 eviction-callback subscription ---------------------------------
+
+    /**
+     * Bounded notice buffer — coalesces rapid eviction storms (memory
+     * pressure can retire several sessions in quick succession) and
+     * drops the oldest if no consumer is reading.
+     */
+    private val _evictionFlow = MutableSharedFlow<EvictionNotice>(
+        replay = 0,
+        extraBufferCapacity = EVICTION_BUFFER,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /**
+     * Shared callback instance — registered exactly once per Mindlayer
+     * lifetime. Service-side idempotency keys on `asBinder()` so
+     * resubscribing this same instance after a reconnect is a no-op.
+     *
+     * Lazy because [IClientCallback.Stub]'s constructor calls
+     * [android.os.Binder.attachInterface], which is only mocked under the
+     * Robolectric framework. Plain-JUnit tests that never reach a
+     * CONNECTED transition (and therefore never invoke
+     * [maybeSubscribeEvictions]) skip the Binder dependency entirely.
+     */
+    private val evictionCallback: IClientCallback by lazy {
+        object : IClientCallback.Stub() {
+            override fun onSessionEvicted(sessionId: String?, reasonCode: Int) {
+                val sid = sessionId ?: return
+                _evictionFlow.tryEmit(EvictionNotice(sid, reasonCode))
+            }
+        }
+    }
+
+    /**
+     * Coroutine scope owning the connection-state observer that handles
+     * automatic re-subscription on each fresh CONNECTED transition.
+     * Cancelled by [disconnect]; survives transient disconnects.
+     */
+    private val lifecycleScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    @Volatile private var lastSubscribedState: ConnectionState? = null
+
+    init {
+        // Auto-subscribe on every new CONNECTED transition so the eviction
+        // flow stays live across rebind cycles. The service-side registry
+        // is per-binder-keyed and survives only as long as the binder does
+        // — a fresh binder means a fresh subscription.
+        lifecycleScope.launch {
+            connection.state.collect { state ->
+                // Invalidate capability cache whenever we leave CONNECTED so
+                // the next `getCapabilities()` re-probes against the new
+                // binder rather than serving a stale cap set.
+                if (state != ConnectionState.CONNECTED) {
+                    cachedCapabilities = null
+                }
+                if (state == ConnectionState.CONNECTED && lastSubscribedState != ConnectionState.CONNECTED) {
+                    lastSubscribedState = ConnectionState.CONNECTED
+                    maybeSubscribeEvictions()
+                } else if (state != ConnectionState.CONNECTED) {
+                    lastSubscribedState = state
+                }
+            }
+        }
+    }
+
+    /**
+     * Stream of eviction notices for sessions owned by this caller.
+     *
+     * Always-on; subscription is automatic and survives reconnects. Emissions
+     * are bounded to the most-recent [EVICTION_BUFFER] items per consumer
+     * with `DROP_OLDEST` overflow, so a slow collector cannot back-pressure
+     * the service-side dispatcher.
+     *
+     * Returns an empty (never-emitting) flow when the connected service does
+     * not advertise [ServiceCapabilities.FEATURE_EVICTION_CALLBACK]. SDK
+     * consumers can additionally check `getCapabilities()` to surface a
+     * "no eviction notices on this service version" diagnostic.
+     */
+    fun evictionNotices(): Flow<EvictionNotice> = _evictionFlow.asSharedFlow()
+
+    /**
+     * Best-effort subscribe — invoked on every fresh CONNECTED transition.
+     *
+     * Intentionally does **not** pre-check capabilities to avoid racing
+     * test fixtures that mock the service: the [getCapabilities] call would
+     * populate the cache before the test gets to override the mock.
+     * Old services without `subscribeEvictionNotices` throw
+     * `AbstractMethodError` / `NoSuchMethodError`; both are swallowed so
+     * the SDK still works without push notifications, the user just polls
+     * instead.
+     */
+    private fun maybeSubscribeEvictions() {
+        try {
+            val service = connection.getService() ?: return
+            service.subscribeEvictionNotices(evictionCallback)
+        } catch (_: NoSuchMethodError) {
+            // Old AIDL stub; nothing to do.
+        } catch (_: AbstractMethodError) {
+            // Old service implementation without this method.
+        } catch (_: SecurityException) {
+            // Auth gate refused — handled by the regular RPC path; ignore here.
+        } catch (_: android.os.RemoteException) {
+            // Binder went away mid-subscribe; the next CONNECTED transition
+            // will re-subscribe.
+        } catch (_: Throwable) {
+            // Defensive: never let an eviction-channel hiccup propagate.
+        }
     }
 
     // -- Capabilities ---------------------------------------------------------
@@ -181,6 +307,22 @@ class Mindlayer private constructor(
      */
     fun disconnect() {
         cachedCapabilities = null
+        // v0.4: cancel the eviction-resubscribe observer so it doesn't try
+        // to re-register against a binding we're tearing down. The service
+        // side will GC the registration when its binder dies anyway, but
+        // an explicit unsubscribe is cleaner and keeps the registry small
+        // for long-lived service processes serving many short-lived clients.
+        // Guard the lazy access — if the callback was never materialized
+        // (no CONNECTED transition ever fired), there's nothing to unsubscribe.
+        if (lastSubscribedState == ConnectionState.CONNECTED) {
+            try {
+                val svc = connection.getService()
+                svc?.unsubscribeEvictionNotices(evictionCallback)
+            } catch (_: Throwable) {
+                // ignore — disconnect must always succeed.
+            }
+        }
+        lifecycleScope.cancel()
         connection.disconnect()
     }
 

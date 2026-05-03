@@ -179,6 +179,13 @@ class MindlayerMlService : Service() {
         MindlayerLog.i(TAG, "Service destroyed")
         thermalMonitor.stop()
         memoryBudget.stop()
+        // v0.4: tear down eviction-callback registrations (unlinks death recipients).
+        // Must run before orchestrator.shutdown() — sessionManager.shutdown()
+        // calls into destroySession (no-notice path), but a stray binder
+        // transaction is still cheaper to skip with an empty registry.
+        if (::binder.isInitialized) {
+            binder.evictionRegistry.clear()
+        }
         orchestrator.shutdown()
         logRepository.shutdown()
         serviceScope.cancel()

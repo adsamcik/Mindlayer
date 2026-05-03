@@ -13,6 +13,7 @@ import com.adsamcik.mindlayer.ServiceCapabilities;
 import com.adsamcik.mindlayer.CancelResult;
 import com.adsamcik.mindlayer.ToolSubmitResult;
 import com.adsamcik.mindlayer.DiagnosticsSnapshot;
+import com.adsamcik.mindlayer.IClientCallback;
 
 interface IMindlayerService {
     // Client liveness — caller passes a Binder token; service linkToDeath's on it
@@ -81,5 +82,14 @@ interface IMindlayerService {
     // ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS. Legacy
     // getDiagnostics() stays as the human-readable bug-report surface.
     DiagnosticsSnapshot getDiagnosticsTyped();
+
+    // v0.4 eviction callback. SDK registers an IClientCallback once after
+    // connect; service fires onSessionEvicted for every session retired
+    // while the callback is registered (memory pressure, expiration, OOM
+    // kill, explicit revoke). Callback's binder is linkToDeath'd so a
+    // crashed client doesn't keep stale callbacks alive.
+    // Capability-gated via ServiceCapabilities.FEATURE_EVICTION_CALLBACK.
+    void subscribeEvictionNotices(IClientCallback callback);
+    void unsubscribeEvictionNotices(IClientCallback callback);
 }
 
