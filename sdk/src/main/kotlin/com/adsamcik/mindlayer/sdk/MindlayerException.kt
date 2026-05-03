@@ -91,6 +91,22 @@ class MindlayerException @JvmOverloads constructor(
             return match.groupValues[1].toLongOrNull()
         }
 
+    /**
+     * F-076: when [code] is [MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED],
+     * the service embeds `retryAfterMs=N` in the wire message body — the
+     * minimum delay the SDK should wait before retrying the staging-bound
+     * request. Returns `null` for any other code or if the service did not
+     * include the marker (e.g. an old service binary), in which case
+     * callers should fall back to a generic exponential backoff.
+     */
+    val retryAfterMs: Long?
+        get() {
+            if (code != MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED) return null
+            val raw = message ?: return null
+            val match = RETRY_AFTER_MS_PATTERN.find(raw) ?: return null
+            return match.groupValues[1].toLongOrNull()
+        }
+
     companion object {
         /**
          * F-072 wire-payload regex. Matches `remaining=<digits>` anywhere
@@ -107,6 +123,14 @@ class MindlayerException @JvmOverloads constructor(
          * markers does not accidentally collide.
          */
         private val COOLDOWN_ENDS_AT_PATTERN: Regex = Regex("""cooldown=(\d+)""")
+
+        /**
+         * F-076 wire-payload regex. Matches `retryAfterMs=<digits>`
+         * anywhere in the SecurityException message body so newer
+         * services can append additional fields without breaking older
+         * SDK parsers.
+         */
+        private val RETRY_AFTER_MS_PATTERN: Regex = Regex("""retryAfterMs=(\d+)""")
 
         /**
          * Parse a wire-prefixed [SecurityException] message into a
