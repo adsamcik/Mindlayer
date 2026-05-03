@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.adsamcik.mindlayer.RequestMeta
 import com.adsamcik.mindlayer.SessionConfig
+import com.adsamcik.mindlayer.service.health.MlHealthRecorder
 import com.adsamcik.mindlayer.service.logging.LogDao
 import com.adsamcik.mindlayer.service.logging.LogDatabase
 import com.adsamcik.mindlayer.service.logging.LogEntry
@@ -43,6 +44,7 @@ class DashboardViewModel : ViewModel() {
     val uiState: StateFlow<DashboardUiState> = _uiState.asStateFlow()
 
     private var logDao: LogDao? = null
+    private var mlHealthRecorder: MlHealthRecorder? = null
     private var service: com.adsamcik.mindlayer.IMindlayerService? = null
     private var bound = false
     private var statusPollingJob: Job? = null
@@ -89,6 +91,11 @@ class DashboardViewModel : ViewModel() {
     fun bindService(context: Context) {
         if (bound) return
         logDao = LogDatabase.getInstance(context).logDao()
+        // F-074: the dashboard reads the watchdog state directly from the
+        // shared file in `filesDir/ml_health/` — no AIDL hop required.
+        // The service writes from `:ml`, atomic-rename means we never see
+        // a torn JSON, and self-UID AIDL would be throttled by design.
+        mlHealthRecorder = MlHealthRecorder(context)
 
         _uiState.update {
             it.copy(
@@ -184,6 +191,19 @@ class DashboardViewModel : ViewModel() {
                     val sessions = svc.listSessions()
                     val now = System.currentTimeMillis()
 
+                    // F-074: peek the watchdog file (cross-process) so the
+                    // banner stays in sync with whatever `:ml` last wrote.
+                    // Cheap unlocked read; atomic rename guarantees no
+                    // torn JSON.
+                    val healthSnapshot = mlHealthRecorder?.peek()
+                    val cooldownEndsAt = mlHealthRecorder?.cooldownEndsAt() ?: 0L
+                    val throttled = mlHealthRecorder?.shouldThrottleBinds() == true
+                    val cooldownRemaining = if (throttled && cooldownEndsAt > now) {
+                        ((cooldownEndsAt - now + 999L) / 1000L).toInt().coerceAtLeast(0)
+                    } else {
+                        0
+                    }
+
                     _uiState.update { current ->
                         current.copy(
                             connectionState = DashboardConnectionState.CONNECTED,
@@ -201,6 +221,9 @@ class DashboardViewModel : ViewModel() {
                             // that to the UI via a typed boolean.
                             thermalTelemetryAvailable = !status.thermalBand
                                 .equals("UNAVAILABLE", ignoreCase = true),
+                            serviceThrottled = throttled,
+                            throttleCooldownSecondsRemaining = cooldownRemaining,
+                            recentDeathCount = healthSnapshot?.deathCount ?: 0,
                             headroom = status.headroom,
                             memoryPressure = status.memoryPressure,
                             availableRamMb = status.availableRamMb,

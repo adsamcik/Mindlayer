@@ -59,6 +59,26 @@ data class DashboardUiState(
      * 4-band value (`COOL`/`WARM`/`HOT`/`CRITICAL`).
      */
     val thermalTelemetryAvailable: Boolean = true,
+    /**
+     * F-074: `true` when the `:ml` crash-loop watchdog is currently
+     * refusing external binds. Derived from the
+     * `MlHealthRecorder.shouldThrottleBinds()` peek the dashboard
+     * polls on the same `filesDir/ml_health/abnormal_deaths.json`
+     * the service writes to.
+     */
+    val serviceThrottled: Boolean = false,
+    /**
+     * F-074: seconds remaining before the throttle window expires.
+     * Computed from `cooldownEndsAt - now`, clamped at zero. Always
+     * `0` when [serviceThrottled] is `false`.
+     */
+    val throttleCooldownSecondsRemaining: Int = 0,
+    /**
+     * F-074: count of recent abnormal deaths recorded by the watchdog.
+     * Surfaced in the throttle banner so the user can tell "first
+     * crash" from "8 crashes in a row" at a glance.
+     */
+    val recentDeathCount: Int = 0,
     // Memory
     val memoryPressure: String = "NORMAL",
     val availableRamMb: Long = 0,
@@ -87,6 +107,9 @@ data class DashboardUiState(
         }
 
         connectionState == DashboardConnectionState.DISCONNECTED -> DashboardHealthLevel.ERROR
+        // F-074: a live throttle is a louder signal than memory/thermal
+        // pressure — surface it as ERROR so the headline reflects it.
+        serviceThrottled -> DashboardHealthLevel.ERROR
         statusErrorMessage != null -> DashboardHealthLevel.ERROR
         statusFreshness(nowMs) == DashboardFreshness.STALE -> DashboardHealthLevel.DEGRADED
         !isEngineLoaded || backend.equals("NONE", ignoreCase = true) -> DashboardHealthLevel.DEGRADED
