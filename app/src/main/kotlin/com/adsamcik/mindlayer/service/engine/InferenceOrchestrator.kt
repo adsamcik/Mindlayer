@@ -255,6 +255,19 @@ class InferenceOrchestrator(
                 )
             }
         }
+        // F-076: synchronous SharedMemoryPool bounds gate. Fails fast at
+        // the binder thread when the pool is at capacity, BEFORE we
+        // launch the inference coroutine that would block in
+        // stageImageWithTimeout / stageAudioWithTimeout for up to 20 s
+        // each. ServiceBinder maps the typed exception to a wire-prefixed
+        // SecurityException with code TRANSIENT_RESOURCE_EXHAUSTED.
+        if (image != null || audio != null) {
+            val numImages = if (image != null) 1 else 0
+            val numAudios = if (audio != null) 1 else 0
+            val expectedBytes: Long = (image?.payloadBytes?.toLong()?.coerceAtLeast(1L) ?: 0L) +
+                (if (audio != null) com.adsamcik.mindlayer.service.ipc.MAX_MEDIA_BYTES.toLong() else 0L)
+            sharedMemoryPool.precheckBounds(numImages, numAudios, expectedBytes)?.let { throw it }
+        }
         val job = scope.launch {
             runInference(scopedKey, meta, image, audio, pipeWriteEnd)
         }

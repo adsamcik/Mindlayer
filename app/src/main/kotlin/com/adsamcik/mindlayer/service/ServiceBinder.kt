@@ -769,6 +769,21 @@ class ServiceBinder(
                 MindlayerErrorCode.INPUT_EXCEEDS_CONTEXT,
                 e.wireMessage,
             )
+        } catch (e: com.adsamcik.mindlayer.service.ipc.SharedMemoryPoolExhaustedException) {
+            // F-076: SharedMemoryPool bounds gate tripped at the
+            // synchronous orchestrator pre-flight. Release the
+            // concurrency slot and translate to a typed wire-prefixed
+            // SecurityException so the SDK can surface
+            // TRANSIENT_RESOURCE_EXHAUSTED with the retry-after hint.
+            activeInferenceOwners.remove(scopedKey)
+            if (activeInferenceUids.remove(scopedKey) != null) {
+                rateLimiter.endInference(uid)
+            }
+            markRecentlyCompleted(scopedKey)
+            throw typedBinderException(
+                MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
+                "shm_pool_exhausted reason=${e.reason} retryAfterMs=${e.retryAfterMs}",
+            )
         } catch (t: Throwable) {
             activeInferenceOwners.remove(scopedKey)
             if (activeInferenceUids.remove(scopedKey) != null) {
@@ -887,6 +902,20 @@ class ServiceBinder(
             throw typedBinderException(
                 MindlayerErrorCode.INPUT_EXCEEDS_CONTEXT,
                 e.wireMessage,
+            )
+        } catch (e: com.adsamcik.mindlayer.service.ipc.SharedMemoryPoolExhaustedException) {
+            // F-076: same translation as [infer]. The bounds gate runs
+            // inside the same orchestrator pre-flight regardless of
+            // whether the request arrived via the legacy infer() path
+            // or the v0.4 inferMulti() / MediaPart path.
+            activeInferenceOwners.remove(scopedKey)
+            if (activeInferenceUids.remove(scopedKey) != null) {
+                rateLimiter.endInference(uid)
+            }
+            markRecentlyCompleted(scopedKey)
+            throw typedBinderException(
+                MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
+                "shm_pool_exhausted reason=${e.reason} retryAfterMs=${e.retryAfterMs}",
             )
         } catch (t: Throwable) {
             activeInferenceOwners.remove(scopedKey)
