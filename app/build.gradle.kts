@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.util.zip.ZipFile
 
 plugins {
     alias(libs.plugins.android.application)
@@ -34,6 +35,135 @@ val validateReleaseModelSha256 by tasks.registering {
                 "Release builds require -PmodelSha256=<64 lowercase hex SHA-256 of the bundled .litertlm model>.",
             )
         }
+    }
+}
+
+// ── F-079: LiteRT-LM AAR ABI inspection ──────────────────────────────────────
+// Replaces the audit's "32-bit ABI silent failure" speculation with a hard
+// build-time check: unpack the resolved LiteRT-LM AAR, enumerate the native
+// libraries it ships under jni/<abi>/, and fail the build if any required
+// ABI is missing.
+//
+// Update EXPECTED_LIBRARY_ABIS / ALLOWED_MISSING_LIBRARY_ABIS intentionally
+// whenever the LiteRT-LM coordinate in libs.versions.toml is bumped — cross-
+// reference the upstream release notes for the new ABI matrix:
+//   https://github.com/google-ai-edge/LiteRT-LM/releases
+//
+// As of 0.10.0 the AAR ships arm64-v8a + x86_64 only; armeabi-v7a (32-bit
+// ARM) has been dropped upstream. The Gemma 4 E2B weights cannot fit on a
+// 32-bit address space anyway, so the gap is acceptable, but allow-listing
+// it here means a *future* regression that drops arm64-v8a or x86_64 would
+// be loud, not silent.
+
+val EXPECTED_LIBRARY_ABIS: Set<String> = setOf(
+    "arm64-v8a",     // mandatory — shipping ABI for all real devices
+    "armeabi-v7a",   // historic 32-bit ARM (currently allow-listed missing)
+    "x86_64",        // mandatory — CI emulator runs on x86_64
+)
+
+val ALLOWED_MISSING_LIBRARY_ABIS: Set<String> = setOf(
+    "armeabi-v7a",   // intentionally absent in LiteRT-LM 0.10.0 — see comment above
+)
+
+val litertlmAarInspection: Configuration by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+    description = "Resolves the raw LiteRT-LM AAR for build-time ABI inspection (F-079)."
+}
+
+run {
+    val dep = libs.litertlm.android.get()
+    val coords = "${dep.module.group}:${dep.module.name}:${dep.versionConstraint.requiredVersion}@aar"
+    dependencies.add(litertlmAarInspection.name, coords)
+}
+
+val validateLitertlmAbis by tasks.registering {
+    group = "verification"
+    description = "Fails the build if the LiteRT-LM AAR no longer ships a required native ABI (F-079)."
+
+    val aarFiles: FileCollection = litertlmAarInspection
+    inputs.files(aarFiles)
+        .withPropertyName("litertlmAar")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+
+    val expectedAbis = EXPECTED_LIBRARY_ABIS
+    val allowedMissingAbis = ALLOWED_MISSING_LIBRARY_ABIS
+    val markerFile = layout.buildDirectory.file("litertlm-abi-check/abis.txt")
+    outputs.file(markerFile)
+
+    doLast {
+        val resolved = aarFiles.files
+        val aar = resolved.singleOrNull {
+            it.name.startsWith("litertlm-android") && it.name.endsWith(".aar")
+        } ?: throw GradleException(
+            "validateLitertlmAbis: expected exactly one LiteRT-LM AAR on the inspection " +
+                "configuration; got ${resolved.map { it.name }}",
+        )
+
+        val abiEntryRegex = Regex("^jni/([^/]+)/lib[^/]+\\.so$")
+        val present = sortedSetOf<String>()
+        val nativeLibsByAbi = sortedMapOf<String, MutableList<String>>()
+        ZipFile(aar).use { zip ->
+            zip.entries().asSequence().forEach { entry ->
+                val match = abiEntryRegex.matchEntire(entry.name) ?: return@forEach
+                val abi = match.groupValues[1]
+                present.add(abi)
+                nativeLibsByAbi.getOrPut(abi) { mutableListOf() }.add(
+                    entry.name.substringAfterLast('/'),
+                )
+            }
+        }
+
+        val missing = (expectedAbis - present).toSortedSet()
+        val missingAndAllowed = (missing intersect allowedMissingAbis).toSortedSet()
+        val missingAndUnallowed = (missing - allowedMissingAbis).toSortedSet()
+        val unexpectedExtras = (present - expectedAbis).toSortedSet()
+
+        logger.lifecycle("validateLitertlmAbis: ${aar.name}")
+        logger.lifecycle("  present ABIs       : $present")
+        nativeLibsByAbi.forEach { (abi, libs) ->
+            logger.info("    $abi -> ${libs.sorted()}")
+        }
+        logger.lifecycle("  expected ABIs      : ${expectedAbis.toSortedSet()}")
+        if (missingAndAllowed.isNotEmpty()) {
+            logger.lifecycle("  allow-listed missing: $missingAndAllowed")
+        }
+        if (unexpectedExtras.isNotEmpty()) {
+            logger.lifecycle(
+                "  extra ABIs (consider adding to EXPECTED_LIBRARY_ABIS): $unexpectedExtras",
+            )
+        }
+
+        if (missingAndUnallowed.isNotEmpty()) {
+            throw GradleException(
+                buildString {
+                    appendLine(
+                        "LiteRT-LM AAR is missing required ABIs: $missingAndUnallowed",
+                    )
+                    appendLine("  AAR file        : ${aar.absolutePath}")
+                    appendLine("  Present ABIs    : $present")
+                    appendLine("  Expected ABIs   : ${expectedAbis.toSortedSet()}")
+                    appendLine("  Allowed missing : ${allowedMissingAbis.toSortedSet()}")
+                    appendLine()
+                    appendLine(
+                        "Either upgrade LiteRT-LM, drop the ABI from EXPECTED_LIBRARY_ABIS,",
+                    )
+                    append(
+                        "or add it to ALLOWED_MISSING_LIBRARY_ABIS with a documented rationale.",
+                    )
+                },
+            )
+        }
+
+        markerFile.get().asFile.apply { parentFile.mkdirs() }.writeText(
+            buildString {
+                appendLine("aar=${aar.name}")
+                appendLine("present=${present.joinToString(",")}")
+                appendLine("expected=${expectedAbis.toSortedSet().joinToString(",")}")
+                appendLine("allowedMissing=${allowedMissingAbis.toSortedSet().joinToString(",")}")
+            },
+        )
     }
 }
 
@@ -149,6 +279,12 @@ tasks.configureEach {
         (name.startsWith("assemble") || name.startsWith("bundle") || name.startsWith("package"))
     if (isReleasePackageTask) {
         dependsOn(validateReleaseModelSha256)
+    }
+    // F-079: every public APK/AAB packaging task must see the ABI validator.
+    // assembleDebug + assembleRelease + bundleRelease are the lifecycle tasks
+    // CI invokes; the validator's <200 ms warm cost makes blanket wiring safe.
+    if (name == "assembleDebug" || name == "assembleRelease" || name == "bundleRelease") {
+        dependsOn(validateLitertlmAbis)
     }
 }
 
