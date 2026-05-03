@@ -23,3 +23,9 @@ Brief description of what this PR does.
 - [ ] Code follows project conventions (MindlayerLog, coroutine dispatchers, etc.)
 - [ ] No secrets or model files committed
 - [ ] AIDL changes mirrored in both `app/` and `sdk/` modules
+
+## Hardware-sensitive change?
+
+- [ ] My change touches `app/src/main/kotlin/.../service/engine/`, `MindlayerMlService.kt` FGS code, the NPU SoC list, `AndroidManifest.xml`, or `:gemma_model`.
+- [ ] If yes, I completed the [Hardware-touching PR checklist](../RELEASE.md#7-hardware-touching-pr-checklist).
+- [ ] If yes, real-device logs (trimmed, metadata only) are attached to this PR description.
