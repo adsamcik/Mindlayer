@@ -27,6 +27,23 @@ data class ThermalSample(
     val headroomNow: Float?,       // getThermalHeadroom(0)
     val headroom10s: Float?,       // getThermalHeadroom(10)
     val timestampMs: Long,
+    /**
+     * `true` when at least one thermal telemetry source returned data on
+     * this sample (status from API 29+, headroom from API 30+). `false`
+     * on Android 8 / 8.1 (API 26-28) where neither API is available — on
+     * those devices [computeBand] always returns COOL because there is
+     * literally no signal.
+     *
+     * Lets consumers (dashboard, [RequestTrace], DiagnosticExporter,
+     * future thermal policy) distinguish "actually cool" from "telemetry
+     * unavailable", so an Android 8 device under genuine thermal stress
+     * is not silently misread as a thermally-healthy device.
+     *
+     * F-070: defaults to `true` so existing test fixtures that pass
+     * concrete `status` / `headroom` values continue to compile
+     * unchanged; [ThermalMonitor.takeSample] always sets this explicitly.
+     */
+    val telemetryAvailable: Boolean = true,
 )
 
 /**
@@ -48,6 +65,21 @@ class ThermalMonitor(
     private val scope: CoroutineScope,
     private val logRepository: com.adsamcik.mindlayer.service.logging.LogRepository? = null,
     private val clock: () -> Long = { SystemClock.uptimeMillis() },
+    /**
+     * F-070: SDK version provider, mockable for tests.
+     *
+     * `Build.VERSION.SDK_INT` is a `static final int` and the Kotlin
+     * compiler inlines reads as compile-time constants from the
+     * `android.jar` stub (where it is `0`). That makes static-field
+     * reflection unreliable for asserting API-level branches —
+     * EngineManagerTest's similar pattern only "passes" because its
+     * assertions are negative (`assertFalse`) which match the inlined
+     * fallback. This indirection lets the
+     * [ThermalSampleTelemetryTest] reliably exercise the API 26-28
+     * "telemetry unavailable" path without touching production
+     * dispatch behaviour in production callers, who keep the default.
+     */
+    private val sdkInt: () -> Int = { Build.VERSION.SDK_INT },
 ) {
 
     companion object {
@@ -173,21 +205,34 @@ class ThermalMonitor(
     }
 
     private fun takeSample(): ThermalSample {
-        val status = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val statusAvailable = sdkInt() >= Build.VERSION_CODES.Q
+        val status = if (statusAvailable) {
             pm.currentThermalStatus
         } else {
             PowerManager.THERMAL_STATUS_NONE
         }
 
-        val headroomNow = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        val headroomNow = if (sdkInt() >= Build.VERSION_CODES.R) {
             pm.getThermalHeadroom(0).takeIf { it.isFinite() }
         } else null
 
-        val headroom10s = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        val headroom10s = if (sdkInt() >= Build.VERSION_CODES.R) {
             pm.getThermalHeadroom(10).takeIf { it.isFinite() }
         } else null
 
-        return ThermalSample(status, headroomNow, headroom10s, clock())
+        // F-070: distinguish "device reported COOL" from "device cannot
+        // report at all" so consumers can choose a conservative policy
+        // on telemetry-blind hardware (Android 8 / 8.1) instead of
+        // assuming the silence means everything is fine.
+        val telemetryAvailable = statusAvailable || headroomNow != null || headroom10s != null
+
+        return ThermalSample(
+            status = status,
+            headroomNow = headroomNow,
+            headroom10s = headroom10s,
+            timestampMs = clock(),
+            telemetryAvailable = telemetryAvailable,
+        )
     }
 
     /**
