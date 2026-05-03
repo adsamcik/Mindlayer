@@ -564,8 +564,13 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
     val tint = thermalColor(state.thermalBand)
     val isHot = state.thermalBand.equals("HOT", ignoreCase = true) ||
         state.thermalBand.equals("CRITICAL", ignoreCase = true)
+    val telemetryBlind = !state.thermalTelemetryAvailable
     val headroomDescription = state.headroom?.let { "Headroom ${"%.0f".format(it * 100)} percent" }
-        ?: "Headroom not reported"
+        ?: if (telemetryBlind) {
+            "Telemetry unavailable on this device"
+        } else {
+            "Headroom not reported"
+        }
 
     ElevatedCard(modifier = modifier) {
         Column(
@@ -618,10 +623,28 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
                     color = tint,
                 )
             } ?: run {
+                // F-073: telemetry-blind devices (Android 8 / 8.1) have
+                // no headroom readout AND no current/10s thermal status,
+                // so we surface the fact explicitly instead of letting
+                // "Headroom not reported" silently misrepresent the
+                // service as healthy when it is actually running on a
+                // conservative duty-cycle policy.
                 Text(
-                    text = "Headroom not reported",
+                    text = if (telemetryBlind) {
+                        "Telemetry unavailable"
+                    } else {
+                        "Headroom not reported"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                )
+            }
+            if (telemetryBlind) {
+                Text(
+                    text = "Conservative policy active",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.Medium,
                 )
             }
             if (isHot) {
