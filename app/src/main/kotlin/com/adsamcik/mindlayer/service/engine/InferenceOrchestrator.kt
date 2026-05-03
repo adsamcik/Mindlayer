@@ -227,6 +227,34 @@ class InferenceOrchestrator(
         pipeWriteEnd: ParcelFileDescriptor,
         onComplete: (() -> Unit)?,
     ) {
+        // F-072: synchronous KV-budget gate. Look up the session's
+        // already-reserved overhead (system prompt + tool defs +
+        // structured-output schema + initialHistory) and compare against
+        // the estimated input cost (text + image + audio + per-turn
+        // chat-template envelope). If the request would overflow the
+        // KV ceiling, throw BEFORE `scope.launch { runInference }` so
+        // the engine never sees the prompt and the SDK's `infer()` AIDL
+        // call surfaces the typed error synchronously via
+        // [com.adsamcik.mindlayer.service.ServiceBinder].
+        //
+        // When the session is unknown / expired (peekTokenBudget == null),
+        // skip the gate and let `runInference` produce the standard
+        // SESSION_NOT_FOUND_OR_NOT_OWNED pipe error.
+        val budget = sessionManager.peekTokenBudget(meta.sessionId)
+        if (budget != null) {
+            val estimatedInputTokens = estimateInputTokens(
+                text = meta.textContent,
+                image = image,
+                audio = audio,
+            )
+            if (budget.reservedTokens + estimatedInputTokens > budget.effectiveMaxTokens) {
+                throw ContextOverflowException(
+                    reservedTokens = budget.reservedTokens,
+                    estimatedInputTokens = estimatedInputTokens,
+                    effectiveMaxTokens = budget.effectiveMaxTokens,
+                )
+            }
+        }
         val job = scope.launch {
             runInference(scopedKey, meta, image, audio, pipeWriteEnd)
         }
@@ -729,7 +757,7 @@ class InferenceOrchestrator(
                 )
                 writer.closeWithError(0, safe, MindlayerErrorCode.INTERNAL)
                 return
-            }finally {
+            } finally {
                 writer.close()
                 handle.activeRequestId = null
                 handle.isStreaming = false

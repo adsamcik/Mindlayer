@@ -79,6 +79,18 @@ object MindlayerErrorCode {
     /** No active inference matches the supplied requestId for this caller. */
     const val NO_ACTIVE_REQUEST = 3005
 
+    /**
+     * F-072: caller-supplied input plus service-owned prompt overhead
+     * (system prompt + tool definitions + structured-output schema suffix)
+     * exceeds the session's effective KV-cache ceiling.
+     *
+     * The wire message body carries `remainingTokens=N`, the number of
+     * KV-cache slots still available for user input given the session's
+     * current overhead reservation. SDKs surface this so callers can
+     * truncate input or shorten history before retrying.
+     */
+    const val INPUT_EXCEEDS_CONTEXT = 3006
+
     // ---- 4xxx resource ------------------------------------------------------
 
     /** Device thermal state is critical; inference rejected. */
@@ -150,7 +162,8 @@ object MindlayerErrorCode {
         ENGINE_INITIALIZING, ENGINE_LOAD_FAILED -> Category.ENGINE
         SESSION_NOT_FOUND_OR_NOT_OWNED, SESSION_EVICTED, SESSION_EXPIRED -> Category.SESSION
         INVALID_REQUEST, INVALID_SESSION_CONFIG, INVALID_TOOL_RESULT,
-        DUPLICATE_REQUEST, NO_ACTIVE_REQUEST -> Category.VALIDATION
+        DUPLICATE_REQUEST, NO_ACTIVE_REQUEST,
+        INPUT_EXCEEDS_CONTEXT -> Category.VALIDATION
         THERMAL_CRITICAL, MEMORY_PRESSURE, CONCURRENT_LIMIT, RATE_LIMITED -> Category.RESOURCE
         ALLOWLIST_PENDING, ALLOWLIST_REVOKED, IDENTITY_UNKNOWN -> Category.AUTH
         INTERNAL -> Category.UNKNOWN
@@ -174,6 +187,7 @@ object MindlayerErrorCode {
         INVALID_TOOL_RESULT -> "INVALID_TOOL_RESULT"
         DUPLICATE_REQUEST -> "DUPLICATE_REQUEST"
         NO_ACTIVE_REQUEST -> "NO_ACTIVE_REQUEST"
+        INPUT_EXCEEDS_CONTEXT -> "INPUT_EXCEEDS_CONTEXT"
         THERMAL_CRITICAL -> "THERMAL_CRITICAL"
         MEMORY_PRESSURE -> "MEMORY_PRESSURE"
         CONCURRENT_LIMIT -> "CONCURRENT_LIMIT"

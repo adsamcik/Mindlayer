@@ -319,6 +319,58 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             initialMessages = initialMessages,
         )
 
+        // F-072: budget the service-owned prompt overhead against the
+        // KV-cache ceiling **before** opening the native conversation.
+        // Estimating after `effectiveSystemPrompt`/`effectiveTools` are
+        // assembled means the safety preamble, tool definitions, and the
+        // structured-output schema suffix are all accounted for.
+        //
+        // System prompt characters cover:
+        //  - client `systemPrompt` if any
+        //  - `TOOL_SAFETY_PREAMBLE` when tools are involved (F-035)
+        //  - structured-output schema suffix (PROMPT_AND_VALIDATE strategy)
+        //
+        // Tool definition characters cover:
+        //  - the raw `config.toolsJson` (a conservative upper bound; the
+        //    runtime parsed-then-reserialized form is ≤ original since
+        //    whitespace gets stripped)
+        //  - the synthetic `__structured_output` tool definition for
+        //    TOOL_ROUTING strategy
+        //
+        // initialHistory characters: every turn's `text` is loaded into the
+        // KV cache via `ConversationConfig.initialMessages`, so it counts
+        // against the budget on turn 1. Accumulated runtime context (model
+        // outputs + tool results from later turns) is NOT tracked here —
+        // that is a separate F-item.
+        val systemPromptChars = effectiveSystemPrompt?.length ?: 0
+        val clientToolDefsChars = config.toolsJson?.length ?: 0
+        val syntheticToolDefsChars = if (
+            structuredOutputConfig?.strategy == StructuredOutputStrategy.TOOL_ROUTING
+        ) {
+            StructuredOutputHelper.buildSchemaToolJson(structuredOutputConfig).length
+        } else {
+            0
+        }
+        val initialHistoryChars = config.initialHistory?.sumOf { it.text.length } ?: 0
+        val reservedTokens = estimateTokensForChars(
+            systemPromptChars +
+                clientToolDefsChars +
+                syntheticToolDefsChars +
+                initialHistoryChars,
+        )
+        if (reservedTokens >= effectiveMaxTokens) {
+            MindlayerLog.w(
+                TAG,
+                "Refusing session: service-owned overhead " +
+                    "(reservedTokens=$reservedTokens) >= effectiveMaxTokens=$effectiveMaxTokens",
+            )
+            throw ContextOverflowException(
+                reservedTokens = reservedTokens,
+                estimatedInputTokens = 0,
+                effectiveMaxTokens = effectiveMaxTokens,
+            )
+        }
+
         val conversation = engine.createConversation(conversationConfig)
 
         val now = System.currentTimeMillis()
@@ -328,6 +380,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             config = config,
             createdAtMs = now,
             effectiveMaxTokens = effectiveMaxTokens,
+            reservedTokens = reservedTokens,
             structuredOutputConfig = structuredOutputConfig,
             ownerToken = ownerToken,
             ownerUid = ownerUid,
@@ -349,7 +402,8 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
 
         MindlayerLog.i(
             TAG, "Session created: $sessionId " +
-                "(maxTokens=$effectiveMaxTokens, sessions=${sessions.size}/${tier.maxSessions}, " +
+                "(maxTokens=$effectiveMaxTokens, reserved=$reservedTokens, " +
+                "sessions=${sessions.size}/${tier.maxSessions}, " +
                 "pressure=${snap.pressure})",
             sessionId = sessionId,
         )
@@ -449,6 +503,29 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
 
     /** Returns the exact owner token attached at creation, or `null` if unowned / unknown. */
     fun getSessionOwnerToken(id: String): Any? = sessions[id]?.ownerToken
+
+    /**
+     * F-072: read-only snapshot of the session's KV-cache budget for the
+     * pre-inference budget check. Does **not** record access (so the
+     * orchestrator's synchronous gate in `fun infer(...)` doesn't reset
+     * the eviction-priority recency window) and does **not** evict an
+     * expired session — if the session is unknown or expired, returns
+     * `null` and the caller defers to the standard SESSION_NOT_FOUND
+     * pipe error path inside `runInference`.
+     */
+    fun peekTokenBudget(id: String): TokenBudget? {
+        val handle = sessions[id] ?: return null
+        if (System.currentTimeMillis() - handle.createdAtMs > handle.expirationMs) {
+            return null
+        }
+        return TokenBudget(
+            reservedTokens = handle.reservedTokens,
+            effectiveMaxTokens = handle.effectiveMaxTokens,
+        )
+    }
+
+    /** Snapshot of [SessionHandle.reservedTokens] / [SessionHandle.effectiveMaxTokens]. */
+    data class TokenBudget(val reservedTokens: Int, val effectiveMaxTokens: Int)
 
     fun listSessions(): List<SessionInfo> {
         val backend = engineManager.currentBackend
@@ -828,6 +905,14 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         val config: SessionConfig,
         val createdAtMs: Long,
         val effectiveMaxTokens: Int,
+        /**
+         * F-072: tokens already consumed by service-owned prompt overhead
+         * (system prompt + tool safety preamble + tool definitions +
+         * structured-output schema suffix). Subtracted from
+         * [effectiveMaxTokens] at infer time to determine how many tokens
+         * remain for the user's input.
+         */
+        val reservedTokens: Int = 0,
         val expirationMs: Long = config.expirationMs,
         val structuredOutputConfig: StructuredOutputConfig? = null,
         val ownerToken: Any? = null,
