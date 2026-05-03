@@ -21,6 +21,7 @@ import com.adsamcik.mindlayer.service.engine.InferenceOrchestrator
 import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.SessionOwnerToken
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
+import com.adsamcik.mindlayer.service.engine.ThermalConfidence
 import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.loggable
@@ -143,6 +144,18 @@ class ServiceBinder(
         private const val TAG = "ServiceBinder"
         /** F-051: lifetime per-UID registerClient cap. */
         const val MAX_REGISTRATIONS_PER_UID = 64
+
+        /**
+         * F-073: sentinel value written to [ServiceStatus.thermalBand] when
+         * the active [ThermalPolicy] has [ThermalConfidence.INFERRED] —
+         * meaning the device exposes no thermal telemetry (Android 8 / 8.1)
+         * and the orchestrator is running on a conservative duty-cycle
+         * variant of the policy. Encoded into the existing String field
+         * so we do not have to grow [ServiceStatus]'s frozen Parcelable
+         * shape (see `docs/AIDL_STABILITY.md`). Dashboard surfaces the
+         * indicator by recognising this constant.
+         */
+        const val THERMAL_TELEMETRY_UNAVAILABLE = "UNAVAILABLE"
 
         /**
          * Logical API version surfaced via [getCapabilities]. Bumped whenever
@@ -1299,7 +1312,19 @@ class ServiceBinder(
             activeSessionCount = visibleActiveSessions,
             activeInferenceCount = visibleActiveInferences,
             backend = engineManager.currentBackend,
-            thermalBand = thermalPolicy.band.name,
+            // F-073: surface the telemetry-blind state via the existing
+            // wire-stable `thermalBand: String` field. `ServiceStatus`
+            // is a frozen Parcelable per `docs/AIDL_STABILITY.md`, so we
+            // encode "telemetry unavailable" as a sentinel value rather
+            // than adding a new field. SDK clients that pattern-match
+            // "HOT"/"CRITICAL" see an unrecognised value and treat the
+            // device as healthy — which is correct, the orchestrator is
+            // already applying the conservative policy on their behalf.
+            thermalBand = if (thermalPolicy.confidence == ThermalConfidence.INFERRED) {
+                THERMAL_TELEMETRY_UNAVAILABLE
+            } else {
+                thermalPolicy.band.name
+            },
             isForeground = visibleActiveInferences > 0,
             uptimeMs = android.os.SystemClock.elapsedRealtime() - service.createdAtMs,
             memoryPressure = memSnapshot.pressure.name,

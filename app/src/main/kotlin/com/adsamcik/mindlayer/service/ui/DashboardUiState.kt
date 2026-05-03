@@ -49,6 +49,16 @@ data class DashboardUiState(
     // Thermal
     val thermalBand: String = "COOL",
     val headroom: Float? = null,
+    /**
+     * F-073: `false` on Android 8 / 8.1 (API 26-28) where no thermal API
+     * exists and the service has switched to the conservative duty-cycle
+     * variant of [ThermalPolicy]. Derived from the wire sentinel
+     * [com.adsamcik.mindlayer.service.ServiceBinder.THERMAL_TELEMETRY_UNAVAILABLE]
+     * by [DashboardViewModel] so the dashboard's thermal card can
+     * surface the indicator. `true` whenever the wire reports a real
+     * 4-band value (`COOL`/`WARM`/`HOT`/`CRITICAL`).
+     */
+    val thermalTelemetryAvailable: Boolean = true,
     // Memory
     val memoryPressure: String = "NORMAL",
     val availableRamMb: Long = 0,

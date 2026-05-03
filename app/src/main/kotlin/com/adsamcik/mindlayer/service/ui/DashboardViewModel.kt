@@ -194,6 +194,13 @@ class DashboardViewModel : ViewModel() {
                             backend = status.backend,
                             uptimeMs = status.uptimeMs,
                             thermalBand = status.thermalBand,
+                            // F-073: the service writes the sentinel
+                            // `UNAVAILABLE` into thermalBand when the
+                            // current ThermalPolicy is INFERRED (Android
+                            // 8 / 8.1, no thermal telemetry). Surface
+                            // that to the UI via a typed boolean.
+                            thermalTelemetryAvailable = !status.thermalBand
+                                .equals("UNAVAILABLE", ignoreCase = true),
                             headroom = status.headroom,
                             memoryPressure = status.memoryPressure,
                             availableRamMb = status.availableRamMb,
