@@ -120,8 +120,12 @@ object TokenStreamReader {
                 input.readFully(payload)
                 val jsonStr = payload.decodeToString()
 
-                val event = parseFrame(jsonStr)
-                if (event != null) emit(event)
+                // Most frames produce one event; v0.5 TOKEN_DELTA_BATCH
+                // expands into many ordered TextDelta emissions. Local
+                // List<MindlayerEvent> avoids widening parseFrame's signature.
+                for (event in parseFrameMulti(jsonStr)) {
+                    emit(event)
+                }
             }
 
             // EOF reached — check whether the service closed cleanly
@@ -145,44 +149,108 @@ object TokenStreamReader {
     // -- Parsing --------------------------------------------------------------
 
     /**
-     * Stable wire identifier for the current pipe protocol. The reader emits
-     * a [MindlayerEvent.Error] with code `PROTOCOL_MISMATCH` if the service
-     * advertises any other value in its [StreamHeader].
+     * Stable wire identifier for the v1 pipe protocol. Reader accepts v1
+     * **or** v2 (see [com.adsamcik.mindlayer.shared.StreamProtocol.SUPPORTED])
+     * — v2 streams may carry [com.adsamcik.mindlayer.shared.StreamEventType.TOKEN_DELTA_BATCH]
+     * which the reader expands into per-token [MindlayerEvent.TextDelta]
+     * emissions so the SDK consumer surface is unchanged.
      */
     internal const val EXPECTED_PIPE_PROTOCOL = "mindlayer.stream.v1"
+
+    /**
+     * Parse one wire frame into zero-or-more [MindlayerEvent]s.
+     * - Normal frames yield exactly one event.
+     * - [com.adsamcik.mindlayer.shared.StreamEventType.TOKEN_DELTA_BATCH]
+     *   frames yield one [MindlayerEvent.TextDelta] per `texts[]` element,
+     *   in order, with synthesised contiguous `seq` values ending at the
+     *   envelope's `seq`.
+     * - Unparseable frames yield an empty list (legacy "skip silently"
+     *   behavior preserved for forward-compat with future event payloads).
+     */
+    private fun parseFrameMulti(jsonStr: String): List<MindlayerEvent> {
+        // Try the common case first.
+        val streamEvent = try {
+            json.decodeFromString<StreamEvent>(jsonStr)
+        } catch (_: Exception) {
+            // Header (first frame) fallback.
+            val header = try {
+                json.decodeFromString<StreamHeader>(jsonStr)
+            } catch (_: Exception) {
+                return emptyList()
+            }
+            return listOf(headerEvent(header))
+        }
+        return when (streamEvent.type) {
+            StreamEventType.TOKEN_DELTA_BATCH -> expandBatch(streamEvent)
+            else -> {
+                val mapped = mapEvent(streamEvent)
+                if (mapped is MindlayerEvent.Unknown && mapped.type == StreamEventType.TOKEN_DELTA_BATCH) {
+                    // Defense-in-depth: should be unreachable since the when
+                    // above handles it, but keeps the contract explicit.
+                    expandBatch(streamEvent)
+                } else {
+                    listOf(mapped)
+                }
+            }
+        }
+    }
+
+    /**
+     * Validate the [StreamHeader.protocol] against
+     * [com.adsamcik.mindlayer.shared.StreamProtocol.SUPPORTED]. Mismatches
+     * yield a synthetic [MindlayerEvent.Error] with code `PROTOCOL_MISMATCH`.
+     */
+    private fun headerEvent(header: StreamHeader): MindlayerEvent {
+        return if (header.protocol !in com.adsamcik.mindlayer.shared.StreamProtocol.SUPPORTED) {
+            MindlayerEvent.Error(
+                message = "Unsupported pipe protocol: '${header.protocol}' " +
+                    "(SDK supports ${com.adsamcik.mindlayer.shared.StreamProtocol.SUPPORTED})",
+                code = "PROTOCOL_MISMATCH",
+                seq = -1,
+                tsMs = null,
+            )
+        } else {
+            MindlayerEvent.Started(header.requestId)
+        }
+    }
+
+    /**
+     * Expand a [StreamEventType.TOKEN_DELTA_BATCH] frame into per-token
+     * [MindlayerEvent.TextDelta] emissions. The envelope's `seq` is the
+     * seq of the last token; earlier tokens' seqs count backwards. Empty
+     * `texts` list yields no events.
+     */
+    private fun expandBatch(envelope: StreamEvent): List<MindlayerEvent> {
+        val texts = envelope.payload["texts"]
+            ?.let { it as? kotlinx.serialization.json.JsonArray }
+            ?: return emptyList()
+        if (texts.isEmpty()) return emptyList()
+        val lastSeq = envelope.seq
+        return texts.mapIndexed { index, element ->
+            val text = (element as? kotlinx.serialization.json.JsonPrimitive)
+                ?.contentOrNull
+                ?: ""
+            // Synthesise contiguous seq values: last entry gets the envelope
+            // seq; earlier entries count backwards.
+            val perTokenSeq = lastSeq - (texts.size - 1 - index)
+            MindlayerEvent.TextDelta(text = text, seq = perTokenSeq)
+        }
+    }
 
     /**
      * Tries [StreamEvent] first (common case), then falls back to
      * [StreamHeader] (first frame only). Returns `null` for unparseable frames.
      *
-     * The header is validated against [EXPECTED_PIPE_PROTOCOL]; a mismatch
-     * yields a synthetic [MindlayerEvent.Error] frame so old SDKs talking to
-     * a future service that bumped the protocol fail loudly instead of
-     * silently misinterpreting later frames.
+     * The header is validated against [com.adsamcik.mindlayer.shared.StreamProtocol.SUPPORTED];
+     * a mismatch yields a synthetic [MindlayerEvent.Error] frame so old SDKs
+     * talking to a future service that bumped the protocol fail loudly
+     * instead of silently misinterpreting later frames.
+     *
+     * Kept for binary compat with prior internal callers; new code paths use
+     * [parseFrameMulti] directly to handle batched events.
      */
-    private fun parseFrame(jsonStr: String): MindlayerEvent? {
-        return try {
-            val streamEvent = json.decodeFromString<StreamEvent>(jsonStr)
-            mapEvent(streamEvent)
-        } catch (_: Exception) {
-            try {
-                val header = json.decodeFromString<StreamHeader>(jsonStr)
-                if (header.protocol != EXPECTED_PIPE_PROTOCOL) {
-                    MindlayerEvent.Error(
-                        message = "Unsupported pipe protocol: '${header.protocol}' " +
-                            "(SDK expects '$EXPECTED_PIPE_PROTOCOL')",
-                        code = "PROTOCOL_MISMATCH",
-                        seq = -1,
-                        tsMs = null,
-                    )
-                } else {
-                    MindlayerEvent.Started(header.requestId)
-                }
-            } catch (_: Exception) {
-                null
-            }
-        }
-    }
+    private fun parseFrame(jsonStr: String): MindlayerEvent? =
+        parseFrameMulti(jsonStr).firstOrNull()
 
     /**
      * Maps a wire [StreamEvent] to a typed [MindlayerEvent], reading payload

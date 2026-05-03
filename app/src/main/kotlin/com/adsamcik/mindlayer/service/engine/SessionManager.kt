@@ -28,6 +28,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -54,6 +56,10 @@ import java.util.concurrent.atomic.AtomicReference
  */
 class EngineNotReadyException(val retryAfterMs: Long) :
     IllegalStateException("engine_initializing")
+
+interface SessionOwnerToken {
+    val ownerUid: Int
+}
 
 class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     private val context: Context,
@@ -122,21 +128,22 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         cleanupExpiredSessions()
         val tier = memoryBudget.deviceTier
         val snap = memoryBudget.currentSnapshot()
+        val ownerUid = ownerUidFor(ownerToken)
 
-        // F-039: per-UID quota. A single ownerToken cannot occupy more
+        // F-039: per-UID quota. A single owner UID cannot occupy more
         // than `perUidCap` of the tier's session slots — guards against a
         // hostile or buggy authorized caller monopolising the cap and
         // forcing other UIDs to evict their warm sessions. The cap is a
         // ceil-half of the tier limit (so 2-of-4, 3-of-6 etc.) which
         // leaves room for a single dominant caller without forcing the
         // 1-tier device to hard-fail.
-        if (ownerToken != null) {
+        if (ownerUid != null) {
             val perUidCap = ((tier.maxSessions + 1) / 2).coerceAtLeast(1)
-            val ownedNow = sessions.values.count { it.ownerToken == ownerToken }
+            val ownedNow = sessions.values.count { it.ownerUid == ownerUid }
             if (ownedNow >= perUidCap) {
                 // Try evicting one of the caller's own sessions before
                 // hard-failing — they are the cheapest to lose.
-                val evicted = evictLowestPriorityOwnedBy(ownerToken)
+                val evicted = evictLowestPriorityOwnedByUid(ownerUid)
                 if (!evicted) {
                     MindlayerLog.w(
                         TAG,
@@ -152,12 +159,12 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         }
 
         if (sessions.size >= tier.maxSessions) {
-            val evicted = if (ownerToken != null) {
+            val evicted = if (ownerUid != null) {
                 MindlayerLog.w(
                     TAG,
                     "At session limit (${tier.maxSessions}), evicting caller-owned lowest priority",
                 )
-                evictLowestPriorityOwnedBy(ownerToken)
+                evictLowestPriorityOwnedByUid(ownerUid)
             } else {
                 MindlayerLog.w(TAG, "At session limit (${tier.maxSessions}), evicting lowest priority")
                 evictLowestPriority()
@@ -293,7 +300,9 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             effectiveMaxTokens = effectiveMaxTokens,
             structuredOutputConfig = structuredOutputConfig,
             ownerToken = ownerToken,
+            ownerUid = ownerUid,
             allowedToolNames = allowedToolNames,
+            preferBatchedDeltas = parseTokenBatchOptIn(config.extraContextJson),
         )
         // F-008: putIfAbsent rejects a request to create a session whose id
         // is already in use rather than silently overwriting the prior
@@ -329,7 +338,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     fun getSession(id: String): SessionHandle? {
         val handle = sessions[id] ?: return null
         if (System.currentTimeMillis() - handle.createdAtMs > handle.expirationMs) {
-            MindlayerLog.i(TAG, "Session expired: $id", sessionId = id)
+            MindlayerLog.i(TAG, "Session expired", sessionId = id)
             destroySession(id)
             return null
         }
@@ -340,7 +349,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     @Synchronized
     fun destroySession(id: String) {
         val handle = sessions.remove(id) ?: run {
-            MindlayerLog.w(TAG, "destroySession: unknown session $id", sessionId = id)
+            MindlayerLog.w(TAG, "destroySession: unknown session", sessionId = id)
             return
         }
         runBlocking {
@@ -352,14 +361,14 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
                 } catch (t: Throwable) {
                     MindlayerLog.w(
                         TAG,
-                        "Error closing conversation for session $id: ${t.safeLabel()}",
+                        "Error closing conversation: ${t.safeLabel()}",
                         sessionId = id,
                     )
                 }
             }
         }
         logRepository?.logSessionDestroyed(id)
-        MindlayerLog.i(TAG, "Session destroyed: $id (remaining=${sessions.size})", sessionId = id)
+        MindlayerLog.i(TAG, "Session destroyed (remaining=${sessions.size})", sessionId = id)
     }
 
     fun getSessionInfo(id: String): SessionInfo? {
@@ -367,19 +376,22 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         return handle.toSessionInfo(engineManager.currentBackend)
     }
 
-    /** Returns the owner token attached at creation, or `null` if unowned / unknown. */
-    fun getSessionOwner(id: String): Any? = sessions[id]?.ownerToken
+    /** Returns the owner UID attached at creation, or `null` if unowned / unknown. */
+    fun getSessionOwner(id: String): Int? = sessions[id]?.ownerUid
+
+    /** Returns the exact owner token attached at creation, or `null` if unowned / unknown. */
+    fun getSessionOwnerToken(id: String): Any? = sessions[id]?.ownerToken
 
     fun listSessions(): List<SessionInfo> {
         val backend = engineManager.currentBackend
         return sessions.values.map { it.toSessionInfo(backend) }
     }
 
-    /** Subset of [listSessions] attributed to [ownerToken]. */
-    fun listSessionsOwnedBy(ownerToken: Any): List<SessionInfo> {
+    /** Subset of [listSessions] attributed to [ownerUid]. */
+    fun listSessionsOwnedBy(ownerUid: Int): List<SessionInfo> {
         val backend = engineManager.currentBackend
         return sessions.values
-            .filter { it.ownerToken != null && it.ownerToken == ownerToken }
+            .filter { it.ownerUid == ownerUid }
             .map { it.toSessionInfo(backend) }
     }
 
@@ -396,6 +408,11 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     fun activeRequestIdsOwnedBy(ownerToken: Any): List<String> =
         sessions.values
             .filter { it.ownerToken != null && it.ownerToken == ownerToken }
+            .mapNotNull { it.activeRequestId }
+
+    fun activeRequestIdsOwnedByUid(ownerUid: Int): List<String> =
+        sessions.values
+            .filter { it.ownerUid == ownerUid }
             .mapNotNull { it.activeRequestId }
 
     // ---- Access tracking ---------------------------------------------------
@@ -438,8 +455,8 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             ?: return false
 
         MindlayerLog.w(
-            TAG, "Evicting session ${victim.sessionId} " +
-                "(priority=${calculatePriority(victim)})",
+            TAG,
+            "Evicting session (priority=${calculatePriority(victim)})",
             sessionId = victim.sessionId,
         )
         logRepository?.logSessionEvicted(victim.sessionId, "lowest_priority")
@@ -455,8 +472,23 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
 
         MindlayerLog.w(
             TAG,
-            "Evicting caller-owned session ${victim.sessionId} " +
-                "(priority=${calculatePriority(victim)})",
+            "Evicting caller-owned session (priority=${calculatePriority(victim)})",
+            sessionId = victim.sessionId,
+        )
+        logRepository?.logSessionEvicted(victim.sessionId, "caller_capacity")
+        destroySession(victim.sessionId)
+        return true
+    }
+
+    private fun evictLowestPriorityOwnedByUid(ownerUid: Int): Boolean {
+        val victim = sessions.values
+            .filter { !it.isStreaming && it.ownerUid == ownerUid }
+            .minByOrNull { calculatePriority(it) }
+            ?: return false
+
+        MindlayerLog.w(
+            TAG,
+            "Evicting caller-owned session (priority=${calculatePriority(victim)})",
             sessionId = victim.sessionId,
         )
         logRepository?.logSessionEvicted(victim.sessionId, "caller_capacity")
@@ -480,7 +512,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         val toEvict = if (nonStreaming.size > 1) nonStreaming.dropLast(1) else emptyList()
 
         for (handle in toEvict) {
-            MindlayerLog.w(TAG, "Pressure-evicting session ${handle.sessionId}", sessionId = handle.sessionId)
+            MindlayerLog.w(TAG, "Pressure-evicting session", sessionId = handle.sessionId)
             logRepository?.logSessionEvicted(handle.sessionId, "memory_pressure")
             destroySession(handle.sessionId)
         }
@@ -561,6 +593,14 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         return ids
     }
 
+    fun closeAllOwnedByUid(ownerUid: Int): List<String> {
+        val ids = sessions.values
+            .filter { it.ownerUid == ownerUid }
+            .map { it.sessionId }
+        for (id in ids) destroySession(id)
+        return ids
+    }
+
     /**
      * Validate client-supplied sampler + token parameters AND every
      * client-controlled string. Throws [IllegalArgumentException] for
@@ -636,6 +676,25 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
      * never invoked by the framework — the model emits tool calls that the
      * client handles externally.
      */
+    /**
+     * v0.5: parse the `extraContextJson.token_batch` opt-in flag.
+     * **Fail-open**: any parse error / non-object / missing key returns
+     * `false` so existing callers with malformed extraContextJson don't
+     * regress.
+     */
+    private fun parseTokenBatchOptIn(extraContextJson: String?): Boolean {
+        if (extraContextJson.isNullOrBlank()) return false
+        return try {
+            val element = Json.parseToJsonElement(extraContextJson)
+            val obj = element as? JsonObject ?: return false
+            val flag = obj["token_batch"] as? kotlinx.serialization.json.JsonPrimitive
+                ?: return false
+            flag.booleanOrNull == true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     private fun parseToolDefinitions(toolsJson: String?): ParsedTools? {
         if (toolsJson.isNullOrBlank()) return null
 
@@ -702,6 +761,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         val expirationMs: Long = config.expirationMs,
         val structuredOutputConfig: StructuredOutputConfig? = null,
         val ownerToken: Any? = null,
+        val ownerUid: Int? = null,
         /**
          * F-036: names of tools declared by the client (plus the synthetic
          * `__structured_output` name when TOOL_ROUTING is configured). The
@@ -710,6 +770,12 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
          * the SDK.
          */
         val allowedToolNames: Set<String> = emptySet(),
+        /**
+         * v0.5: caller opted in to TOKEN_DELTA_BATCH coalescing via
+         * `extraContextJson.token_batch = true`. Default `false` so existing
+         * sessions and SDKs see no behavior change.
+         */
+        val preferBatchedDeltas: Boolean = false,
     ) {
         val mutex = Mutex()
 
@@ -739,5 +805,11 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             isStreaming = isStreaming,
             expirationMs = expirationMs,
         )
+    }
+
+    private fun ownerUidFor(ownerToken: Any?): Int? = when (ownerToken) {
+        is Int -> ownerToken
+        is SessionOwnerToken -> ownerToken.ownerUid
+        else -> null
     }
 }

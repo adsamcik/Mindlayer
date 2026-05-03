@@ -196,6 +196,7 @@ class ServiceBinder(
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_PREWARM_AWAIT,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TOKEN_BATCH,
         )
     }
 

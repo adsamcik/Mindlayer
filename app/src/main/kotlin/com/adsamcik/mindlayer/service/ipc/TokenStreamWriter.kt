@@ -80,6 +80,31 @@ class TokenStreamWriter private constructor(
         internal const val DEFAULT_WRITE_TIMEOUT_MS = 5_000L
         internal const val EAGAIN_BACKOFF_MS = 5L
 
+        /**
+         * v0.5 token-batch policy: flush when the buffer holds this many
+         * tokens. Smaller = lower perceived latency; larger = fewer
+         * syscalls. 8 mirrors the multi-model review's recommendation.
+         */
+        internal const val BATCH_MAX_TOKENS = 8
+
+        /**
+         * v0.5: flush when the buffer's total UTF-8 byte size would exceed
+         * this. Per the rubber-duck pass: structured-output emissions can
+         * push large strings into `writeTokenDelta`, so a count cap alone
+         * is not enough to stay under the 1 MiB pipe-frame limit.
+         */
+        internal const val BATCH_MAX_BYTES = 4 * 1024
+
+        /**
+         * v0.5: max wall-clock latency between the first buffered token
+         * and the flush. Checked **inline** on the next `writeTokenDelta`
+         * — there is no background timer (preserves the single-writer
+         * guarantee documented above). If the model pauses with tokens
+         * still buffered, they wait for the next event (token, tool call,
+         * metrics, done, or close) — all of which trigger a flush.
+         */
+        internal const val BATCH_MAX_LATENCY_MS = 16L
+
         /** Test-only factory that accepts a plain [OutputStream]. */
         internal fun forTesting(
             output: OutputStream,
@@ -90,18 +115,73 @@ class TokenStreamWriter private constructor(
     private val json = Json { encodeDefaults = true }
     @Volatile private var closed = false
 
+    /**
+     * v0.5 batching state. Set via [enableBatching]; non-batching writers
+     * never accumulate a buffer and emit a single TOKEN_DELTA per call.
+     */
+    private var batchingEnabled: Boolean = false
+    private val tokenBatch = StringBuilder()
+    private val tokenBatchTexts = mutableListOf<String>()
+    private var tokenBatchFirstTimestamp: Long = 0L
+    private var tokenBatchByteCount: Int = 0
+    private var tokenBatchLastSeq: Long = -1L
+
+    /**
+     * Switch this writer to v2 protocol mode and enable the
+     * [StreamEventType.TOKEN_DELTA_BATCH] coalescing buffer. Must be
+     * called **before** [writeHeader] so the header advertises v2.
+     */
+    fun enableBatching() {
+        require(!closed) { "writer is closed" }
+        batchingEnabled = true
+    }
+
     // ---- Public API --------------------------------------------------------
 
     suspend fun writeHeader(requestId: String) {
-        val header = StreamHeader(requestId = requestId)
+        val protocol = if (batchingEnabled) {
+            com.adsamcik.mindlayer.shared.StreamProtocol.V2
+        } else {
+            com.adsamcik.mindlayer.shared.StreamProtocol.V1
+        }
+        val header = StreamHeader(protocol = protocol, requestId = requestId)
         writeFrame(json.encodeToString(StreamHeader.serializer(), header))
     }
 
     suspend fun writeTokenDelta(seq: Long, text: String) {
-        writeEvent(seq, StreamEventType.TOKEN_DELTA, buildJsonObject { put("text", text) })
+        if (!batchingEnabled) {
+            writeEvent(seq, StreamEventType.TOKEN_DELTA, buildJsonObject { put("text", text) })
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        val incomingBytes = text.toByteArray(Charsets.UTF_8).size
+
+        // Flush BEFORE appending if the new chunk would push us past either
+        // size cap. Empty buffer always passes — single oversized chunks
+        // emit as their own batch (still preferable to a v1 fall-back path
+        // which would fragment unsupported types).
+        if (tokenBatchTexts.isNotEmpty()) {
+            val wouldExceedCount = tokenBatchTexts.size >= BATCH_MAX_TOKENS
+            val wouldExceedBytes = tokenBatchByteCount + incomingBytes > BATCH_MAX_BYTES
+            val wouldExceedLatency = now - tokenBatchFirstTimestamp >= BATCH_MAX_LATENCY_MS
+            if (wouldExceedCount || wouldExceedBytes || wouldExceedLatency) {
+                flushTokenBatch()
+            }
+        }
+
+        // Fresh batch: capture start timestamp.
+        if (tokenBatchTexts.isEmpty()) {
+            tokenBatchFirstTimestamp = now
+            tokenBatchByteCount = 0
+        }
+        tokenBatchTexts += text
+        tokenBatchByteCount += incomingBytes
+        tokenBatchLastSeq = seq
     }
 
     suspend fun writeToolCall(seq: Long, callId: String, name: String, argsJson: String) {
+        flushTokenBatch()
         writeEvent(seq, StreamEventType.TOOL_CALL, buildJsonObject {
             put("callId", callId)
             put("name", name)
@@ -110,14 +190,17 @@ class TokenStreamWriter private constructor(
     }
 
     suspend fun writeMetrics(seq: Long, metrics: JsonObject) {
+        flushTokenBatch()
         writeEvent(seq, StreamEventType.METRICS, metrics)
     }
 
     suspend fun writeDone(seq: Long, finishReason: String) {
+        flushTokenBatch()
         writeEvent(seq, StreamEventType.DONE, buildJsonObject { put("finish_reason", finishReason) })
     }
 
     suspend fun writeError(seq: Long, code: String, message: String) {
+        flushTokenBatch()
         writeEvent(seq, StreamEventType.ERROR, buildJsonObject {
             put("code", code)
             put("message", message)
@@ -138,6 +221,25 @@ class TokenStreamWriter private constructor(
     fun close() {
         if (closed) return
         closed = true
+        // v0.5: drain any pending batched tokens via a synchronous best-
+        // effort flush. Suspend isn't available in close(), so we call the
+        // sync helper which writes via the same writeFrame path used
+        // elsewhere; the existing per-session mutex guarantees no
+        // concurrent writer is touching `output`. If the pipe is already
+        // dead the IOException catch in writeFrame swallows it.
+        if (tokenBatchTexts.isNotEmpty()) {
+            try {
+                kotlinx.coroutines.runBlocking { flushTokenBatch() }
+            } catch (t: Throwable) {
+                MindlayerLog.w(
+                    TAG,
+                    "Failed to drain pending token batch on close: ${t.safeLabel()}",
+                )
+                // Clear so a subsequent close() doesn't re-attempt.
+                tokenBatchTexts.clear()
+                tokenBatchByteCount = 0
+            }
+        }
         // F-020: independent try/catch around flush and close. The
         // previous code wrapped both in a single `catch(IOException)`,
         // so any non-IOException from `flush()` skipped `close()` and
@@ -169,6 +271,14 @@ class TokenStreamWriter private constructor(
         code: Int = MindlayerErrorCode.INTERNAL,
     ) {
         try {
+            // Drain pending batched tokens before the terminal error frame
+            // so the consumer gets every token the model produced before
+            // the abort, in order, ahead of the error.
+            flushTokenBatch()
+        } catch (_: Throwable) {
+            // Best-effort — fall through to writeError regardless.
+        }
+        try {
             writeError(seq, code, message)
         } catch (_: IOException) {
             // Best-effort
@@ -178,6 +288,44 @@ class TokenStreamWriter private constructor(
             // call is already terminal — swallow and continue to close().
         }
         close()
+    }
+
+    // ---- v0.5 batching internals --------------------------------------------
+
+    /**
+     * Drain the pending token batch as a single
+     * [StreamEventType.TOKEN_DELTA_BATCH] frame, then reset state. Idempotent
+     * — empty buffer is a no-op. Called inline before every non-text event,
+     * by the size/count/latency caps in [writeTokenDelta], and from
+     * [close]/[closeWithError] so the batch never escapes the writer.
+     *
+     * Single-writer guarantee: this method itself doesn't introduce any
+     * background work — flush happens on the caller's coroutine context,
+     * just like every other write. The per-session mutex held by the
+     * orchestrator continues to serialize all access to `output`.
+     */
+    private suspend fun flushTokenBatch() {
+        if (!batchingEnabled || tokenBatchTexts.isEmpty()) return
+        val texts = tokenBatchTexts.toList()
+        val lastSeq = tokenBatchLastSeq
+        // Reset before the write so a writeFrame failure doesn't leave the
+        // buffer in a half-flushed state for the next call.
+        tokenBatchTexts.clear()
+        tokenBatchByteCount = 0
+        tokenBatchLastSeq = -1L
+        tokenBatchFirstTimestamp = 0L
+        writeEvent(
+            lastSeq,
+            StreamEventType.TOKEN_DELTA_BATCH,
+            buildJsonObject {
+                put(
+                    "texts",
+                    kotlinx.serialization.json.JsonArray(
+                        texts.map { JsonPrimitive(it) }
+                    )
+                )
+            },
+        )
     }
 
     // ---- Internals ---------------------------------------------------------
