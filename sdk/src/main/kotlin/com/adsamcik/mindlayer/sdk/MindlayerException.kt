@@ -72,6 +72,25 @@ class MindlayerException @JvmOverloads constructor(
             return match.groupValues[1].toIntOrNull()
         }
 
+    /**
+     * F-074: when [code] is [MindlayerErrorCode.SERVICE_THROTTLED], the
+     * service embeds `cooldown=<wallClockMs>` in the wire message body —
+     * the UTC timestamp at which the throttle window naturally expires.
+     * SDK reconnect loops use this to schedule a deferred bind instead
+     * of hot-spinning while the `:ml` process is in a crash loop.
+     *
+     * Returns `null` for any other code, or if the service did not
+     * include the marker (older service binary). In that case the SDK
+     * should fall back to its standard exponential backoff.
+     */
+    val cooldownEndsAt: Long?
+        get() {
+            if (code != MindlayerErrorCode.SERVICE_THROTTLED) return null
+            val raw = message ?: return null
+            val match = COOLDOWN_ENDS_AT_PATTERN.find(raw) ?: return null
+            return match.groupValues[1].toLongOrNull()
+        }
+
     companion object {
         /**
          * F-072 wire-payload regex. Matches `remaining=<digits>` anywhere
@@ -80,6 +99,14 @@ class MindlayerException @JvmOverloads constructor(
          * older SDK parsers.
          */
         private val REMAINING_TOKENS_PATTERN: Regex = Regex("""remaining=(\d+)""")
+
+        /**
+         * F-074 wire-payload regex. Matches `cooldown=<digits>` anywhere
+         * in the SecurityException message body. Pattern is independent
+         * of [REMAINING_TOKENS_PATTERN] so a future code that emits both
+         * markers does not accidentally collide.
+         */
+        private val COOLDOWN_ENDS_AT_PATTERN: Regex = Regex("""cooldown=(\d+)""")
 
         /**
          * Parse a wire-prefixed [SecurityException] message into a
