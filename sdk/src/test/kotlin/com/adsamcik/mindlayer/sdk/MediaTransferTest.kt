@@ -397,21 +397,7 @@ class MediaTransferTest {
         transfer.source.close()
     }
 
-    @Test
-    @Ignore("Requires real Android FD internals")
-    @Config(sdk = [26]) // API 26 → pipe-based fallback for bitmap too
-    fun `fromBitmap_api26_usesPipeFallback`() {
-        val bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
-        try {
-            val transfer = MediaTransfer.fromBitmap("req-bmp-pipe", bitmap)
-
-            assertFalse(transfer.isSharedMemory)
-            assertEquals("image/png", transfer.mimeType) // pipe path compresses to PNG
-            assertEquals(16, transfer.width)
-            assertEquals(16, transfer.height)
-            transfer.source.close()
-        } finally {
-            bitmap.recycle()
-        }
-    }
+    // F-078: `fromBitmap_api26_usesPipeFallback` was moved to
+    // `MediaTransferApi26Test` and the @Ignore was dropped — the test
+    // now actively runs under Robolectric @Config(sdk=26).
 }
