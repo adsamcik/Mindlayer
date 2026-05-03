@@ -94,6 +94,36 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
 
     private val sessions = ConcurrentHashMap<String, SessionHandle>()
 
+    /**
+     * Optional eviction listener. When non-null, every involuntary session
+     * retirement (memory pressure, expiration, caller-capacity eviction)
+     * fires this callback **after** the session has been removed from
+     * [sessions] and its [Conversation] closed.
+     *
+     * The listener is invoked **outside** the [destroySession] synchronization
+     * boundary so that callbacks holding their own locks (or making binder
+     * transactions) can never reenter SessionManager's monitor and deadlock.
+     *
+     * The reason code is a [com.adsamcik.mindlayer.shared.MindlayerErrorCode]
+     * integer (typically `SESSION_EVICTED`, `SESSION_EXPIRED`, or
+     * `MEMORY_PRESSURE`). Voluntary tear-downs — caller-initiated
+     * `destroySession` and binder-death cleanup — pass `null` and skip the
+     * notification.
+     */
+    @Volatile
+    private var evictionListener: ((sessionId: String, ownerUid: Int?, reasonCode: Int) -> Unit)? = null
+
+    /**
+     * Install an [evictionListener]. Calling this twice replaces the previous
+     * listener — the contract assumes a single owner (the [ServiceBinder]).
+     */
+    fun setEvictionListener(
+        listener: ((sessionId: String, ownerUid: Int?, reasonCode: Int) -> Unit)?,
+    ) {
+        evictionListener = listener
+    }
+
+
     // F-018: dedicated single-threaded slot for engine init. Coalesces
     // concurrent first callers so binder threads never block on the
     // ~5–10 s LiteRT-LM init path. See ensureInitStarted().
@@ -339,19 +369,39 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         val handle = sessions[id] ?: return null
         if (System.currentTimeMillis() - handle.createdAtMs > handle.expirationMs) {
             MindlayerLog.i(TAG, "Session expired", sessionId = id)
-            destroySession(id)
+            destroySessionInternal(id, com.adsamcik.mindlayer.shared.MindlayerErrorCode.SESSION_EXPIRED)
             return null
         }
         handle.recordAccess()
         return handle
     }
 
+    /**
+     * Caller-initiated destroy. No eviction notice is fired — the caller
+     * just asked us to end the session, so notifying them would be
+     * tautological. Path used by [ServiceBinder.revokeSession].
+     */
     @Synchronized
-    fun destroySession(id: String) {
+    fun destroySession(id: String) = destroySessionInternal(id, evictionReasonCode = null)
+
+    /**
+     * Internal destroy used by every retirement path. When [evictionReasonCode]
+     * is non-null, the [evictionListener] fires after the session is
+     * fully torn down (and after the @Synchronized monitor is released —
+     * we do **not** invoke listeners while holding the lock).
+     *
+     * Typical reason codes:
+     *  - `SESSION_EVICTED` (2002): caller-capacity eviction
+     *  - `SESSION_EXPIRED` (2003): expiration sweep / get-on-stale
+     *  - `MEMORY_PRESSURE` (4002): device-wide memory eviction
+     */
+    @Synchronized
+    private fun destroySessionInternal(id: String, evictionReasonCode: Int?) {
         val handle = sessions.remove(id) ?: run {
             MindlayerLog.w(TAG, "destroySession: unknown session", sessionId = id)
             return
         }
+        val capturedOwnerUid = handle.ownerUid
         runBlocking {
             handle.mutex.withLock {
                 handle.activeRequestId = null
@@ -369,7 +419,25 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         }
         logRepository?.logSessionDestroyed(id)
         MindlayerLog.i(TAG, "Session destroyed (remaining=${sessions.size})", sessionId = id)
+
+        // Capture listener locally so a concurrent setEvictionListener(null) can't
+        // race us to a NullPointerException. Invoke after lock release.
+        if (evictionReasonCode != null) {
+            val listener = evictionListener
+            if (listener != null) {
+                try {
+                    listener.invoke(id, capturedOwnerUid, evictionReasonCode)
+                } catch (t: Throwable) {
+                    MindlayerLog.w(
+                        TAG,
+                        "evictionListener threw: ${t.javaClass.simpleName}",
+                        sessionId = id,
+                    )
+                }
+            }
+        }
     }
+
 
     fun getSessionInfo(id: String): SessionInfo? {
         val handle = sessions[id] ?: return null
@@ -460,7 +528,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             sessionId = victim.sessionId,
         )
         logRepository?.logSessionEvicted(victim.sessionId, "lowest_priority")
-        destroySession(victim.sessionId)
+        destroySessionInternal(victim.sessionId, com.adsamcik.mindlayer.shared.MindlayerErrorCode.MEMORY_PRESSURE)
         return true
     }
 
@@ -476,7 +544,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             sessionId = victim.sessionId,
         )
         logRepository?.logSessionEvicted(victim.sessionId, "caller_capacity")
-        destroySession(victim.sessionId)
+        destroySessionInternal(victim.sessionId, com.adsamcik.mindlayer.shared.MindlayerErrorCode.SESSION_EVICTED)
         return true
     }
 
@@ -492,7 +560,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             sessionId = victim.sessionId,
         )
         logRepository?.logSessionEvicted(victim.sessionId, "caller_capacity")
-        destroySession(victim.sessionId)
+        destroySessionInternal(victim.sessionId, com.adsamcik.mindlayer.shared.MindlayerErrorCode.SESSION_EVICTED)
         return true
     }
 
@@ -514,7 +582,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         for (handle in toEvict) {
             MindlayerLog.w(TAG, "Pressure-evicting session", sessionId = handle.sessionId)
             logRepository?.logSessionEvicted(handle.sessionId, "memory_pressure")
-            destroySession(handle.sessionId)
+            destroySessionInternal(handle.sessionId, com.adsamcik.mindlayer.shared.MindlayerErrorCode.MEMORY_PRESSURE)
         }
 
         if (toEvict.isNotEmpty()) {
@@ -556,7 +624,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
                 val nonStreaming = sessions.values.filter { !it.isStreaming }
                 for (handle in nonStreaming) {
                     logRepository?.logSessionEvicted(handle.sessionId, "emergency_pressure")
-                    destroySession(handle.sessionId)
+                    destroySessionInternal(handle.sessionId, com.adsamcik.mindlayer.shared.MindlayerErrorCode.MEMORY_PRESSURE)
                 }
                 if (nonStreaming.isNotEmpty()) {
                     MindlayerLog.w(
@@ -574,7 +642,9 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         val expired = sessions.filter { (_, handle) ->
             now - handle.createdAtMs > handle.expirationMs
         }
-        expired.forEach { (id, _) -> destroySession(id) }
+        expired.forEach { (id, _) ->
+            destroySessionInternal(id, com.adsamcik.mindlayer.shared.MindlayerErrorCode.SESSION_EXPIRED)
+        }
         if (expired.isNotEmpty()) {
             MindlayerLog.i(TAG, "Cleaned up ${expired.size} expired session(s)")
         }
