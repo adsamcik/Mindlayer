@@ -8,6 +8,7 @@ import android.os.ParcelFileDescriptor
 import android.os.SharedMemory
 import android.system.ErrnoException
 import android.system.Os
+import android.system.OsConstants
 import androidx.annotation.RequiresApi
 import com.adsamcik.mindlayer.AudioTransfer
 import com.adsamcik.mindlayer.ImageTransfer
@@ -24,6 +25,7 @@ import java.io.EOFException
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
+import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -65,6 +67,9 @@ class SharedMemoryPoolExhaustedException(
     "shm_pool_exhausted reason=$reason count=$currentCount bytes=$currentBytes " +
         "retryAfterMs=$retryAfterMs"
 )
+
+/** Maximum accepted image dimension (width or height). 8192² × 4 bpp = 256 MB worst-case. */
+private const val MAX_IMAGE_DIM: Int = 8192
 
 /**
  * Staged media ready for LiteRT-LM consumption.
@@ -446,13 +451,14 @@ class SharedMemoryPool(cacheDir: File) {
             }
             return
         }
+        val snapshot = synchronized(files) { files.toList() }
         var deleted = 0
-        for (file in files) {
+        for (file in snapshot) {
             if (file.delete()) deleted++
         }
         MindlayerLog.d(
             TAG,
-            "Cleaned up $deleted/${files.size} staged file(s) and closed " +
+            "Cleaned up $deleted/${snapshot.size} staged file(s) and closed " +
                 "$closedPfds active PFD(s) for request ${requestLabel(scopedKey)}",
         )
     }
@@ -706,13 +712,18 @@ class SharedMemoryPool(cacheDir: File) {
                     MindlayerLog.w(TAG, "setProtect(PROT_READ) failed; relying on private copy: ${t.safeLabel()}")
                 }
                 buffer = shm.mapReadOnly()
-                val pixels = ByteArray(payloadSize)
-                buffer.get(pixels)
-                compressPixelsToPng(pixels, transfer.width, transfer.height, transfer.pixelFormat, outFile)
+                // M21 — feed the mapped SharedMemory buffer to the bitmap directly
+                // instead of allocating a fresh ByteArray(payloadSize). The repack
+                // helper falls back to a row-by-row copy only when the client used
+                // a non-tight rowStride, bounding peak heap regardless.
+                compressPixelsFromBufferToPng(
+                    buffer, transfer.width, transfer.height,
+                    transfer.pixelFormat, transfer.rowStride, payloadSize, outFile,
+                )
             } else {
                 // Reconstruction failed — fall back to stream read
                 val pixels = readExactly(pfd, payloadSize)
-                compressPixelsToPng(pixels, transfer.width, transfer.height, transfer.pixelFormat, outFile)
+                compressPixelsToPng(pixels, transfer.width, transfer.height, transfer.pixelFormat, transfer.rowStride, outFile)
             }
         } finally {
             buffer?.let { SharedMemory.unmap(it) }
@@ -759,6 +770,12 @@ class SharedMemoryPool(cacheDir: File) {
      * fds where EOF semantics are unreliable). Otherwise reads until EOF.
      */
     private fun stageFromPfd(pfd: ParcelFileDescriptor, outFile: File, knownSize: Int?) {
+        // H5 — reject FIFOs / sockets / character devices that would block the
+        // staging thread indefinitely. SharedMemory regions go through the
+        // dedicated reconstructSharedMemory path and are validated by the
+        // SharedMemory.fromFileDescriptor API, so this guard runs only on
+        // the generic PFD copy path.
+        assertSafePfdType(pfd)
         try {
             if (knownSize != null) {
                 require(knownSize in 1..MAX_MEDIA_BYTES) {
@@ -777,6 +794,60 @@ class SharedMemoryPool(cacheDir: File) {
         } catch (t: Throwable) {
             MindlayerLog.e(TAG, "Failed to stage PFD to ${outFile.name}: ${t.safeLabel()}")
             throw t
+        }
+    }
+
+    /**
+     * Reject [pfd] handles that point at non-regular files (FIFOs, sockets,
+     * character/block devices). Such fds can block [java.io.InputStream.read]
+     * forever, pinning the orchestrator coroutine and per-session mutex.
+     *
+     * Visible-for-testing so JVM unit tests can drive the helper directly.
+     *
+     * Robolectric/JVM note: [Os.fstat] is a real JNI call. When the runtime
+     * is missing the native shim (e.g. a stripped Robolectric image), or
+     * [android.system.OsConstants.S_IFMT] resolves to 0 (uninitialised stub),
+     * we cannot make a confident determination — in that case we permit the
+     * fd. The check is defense-in-depth on top of AIDL parcelable validation;
+     * the production runtime always has a working fstat.
+     */
+    internal fun assertSafePfdType(pfd: ParcelFileDescriptor) {
+        val st = try {
+            Os.fstat(pfd.fileDescriptor)
+        } catch (_: UnsatisfiedLinkError) {
+            return
+        } catch (_: NoClassDefFoundError) {
+            return
+        } catch (t: Throwable) {
+            // ErrnoException (and any other native-bridge failure) under JVM/
+            // Robolectric — fall through to permissive behaviour. On a real
+            // device a working fd never raises here.
+            MindlayerLog.d(TAG, "fstat unavailable; skipping PFD-type guard: ${t.javaClass.simpleName}")
+            return
+        }
+        val mask = OsConstants.S_IFMT
+        val regular = OsConstants.S_IFREG
+        // Stubbed constants → cannot enforce; allow.
+        if (mask == 0 || regular == 0) return
+        val type = st.st_mode and mask
+        // Robolectric returns st_mode=0 for tempfiles → cannot enforce; allow.
+        if (type == 0) return
+        if (type != regular) {
+            throw IllegalArgumentException(
+                "Unsupported source PFD type: 0x${"%x".format(type)}",
+            )
+        }
+    }
+
+    /** Stream exactly [size] bytes from [pfd] to [outFile], closing the PFD when done. */
+    private fun writeExactly(pfd: ParcelFileDescriptor, size: Int, outFile: File) {
+        require(size in 1..MAX_MEDIA_BYTES) {
+            "Media payload size out of bounds: $size"
+        }
+        ParcelFileDescriptor.AutoCloseInputStream(pfd).use { input ->
+            FileOutputStream(outFile).use { output ->
+                copyExactly(input, output, size)
+            }
         }
     }
 
@@ -810,6 +881,31 @@ class SharedMemoryPool(cacheDir: File) {
         }
     }
 
+    private fun copyExactly(input: java.io.InputStream, output: java.io.OutputStream, expectedBytes: Int) {
+        val buf = ByteArray(COPY_BUFFER_SIZE)
+        var remaining = expectedBytes
+        while (remaining > 0) {
+            val n = input.read(buf, 0, minOf(buf.size, remaining))
+            if (n == -1) {
+                throw EOFException("Expected $expectedBytes bytes, missing $remaining")
+            }
+            output.write(buf, 0, n)
+            remaining -= n
+        }
+    }
+
+    private fun declaredPayloadSize(payloadBytes: Int): Int? {
+        if (payloadBytes == 0) return null
+        requireMediaSize(payloadBytes.toLong())
+        return payloadBytes
+    }
+
+    private fun requireMediaSize(size: Long) {
+        require(size in 1..MAX_MEDIA_BYTES.toLong()) {
+            "Media payload size out of bounds: $size"
+        }
+    }
+
     /** Read exactly [size] bytes from [pfd], closing it when done. */
     private fun readExactly(pfd: ParcelFileDescriptor, size: Int): ByteArray {
         require(size in 1..MAX_MEDIA_BYTES) {
@@ -820,7 +916,9 @@ class SharedMemoryPool(cacheDir: File) {
             var offset = 0
             while (offset < size) {
                 val n = input.read(bytes, offset, size - offset)
-                if (n == -1) break
+                if (n == -1) {
+                    throw EOFException("Expected $size bytes, missing ${size - offset}")
+                }
                 offset += n
             }
             // F-016: a truncated PFD must NOT silently zero-pad the buffer
@@ -840,6 +938,7 @@ class SharedMemoryPool(cacheDir: File) {
         width: Int,
         height: Int,
         pixelFormat: Int,
+        rowStride: Int,
         outFile: File,
     ) {
         // F-001 / F-058: dimensions and pixel format already validated at
@@ -856,9 +955,23 @@ class SharedMemoryPool(cacheDir: File) {
             "unsupported pixelFormat: $pixelFormat"
         }
         val config = pixelFormatToBitmapConfig(pixelFormat)
+        val bpp = bytesPerPixel(config)
+        val tightRowBytes = width * bpp
+        // M4: validate dimensions and buffer size before any Bitmap allocation.
+        validatePixelBufferLayout(width, height, pixelFormat, rowStride, pixels.size)
+        // C2: repack rows when the source had padding (sub-bitmap, hardware-backed, etc.).
+        val packed: ByteArray = if (rowStride <= 0 || rowStride == tightRowBytes) {
+            pixels
+        } else {
+            ByteArray(tightRowBytes * height).also { dst ->
+                for (y in 0 until height) {
+                    System.arraycopy(pixels, y * rowStride, dst, y * tightRowBytes, tightRowBytes)
+                }
+            }
+        }
         val bitmap = Bitmap.createBitmap(width, height, config)
         try {
-            bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
+            bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(packed))
             // F-063: cap PNG output at MAX_MEDIA_BYTES. A small input bitmap
             // can still produce a multi-GB PNG when the encoder hits a
             // pathological palette or filter sequence; without a streaming
@@ -866,6 +979,64 @@ class SharedMemoryPool(cacheDir: File) {
             // ever sees a failure. Throws partway through compression so
             // the orchestrator's existing `media_staging_failed` cleanup
             // path deletes the partial output.
+            FileOutputStream(outFile).use { fos ->
+                val capped = CountingOutputStream(fos, MAX_MEDIA_BYTES.toLong(), "png_too_large")
+                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, capped)) {
+                    throw java.io.IOException("png_compress_failed")
+                }
+            }
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    /**
+     * M21 — buffer-backed variant of [compressPixelsToPng]. When the client uses
+     * a tight rowStride (no padding), the mapped SharedMemory ByteBuffer is fed
+     * directly into the Bitmap with zero intermediate heap allocation. When the
+     * stride is padded we still need to repack into a tight buffer; the ByteArray
+     * sized at `tightRowBytes * height` is bounded by the M4 validation pass.
+     */
+    private fun compressPixelsFromBufferToPng(
+        source: ByteBuffer,
+        width: Int,
+        height: Int,
+        pixelFormat: Int,
+        rowStride: Int,
+        sourceSize: Int,
+        outFile: File,
+    ) {
+        val config = pixelFormatToBitmapConfig(pixelFormat)
+        val bpp = bytesPerPixel(config)
+        val tightRowBytes = width * bpp
+        validatePixelBufferLayout(width, height, pixelFormat, rowStride, sourceSize)
+        val isTight = rowStride <= 0 || rowStride == tightRowBytes
+
+        val bitmap = Bitmap.createBitmap(width, height, config)
+        try {
+            if (isTight) {
+                // Slice to the exact pixel range and reset position so the bitmap
+                // consumes from the start of the mapped region.
+                val view = source.duplicate().apply {
+                    order(source.order())
+                    position(0)
+                    limit(sourceSize)
+                }
+                bitmap.copyPixelsFromBuffer(view)
+            } else {
+                val packed = ByteArray(tightRowBytes * height)
+                val rowBuf = ByteArray(rowStride)
+                val view = source.duplicate().apply { position(0); limit(sourceSize) }
+                for (y in 0 until height) {
+                    view.position(y * rowStride)
+                    view.get(rowBuf, 0, rowStride)
+                    System.arraycopy(rowBuf, 0, packed, y * tightRowBytes, tightRowBytes)
+                }
+                bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(packed))
+            }
+            // F-063: cap PNG output at MAX_MEDIA_BYTES — same rationale as
+            // [compressPixelsToPng]; a pathological encoder run on a small
+            // input bitmap can still fill the staging filesystem.
             FileOutputStream(outFile).use { fos ->
                 val capped = CountingOutputStream(fos, MAX_MEDIA_BYTES.toLong(), "png_too_large")
                 if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, capped)) {
@@ -954,8 +1125,10 @@ class SharedMemoryPool(cacheDir: File) {
      * Build a staging-file path that is guaranteed to live under
      * [stagingDir] regardless of caller-supplied input. We use
      * [UUID.randomUUID] only — the caller's `requestId` never reaches
-     * the filesystem path. The canonical-path check is defence in depth
-     * in case [File] on some filesystem normalises the random component.
+     * the filesystem path (F-004 path-traversal-via-requestId / F-007
+     * cross-UID staging-file deletion). The canonical-path check is
+     * defence in depth in case [File] on some filesystem normalises the
+     * random component.
      */
     private fun createStagingFile(prefix: String, extension: String): File {
         val uuid = UUID.randomUUID().toString()
@@ -967,7 +1140,10 @@ class SharedMemoryPool(cacheDir: File) {
     }
 
     private fun trackFile(scopedKey: String, file: File) {
-        stagedFiles.getOrPut(scopedKey) { mutableListOf() }.add(file)
+        val files = stagedFiles.computeIfAbsent(scopedKey) {
+            Collections.synchronizedList(mutableListOf())
+        }
+        files.add(file)
     }
 
     private fun pixelFormatToBitmapConfig(pixelFormat: Int): Bitmap.Config = when (pixelFormat) {
@@ -992,4 +1168,64 @@ class SharedMemoryPool(cacheDir: File) {
         // protects direct in-process callers.
         else -> throw IllegalArgumentException("unsupported MIME type: $mimeType")
     }
+}
+
+// ---- Pixel-layout helpers (internal for unit testing via Robolectric) ------
+
+/** Allowed raw pixel formats — anything else is rejected (H1). */
+private val ALLOWED_PIXEL_FORMATS = setOf(PixelFormat.RGBA_8888, PixelFormat.RGB_565)
+
+private fun pixelFormatToBitmapConfig(pixelFormat: Int): Bitmap.Config = when (pixelFormat) {
+    PixelFormat.RGBA_8888 -> Bitmap.Config.ARGB_8888
+    PixelFormat.RGB_565   -> Bitmap.Config.RGB_565
+    // H1: caller-supplied unknown formats must NOT silently coerce to ARGB_8888 —
+    // that would let an attacker disagree with the buffer's actual layout and
+    // trigger an over-read in Bitmap.copyPixelsFromBuffer.
+    else                  -> throw IllegalArgumentException("Unsupported pixelFormat: $pixelFormat")
+}
+
+internal fun bytesPerPixel(config: Bitmap.Config): Int = when (config) {
+    Bitmap.Config.RGB_565 -> 2
+    else -> 4 // ARGB_8888 and all other configs handled by the pool
+}
+
+/**
+ * Validates pixel buffer dimensions and layout. Contains no Bitmap allocation so it
+ * can be unit-tested directly on JVM/Robolectric without side-effects.
+ *
+ * @return tight buffer size (width × bpp × height) — the size after row repacking
+ */
+internal fun validatePixelBufferLayout(
+    width: Int,
+    height: Int,
+    pixelFormat: Int,
+    rowStride: Int,
+    bufferSize: Int,
+): Long {
+    require(width in 1..MAX_IMAGE_DIM) { "Image width out of range: $width" }
+    require(height in 1..MAX_IMAGE_DIM) { "Image height out of range: $height" }
+    require(pixelFormat in ALLOWED_PIXEL_FORMATS) {
+        "Unsupported pixelFormat: $pixelFormat"
+    }
+    // H1 — guard the megapixel product itself in Long arithmetic, independent
+    // of the per-dimension cap, so a future MAX_IMAGE_DIM bump can't accidentally
+    // re-open a 4-billion-pixel allocation window.
+    val pixels = width.toLong() * height.toLong()
+    require(pixels <= MAX_IMAGE_DIM.toLong() * MAX_IMAGE_DIM.toLong()) {
+        "Image pixel count out of range: $pixels"
+    }
+    val bpp = bytesPerPixel(pixelFormatToBitmapConfig(pixelFormat))
+    val tightRowBytes = width.toLong() * bpp.toLong()
+    val expected = if (rowStride > 0 && rowStride.toLong() != tightRowBytes) {
+        require(rowStride.toLong() >= tightRowBytes) {
+            "rowStride $rowStride < width*bpp $tightRowBytes"
+        }
+        rowStride.toLong() * height.toLong()
+    } else {
+        tightRowBytes * height.toLong()
+    }
+    require(bufferSize.toLong() == expected) {
+        "Pixel buffer size $bufferSize doesn't match expected $expected"
+    }
+    return tightRowBytes * height.toLong()
 }

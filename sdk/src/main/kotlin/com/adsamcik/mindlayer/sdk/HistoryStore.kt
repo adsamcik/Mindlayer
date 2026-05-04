@@ -31,6 +31,19 @@ class HistoryStore internal constructor(
         /** Rough chars-per-token ratio for budget calculations. */
         private const val CHARS_PER_TOKEN = 4
 
+        /**
+         * Hard ceiling on a single turn's text length during replay selection.
+         * Turns exceeding this are skipped to prevent multi-MB blobs reaching
+         * the service regardless of what tokenEstimate the DB stores.
+         */
+        private const val MAX_TURN_TEXT_CHARS = 32_768
+
+        /**
+         * Maximum number of turns included in a single replay bundle.
+         * Caps memory and IPC payload even when every turn is small.
+         */
+        private const val MAX_REPLAY_TURNS = 200
+
         private val json = Json { ignoreUnknownKeys = true }
     }
 
@@ -233,9 +246,19 @@ class HistoryStore internal constructor(
         remaining -= systemTokens
 
         for (turn in allCompleted) {
-            if (turn.tokenEstimate > remaining) break
+            if (selected.size >= MAX_REPLAY_TURNS) break
+
+            // Recompute from actual text — never trust the stored tokenEstimate,
+            // which is attacker-controlled if the DB is tampered with.
+            val text = turn.textContent
+            if (text != null && text.length > MAX_TURN_TEXT_CHARS) {
+                Log.w(TAG, "skipping turn id=${turn.turnId} text too long (${text.length} chars)")
+                continue
+            }
+            val recomputed = estimateTokens(text)
+            if (recomputed > remaining) break
             selected.add(turn)
-            remaining -= turn.tokenEstimate
+            remaining -= recomputed
         }
 
         // Reverse to chronological order
@@ -259,19 +282,27 @@ class HistoryStore internal constructor(
      * List all past conversations with turn count and preview.
      */
     suspend fun listConversations(limit: Int = 50, offset: Int = 0): List<ConversationSummary> {
-        val conversations = db.conversationDao().listPaged(limit, offset)
-        return conversations.map { conv ->
-            val turnCount = db.turnDao().countCompleted(conv.conversationId)
-            val lastTurns = db.turnDao().lastNTurns(conv.conversationId, 3)
+        val conversations = conversationDao.listPagedWithCompletedTurnCounts(limit, offset)
+        if (conversations.isEmpty()) return emptyList()
+
+        val conversationIds = conversations.map { it.conversation.conversationId }
+        val previewsByConversation = turnDao
+            .completedForConversationsDescending(conversationIds)
+            .groupBy { it.conversationId }
+            .mapValues { (_, turns) -> turns.take(3) }
+
+        return conversations.map { row ->
+            val conv = row.conversation
+            val previewTurns = previewsByConversation[conv.conversationId].orEmpty().asReversed()
             ConversationSummary(
                 conversationId = conv.conversationId,
                 systemPrompt = conv.systemPrompt.takeIf { historyPolicy.persistSystemPrompt },
-                turnCount = turnCount,
+                turnCount = row.completedTurnCount,
                 tokenEstimate = conv.tokenEstimateTotal,
                 createdAt = conv.createdAtMs,
                 lastActiveAt = conv.updatedAtMs,
                 isActive = false, // Will be enriched by SDK
-                preview = lastTurns.reversed().map { turn ->
+                preview = previewTurns.map { turn ->
                     TurnPreview(
                         role = turn.role,
                         text = turn.textContent
@@ -305,6 +336,15 @@ class HistoryStore internal constructor(
     suspend fun pruneOlderThan(maxAgeMs: Long): Int {
         val cutoff = System.currentTimeMillis() - maxAgeMs
         return db.conversationDao().deleteOlderThan(cutoff)
+    }
+
+    /**
+     * Delete all conversations and turns from the local database.
+     * Called by [Mindlayer.eraseAllHistory].
+     */
+    suspend fun clearAll() {
+        db.conversationDao().deleteAll()
+        db.turnDao().deleteAll()
     }
 
     /**

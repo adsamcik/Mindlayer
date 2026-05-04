@@ -19,6 +19,7 @@ import com.adsamcik.mindlayer.ToolResult
 import com.adsamcik.mindlayer.service.engine.EngineManager
 import com.adsamcik.mindlayer.service.engine.InferenceOrchestrator
 import com.adsamcik.mindlayer.service.engine.MemoryBudget
+import com.adsamcik.mindlayer.service.engine.SessionManager
 import com.adsamcik.mindlayer.service.engine.SessionOwnerToken
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
 import com.adsamcik.mindlayer.service.engine.ThermalConfidence
@@ -26,6 +27,8 @@ import com.adsamcik.mindlayer.service.health.MlHealthRecorder
 import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.loggable
+import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.logging.sanitizeLogField
 import com.adsamcik.mindlayer.service.security.AllowlistStore
 import com.adsamcik.mindlayer.service.security.CallerIdentity
 import com.adsamcik.mindlayer.service.security.CallerVerifier
@@ -35,15 +38,16 @@ import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.TimeoutCancellationException
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -73,6 +77,11 @@ class ServiceBinder(
 ) : IMindlayerService.Stub() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val diagnosticsRefreshInFlight = AtomicBoolean(false)
+    private val engineWarmupInFlight = AtomicBoolean(false)
+
+    @Volatile
+    private var diagnosticsSnapshot: String = """{"status":"warming"}"""
 
     /**
      * Scoped key (`uid:publicRequestId`) → UID that owns the concurrency slot.
@@ -226,6 +235,21 @@ class ServiceBinder(
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TOKEN_BATCH,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_EVICTION_CALLBACK,
         )
+
+        /** Allowed characters for caller-supplied identifiers (sessionId/requestId). */
+        private val SAFE_ID_REGEX = Regex("^[A-Za-z0-9._-]+$")
+        private const val MAX_ID_LENGTH = 128
+
+        /** Hard cap for `RequestMeta.textContent` on the binder side (256 KiB). */
+        private const val MAX_REQUEST_TEXT_CHARS = 256 * 1024
+
+        private val ALLOWED_ROLES = setOf("user", "model", "tool", "system")
+
+        /** Boundary cap for SessionConfig.expirationMs — 1 ms .. 30 days. */
+        private const val MAX_BOUNDARY_EXPIRATION_MS = 30L * 24 * 60 * 60 * 1000
+
+        private val ALLOWED_BACKENDS = setOf("GPU", "CPU", "NPU")
+        private val ALLOWED_HISTORY_ROLES = setOf("user", "model", "tool")
     }
 
     private data class ClientRegistration(
@@ -259,6 +283,12 @@ class ServiceBinder(
      * we skip the allowlist + rate-limit checks. Without this the dashboard
      * would self-deny (never user-approved) and self-rate-limit (polling
      * 3 RPCs every 2s = 90 RPM > default 60 RPM).
+     *
+     * **Order matters** (H2): rate-limit BEFORE allowlist so an un-approved
+     * caller cannot drive unbounded `recordPending` disk I/O simply by
+     * spamming the binder. The rejection-bookkeeping path is further
+     * throttled by [RateLimiter.tryAcquireRejection] — only ~6 rejections
+     * per minute per UID actually call `recordPending`.
      */
     private fun authorizeCall(): CallerIdentity = authorizeCall(cost = 1.0)
 
@@ -310,31 +340,40 @@ class ServiceBinder(
                 )
             }
 
-        val store = allowlistStore
-        if (store != null && !store.isAllowed(identity.packageName, identity.signingCertSha256)) {
-            // F-033: throttle BEFORE recordPending so a hostile caller cannot
-            // saturate FileLock + fsync `pending.json` indefinitely. The
-            // rejected bucket is independent of the main-traffic bucket so a
-            // legitimate caller's first-launch race is unaffected.
-            if (!rateLimiter.tryAcquireRejected(uid)) {
-                MindlayerLog.w(TAG, "Reject flood: ${identity.packageName} (uid=$uid)")
-                throw SecurityException("Rate limit exceeded")
-            }
-            store.recordPending(
-                pkg = identity.packageName,
-                sigSha256 = identity.signingCertSha256,
-                displayName = identity.displayName,
-            )
-            MindlayerLog.w(TAG, "Blocked un-approved caller ${identity.packageName} (uid=$uid)")
-            throw SecurityException(
-                "App ${identity.packageName} not authorized — user approval required"
-            )
-        }
-
+        // 1. Rate-limit BEFORE any allowlist I/O. Stops volume regardless of
+        //    whether the caller is approved or not. F-064: cost-weighted —
+        //    cheap status/info methods pass a fractional cost.
         if (!rateLimiter.tryAcquire(uid, cost)) {
             MindlayerLog.w(TAG, "Rate limit exceeded for ${identity.packageName} (uid=$uid)")
             throw SecurityException("Rate limit exceeded for ${identity.packageName}")
         }
+
+        // 2. Allowlist check. A previously-denied caller is rejected silently.
+        val store = allowlistStore
+        if (store != null) {
+            if (store.isDenied(identity.packageName, identity.signingCertSha256)) {
+                throw SecurityException(
+                    "App ${identity.packageName} not authorized — user approval required"
+                )
+            }
+            if (!store.isAllowed(identity.packageName, identity.signingCertSha256)) {
+                // Only do the (relatively expensive) recordPending if the
+                // per-UID rejection bucket still has tokens. Otherwise drop
+                // silently — prevents log spam + atomic-write storm.
+                if (rateLimiter.tryAcquireRejection(uid)) {
+                    store.recordPending(
+                        pkg = identity.packageName,
+                        sigSha256 = identity.signingCertSha256,
+                        displayName = identity.displayName,
+                    )
+                    MindlayerLog.w(TAG, "Blocked un-approved caller ${identity.packageName} (uid=$uid)")
+                }
+                throw SecurityException(
+                    "App ${identity.packageName} not authorized — user approval required"
+                )
+            }
+        }
+
         return identity
     }
 
@@ -359,8 +398,8 @@ class ServiceBinder(
         if (owner == null || owner != uid) {
             MindlayerLog.w(
                 TAG,
-                "Ownership violation: uid=$uid tried to touch session owned by $owner",
-                sessionId = sessionId,
+                "Ownership violation: uid=$uid tried to touch session (owner=$owner)",
+                sessionId = sanitizeLogField(sessionId),
             )
             throw typedBinderException(
                 MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
@@ -545,6 +584,12 @@ class ServiceBinder(
         val identity = authorizeCall()
         val uid = Binder.getCallingUid()
         val ownerToken = requireRegisteredClient()
+        // M1: validate at the binder boundary BEFORE any expensive native
+        // engine warmup. Otherwise an unprivileged-but-allowlisted caller
+        // could trigger a multi-second engine init with arbitrary `backend`
+        // / `maxTokens` values and only afterwards hit the SessionManager
+        // validator.
+        validateSessionConfigBoundary(config)
         // Validate every client-supplied string in SessionConfig against
         // explicit byte budgets and identifier shape constraints. See
         // IpcInputValidator for the rules.
@@ -573,6 +618,7 @@ class ServiceBinder(
             config
         }
         MindlayerLog.d(TAG, "createSession from ${identity.packageName}")
+        ensureEngineReadyOrStart(config)
         return try {
             orchestrator.createSession(safeConfig, ownerToken ?: uid)
         } catch (e: com.adsamcik.mindlayer.service.engine.EngineNotReadyException) {
@@ -608,7 +654,102 @@ class ServiceBinder(
                 MindlayerErrorCode.INVALID_SESSION_CONFIG,
                 "Invalid SessionConfig: ${e.message}",
             )
+        } catch (e: IllegalStateException) {
+            // Engine-not-ready is the legitimate signal — preserve it.
+            // Other ISEs from internal validators get redacted to a
+            // generic SecurityException so they cannot leak engine state.
+            if (e.message?.contains("initialization has been started") == true) throw e
+            MindlayerLog.w(TAG, "createSession rejected: ${e.javaClass.simpleName}")
+            throw SecurityException("Service not ready")
         }
+    }
+
+    /**
+     * Boundary validation for [SessionConfig] (M1, M2). Mirrors and is
+     * STRICTER than [com.adsamcik.mindlayer.service.engine.SessionManager.validateSessionConfig]
+     * — duplicated intentionally so that an SDK bypass (someone calling AIDL
+     * directly) cannot trigger the heavy engine path with malformed config.
+     *
+     * Throws [SecurityException] with a fixed, non-leaking message on any
+     * failure (L2). The internal exception class is logged via
+     * [MindlayerLog] for diagnostic purposes.
+     */
+    private fun validateSessionConfigBoundary(config: SessionConfig) {
+        try {
+            require(config.backend in ALLOWED_BACKENDS) { "backend" }
+            require(config.maxTokens in 1..32_768) { "maxTokens" }
+            require(config.samplerTopK in 1..1024) { "samplerTopK" }
+            require(config.samplerTopP in 0.0f..1.0f) { "samplerTopP" }
+            require(config.samplerTemperature in 0.0f..2.0f) { "samplerTemperature" }
+            config.systemPrompt?.let {
+                require(it.length <= SessionManager.MAX_SYSTEM_PROMPT_CHARS) { "systemPrompt" }
+            }
+            config.toolsJson?.let {
+                require(it.length <= SessionManager.MAX_TOOLS_JSON_CHARS) { "toolsJson" }
+            }
+            config.extraContextJson?.let {
+                require(it.length <= SessionManager.MAX_EXTRA_CONTEXT_CHARS) { "extraContextJson" }
+            }
+            config.initialHistory?.let { hist ->
+                require(hist.size <= SessionManager.MAX_INITIAL_HISTORY_TURNS) { "initialHistory.size" }
+                for (turn in hist) {
+                    require(turn.role in ALLOWED_HISTORY_ROLES) { "initialHistory.role" }
+                    require(turn.text.length <= SessionManager.MAX_HISTORY_TURN_CHARS) {
+                        "initialHistory.text"
+                    }
+                }
+            }
+            require(config.expirationMs in 1L..MAX_BOUNDARY_EXPIRATION_MS) { "expirationMs" }
+            config.sessionId?.let {
+                require(it.length in 1..MAX_ID_LENGTH && SAFE_ID_REGEX.matches(it)) { "sessionId" }
+            }
+        } catch (e: IllegalArgumentException) {
+            MindlayerLog.w(TAG, "SessionConfig boundary validation failed: ${e.message}")
+            throw SecurityException("Invalid SessionConfig")
+        }
+    }
+
+    /**
+     * Boundary validation for [RequestMeta] (M3). Caps caller-supplied
+     * identifiers and text size; restricts `role` to "user" (the only sane
+     * runtime value) and `priority` to a small range.
+     */
+    private fun validateRequestMeta(meta: RequestMeta) {
+        try {
+            require(
+                meta.requestId.length in 1..MAX_ID_LENGTH && SAFE_ID_REGEX.matches(meta.requestId)
+            ) { "requestId" }
+            require(
+                meta.sessionId.length in 1..MAX_ID_LENGTH && SAFE_ID_REGEX.matches(meta.sessionId)
+            ) { "sessionId" }
+            // Only allowed roles for an inbound runtime request; "model"
+            // / "tool" / "system" may also appear in tool-result turns.
+            require(meta.role in ALLOWED_ROLES) { "role" }
+            require(meta.priority in -10..10) { "priority" }
+            meta.textContent?.let {
+                require(it.length <= MAX_REQUEST_TEXT_CHARS) { "textContent" }
+            }
+        } catch (e: IllegalArgumentException) {
+            MindlayerLog.w(TAG, "RequestMeta boundary validation failed: ${e.message}")
+            throw SecurityException("Invalid request")
+        }
+    }
+
+    private fun validateRequestId(requestId: String) {
+        require(requestId.isNotBlank()) { "requestId must not be blank" }
+        require(requestId.length <= 256) { "requestId too long" }
+    }
+
+    private fun ensureEngineReadyOrStart(config: SessionConfig) {
+        if (engineManager.isInitialized) return
+        startEngineWarmup(
+            preferredBackend = config.backend,
+            maxTokens = config.maxTokens,
+        )
+        throw IllegalStateException(
+            "Engine is not initialized; initialization has been started. " +
+                "Retry createSession after service status reports engine loaded."
+        )
     }
 
     override fun destroySession(sessionId: String) {
@@ -623,7 +764,7 @@ class ServiceBinder(
             )
         }
         requireOwnership(sessionId)
-        MindlayerLog.d(TAG, "destroySession: $sessionId", sessionId = sessionId)
+        MindlayerLog.d(TAG, "destroySession", sessionId = sanitizeLogField(sessionId))
         orchestrator.destroySession(sessionId)
     }
 
@@ -683,114 +824,133 @@ class ServiceBinder(
         audio: AudioTransfer?,
         eventWriteEnd: ParcelFileDescriptor,
     ) {
-        val identity = authorizeCall()
-        val uid = Binder.getCallingUid()
-        val ownerToken = requireRegisteredClient()
-
-        // Validate every client-supplied identifier and string at AIDL
-        // ingress so the downstream code never sees malformed values.
+        // M11: track FD ownership so any synchronous failure path closes the
+        // FDs we received from AIDL. The orchestrator takes ownership only on
+        // a successful return from `orchestrator.infer(...)`.
+        var handedOff = false
         try {
-            IpcInputValidator.validateRequestMeta(meta)
-            image?.let { IpcInputValidator.validateImageTransfer(it, MAX_MEDIA_BYTES) }
-            audio?.let { IpcInputValidator.validateAudioTransfer(it) }
-            // Inbound media transfer requestId must agree with meta.requestId
-            // — defends against staging-cleanup keying mismatches.
-            require(image == null || image.requestId == meta.requestId) {
-                "ImageTransfer.requestId must equal RequestMeta.requestId"
-            }
-            require(audio == null || audio.requestId == meta.requestId) {
-                "AudioTransfer.requestId must equal RequestMeta.requestId"
-            }
-        } catch (e: IllegalArgumentException) {
-            throw typedBinderException(
-                MindlayerErrorCode.INVALID_REQUEST,
-                "Invalid request: ${e.message}",
-            )
-        }
+            val identity = authorizeCall()
+            val uid = Binder.getCallingUid()
+            val ownerToken = requireRegisteredClient()
 
-        // Caller must own the target session.
-        requireOwnership(meta.sessionId)
+            // Validate every client-supplied identifier and string at AIDL
+            // ingress so the downstream code never sees malformed values.
+            try {
+                IpcInputValidator.validateRequestMeta(meta)
+                image?.let { IpcInputValidator.validateImageTransfer(it, MAX_MEDIA_BYTES) }
+                audio?.let { IpcInputValidator.validateAudioTransfer(it) }
+                // Inbound media transfer requestId must agree with meta.requestId
+                // — defends against staging-cleanup keying mismatches.
+                require(image == null || image.requestId == meta.requestId) {
+                    "ImageTransfer.requestId must equal RequestMeta.requestId"
+                }
+                require(audio == null || audio.requestId == meta.requestId) {
+                    "AudioTransfer.requestId must equal RequestMeta.requestId"
+                }
+            } catch (e: IllegalArgumentException) {
+                throw typedBinderException(
+                    MindlayerErrorCode.INVALID_REQUEST,
+                    "Invalid request: ${e.message}",
+                )
+            }
 
-        if (!rateLimiter.beginInference(uid)) {
-            MindlayerLog.w(
+            // Caller must own the target session.
+            requireOwnership(meta.sessionId)
+
+            if (!rateLimiter.beginInference(uid)) {
+                MindlayerLog.w(
+                    TAG,
+                    "Concurrent inference limit exceeded for ${identity.packageName}",
+                )
+                throw typedBinderException(
+                    MindlayerErrorCode.CONCURRENT_LIMIT,
+                    "Concurrent inference limit exceeded for ${identity.packageName}",
+                )
+            }
+
+            // L11: identifiers were already shape-checked by IpcInputValidator,
+            // but use sanitizeLogField as defense-in-depth in case a future
+            // refactor relaxes the regex.
+            MindlayerLog.d(
                 TAG,
-                "Concurrent inference limit exceeded for ${identity.packageName}",
+                "infer request from ${identity.packageName}",
+                requestId = sanitizeLogField(meta.requestId),
+                sessionId = sanitizeLogField(meta.sessionId),
             )
-            throw typedBinderException(
-                MindlayerErrorCode.CONCURRENT_LIMIT,
-                "Concurrent inference limit exceeded for ${identity.packageName}",
-            )
-        }
-
-        MindlayerLog.d(
-            TAG,
-            "infer request from ${identity.packageName}",
-            requestId = meta.requestId,
-            sessionId = meta.sessionId,
-        )
-        // Namespace the active-request map by UID so two callers that coin the
-        // same requestId (UUID collision / malicious) cannot collide on our
-        // concurrency accounting, nor cancel each other's inference. The
-        // public requestId still flows to the SDK in stream events; the
-        // scoped key is purely an in-process invariant.
-        val scopedKey = inferenceKey(uid, meta.requestId)
-        // F-028: putIfAbsent guarantees a duplicate (uid, requestId) is
-        // rejected up-front rather than overwriting the slot accounting.
-        if (activeInferenceUids.putIfAbsent(scopedKey, uid) != null) {
-            rateLimiter.endInference(uid)
-            throw typedBinderException(
-                MindlayerErrorCode.DUPLICATE_REQUEST,
-                "Duplicate requestId: ${meta.requestId}",
-            )
-        }
-        if (ownerToken != null) {
-            activeInferenceOwners[scopedKey] = ownerToken
-        }
-        try {
-            orchestrator.infer(scopedKey, meta, image, audio, eventWriteEnd) {
+            // Namespace the active-request map by UID so two callers that coin the
+            // same requestId (UUID collision / malicious) cannot collide on our
+            // concurrency accounting, nor cancel each other's inference. The
+            // public requestId still flows to the SDK in stream events; the
+            // scoped key is purely an in-process invariant.
+            val scopedKey = inferenceKey(uid, meta.requestId)
+            // F-028: putIfAbsent guarantees a duplicate (uid, requestId) is
+            // rejected up-front rather than overwriting the slot accounting.
+            if (activeInferenceUids.putIfAbsent(scopedKey, uid) != null) {
+                rateLimiter.endInference(uid)
+                throw typedBinderException(
+                    MindlayerErrorCode.DUPLICATE_REQUEST,
+                    "Duplicate requestId: ${meta.requestId}",
+                )
+            }
+            if (ownerToken != null) {
+                activeInferenceOwners[scopedKey] = ownerToken
+            }
+            try {
+                orchestrator.infer(scopedKey, meta, image, audio, eventWriteEnd) {
+                    activeInferenceOwners.remove(scopedKey)
+                    if (activeInferenceUids.remove(scopedKey) != null) {
+                        rateLimiter.endInference(uid)
+                    }
+                    markRecentlyCompleted(scopedKey)
+                }
+                handedOff = true
+            } catch (e: com.adsamcik.mindlayer.service.engine.ContextOverflowException) {
+                // F-072: budget check tripped synchronously at the orchestrator
+                // gate; the request never reached `scope.launch`. Release the
+                // concurrency slot, drop ownership, and translate to a typed
+                // wire-prefixed SecurityException so the SDK surfaces the
+                // typed code + `remainingTokens=N` payload.
                 activeInferenceOwners.remove(scopedKey)
                 if (activeInferenceUids.remove(scopedKey) != null) {
                     rateLimiter.endInference(uid)
                 }
                 markRecentlyCompleted(scopedKey)
+                throw typedBinderException(
+                    MindlayerErrorCode.INPUT_EXCEEDS_CONTEXT,
+                    e.wireMessage,
+                )
+            } catch (e: com.adsamcik.mindlayer.service.ipc.SharedMemoryPoolExhaustedException) {
+                // F-076: SharedMemoryPool bounds gate tripped at the
+                // synchronous orchestrator pre-flight. Release the
+                // concurrency slot and translate to a typed wire-prefixed
+                // SecurityException so the SDK can surface
+                // TRANSIENT_RESOURCE_EXHAUSTED with the retry-after hint.
+                activeInferenceOwners.remove(scopedKey)
+                if (activeInferenceUids.remove(scopedKey) != null) {
+                    rateLimiter.endInference(uid)
+                }
+                markRecentlyCompleted(scopedKey)
+                throw typedBinderException(
+                    MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
+                    "shm_pool_exhausted reason=${e.reason} retryAfterMs=${e.retryAfterMs}",
+                )
+            } catch (t: Throwable) {
+                activeInferenceOwners.remove(scopedKey)
+                if (activeInferenceUids.remove(scopedKey) != null) {
+                    rateLimiter.endInference(uid)
+                }
+                markRecentlyCompleted(scopedKey)
+                throw t
             }
-        } catch (e: com.adsamcik.mindlayer.service.engine.ContextOverflowException) {
-            // F-072: budget check tripped synchronously at the orchestrator
-            // gate; the request never reached `scope.launch`. Release the
-            // concurrency slot, drop ownership, and translate to a typed
-            // wire-prefixed SecurityException so the SDK surfaces the
-            // typed code + `remainingTokens=N` payload.
-            activeInferenceOwners.remove(scopedKey)
-            if (activeInferenceUids.remove(scopedKey) != null) {
-                rateLimiter.endInference(uid)
+        } finally {
+            if (!handedOff) {
+                // M11: close any FDs we duped during the AIDL transaction so
+                // they don't leak when validation/ownership/rate-limit rejects
+                // the call before orchestrator.infer takes ownership.
+                try { eventWriteEnd.close() } catch (_: Exception) {}
+                try { image?.source?.close() } catch (_: Exception) {}
+                try { audio?.source?.close() } catch (_: Exception) {}
             }
-            markRecentlyCompleted(scopedKey)
-            throw typedBinderException(
-                MindlayerErrorCode.INPUT_EXCEEDS_CONTEXT,
-                e.wireMessage,
-            )
-        } catch (e: com.adsamcik.mindlayer.service.ipc.SharedMemoryPoolExhaustedException) {
-            // F-076: SharedMemoryPool bounds gate tripped at the
-            // synchronous orchestrator pre-flight. Release the
-            // concurrency slot and translate to a typed wire-prefixed
-            // SecurityException so the SDK can surface
-            // TRANSIENT_RESOURCE_EXHAUSTED with the retry-after hint.
-            activeInferenceOwners.remove(scopedKey)
-            if (activeInferenceUids.remove(scopedKey) != null) {
-                rateLimiter.endInference(uid)
-            }
-            markRecentlyCompleted(scopedKey)
-            throw typedBinderException(
-                MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
-                "shm_pool_exhausted reason=${e.reason} retryAfterMs=${e.retryAfterMs}",
-            )
-        } catch (t: Throwable) {
-            activeInferenceOwners.remove(scopedKey)
-            if (activeInferenceUids.remove(scopedKey) != null) {
-                rateLimiter.endInference(uid)
-            }
-            markRecentlyCompleted(scopedKey)
-            throw t
         }
     }
 
@@ -986,14 +1146,14 @@ class ServiceBinder(
                 MindlayerLog.d(
                     TAG,
                     "cancelInference: no active request owned by uid=$uid",
-                    requestId = requestId,
+                    requestId = sanitizeLogField(requestId),
                 )
                 return
             }
             requireRequestOwner(key)
             key
         }
-        MindlayerLog.d(TAG, "cancelInference request", requestId = requestId)
+        MindlayerLog.d(TAG, "cancelInference request", requestId = sanitizeLogField(requestId))
         // Concurrency slot is released by the orchestrator's completion hook.
         orchestrator.cancelInference(scopedKey)
     }
@@ -1033,7 +1193,7 @@ class ServiceBinder(
         }
         if (activeKey != null) {
             if (!isSelfUid) requireRequestOwner(activeKey)
-            MindlayerLog.d(TAG, "cancelInferenceV2: cancelling", requestId = requestId)
+            MindlayerLog.d(TAG, "cancelInferenceV2: cancelling", requestId = sanitizeLogField(requestId))
             orchestrator.cancelInference(activeKey)
             return com.adsamcik.mindlayer.CancelResult(
                 outcome = com.adsamcik.mindlayer.CancelResult.CANCELLED,
@@ -1091,9 +1251,13 @@ class ServiceBinder(
         }
         MindlayerLog.d(
             TAG,
-            "submitToolResult for call ${result.callId.loggable()} tool=${result.toolName}",
-            requestId = requestId,
+            "submitToolResult for call ${result.callId.loggable()} tool=${sanitizeLogField(result.toolName)}",
+            requestId = sanitizeLogField(requestId),
         )
+        // H3a — route to the caller's per-uid slot. The orchestrator registered
+        // the pending call under the session owner's uid, which equals the
+        // caller's uid (verified by the activeInferenceUids check above for
+        // external callers; equal by definition for self-UID dashboard).
         orchestrator.toolCallBridge.submitResult(
             scopedKey = scopedKey,
             callId = result.callId,
@@ -1296,30 +1460,32 @@ class ServiceBinder(
             )
             return
         }
-        // Coalesce concurrent prewarms — the engine is mutex-protected
-        // internally but we don't need to spawn more than one waiting
-        // launcher per UID (defends against `oneway` flooding).
-        val existing = prewarmJob.get()
-        if (existing != null && existing.isActive) {
-            MindlayerLog.d(TAG, "prewarm already in progress; coalescing")
-            return
-        }
         MindlayerLog.d(TAG, "prewarm: backend=$safeBackend")
-        val job = scope.launch {
-            try {
-                engineManager.initialize(
-                    preferredBackend = safeBackend,
-                    maxTokens = 4096,
-                )
-            } catch (e: Exception) {
-                MindlayerLog.w(TAG, "Prewarm failed: ${e.message}")
-            }
-        }
-        prewarmJob.set(job)
+        startEngineWarmup(
+            preferredBackend = safeBackend,
+            maxTokens = 4096,
+        )
     }
 
-    /** Coalesces concurrent prewarms (F-057). */
-    private val prewarmJob = AtomicReference<kotlinx.coroutines.Job?>(null)
+    private fun startEngineWarmup(preferredBackend: String, maxTokens: Int) {
+        if (engineManager.isInitialized) return
+        // F-057: engineWarmupInFlight coalesces concurrent prewarms — only one
+        // launcher per process at a time. EngineManager.initialize is mutex-
+        // protected internally as additional defense.
+        if (!engineWarmupInFlight.compareAndSet(false, true)) return
+        scope.launch(Dispatchers.IO) {
+            try {
+                engineManager.initialize(
+                    preferredBackend = preferredBackend,
+                    maxTokens = maxTokens,
+                )
+            } catch (e: Exception) {
+                MindlayerLog.w(TAG, "Engine warmup failed: ${e.safeLabel()}")
+            } finally {
+                engineWarmupInFlight.set(false)
+            }
+        }
+    }
 
     /**
      * v0.4 synchronous prewarm. Suspends the binder transaction (occupying a
@@ -1422,32 +1588,57 @@ class ServiceBinder(
             activeInferenceUids.values.count { it == uid }
         }
 
-        return ServiceStatus(
-            isEngineLoaded = engineManager.isInitialized,
-            activeSessionCount = visibleActiveSessions,
-            activeInferenceCount = visibleActiveInferences,
-            backend = engineManager.currentBackend,
-            // F-073: surface the telemetry-blind state via the existing
-            // wire-stable `thermalBand: String` field. `ServiceStatus`
-            // is a frozen Parcelable per `docs/AIDL_STABILITY.md`, so we
-            // encode "telemetry unavailable" as a sentinel value rather
-            // than adding a new field. SDK clients that pattern-match
-            // "HOT"/"CRITICAL" see an unrecognised value and treat the
-            // device as healthy — which is correct, the orchestrator is
-            // already applying the conservative policy on their behalf.
-            thermalBand = if (thermalPolicy.confidence == ThermalConfidence.INFERRED) {
-                THERMAL_TELEMETRY_UNAVAILABLE
-            } else {
-                thermalPolicy.band.name
-            },
-            isForeground = visibleActiveInferences > 0,
-            uptimeMs = android.os.SystemClock.elapsedRealtime() - service.createdAtMs,
-            memoryPressure = memSnapshot.pressure.name,
-            availableRamMb = memSnapshot.availableMb,
-            totalRamMb = memSnapshot.totalMb,
-            maxSessions = memoryBudget.deviceTier.maxSessions,
-            headroom = thermalSample?.headroom10s,
-        )
+        // F-073: surface the telemetry-blind state via the existing
+        // wire-stable `thermalBand: String` field. `ServiceStatus` is a
+        // frozen Parcelable per `docs/AIDL_STABILITY.md`, so we encode
+        // "telemetry unavailable" as a sentinel rather than adding a field.
+        // SDK clients that pattern-match "HOT"/"CRITICAL" see an unrecognised
+        // value and treat the device as healthy — which is correct, the
+        // orchestrator is already applying the conservative policy on
+        // their behalf.
+        val encodedThermalBand = if (thermalPolicy.confidence == ThermalConfidence.INFERRED) {
+            THERMAL_TELEMETRY_UNAVAILABLE
+        } else {
+            thermalPolicy.band.name
+        }
+
+        // L1: only the dashboard (self-UID) sees device-wide metrics that
+        // could be used for cross-app workload inference / fingerprinting.
+        // External callers see scoped session/inference counts and zeroed
+        // memory/headroom fields.
+        return if (isSelfUid) {
+            ServiceStatus(
+                isEngineLoaded = engineManager.isInitialized,
+                engineWarming = engineWarmupInFlight.get(),
+                activeSessionCount = visibleActiveSessions,
+                activeInferenceCount = visibleActiveInferences,
+                backend = engineManager.currentBackend,
+                thermalBand = encodedThermalBand,
+                isForeground = visibleActiveInferences > 0,
+                uptimeMs = android.os.SystemClock.elapsedRealtime() - service.createdAtMs,
+                memoryPressure = memSnapshot.pressure.name,
+                availableRamMb = memSnapshot.availableMb,
+                totalRamMb = memSnapshot.totalMb,
+                maxSessions = memoryBudget.deviceTier.maxSessions,
+                headroom = thermalSample?.headroom10s,
+            )
+        } else {
+            ServiceStatus(
+                isEngineLoaded = engineManager.isInitialized,
+                engineWarming = engineWarmupInFlight.get(),
+                activeSessionCount = visibleActiveSessions,
+                activeInferenceCount = visibleActiveInferences,
+                backend = engineManager.currentBackend,
+                thermalBand = encodedThermalBand,
+                isForeground = false,
+                uptimeMs = android.os.SystemClock.elapsedRealtime() - service.createdAtMs,
+                memoryPressure = "NORMAL",
+                availableRamMb = 0L,
+                totalRamMb = 0L,
+                maxSessions = memoryBudget.deviceTier.maxSessions,
+                headroom = null,
+            )
+        }
     }
 
     override fun getDiagnostics(): String {
@@ -1474,11 +1665,7 @@ class ServiceBinder(
         // F-064: cheap call — quarter-cost.
         authorizeCall(cost = 0.25)
         val currentModel = engineManager.currentModel
-        val modelPath = try {
-            engineManager.modelPath
-        } catch (_: Throwable) {
-            ""
-        }
+        val modelPath = currentModel?.path.orEmpty()
         val modelId = currentModel?.id
             ?.takeUnless { it.isBlank() }
             ?: modelPath
@@ -1487,13 +1674,7 @@ class ServiceBinder(
             .removeSuffix(".litertlm")
         val modelSize = currentModel?.sizeBytes
             ?.takeIf { it > 0 }
-            ?: if (modelPath.isNotEmpty()) {
-            try {
-                File(modelPath).length()
-            } catch (_: Throwable) {
-                0L
-            }
-        } else 0L
+            ?: 0L
 
         return EngineInfo(
             modelId = modelId,

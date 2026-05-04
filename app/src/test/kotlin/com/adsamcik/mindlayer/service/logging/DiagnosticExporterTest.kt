@@ -8,6 +8,7 @@ import com.adsamcik.mindlayer.service.engine.EngineManager
 import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.MemoryPressure
 import com.adsamcik.mindlayer.service.engine.MemorySnapshot
+import com.adsamcik.mindlayer.service.engine.ModelInfo
 import com.adsamcik.mindlayer.service.engine.SessionManager
 import com.adsamcik.mindlayer.service.engine.ThermalBand
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
@@ -100,7 +101,13 @@ class DiagnosticExporterTest {
         every { engineManager.isInitialized } returns true
         every { engineManager.currentBackend } returns "GPU"
         every { engineManager.initTimeSeconds } returns 2.3f
-        every { engineManager.modelPath } returns "/data/app/model.litertlm"
+        every { engineManager.currentModel } returns ModelInfo(
+            id = "model",
+            displayName = "Model",
+            path = "/data/app/model.litertlm",
+            sizeBytes = 1L,
+            isDefault = true,
+        )
 
         thermalMonitor = mockk(relaxed = true)
         every { thermalMonitor.currentPolicy } returns MutableStateFlow(defaultPolicy)
@@ -116,6 +123,7 @@ class DiagnosticExporterTest {
             SessionInfo("s1", "GPU", 4096, 120, 5, 1000, 2000, false),
             SessionInfo("s2", "CPU", 2048, 50, 2, 1500, 2500, true),
         )
+
 
         logDao = mockk(relaxed = true)
         coEvery { logDao.getRecent(50) } returns listOf(
@@ -201,7 +209,22 @@ class DiagnosticExporterTest {
     @Test
     fun `engine section has modelPath field`() = runTest {
         val engine = exportJson()["engine"]!!.jsonObject
-        assertEquals("/data/app/model.litertlm", engine["modelPath"]!!.jsonPrimitive.content)
+        assertEquals("model.litertlm", engine["modelPath"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `engine section redacts modelPath directories`() = runTest {
+        every { engineManager.currentModel } returns ModelInfo(
+            id = "model",
+            displayName = "Model",
+            path = "C:\\private\\models\\gemma\\model.litertlm",
+            sizeBytes = 1L,
+            isDefault = true,
+        )
+
+        val engine = exportJson()["engine"]!!.jsonObject
+
+        assertEquals("model.litertlm", engine["modelPath"]!!.jsonPrimitive.content)
     }
 
     @Test
@@ -225,8 +248,8 @@ class DiagnosticExporterTest {
     }
 
     @Test
-    fun `engine section omits modelPath when it throws`() = runTest {
-        every { engineManager.modelPath } throws IllegalStateException("not found")
+    fun `engine section omits modelPath when no model is loaded`() = runTest {
+        every { engineManager.currentModel } returns null
 
         val engine = exportJson()["engine"]!!.jsonObject
         assertFalse(engine.containsKey("modelPath"))
@@ -451,20 +474,65 @@ class DiagnosticExporterTest {
     }
 
     @Test
-    fun `recentLogs includes thermalBand and errorMessage when present`() = runTest {
+    fun `recentLogs emits errorClass key not errorMessage for error entries`() = runTest {
         coEvery { logDao.getRecent(50) } returns listOf(
             LogEntry(
                 timestampMs = 1L,
                 category = LogCategory.ERROR,
                 event = LogEvent.GENERAL_ERROR,
                 thermalBand = "HOT",
-                errorMessage = "out of memory",
+                errorMessage = "OutOfMemoryError",
             ),
         )
 
         val entry = exportJson()["recentLogs"]!!.jsonArray[0].jsonObject
         assertEquals("HOT", entry["thermalBand"]!!.jsonPrimitive.content)
-        assertEquals("out of memory", entry["errorMessage"]!!.jsonPrimitive.content)
+        // Must use "errorClass" key, never "errorMessage"
+        assertFalse("Raw errorMessage key must not be emitted", entry.containsKey("errorMessage"))
+        assertEquals("OutOfMemoryError", entry["errorClass"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `recentLogs errorClass is capped at 256 chars in export`() = runTest {
+        val longLabel = "A".repeat(500)
+        coEvery { logDao.getRecent(50) } returns listOf(
+            LogEntry(
+                timestampMs = 2L,
+                category = LogCategory.ERROR,
+                event = LogEvent.REQUEST_ERROR,
+                errorMessage = longLabel,
+            ),
+        )
+
+        val entry = exportJson()["recentLogs"]!!.jsonArray[0].jsonObject
+        val exported = entry["errorClass"]!!.jsonPrimitive.content
+        assertTrue("Exported errorClass must be ≤ 256 chars", exported.length <= 256)
+        assertFalse("Raw errorMessage key must not be emitted", entry.containsKey("errorMessage"))
+    }
+
+    @Test
+    fun `recentLogs errorClass never contains free-form prompt text`() = runTest {
+        // Simulate an adversarial insertion where a caller bypassed sanitization
+        val leaked = "leaked prompt: SECRET TEXT 1234567890".repeat(50)
+        coEvery { logDao.getRecent(50) } returns listOf(
+            LogEntry(
+                timestampMs = 3L,
+                category = LogCategory.ERROR,
+                event = LogEvent.REQUEST_ERROR,
+                errorMessage = leaked,
+            ),
+        )
+
+        val raw = exporter.export()
+        // The full leaked text must never appear verbatim in the export
+        assertFalse("Leaked prompt text must not appear in diagnostic export",
+            raw.contains("SECRET TEXT 1234567890"))
+        // The export should still contain an errorClass field (truncated to 256)
+        val entry = Json.parseToJsonElement(raw).jsonObject["recentLogs"]!!
+            .jsonArray[0].jsonObject
+        assertFalse(entry.containsKey("errorMessage"))
+        assertTrue(entry.containsKey("errorClass"))
+        assertTrue((entry["errorClass"]!!.jsonPrimitive.content.length) <= 256)
     }
 
     // ---- Stats section ------------------------------------------------------

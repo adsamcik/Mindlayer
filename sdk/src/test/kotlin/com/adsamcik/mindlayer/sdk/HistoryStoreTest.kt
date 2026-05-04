@@ -53,14 +53,11 @@ class HistoryStoreTest {
 
         val context = ApplicationProvider.getApplicationContext<Context>()
 
-        // Build in-memory database and inject via MindlayerDatabase singleton hack:
-        // We construct the HistoryStore with the same context, but to avoid the
-        // singleton returning a persistent DB, we reset the singleton field.
-        resetSingleton()
+        MindlayerDatabase.clearInstance()
         db = Room.inMemoryDatabaseBuilder(context, MindlayerDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        setSingleton(db)
+        MindlayerDatabase.setInstance(db)
 
         store = HistoryStore(context, HistoryPolicy.FULL_CONTENT)
     }
@@ -68,22 +65,8 @@ class HistoryStoreTest {
     @After
     fun teardown() {
         db.close()
-        resetSingleton()
+        MindlayerDatabase.clearInstance()
         unmockkStatic(Log::class)
-    }
-
-    /** Clear the private `instance` field in MindlayerDatabase.Companion. */
-    private fun resetSingleton() {
-        val field = MindlayerDatabase::class.java.getDeclaredField("instance")
-        field.isAccessible = true
-        field.set(null, null)
-    }
-
-    /** Inject our in-memory DB into the singleton so HistoryStore picks it up. */
-    private fun setSingleton(database: MindlayerDatabase) {
-        val field = MindlayerDatabase::class.java.getDeclaredField("instance")
-        field.isAccessible = true
-        field.set(null, database)
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -491,6 +474,35 @@ class HistoryStoreTest {
         assertNull(replay.pendingUserTurn)
     }
 
+    @Test
+    fun `listConversations returns counts and chronological previews`() = runTest {
+        store.persistConversation("older", defaultConfig.copy(systemPrompt = "Old prompt"))
+        val oldTexts = listOf("one", "two", "three", "four")
+        oldTexts.forEach { text ->
+            val turnId = store.persistUserTurn("older", text)
+            store.markUserTurnCompleted(turnId)
+        }
+        store.persistUserTurn("older", "pending should not count")
+
+        store.persistConversation("newer", defaultConfig.copy(systemPrompt = "New prompt"))
+        val newerTurn = store.persistUserTurn("newer", "newest")
+        store.markUserTurnCompleted(newerTurn)
+
+        db.conversationDao().touch("older", nowMs = 1_000L)
+        db.conversationDao().touch("newer", nowMs = 2_000L)
+
+        val summaries = store.listConversations(limit = 10)
+
+        assertEquals(listOf("newer", "older"), summaries.map { it.conversationId })
+        assertEquals(1, summaries[0].turnCount)
+        assertEquals(listOf("newest"), summaries[0].preview.map { it.text })
+
+        val older = summaries[1]
+        assertEquals(4, older.turnCount)
+        assertEquals(listOf("two", "three", "four"), older.preview.map { it.text })
+        assertTrue(older.preview.all { it.role == TurnRole.USER })
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     //  Recovery flow (integration)
     // ═══════════════════════════════════════════════════════════════════
@@ -554,5 +566,112 @@ class HistoryStoreTest {
         assertEquals(turnIds[7], replay.turns[0].turnId)
         assertEquals(turnIds[8], replay.turns[1].turnId)
         assertEquals(turnIds[9], replay.turns[2].turnId)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  M18 security regression tests — tokenEstimate must not be trusted
+    // ═══════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `getReplayHistory skips turn with over-long text regardless of stored tokenEstimate zero`() =
+        runTest {
+            store.persistConversation("sess-1", defaultConfig.copy(systemPrompt = null))
+
+            // Adversary writes a turn with 100k chars but tokenEstimate = 0
+            val oversizedTurnId = java.util.UUID.randomUUID().toString()
+            db.turnDao().insertWithAutoSeq(
+                com.adsamcik.mindlayer.sdk.db.TurnEntity(
+                    turnId = oversizedTurnId,
+                    conversationId = "sess-1",
+                    seq = 0,
+                    role = TurnRole.USER,
+                    state = TurnState.COMPLETED,
+                    textContent = "x".repeat(100_000),
+                    tokenEstimate = 0,
+                    startedAtMs = System.currentTimeMillis(),
+                    completedAtMs = System.currentTimeMillis(),
+                ),
+            )
+
+            val replay = store.getReplayHistory("sess-1", 100_000)!!
+
+            // The oversized turn must be excluded despite tokenEstimate = 0
+            assertTrue(replay.turns.none { it.turnId == oversizedTurnId })
+            assertTrue(replay.turns.isEmpty())
+
+            // Warning must have been logged
+            io.mockk.verify(atLeast = 1) {
+                Log.w("HistoryStore", match<String> { it.contains("text too long") })
+            }
+        }
+
+    @Test
+    fun `getReplayHistory caps at MAX_REPLAY_TURNS even when tokenEstimate is zero for all turns`() =
+        runTest {
+            store.persistConversation("sess-1", defaultConfig.copy(systemPrompt = null))
+
+            // Insert 500 turns each with ~100 chars and tokenEstimate = 0 (adversarial)
+            for (i in 0 until 500) {
+                val id = java.util.UUID.randomUUID().toString()
+                db.turnDao().insertWithAutoSeq(
+                    com.adsamcik.mindlayer.sdk.db.TurnEntity(
+                        turnId = id,
+                        conversationId = "sess-1",
+                        seq = 0,
+                        role = TurnRole.USER,
+                        state = TurnState.COMPLETED,
+                        textContent = "a".repeat(100),
+                        tokenEstimate = 0,
+                        startedAtMs = System.currentTimeMillis(),
+                        completedAtMs = System.currentTimeMillis(),
+                    ),
+                )
+            }
+
+            // Use a budget large enough that only the 200-turn cap is binding
+            // (100 chars / 4 = 25 tokens each; 200 * 25 = 5000 tokens)
+            val replay = store.getReplayHistory("sess-1", 1_000_000)!!
+
+            assertTrue(
+                "Expected at most 200 turns, got ${replay.turns.size}",
+                replay.turns.size <= 200,
+            )
+
+            // Total recomputed tokens must also stay within any sane budget
+            val totalRecomputed = replay.turns.sumOf { (it.textContent?.length ?: 0) / 4 }
+            assertTrue(totalRecomputed <= 1_000_000)
+        }
+
+    @Test
+    fun `getReplayHistory uses recomputed tokens not stored zero for budget gate`() = runTest {
+        store.persistConversation("sess-1", defaultConfig.copy(systemPrompt = null))
+
+        // Each turn: 800 chars → recomputed = 200 tokens. tokenEstimate is 0 (lying column).
+        val ids = mutableListOf<String>()
+        for (i in 0 until 5) {
+            val id = java.util.UUID.randomUUID().toString()
+            ids.add(id)
+            db.turnDao().insertWithAutoSeq(
+                com.adsamcik.mindlayer.sdk.db.TurnEntity(
+                    turnId = id,
+                    conversationId = "sess-1",
+                    seq = 0,
+                    role = TurnRole.USER,
+                    state = TurnState.COMPLETED,
+                    textContent = "b".repeat(800),
+                    tokenEstimate = 0,
+                    startedAtMs = System.currentTimeMillis(),
+                    completedAtMs = System.currentTimeMillis(),
+                ),
+            )
+        }
+
+        // Budget of 500 tokens → only 2 turns fit (2 * 200 = 400 ≤ 500; 3rd would be 600 > 500)
+        // The old code using tokenEstimate=0 would have included all 5.
+        val replay = store.getReplayHistory("sess-1", 500)!!
+        assertTrue(
+            "Expected at most 2 turns with recomputed budget, got ${replay.turns.size}",
+            replay.turns.size <= 2,
+        )
     }
 }

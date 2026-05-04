@@ -82,6 +82,16 @@ class LogDaoTest {
     }
 
     @Test
+    fun `usage log table exposes composite query indexes`() {
+        val indexes = indexNames("usage_logs")
+
+        assertTrue(indexes.contains("index_usage_logs_request_timestamp"))
+        assertTrue(indexes.contains("index_usage_logs_session_timestamp"))
+        assertTrue(indexes.contains("index_usage_logs_category_event_timestamp"))
+        assertTrue(indexes.contains("index_usage_logs_backend_event_timestamp"))
+    }
+
+    @Test
     fun `getRecent returns entries in reverse chronological order`() = runTest {
         dao.insert(entry(timestampMs = 100))
         dao.insert(entry(timestampMs = 300))
@@ -308,5 +318,19 @@ class LogDaoTest {
         )
         dao.insertAll(entries)
         assertEquals(3, dao.totalCount())
+    }
+
+    private fun indexNames(tableName: String): Set<String> {
+        val names = mutableSetOf<String>()
+        val cursor = db.openHelper.readableDatabase.query("PRAGMA index_list(`$tableName`)")
+        try {
+            val nameColumn = cursor.getColumnIndexOrThrow("name")
+            while (cursor.moveToNext()) {
+                names += cursor.getString(nameColumn)
+            }
+        } finally {
+            cursor.close()
+        }
+        return names
     }
 }

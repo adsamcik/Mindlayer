@@ -190,7 +190,7 @@ class EngineManager(
         maxTokens: Int = 4096,
     ): Engine = mutex.withLock {
         val target = try {
-            selectedModel
+            withContext(Dispatchers.IO) { selectedModel }
         } catch (e: IllegalStateException) {
             // F-077: `selectedModel` is `by lazy { ... ?: throw noModelFoundException() }`.
             // The only IllegalStateException reachable here is the no-model-file path

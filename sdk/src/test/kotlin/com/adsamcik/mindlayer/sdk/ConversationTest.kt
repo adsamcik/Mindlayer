@@ -11,11 +11,14 @@ import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.sdk.db.MindlayerDatabase
 import io.mockk.coEvery
 import io.mockk.every
+import io.mockk.just
 import io.mockk.mockk
 import io.mockk.mockkStatic
+import io.mockk.runs
 import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
+import org.junit.Assert.assertTrue
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -55,11 +58,11 @@ class ConversationTest {
 
         val context = ApplicationProvider.getApplicationContext<Context>()
 
-        resetDbSingleton()
+        MindlayerDatabase.clearInstance()
         db = Room.inMemoryDatabaseBuilder(context, MindlayerDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        setDbSingleton(db)
+        MindlayerDatabase.setInstance(db)
 
         mockService = mockk(relaxed = true) {
             every { createSession(any()) } returns "session-conv"
@@ -79,23 +82,11 @@ class ConversationTest {
     @After
     fun tearDown() {
         db.close()
-        resetDbSingleton()
+        MindlayerDatabase.clearInstance()
         unmockkAll()
     }
 
     // -- Helpers --------------------------------------------------------------
-
-    private fun resetDbSingleton() {
-        val field = MindlayerDatabase::class.java.getDeclaredField("instance")
-        field.isAccessible = true
-        field.set(null, null)
-    }
-
-    private fun setDbSingleton(database: MindlayerDatabase) {
-        val field = MindlayerDatabase::class.java.getDeclaredField("instance")
-        field.isAccessible = true
-        field.set(null, database)
-    }
 
     private fun buildMindlayer(conn: ConnectionManager, historyStore: HistoryStore?): Mindlayer {
         val ctor = Mindlayer::class.java.getDeclaredConstructor(
@@ -356,5 +347,52 @@ class ConversationTest {
 
         val cfg = configSlot.captured
         assertEquals(7L * 24 * 60 * 60 * 1000, cfg.expirationMs)
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  L14 — close() cancels in-flight handles (thread-safety fix)
+    // ═════════════════════════════════════════════════════════════════════
+
+    /**
+     * Verifies that [Conversation.close] cancels every in-flight
+     * [InferenceHandle] before calling [destroySession], ensuring the service
+     * is not left generating tokens for a dead session.
+     */
+    @Test
+    fun `close cancels in-flight handle before destroying session`() = runTest {
+        val callOrder = java.util.concurrent.CopyOnWriteArrayList<String>()
+
+        // Track order: cancel before destroy?
+        every { mockService.cancelInference(any()) } answers { callOrder.add("cancel") }
+        every { mockService.destroySession(any()) } answers { callOrder.add("destroy") }
+
+        val conv = mindlayer.conversation()
+        // chatStream creates the session and returns a cold-flow handle (not collected)
+        val handle = conv.chatStream("a long streaming message")
+
+        // Close the conversation — should cancel handle then destroy session.
+        // close() is synchronous, so both IPC calls have been dispatched by the
+        // time it returns. No polling/sleeping required.
+        conv.close()
+
+        assertTrue("handle must be marked cancelled after close()", handle.isCancelled)
+        assertEquals(
+            "cancel must happen before destroySession",
+            listOf("cancel", "destroy"),
+            callOrder,
+        )
+    }
+
+    @Test
+    fun `close is idempotent when called multiple times`() = runTest {
+        stubInferToClose()
+        val conv = mindlayer.conversation()
+        try { conv.chat("setup") } catch (_: Exception) { }
+
+        conv.close()
+        conv.close()
+        conv.close()
+
+        verify(exactly = 1) { mockService.destroySession(any()) }
     }
 }

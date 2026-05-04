@@ -30,7 +30,9 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
@@ -72,6 +74,12 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     companion object {
         private const val TAG = "SessionManager"
         private const val INIT_RETRY_AFTER_MS: Long = 200L
+
+        const val MAX_SYSTEM_PROMPT_CHARS = 64 * 1024
+        const val MAX_TOOLS_JSON_CHARS = 64 * 1024
+        const val MAX_EXTRA_CONTEXT_CHARS = 64 * 1024
+        const val MAX_INITIAL_HISTORY_TURNS = 200
+        const val MAX_HISTORY_TURN_CHARS = 16 * 1024
 
         /**
          * F-035: prepended (uncopyable by the client) to every system
@@ -168,6 +176,10 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     fun createSession(config: SessionConfig, ownerToken: Any?): String {
         validateSessionConfig(config)
         cleanupExpiredSessions()
+        val sessionId = config.sessionId ?: UUID.randomUUID().toString()
+        if (sessions.containsKey(sessionId)) {
+            throw IllegalArgumentException("Session ID already in use")
+        }
         val tier = memoryBudget.deviceTier
         val snap = memoryBudget.currentSnapshot()
         val ownerUid = ownerUidFor(ownerToken)
@@ -255,7 +267,6 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         }
 
         val engine = engineManager.requireEngine()
-        val sessionId = config.sessionId ?: UUID.randomUUID().toString()
 
         val samplerConfig = SamplerConfig(
             topK = config.samplerTopK,
@@ -466,6 +477,17 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
      * fully torn down (and after the @Synchronized monitor is released —
      * we do **not** invoke listeners while holding the lock).
      *
+     * H6 — DO NOT remove-then-close. Native [Conversation.close] is unsafe
+     * while a flow collector is still in-flight on the same conversation
+     * (use-after-free in the LiteRT-LM JNI bridge). Instead:
+     *   1. look the handle up without removing,
+     *   2. if streaming, fire cancelProcess() to unblock the native flow,
+     *   3. acquire the per-session mutex (shared with InferenceOrchestrator),
+     *   4. close the conversation under the mutex,
+     *   5. only then remove the handle from the map.
+     * Step 5 ordering matters because callers (e.g. test cleanup, AIDL
+     * teardown) treat absence from the map as "fully torn down".
+     *
      * Typical reason codes:
      *  - `SESSION_EVICTED` (2002): caller-capacity eviction
      *  - `SESSION_EXPIRED` (2003): expiration sweep / get-on-stale
@@ -473,25 +495,40 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
      */
     @Synchronized
     private fun destroySessionInternal(id: String, evictionReasonCode: Int?) {
-        val handle = sessions.remove(id) ?: run {
+        val handle = sessions[id] ?: run {
             MindlayerLog.w(TAG, "destroySession: unknown session", sessionId = id)
             return
         }
         val capturedOwnerUid = handle.ownerUid
-        runBlocking {
-            handle.mutex.withLock {
-                handle.activeRequestId = null
-                handle.isStreaming = false
-                try {
-                    handle.conversation.close()
-                } catch (t: Throwable) {
-                    MindlayerLog.w(
-                        TAG,
-                        "Error closing conversation: ${t.safeLabel()}",
-                        sessionId = id,
-                    )
+        if (handle.isStreaming) {
+            try {
+                handle.conversation.cancelProcess()
+            } catch (t: Throwable) {
+                MindlayerLog.w(
+                    TAG,
+                    "cancelProcess failed during destroy: ${t.safeLabel()}",
+                    sessionId = id,
+                )
+            }
+        }
+        try {
+            runBlocking {
+                handle.mutex.withLock {
+                    handle.activeRequestId = null
+                    handle.isStreaming = false
+                    try {
+                        handle.conversation.close()
+                    } catch (t: Throwable) {
+                        MindlayerLog.w(
+                            TAG,
+                            "Error closing conversation: ${t.safeLabel()}",
+                            sessionId = id,
+                        )
+                    }
                 }
             }
+        } finally {
+            sessions.remove(id)
         }
         logRepository?.logSessionDestroyed(id)
         MindlayerLog.i(TAG, "Session destroyed (remaining=${sessions.size})", sessionId = id)
@@ -631,22 +668,6 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         return true
     }
 
-    private fun evictLowestPriorityOwnedBy(ownerToken: Any): Boolean {
-        val victim = sessions.values
-            .filter { !it.isStreaming && it.ownerToken != null && it.ownerToken == ownerToken }
-            .minByOrNull { calculatePriority(it) }
-            ?: return false
-
-        MindlayerLog.w(
-            TAG,
-            "Evicting caller-owned session (priority=${calculatePriority(victim)})",
-            sessionId = victim.sessionId,
-        )
-        logRepository?.logSessionEvicted(victim.sessionId, "caller_capacity")
-        destroySessionInternal(victim.sessionId, com.adsamcik.mindlayer.shared.MindlayerErrorCode.SESSION_EVICTED)
-        return true
-    }
-
     private fun evictLowestPriorityOwnedByUid(ownerUid: Int): Boolean {
         val victim = sessions.values
             .filter { !it.isStreaming && it.ownerUid == ownerUid }
@@ -672,10 +693,10 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
      */
     fun evictUnderPressure() {
         val nonStreaming = sessions.values
-            .filter { !it.isStreaming }
+            .filter { !it.isStreaming && !it.isPinned }
             .sortedBy { calculatePriority(it) }
 
-        // Keep the single highest-priority non-streaming session
+        // Keep the single highest-priority non-streaming, non-pinned session
         val toEvict = if (nonStreaming.size > 1) nonStreaming.dropLast(1) else emptyList()
 
         for (handle in toEvict) {
@@ -719,16 +740,15 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             }
 
             MemoryPressure.EMERGENCY -> {
-                MindlayerLog.w(TAG, "EMERGENCY pressure — evicting all non-streaming sessions")
-                val nonStreaming = sessions.values.filter { !it.isStreaming }
+                MindlayerLog.w(TAG, "EMERGENCY pressure — evicting all non-streaming, non-pinned sessions")
+                val nonStreaming = sessions.values.filter { !it.isStreaming && !it.isPinned }
                 for (handle in nonStreaming) {
                     logRepository?.logSessionEvicted(handle.sessionId, "emergency_pressure")
                     destroySessionInternal(handle.sessionId, com.adsamcik.mindlayer.shared.MindlayerErrorCode.MEMORY_PRESSURE)
                 }
                 if (nonStreaming.isNotEmpty()) {
                     MindlayerLog.w(
-                        TAG, "Emergency-evicted ${nonStreaming.size} session(s) " +
-                            "(remaining=${sessions.size})"
+                        TAG, "Emergency-evicted ${nonStreaming.size} session(s) (remaining=${sessions.size})"
                     )
                 }
             }
@@ -893,7 +913,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             val names = mutableSetOf<String>()
             val providers = array.map { element ->
                 val obj = element.jsonObject
-                // F-066: client-supplied tool names beginning with "__"
+                // F-066 / L9 — client-supplied tool names beginning with "__"
                 // are reserved for internal use (e.g. the synthetic
                 // `__structured_output` tool). Reject them at parse time
                 // so they cannot collide with engine machinery.
@@ -912,11 +932,23 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             }
             MindlayerLog.d(TAG, "Parsed ${providers.size} tool definition(s)")
             ParsedTools(providers = providers, names = names)
+        } catch (e: IllegalArgumentException) {
+            // L9 — reserved-name rejections must surface to the client so the
+            // session is rejected, not silently created without tools.
+            throw e
         } catch (t: Throwable) {
             MindlayerLog.e(TAG, "Failed to parse toolsJson: ${t.safeLabel()}")
             null
         }
     }
+
+    /**
+     * L9 — names beginning with `__` are reserved for framework-injected
+     * helper tools (currently `__structured_output`). Client-supplied tools
+     * must not collide with this namespace.
+     */
+    private fun isReservedToolName(name: String): Boolean =
+        name == StructuredOutputHelper.TOOL_NAME || name.startsWith("__")
 
     /**
      * Lightweight [OpenApiTool] backed by a pre-serialised JSON description.

@@ -1,9 +1,9 @@
 import java.util.Properties
+import java.util.Base64
 import java.util.zip.ZipFile
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
     id("org.jetbrains.kotlin.plugin.compose") version libs.versions.kotlin.get()
@@ -20,9 +20,22 @@ val keystoreProperties = Properties().apply {
         keystorePropertiesFile.inputStream().use { load(it) }
     }
 }
-val hasReleaseKeystore = keystoreProperties.getProperty("storeFile")?.let {
-    rootProject.file(it).exists()
-} ?: false
+val localReleaseKeystore = keystoreProperties.getProperty("storeFile")?.let(rootProject::file)
+val hasLocalReleaseKeystore = localReleaseKeystore?.exists() == true
+val ciKeystoreBase64 = providers.environmentVariable("ANDROID_KEYSTORE_BASE64").orNull?.takeIf { it.isNotBlank() }
+val ciKeystorePassword = providers.environmentVariable("ANDROID_KEYSTORE_PASSWORD").orNull?.takeIf { it.isNotBlank() }
+val ciKeyAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").orNull?.takeIf { it.isNotBlank() }
+val ciKeyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").orNull?.takeIf { it.isNotBlank() }
+val ciReleaseKeystore = ciKeystoreBase64?.let { encoded ->
+    layout.buildDirectory.file("generated/signing/ci-release.jks").get().asFile.also { file ->
+        file.parentFile.mkdirs()
+        file.writeBytes(Base64.getDecoder().decode(encoded))
+    }
+}
+val hasCiReleaseKeystore =
+    ciReleaseKeystore != null && ciKeystorePassword != null && ciKeyAlias != null && ciKeyPassword != null
+val hasReleaseKeystore = hasLocalReleaseKeystore || hasCiReleaseKeystore
+
 val modelSha256 = project.findProperty("modelSha256")?.toString()?.trim().orEmpty()
 val modelSha256Pattern = Regex("^[0-9a-f]{64}$")
 
@@ -181,7 +194,9 @@ android {
 
         // Only bundle resources for the locales we actually ship.
         // Expand this list when translations are added.
-        resourceConfigurations += listOf("en")
+        androidResources {
+            localeFilters += listOf("en")
+        }
 
         // F-002: hex-encoded SHA-256 of the bundled model file. When
         // non-empty, the engine refuses to load any .litertlm whose hash
@@ -195,10 +210,17 @@ android {
     signingConfigs {
         if (hasReleaseKeystore) {
             create("release") {
-                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
-                storePassword = keystoreProperties.getProperty("storePassword")
-                keyAlias = keystoreProperties.getProperty("keyAlias")
-                keyPassword = keystoreProperties.getProperty("keyPassword")
+                if (hasLocalReleaseKeystore) {
+                    storeFile = localReleaseKeystore
+                    storePassword = keystoreProperties.getProperty("storePassword")
+                    keyAlias = keystoreProperties.getProperty("keyAlias")
+                    keyPassword = keystoreProperties.getProperty("keyPassword")
+                } else {
+                    storeFile = checkNotNull(ciReleaseKeystore)
+                    storePassword = checkNotNull(ciKeystorePassword)
+                    keyAlias = checkNotNull(ciKeyAlias)
+                    keyPassword = checkNotNull(ciKeyPassword)
+                }
             }
         }
     }
