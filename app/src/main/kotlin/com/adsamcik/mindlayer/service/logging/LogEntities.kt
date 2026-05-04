@@ -40,6 +40,9 @@ object LogCategory {
     const val MEMORY = "MEMORY"
     const val ENGINE = "ENGINE"
     const val ERROR = "ERROR"
+    // F-056: audit trail for approve / deny / revoke / cert-rotation
+    // events. Surfaced in dashboard logs for the user to inspect.
+    const val SECURITY = "SECURITY"
 }
 
 object LogEvent {
@@ -50,6 +53,10 @@ object LogEvent {
     const val REQUEST_ERROR = "request_error"
     const val TOOL_CALL = "tool_call"
     const val TOOL_RESULT = "tool_result"
+    // F-036: model fabricated an unknown tool name OR emitted oversized
+    // arguments; the orchestrator dropped/truncated the call. Logged
+    // under LogCategory.SECURITY so the dashboard surfaces it.
+    const val TOOL_CALL_REJECTED = "tool_call_rejected"
     const val USER_MESSAGE = "user_message"
     const val MODEL_RESPONSE = "model_response"
     // Thermal
@@ -66,6 +73,14 @@ object LogEvent {
     const val ENGINE_INIT = "engine_init"
     const val ENGINE_SHUTDOWN = "engine_shutdown"
     const val ENGINE_FALLBACK = "engine_fallback"
+    // F-077: typed init-failure category. The variant name lands in
+    // `extraJson` under "failureCategory"; the optional safeLabel goes
+    // in `errorMessage` (already F-006-clean — class-name-only). The
+    // dashboard reads the latest row to render variant-specific
+    // remediation copy.
+    const val INIT_FAILURE_CATEGORIZED = "init_failure_categorized"
     // Error
     const val GENERAL_ERROR = "general_error"
+    // Security
+    const val SECURITY_DECISION = "security_decision"
 }

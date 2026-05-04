@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    F-024: exclude the SDK's encrypted history DB and key prefs from
+    cloud backup and device-to-device transfer. The DB is encrypted with
+    a Keystore-resident wrapping key (alias `mindlayer.sdk.db.key`) that
+    cannot be restored to a different device, so any restored ciphertext
+    would be unreadable anyway — but we still exclude it explicitly so
+    that:
+      - Backups stay small (the DB grows with conversation history).
+      - The wrapped-key SharedPreferences blob does not leak across
+        devices in a backup, even though it is itself useless without
+        the on-device Keystore key.
+
+    Host-app precedence note: when a host app declares its own
+    dataExtractionRules in its manifest, the manifest merger uses the
+    host's value. Hosts wanting Mindlayer's exclusions must merge these
+    rules into their own file. See SDK_INTEGRATION.md.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="database" path="mindlayer_history.db" />
+        <exclude domain="database" path="mindlayer_history.db-shm" />
+        <exclude domain="database" path="mindlayer_history.db-wal" />
+        <exclude domain="sharedpref" path="mindlayer_sdk_db_key.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="database" path="mindlayer_history.db" />
+        <exclude domain="database" path="mindlayer_history.db-shm" />
+        <exclude domain="database" path="mindlayer_history.db-wal" />
+        <exclude domain="sharedpref" path="mindlayer_sdk_db_key.xml" />
+    </device-transfer>
+</data-extraction-rules>

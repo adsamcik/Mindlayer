@@ -21,6 +21,30 @@ data class CallerIdentity(
  */
 object CallerVerifier {
 
+    /** F-030: maximum length for a sanitised application label. */
+    const val MAX_LABEL_LEN = 64
+
+    /**
+     * F-030: characters that hide attacker-controlled labels under
+     * homoglyphs / direction overrides / private-use codepoints. Stripped
+     * after NFKC normalisation.
+     */
+    private val UNSAFE_LABEL_CHARS = Regex("[\\p{Cf}\\p{Cc}\\p{Co}\\p{Cn}]")
+
+    /**
+     * F-030: NFKC-normalise, strip Cf/Cc/Co/Cn (RTL overrides, ZWNJ,
+     * private-use, unassigned) and cap to [MAX_LABEL_LEN]. Returns null for
+     * blank / empty / wholly-stripped labels so callers fall back to the
+     * package name as primary identity.
+     */
+    fun sanitizeLabel(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        val nfkc = java.text.Normalizer.normalize(raw, java.text.Normalizer.Form.NFKC)
+        val stripped = UNSAFE_LABEL_CHARS.replace(nfkc, "").trim()
+        if (stripped.isEmpty()) return null
+        return if (stripped.length > MAX_LABEL_LEN) stripped.substring(0, MAX_LABEL_LEN) else stripped
+    }
+
     fun identifyCaller(context: Context, callingUid: Int): CallerIdentity? {
         val pm = context.packageManager
         val packages = pm.getPackagesForUid(callingUid) ?: return null
@@ -44,8 +68,36 @@ object CallerVerifier {
         } catch (_: Throwable) {
             null
         }
-
         return CallerIdentity(pkg, sha, displayName)
+    }
+
+    /**
+     * F-031: resolve a [CallerIdentity] from a package name only. Used at
+     * approve-tap time to re-verify the live signing certificate against the
+     * sig pinned in the displayed [PendingApproval] row.
+     *
+     * Returns `null` if the package is not installed, has no signing
+     * certificate, or fails sig resolution. Does NOT consult the calling
+     * UID (the dashboard's UID is not the target package's UID).
+     */
+    fun identifyByPackage(context: Context, pkg: String): CallerIdentity? {
+        val pm = context.packageManager
+        return try {
+            val sha = certificateSha256(pm, pkg) ?: return null
+            val label = sanitizeLabel(rawApplicationLabel(pm, pkg))
+            CallerIdentity(pkg, sha, label)
+        } catch (_: PackageManager.NameNotFoundException) {
+            null
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun rawApplicationLabel(pm: PackageManager, pkg: String): String? = try {
+        val appInfo = pm.getApplicationInfo(pkg, 0)
+        pm.getApplicationLabel(appInfo).toString()
+    } catch (_: Throwable) {
+        null
     }
 
     @Suppress("DEPRECATION")

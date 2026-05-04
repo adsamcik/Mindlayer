@@ -17,6 +17,7 @@ import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.MemoryPressure
 import com.adsamcik.mindlayer.service.engine.SessionManager
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
+import com.adsamcik.mindlayer.service.health.MlHealthRecorder
 import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
 import com.adsamcik.mindlayer.service.logging.LogCategory
 import com.adsamcik.mindlayer.service.logging.LogDatabase
@@ -24,6 +25,7 @@ import com.adsamcik.mindlayer.service.logging.LogEntry
 import com.adsamcik.mindlayer.service.logging.LogEvent
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
+import com.adsamcik.mindlayer.service.logging.safeLabel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -40,12 +42,18 @@ class MindlayerMlService : Service() {
         private const val NOTIFICATION_CHANNEL_ID = "mindlayer_inference"
         private const val NOTIFICATION_ID = 1
         private const val LOG_CLEANUP_INTERVAL_MS = 24L * 60 * 60 * 1000
-        private const val ACTION_STOP = "com.adsamcik.mindlayer.STOP"
 
         const val STATE_IDLE = "idle"
         const val STATE_LOADING = "loading"
         const val STATE_READY = "ready"
         const val STATE_INFERRING = "inferring"
+
+        /**
+         * F-043: STOP intent action posted by the foreground notification.
+         * Triggers a graceful shutdown of all active inferences and exits
+         * the foreground state.
+         */
+        const val ACTION_STOP = "com.adsamcik.mindlayer.service.ACTION_STOP"
     }
 
     lateinit var engineManager: EngineManager
@@ -57,6 +65,8 @@ class MindlayerMlService : Service() {
     lateinit var memoryBudget: MemoryBudget
         private set
     lateinit var thermalMonitor: ThermalMonitor
+        private set
+    lateinit var mlHealthRecorder: MlHealthRecorder
         private set
     private lateinit var sharedMemoryPool: SharedMemoryPool
     private lateinit var binder: ServiceBinder
@@ -77,11 +87,42 @@ class MindlayerMlService : Service() {
     var createdAtMs: Long = 0L
         private set
 
+    /**
+     * F-074: hold a reference to the prior default uncaught-exception
+     * handler so we can chain to it after recording the abnormal death.
+     * Skipping the chain would suppress the framework's own crash
+     * reporting (e.g. ActivityThread's process-dump trigger).
+     */
+    private var previousUncaughtHandler: Thread.UncaughtExceptionHandler? = null
+
     override fun onCreate() {
         super.onCreate()
         createdAtMs = android.os.SystemClock.elapsedRealtime()
         MindlayerLog.i(TAG, "Service created in process ${android.os.Process.myPid()}")
         createNotificationChannel()
+
+        // F-074: install the crash-loop watchdog *before* anything else
+        // touches the engine. recordHealthyBoot() runs the missed-death
+        // detection (previous boot ran but neither cleanly destroyed nor
+        // raised an uncaught exception — i.e. OOM-killer SIGKILL) and the
+        // 5-minute decay reset. The uncaught handler chains to whatever
+        // was installed before us so framework crash reporting still
+        // fires.
+        mlHealthRecorder = MlHealthRecorder(this)
+        try {
+            mlHealthRecorder.recordHealthyBoot()
+        } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "MlHealthRecorder.recordHealthyBoot raised: ${t.safeLabel()}")
+        }
+        previousUncaughtHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            try {
+                mlHealthRecorder.recordAbnormalDeath()
+            } catch (_: Throwable) {
+                // Never block the death path on I/O failure.
+            }
+            previousUncaughtHandler?.uncaughtException(thread, error)
+        }
 
         val logDb = LogDatabase.getInstance(this)
         logRepository = LogRepository(logDb.logDao())
@@ -97,7 +138,7 @@ class MindlayerMlService : Service() {
         val diagnosticExporter = DiagnosticExporter(
             engineManager, thermalMonitor, memoryBudget, sessionManager, logDb.logDao()
         )
-        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget)
+        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, logRepository = logRepository, mlHealthRecorder = mlHealthRecorder)
 
         logRepository.log(LogEntry(
             timestampMs = System.currentTimeMillis(),
@@ -110,6 +151,10 @@ class MindlayerMlService : Service() {
         thermalMonitor.start()
         observeMemoryPressure()
         observeThermalPolicy()
+        // F-022: schedule the documented 7-day log-retention cleanup.
+        // Without it, logs accumulate forever which is undesirable on a
+        // low-storage device. Implementation lives in `scheduleLogCleanup()`
+        // below.
         scheduleLogCleanup()
     }
 
@@ -129,8 +174,22 @@ class MindlayerMlService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         MindlayerLog.i(TAG, "onStartCommand, startId=$startId, action=${intent?.action}")
+        // F-043: handle the STOP action posted by the foreground notification.
+        // Tear down all in-flight inferences gracefully, drop the FGS, and stop
+        // the service. Other commands fall through to the START_NOT_STICKY
+        // path.
         if (intent?.action == ACTION_STOP) {
-            MindlayerLog.i(TAG, "Stop requested via notification action")
+            MindlayerLog.i(TAG, "ACTION_STOP received; cancelling all inferences and stopping")
+            try {
+                orchestrator.cancelAll()
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "orchestrator.cancelAll() raised: ${t.safeLabel()}")
+            }
+            try {
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            } catch (_: Throwable) { /* best-effort */ }
+            // Coroutine-scoped graceful shutdown: complete orchestrator
+            // teardown asynchronously so we don't block the binder thread.
             serviceScope.launch {
                 try {
                     orchestrator.shutdown()
@@ -148,9 +207,29 @@ class MindlayerMlService : Service() {
         MindlayerLog.i(TAG, "Service destroyed")
         thermalMonitor.stop()
         memoryBudget.stop()
+        // v0.4: tear down eviction-callback registrations (unlinks death recipients).
+        // Must run before orchestrator.shutdown() — sessionManager.shutdown()
+        // calls into destroySession (no-notice path), but a stray binder
+        // transaction is still cheaper to skip with an empty registry.
+        if (::binder.isInitialized) {
+            binder.evictionRegistry.clear()
+        }
         orchestrator.shutdown()
         logRepository.shutdown()
         serviceScope.cancel()
+        // F-074: stamp the clean-shutdown marker last so the next boot's
+        // missed-death check (which compares lastBootAt to lastCleanShutdownAt)
+        // sees a fresh timestamp. Failure here is best-effort — if the
+        // file system is unhappy we'd rather not block the rest of the
+        // teardown chain. Worst case the next boot bumps the death
+        // count by one, which decays in 5 minutes anyway.
+        if (::mlHealthRecorder.isInitialized) {
+            try {
+                mlHealthRecorder.recordCleanShutdown()
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "MlHealthRecorder.recordCleanShutdown raised: ${t.safeLabel()}")
+            }
+        }
         super.onDestroy()
     }
 
@@ -267,6 +346,7 @@ class MindlayerMlService : Service() {
         }
 
         MindlayerLog.i(TAG, "Applying backend switch: ${engineManager.currentBackend} → $target")
+
         serviceScope.launch {
             try {
                 // Wait for any coroutine that slipped in before we took the
@@ -277,7 +357,7 @@ class MindlayerMlService : Service() {
                 engineManager.switchBackend(target)
                 MindlayerLog.i(TAG, "Backend switch complete: now on ${engineManager.currentBackend}")
             } catch (t: Throwable) {
-                MindlayerLog.e(TAG, "Backend switch failed: ${t.message}", throwable = t)
+                MindlayerLog.e(TAG, "Backend switch failed: ${t.safeLabel()}")
             }
         }
     }
@@ -304,7 +384,7 @@ class MindlayerMlService : Service() {
                     )
                     MindlayerLog.i(TAG, "Entered foreground")
                 } catch (e: Exception) {
-                    MindlayerLog.e(TAG, "Failed to enter foreground", throwable = e)
+                    MindlayerLog.e(TAG, "Failed to enter foreground: ${e.safeLabel()}")
                 }
             }
         }
@@ -316,11 +396,11 @@ class MindlayerMlService : Service() {
      */
     fun exitForeground() {
         synchronized(stateLock) {
-                activeInferenceCount = (activeInferenceCount - 1).coerceAtLeast(0)
-                if (activeInferenceCount == 0) {
-                    ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-                    MindlayerLog.i(TAG, "Exited foreground")
-                    // Apply pending backend switch when idle
+            activeInferenceCount = (activeInferenceCount - 1).coerceAtLeast(0)
+            if (activeInferenceCount == 0) {
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                MindlayerLog.i(TAG, "Exited foreground")
+                // Apply pending backend switch when idle
                 applyPendingBackendSwitch()
             }
         }

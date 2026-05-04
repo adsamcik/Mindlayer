@@ -5,16 +5,25 @@ import android.graphics.Bitmap
 import android.os.ParcelFileDescriptor
 import com.adsamcik.mindlayer.EngineInfo
 import com.adsamcik.mindlayer.HistoryTurn
+import com.adsamcik.mindlayer.IClientCallback
 import com.adsamcik.mindlayer.RequestMeta
+import com.adsamcik.mindlayer.ServiceCapabilities
 import com.adsamcik.mindlayer.ServiceStatus
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.SessionInfo
 import com.adsamcik.mindlayer.ToolResult
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
@@ -79,20 +88,37 @@ class Mindlayer private constructor(
             "Use the streaming chat() API with a ToolCall handler instead."
 
         /**
+         * Per-instance buffer for [evictionNotices]. 64 entries is enough to
+         * absorb a device-wide memory-pressure storm (which evicts every
+         * non-streaming session, typically ≤8) plus normal expiration churn
+         * without dropping anything in steady-state.
+         */
+        const val EVICTION_BUFFER: Int = 64
+
+        /**
          * Create a [Mindlayer] instance and start binding to the service.
          * Use [awaitConnected] or observe [connectionState] before issuing RPCs.
          *
-         * @param persistHistory when `true`, user prompts and model responses are
-         *   stored in an SQLCipher-encrypted Room database at
-         *   `context.getDatabasePath("mindlayer_history.db")`. Defaults to `false`
-         *   (privacy-by-default). Pass `true` only when the host app explicitly
-         *   opts in to conversation history (e.g., to power a history UI or
-         *   enable session recovery after process death).
+         * History is metadata-only by default. Pass [HistoryPolicy.FULL_CONTENT]
+         * only if the client explicitly needs local replay/recovery and has its
+         * own consent/retention controls for prompt and model-output content.
+         *
+         * @param historyPolicy controls what — if anything — is persisted in the
+         *   SQLCipher-encrypted Room database at
+         *   `context.getDatabasePath("mindlayer_history.db")`. Defaults to
+         *   [HistoryPolicy.METADATA_ONLY] (privacy-by-default; metadata only,
+         *   no prompt or model-output content). Pass [HistoryPolicy.FULL_CONTENT]
+         *   only when the host app explicitly opts in to full conversation
+         *   history (to power a history UI or enable session recovery after
+         *   process death) and has its own consent/retention controls.
          */
-        fun connect(context: Context, persistHistory: Boolean = false): Mindlayer {
+        fun connect(
+            context: Context,
+            historyPolicy: HistoryPolicy = HistoryPolicy.METADATA_ONLY,
+        ): Mindlayer {
             val mgr = ConnectionManager()
             mgr.connect(context)
-            val store = if (persistHistory) HistoryStore(context) else null
+            val store = HistoryStore(context, historyPolicy)
             return Mindlayer(mgr, store)
         }
     }
@@ -112,6 +138,175 @@ class Mindlayer private constructor(
         connection.awaitConnected()
     }
 
+    // -- v0.4 eviction-callback subscription ---------------------------------
+
+    /**
+     * Bounded notice buffer — coalesces rapid eviction storms (memory
+     * pressure can retire several sessions in quick succession) and
+     * drops the oldest if no consumer is reading.
+     */
+    private val _evictionFlow = MutableSharedFlow<EvictionNotice>(
+        replay = 0,
+        extraBufferCapacity = EVICTION_BUFFER,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /**
+     * Shared callback instance — registered exactly once per Mindlayer
+     * lifetime. Service-side idempotency keys on `asBinder()` so
+     * resubscribing this same instance after a reconnect is a no-op.
+     *
+     * Lazy because [IClientCallback.Stub]'s constructor calls
+     * [android.os.Binder.attachInterface], which is only mocked under the
+     * Robolectric framework. Plain-JUnit tests that never reach a
+     * CONNECTED transition (and therefore never invoke
+     * [maybeSubscribeEvictions]) skip the Binder dependency entirely.
+     */
+    private val evictionCallback: IClientCallback by lazy {
+        object : IClientCallback.Stub() {
+            override fun onSessionEvicted(sessionId: String?, reasonCode: Int) {
+                val sid = sessionId ?: return
+                _evictionFlow.tryEmit(EvictionNotice(sid, reasonCode))
+            }
+        }
+    }
+
+    /**
+     * Coroutine scope owning the connection-state observer that handles
+     * automatic re-subscription on each fresh CONNECTED transition.
+     * Cancelled by [disconnect]; survives transient disconnects.
+     */
+    private val lifecycleScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    @Volatile private var lastSubscribedState: ConnectionState? = null
+
+    init {
+        // Auto-subscribe on every new CONNECTED transition so the eviction
+        // flow stays live across rebind cycles. The service-side registry
+        // is per-binder-keyed and survives only as long as the binder does
+        // — a fresh binder means a fresh subscription.
+        lifecycleScope.launch {
+            connection.state.collect { state ->
+                // Invalidate capability cache whenever we leave CONNECTED so
+                // the next `getCapabilities()` re-probes against the new
+                // binder rather than serving a stale cap set.
+                if (state != ConnectionState.CONNECTED) {
+                    cachedCapabilities = null
+                }
+                if (state == ConnectionState.CONNECTED && lastSubscribedState != ConnectionState.CONNECTED) {
+                    lastSubscribedState = ConnectionState.CONNECTED
+                    maybeSubscribeEvictions()
+                } else if (state != ConnectionState.CONNECTED) {
+                    lastSubscribedState = state
+                }
+            }
+        }
+    }
+
+    /**
+     * Stream of eviction notices for sessions owned by this caller.
+     *
+     * Always-on; subscription is automatic and survives reconnects. Emissions
+     * are bounded to the most-recent [EVICTION_BUFFER] items per consumer
+     * with `DROP_OLDEST` overflow, so a slow collector cannot back-pressure
+     * the service-side dispatcher.
+     *
+     * Returns an empty (never-emitting) flow when the connected service does
+     * not advertise [ServiceCapabilities.FEATURE_EVICTION_CALLBACK]. SDK
+     * consumers can additionally check `getCapabilities()` to surface a
+     * "no eviction notices on this service version" diagnostic.
+     */
+    fun evictionNotices(): Flow<EvictionNotice> = _evictionFlow.asSharedFlow()
+
+    /**
+     * Best-effort subscribe — invoked on every fresh CONNECTED transition.
+     *
+     * Intentionally does **not** pre-check capabilities to avoid racing
+     * test fixtures that mock the service: the [getCapabilities] call would
+     * populate the cache before the test gets to override the mock.
+     * Old services without `subscribeEvictionNotices` throw
+     * `AbstractMethodError` / `NoSuchMethodError`; both are swallowed so
+     * the SDK still works without push notifications, the user just polls
+     * instead.
+     */
+    private fun maybeSubscribeEvictions() {
+        try {
+            val service = connection.getService() ?: return
+            service.subscribeEvictionNotices(evictionCallback)
+        } catch (_: NoSuchMethodError) {
+            // Old AIDL stub; nothing to do.
+        } catch (_: AbstractMethodError) {
+            // Old service implementation without this method.
+        } catch (_: SecurityException) {
+            // Auth gate refused — handled by the regular RPC path; ignore here.
+        } catch (_: android.os.RemoteException) {
+            // Binder went away mid-subscribe; the next CONNECTED transition
+            // will re-subscribe.
+        } catch (_: Throwable) {
+            // Defensive: never let an eviction-channel hiccup propagate.
+        }
+    }
+
+    // -- Capabilities ---------------------------------------------------------
+
+    @Volatile private var cachedCapabilities: ServiceCapabilities? = null
+
+    /**
+     * Probe and cache the [ServiceCapabilities] of the connected service.
+     *
+     * The first call after [awaitConnected] performs the AIDL handshake and
+     * caches the result for the lifetime of this [Mindlayer] instance.
+     * Subsequent calls return the cached value without crossing the wire.
+     *
+     * **Old service compatibility**: if the connected service predates the
+     * `getCapabilities` AIDL method (built before v0.2), this falls back to
+     * [ServiceCapabilities.v0Baseline] so feature-gated SDK code can still
+     * make conservative decisions.
+     *
+     * Use [ServiceCapabilities.supports] to test a specific feature flag:
+     *
+     * ```kotlin
+     * val caps = mindlayer.getCapabilities()
+     * if (caps.supports(ServiceCapabilities.FEATURE_TOKEN_BATCH)) {
+     *     // request batched token deltas
+     * }
+     * ```
+     */
+    suspend fun getCapabilities(): ServiceCapabilities {
+        cachedCapabilities?.let { return it }
+        val service = connection.awaitConnected()
+        val caps = try {
+            service.capabilities
+        } catch (_: NoSuchMethodError) {
+            // AIDL stub from an older SDK; binder dispatch returned no
+            // implementation for this method on the remote side.
+            ServiceCapabilities.v0Baseline()
+        } catch (_: AbstractMethodError) {
+            // Same shape, different exception class on some Android versions.
+            ServiceCapabilities.v0Baseline()
+        } catch (e: SecurityException) {
+            // Auth-gate refusal — propagate. Capabilities are NOT typed-error
+            // gated; an un-prefixed SecurityException here means the caller
+            // isn't on the allowlist and this binding is going to be torn down.
+            throw e
+        }
+        cachedCapabilities = caps
+        return caps
+    }
+
+    /**
+     * Cheap kernel-level liveness probe. Returns `true` if the service binder
+     * is alive and accepting transactions, `false` if the binder is dead, the
+     * remote process has crashed, or this client has not yet connected.
+     *
+     * Implemented via [android.os.IBinder.pingBinder] so it does **not**
+     * consume rate-limit budget and does not exercise the service's own
+     * threading — a deadlocked service may still pass this check. Use
+     * [getStatus] (which goes through the auth gate at quarter-cost) when you
+     * need real service-state liveness.
+     */
+    fun isAlive(): Boolean = connection.getService()?.asBinder()?.pingBinder() == true
+
     /**
      * Unbind from the Mindlayer service and release resources.
      *
@@ -122,16 +317,76 @@ class Mindlayer private constructor(
      * Safe to call from any thread. Idempotent — multiple calls are harmless.
      */
     fun disconnect() {
+        cachedCapabilities = null
+        // v0.4: cancel the eviction-resubscribe observer so it doesn't try
+        // to re-register against a binding we're tearing down. The service
+        // side will GC the registration when its binder dies anyway, but
+        // an explicit unsubscribe is cleaner and keeps the registry small
+        // for long-lived service processes serving many short-lived clients.
+        // Guard the lazy access — if the callback was never materialized
+        // (no CONNECTED transition ever fired), there's nothing to unsubscribe.
+        if (lastSubscribedState == ConnectionState.CONNECTED) {
+            try {
+                val svc = connection.getService()
+                svc?.unsubscribeEvictionNotices(evictionCallback)
+            } catch (_: Throwable) {
+                // ignore — disconnect must always succeed.
+            }
+        }
+        lifecycleScope.cancel()
         connection.disconnect()
+    }
+
+    // -- Internal: AIDL error chokepoint --------------------------------------
+
+    /**
+     * Suspend chokepoint that converts service-thrown
+     * Mindlayer-coded Binder runtime exceptions into typed [MindlayerException]s.
+     *
+     * Wrap every public AIDL call site through this so callers see one error
+     * vocabulary regardless of which method threw. [SecurityException] from the
+     * auth gate (allowlist rejection, registration precondition) propagates
+     * unchanged — it remains the canonical "you don't have the right to do
+     * this" signal so IDS / Play Protect doesn't lose meaning.
+     */
+    private suspend inline fun <R> withTypedErrors(
+        requestId: String? = null,
+        sessionId: String? = null,
+        crossinline block: suspend (com.adsamcik.mindlayer.IMindlayerService) -> R,
+    ): R = try {
+        block(connection.awaitConnected())
+    } catch (e: SecurityException) {
+        throw MindlayerException.fromAidlSecurityException(e, requestId, sessionId) ?: throw e
+    }
+
+    /**
+     * Non-suspend variant for paths that already hold a connected service
+     * reference (e.g. [startInference], where the AIDL call kicks off a cold
+     * flow and must run synchronously to produce a request handle).
+     */
+    private inline fun <R> withTypedErrorsSync(
+        service: com.adsamcik.mindlayer.IMindlayerService,
+        requestId: String? = null,
+        sessionId: String? = null,
+        block: (com.adsamcik.mindlayer.IMindlayerService) -> R,
+    ): R = try {
+        block(service)
+    } catch (e: SecurityException) {
+        throw MindlayerException.fromAidlSecurityException(e, requestId, sessionId) ?: throw e
     }
 
     // -- Prewarm --------------------------------------------------------------
 
     /**
-     * Pre-warms the LLM engine in the background. Call this early (e.g., when
-     * scan screen opens) so the first [createSession] doesn't pay the 5-10s
-     * init cost. Safe to call multiple times — subsequent calls are no-ops if
-     * the engine is already loaded.
+     * Pre-warm the LLM engine in the background (fire-and-forget). Call this
+     * early (e.g. when an inference-bound screen opens) so the first
+     * [createSession] doesn't pay the ~5-10 s cold-start cost. Safe to call
+     * multiple times — subsequent calls are no-ops if the engine is already
+     * loaded.
+     *
+     * **Returns immediately** regardless of whether the engine has finished
+     * initializing — use [prewarmAndAwait] if you need to know when init
+     * completes or which fallback backend was selected.
      *
      * @param backend the preferred backend to initialize.
      */
@@ -140,6 +395,47 @@ class Mindlayer private constructor(
             val service = connection.awaitConnected()
             service.prewarm(backend.value)
         }
+    }
+
+    /**
+     * Synchronously pre-warm the engine and return the actually-active
+     * [InferenceBackend]. Suspends until either init completes or the
+     * service-side timeout (clamped to ≤30 s) elapses.
+     *
+     * If the connected service does not advertise
+     * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_PREWARM_AWAIT]
+     * (talking to a pre-v0.4 binary), this falls back to the legacy
+     * fire-and-forget [prewarm] path and returns the requested [backend]
+     * without waiting.
+     *
+     * @param backend the preferred backend.
+     * @param timeoutMs upper bound on how long the SDK is willing to wait
+     *   for the service to confirm engine readiness. Service may clamp
+     *   this further to its own MIN/MAX bounds. Default 15 s.
+     */
+    suspend fun prewarmAndAwait(
+        backend: InferenceBackend = InferenceBackend.GPU,
+        timeoutMs: Long = 15_000L,
+    ): InferenceBackend {
+        val caps = getCapabilities()
+        if (!caps.supports(com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_PREWARM_AWAIT)) {
+            // Old service — fire-and-forget and return the requested backend.
+            prewarm(backend)
+            return backend
+        }
+        val activeBackend = try {
+            withTypedErrors {
+                it.prewarmAndAwait(backend.value, timeoutMs)
+            }
+        } catch (_: NoSuchMethodError) {
+            prewarm(backend)
+            return backend
+        } catch (_: AbstractMethodError) {
+            prewarm(backend)
+            return backend
+        }
+        return InferenceBackend.values().firstOrNull { it.value == activeBackend }
+            ?: backend
     }
 
     // -- Session management ---------------------------------------------------
@@ -168,10 +464,14 @@ class Mindlayer private constructor(
         }
         historyStore?.prepareConversation(tentativeId, configWithId)
 
-        // 2. Create remote session
+        // 2. Create remote session.
+        // F-018: if the service responds with `engine_initializing`, the
+        // engine is doing its (~5–10 s) cold-start init on a dedicated
+        // background slot. Retry with exponential backoff up to ~10 s
+        // total before giving up so first-launch UX matches the
+        // documented "5–10 s cold-start wait" contract.
         val sessionId = try {
-            val service = connection.awaitConnected()
-            createRemoteSessionWhenReady(service, configWithId)
+            createSessionWithInitRetry(configWithId)
         } catch (e: Exception) {
             // Remote creation failed — clean up local CREATING record
             historyStore?.cleanupConversation(tentativeId)
@@ -184,31 +484,66 @@ class Mindlayer private constructor(
         sessionId
     }
 
+    private suspend fun createSessionWithInitRetry(configWithId: SessionConfig): String {
+        // Backoff schedule: 50ms → 200ms → 800ms (caps total wait ≈ 10 s
+        // when combined with the underlying engine init time).
+        val backoffMs = longArrayOf(50L, 200L, 800L)
+        var attempt = 0
+        val deadline = System.currentTimeMillis() + 10_000L
+        while (true) {
+            try {
+                return connection.awaitConnected().createSession(configWithId)
+            } catch (e: SecurityException) {
+                val typed = MindlayerException.fromAidlSecurityException(
+                    e,
+                    sessionId = configWithId.sessionId,
+                ) ?: throw e
+                if (typed.code == com.adsamcik.mindlayer.shared.MindlayerErrorCode.ENGINE_INITIALIZING &&
+                    attempt < backoffMs.size &&
+                    System.currentTimeMillis() < deadline
+                ) {
+                    kotlinx.coroutines.delay(backoffMs[attempt])
+                    attempt++
+                    continue
+                }
+                throw typed
+            }
+        }
+    }
+
     /** Destroy a session and free server-side resources. */
     suspend fun destroySession(sessionId: String) {
-        withContext(Dispatchers.IO) {
-            connection.awaitConnected().destroySession(sessionId)
-        }
+        withTypedErrors(sessionId = sessionId) { it.destroySession(sessionId) }
     }
 
     /** Get info for a single session. */
     suspend fun getSessionInfo(sessionId: String): SessionInfo {
-        return withContext(Dispatchers.IO) {
-            connection.awaitConnected().getSessionInfo(sessionId)
-        }
+        return withTypedErrors(sessionId = sessionId) { it.getSessionInfo(sessionId) }
     }
 
-    /** List all active sessions. */
+    /** List all live server-side sessions owned by this caller.
+     *
+     *  This goes to the **service** and returns only sessions that the
+     *  service still knows about — it does **not** include conversations
+     *  whose sessions were destroyed, evicted, or expired. For the durable
+     *  view of every conversation this app has tracked locally, see
+     *  [listHistory]. The two views are intentionally distinct: live
+     *  sessions are server state, history is encrypted local persistence
+     *  with a different threat model.
+     */
     suspend fun listSessions(): List<SessionInfo> {
-        return withContext(Dispatchers.IO) {
-            connection.awaitConnected().listSessions()
-        }
+        return withTypedErrors { it.listSessions() }
     }
 
     // -- Chat (text only) -----------------------------------------------------
 
     /**
      * Send a text message and stream back inference events.
+     *
+     * Suspends until the service is connected, then issues the inference
+     * request and returns an [InferenceHandle]. The handle's [requestId]
+     * is generated synchronously before the suspend, so callers can wire
+     * up cancel callbacks ahead of time even before this returns.
      *
      * Creates a reliable pipe, hands the write end to the service via AIDL,
      * and returns an [InferenceHandle] that provides the [requestId], event
@@ -219,7 +554,7 @@ class Mindlayer private constructor(
      * assistant turn is marked COMPLETED only after the [MindlayerEvent.Done]
      * event.
      */
-    fun chat(sessionId: String, text: String): InferenceHandle {
+    suspend fun chat(sessionId: String, text: String): InferenceHandle {
         val requestId = UUID.randomUUID().toString()
         val flow = startTrackedInference(
             sessionId = sessionId,
@@ -240,7 +575,7 @@ class Mindlayer private constructor(
     /**
      * Send a text + Bitmap message and stream back inference events.
      */
-    fun chatWithImage(
+    suspend fun chatWithImage(
         sessionId: String,
         text: String,
         bitmap: Bitmap,
@@ -265,7 +600,7 @@ class Mindlayer private constructor(
     /**
      * Send a text + audio file message and stream back inference events.
      */
-    fun chatWithAudio(
+    suspend fun chatWithAudio(
         sessionId: String,
         text: String,
         audioFile: File,
@@ -285,12 +620,65 @@ class Mindlayer private constructor(
         return buildHandle(requestId, flow)
     }
 
+    /**
+     * Send a text message with an ordered list of media attachments. v0.4
+     * successor to [chatWithImage] / [chatWithAudio] — accepts varargs of
+     * [com.adsamcik.mindlayer.MediaPart] so future engines can consume
+     * multi-image / video / document inputs without another wire-break.
+     *
+     * Build parts via the helpers on [MediaTransfer]:
+     *
+     * ```kotlin
+     * mindlayer.chatWithMedia(
+     *     sessionId,
+     *     "Compare these two coffee bags",
+     *     MediaTransfer.imagePart(bagA),
+     *     MediaTransfer.imagePart(bagB),
+     * ).events.collect { ... }
+     * ```
+     *
+     * **Today's engine constraint** (see `MediaPart` KDoc): at most one
+     * image + one audio per request. The wire allows ordered lists for
+     * forward compatibility but the service rejects multi-image with
+     * `INVALID_REQUEST`. Order between the kinds is wire-stable from day
+     * one — clients should pass parts in their preferred order.
+     *
+     * **Old service compatibility**: if the connected service does not
+     * advertise [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_MEDIA_LIST],
+     * this method delegates to the legacy [chat] / [chatWithImage] /
+     * [chatWithAudio] surface (with the corresponding 1-image / 1-audio
+     * limit). Callers should still build via this entry point — the
+     * fallback is transparent.
+     */
+    suspend fun chatWithMedia(
+        sessionId: String,
+        text: String,
+        vararg parts: com.adsamcik.mindlayer.MediaPart,
+    ): InferenceHandle {
+        val requestId = UUID.randomUUID().toString()
+        // Re-tag every part with this requestId so the service's
+        // requestId-cross-check passes — callers built parts via the
+        // MediaTransfer helpers without knowing this requestId yet.
+        val rebound = parts.map { it.copy(requestId = requestId) }
+        val flow = startTrackedInferenceMulti(
+            sessionId = sessionId,
+            userText = text,
+            meta = RequestMeta(
+                requestId = requestId,
+                sessionId = sessionId,
+                textContent = text,
+            ),
+            media = rebound,
+        )
+        return buildHandle(requestId, flow)
+    }
+
     // -- Tool calling ---------------------------------------------------------
 
     /**
-     * Submit a tool result back to the service. Supply [callId] from
-     * [MindlayerEvent.ToolCall.callId] so the service can disambiguate parallel
-     * calls of the same tool.
+     * Submit a tool result back to the service for continued inference.
+     *
+     * Use the [MindlayerEvent.ToolCall.callId] from the tool-call event being answered.
      */
     suspend fun submitToolResult(
         requestId: String,
@@ -304,36 +692,87 @@ class Mindlayer private constructor(
             toolName = toolName,
             resultJson = resultJson,
         )
-        withContext(Dispatchers.IO) {
-            connection.awaitConnected().submitToolResult(requestId, result)
-        }
+        withTypedErrors(requestId = requestId) { it.submitToolResult(requestId, result) }
     }
 
-    @Deprecated(
-        "Use the 4-arg overload that takes callId from MindlayerEvent.ToolCall.callId. " +
-            "The legacy overload cannot disambiguate parallel calls of the same tool.",
-        ReplaceWith("submitToolResult(requestId, callId, toolName, resultJson)"),
-    )
-    suspend fun submitToolResult(
+    /**
+     * Submit a tool result and receive a tri-state outcome (`ACCEPTED` /
+     * `NO_PENDING_CALL` / `REQUEST_GONE`). Capability-gated via
+     * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL];
+     * falls back to the legacy [submitToolResult] (which always reports
+     * success) when the connected service is older.
+     */
+    suspend fun submitToolResultDetailed(
         requestId: String,
+        callId: String,
         toolName: String,
         resultJson: String,
-    ) {
+    ): com.adsamcik.mindlayer.ToolSubmitResult {
+        val caps = getCapabilities()
         val result = ToolResult(
             requestId = requestId,
-            callId = null,
+            callId = callId,
             toolName = toolName,
             resultJson = resultJson,
         )
-        withContext(Dispatchers.IO) {
-            connection.awaitConnected().submitToolResult(requestId, result)
+        if (!caps.supports(com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL)) {
+            withTypedErrors(requestId = requestId) { it.submitToolResult(requestId, result) }
+            return com.adsamcik.mindlayer.ToolSubmitResult(
+                outcome = com.adsamcik.mindlayer.ToolSubmitResult.ACCEPTED,
+            )
+        }
+        return try {
+            withTypedErrors(requestId = requestId) {
+                it.submitToolResultV2(requestId, result)
+            }
+        } catch (_: NoSuchMethodError) {
+            withTypedErrors(requestId = requestId) { it.submitToolResult(requestId, result) }
+            com.adsamcik.mindlayer.ToolSubmitResult(
+                outcome = com.adsamcik.mindlayer.ToolSubmitResult.ACCEPTED,
+            )
+        } catch (_: AbstractMethodError) {
+            withTypedErrors(requestId = requestId) { it.submitToolResult(requestId, result) }
+            com.adsamcik.mindlayer.ToolSubmitResult(
+                outcome = com.adsamcik.mindlayer.ToolSubmitResult.ACCEPTED,
+            )
         }
     }
 
     /** Cancel an in-flight inference request. */
     suspend fun cancelInference(requestId: String) {
-        withContext(Dispatchers.IO) {
-            connection.awaitConnected().cancelInference(requestId)
+        withTypedErrors(requestId = requestId) { it.cancelInference(requestId) }
+    }
+
+    /**
+     * Cancel an in-flight inference and receive a tri-state outcome
+     * (`CANCELLED` / `ALREADY_FINISHED` / `UNKNOWN`). Capability-gated via
+     * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL];
+     * falls back to legacy [cancelInference] (which silently swallows all
+     * outcomes) when the connected service is older.
+     *
+     * `UNKNOWN` covers both "we never saw this requestId" and "owned by
+     * another UID" — the anti-enumeration property is preserved.
+     */
+    suspend fun cancelInferenceDetailed(requestId: String): com.adsamcik.mindlayer.CancelResult {
+        val caps = getCapabilities()
+        if (!caps.supports(com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL)) {
+            withTypedErrors(requestId = requestId) { it.cancelInference(requestId) }
+            return com.adsamcik.mindlayer.CancelResult(
+                outcome = com.adsamcik.mindlayer.CancelResult.UNKNOWN,
+            )
+        }
+        return try {
+            withTypedErrors(requestId = requestId) { it.cancelInferenceV2(requestId) }
+        } catch (_: NoSuchMethodError) {
+            withTypedErrors(requestId = requestId) { it.cancelInference(requestId) }
+            com.adsamcik.mindlayer.CancelResult(
+                outcome = com.adsamcik.mindlayer.CancelResult.UNKNOWN,
+            )
+        } catch (_: AbstractMethodError) {
+            withTypedErrors(requestId = requestId) { it.cancelInference(requestId) }
+            com.adsamcik.mindlayer.CancelResult(
+                outcome = com.adsamcik.mindlayer.CancelResult.UNKNOWN,
+            )
         }
     }
 
@@ -341,22 +780,38 @@ class Mindlayer private constructor(
 
     /** Get the current service status (engine loaded, thermals, etc.). */
     suspend fun getStatus(): ServiceStatus {
-        return withContext(Dispatchers.IO) {
-            connection.awaitConnected().status
-        }
+        return withTypedErrors { it.status }
     }
 
     /** Get engine info (selected model, perf stats, etc.). */
     suspend fun getEngineInfo(): EngineInfo {
-        return withContext(Dispatchers.IO) {
-            connection.awaitConnected().engineInfo
-        }
+        return withTypedErrors { it.engineInfo }
     }
 
     /** Get a diagnostic JSON dump for bug reports and troubleshooting. */
     suspend fun getDiagnostics(): String {
-        return withContext(Dispatchers.IO) {
-            connection.awaitConnected().diagnostics
+        return withTypedErrors { it.diagnostics }
+    }
+
+    /**
+     * v0.4 typed diagnostics snapshot. Returns a small struct
+     * ([com.adsamcik.mindlayer.DiagnosticsSnapshot]) suitable for
+     * dashboard polling and external monitoring. Capability-gated via
+     * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS];
+     * returns `null` when talking to a pre-v0.4 service. Callers wanting
+     * the human-readable JSON dump should use [getDiagnostics].
+     */
+    suspend fun getDiagnosticsTyped(): com.adsamcik.mindlayer.DiagnosticsSnapshot? {
+        val caps = getCapabilities()
+        if (!caps.supports(com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS)) {
+            return null
+        }
+        return try {
+            withTypedErrors { it.diagnosticsTyped }
+        } catch (_: NoSuchMethodError) {
+            null
+        } catch (_: AbstractMethodError) {
+            null
         }
     }
 
@@ -404,17 +859,29 @@ class Mindlayer private constructor(
     // ── History ─────────────────────────────────────────────
 
     /**
-     * List past conversations with turn previews.
-     * Returns conversations from the local history database, including
-     * both active and destroyed sessions.
+     * List past conversations from the SDK's encrypted local history database.
+     *
+     * This is the **durable view**: every conversation this app has tracked
+     * locally, including ones whose service-side sessions were evicted,
+     * expired, destroyed, or never re-bound after a service restart. Each
+     * entry's [ConversationSummary.isActive] is augmented from a fresh
+     * [listSessions] call so callers can tell which conversations still have
+     * a live remote session attached.
+     *
+     * **Compare to [listSessions]**:
+     * - `listHistory` = "every conversation this app remembers" (local-only,
+     *   survives service restart, lost on reinstall because the SQLCipher
+     *   keystore key doesn't move with backups).
+     * - `listSessions` = "live remote sessions the service has for me right
+     *   now" (subset of `listHistory`'s active rows).
+     *
+     * The two have different threat models. **Do not unify** — a future
+     * third-party caller story will preserve this split.
      *
      * ```kotlin
      * val history = mindlayer.listHistory(limit = 20)
      * history.forEach { conv ->
-     *     println("${conv.conversationId}: ${conv.turnCount} turns")
-     *     conv.preview.forEach { turn ->
-     *         println("  ${turn.role}: ${turn.text?.take(50)}")
-     *     }
+     *     println("${conv.conversationId}: ${conv.turnCount} turns, active=${conv.isActive}")
      * }
      * ```
      */
@@ -432,7 +899,15 @@ class Mindlayer private constructor(
     }
 
     /**
-     * Get full conversation history for a specific session.
+     * Get the full turn history for a single conversation from local storage.
+     *
+     * Returns turns in chronological order, including completed assistant
+     * responses, pending user turns, and any interrupted streaming turns. The
+     * service is not consulted — this is a pure local read.
+     *
+     * @return the turn list, or an empty list if [conversationId] is unknown
+     *   to the local history store (the SDK was constructed without history,
+     *   or the conversation was pruned).
      */
     suspend fun getHistory(conversationId: String): List<TurnPreview> {
         return withContext(Dispatchers.IO) {
@@ -500,32 +975,8 @@ class Mindlayer private constructor(
      * @throws IllegalStateException if the stream ends without a terminal
      *   [MindlayerEvent.Done] event.
      */
-    suspend fun chatOnce(sessionId: String, text: String): String {
-        var result: String? = null
-        val accumulator = StringBuilder()
-
-        chat(sessionId, text).events.collect { event ->
-            when (event) {
-                is MindlayerEvent.TextDelta -> accumulator.append(event.text)
-                is MindlayerEvent.Done -> {
-                    result = event.fullText ?: accumulator.toString()
-                }
-                is MindlayerEvent.Error -> throw MindlayerException(
-                    message = event.message,
-                    code = event.code,
-                )
-                is MindlayerEvent.ToolCall -> throw MindlayerException(
-                    message = TOOL_CALL_IN_ONESHOT_MSG,
-                    code = "UNSUPPORTED_TOOL_CALL",
-                )
-                else -> { /* Started, Metrics — ignored */ }
-            }
-        }
-
-        return result ?: throw IllegalStateException(
-            "Inference stream ended without a Done event"
-        )
-    }
+    suspend fun chatOnce(sessionId: String, text: String): String =
+        collectHandleToString(chat(sessionId, text), sessionId)
 
     /**
      * Send a text + image message and return the complete response text.
@@ -536,31 +987,135 @@ class Mindlayer private constructor(
         sessionId: String,
         text: String,
         bitmap: Bitmap,
+    ): String = collectHandleToString(chatWithImage(sessionId, text, bitmap), sessionId)
+
+    /**
+     * Send a text + audio message and return the complete response text.
+     *
+     * @see chatOnce for error semantics.
+     */
+    suspend fun chatWithAudioOnce(
+        sessionId: String,
+        text: String,
+        audioFile: File,
+    ): String = collectHandleToString(chatWithAudio(sessionId, text, audioFile), sessionId)
+
+    /**
+     * Stream just the text deltas from [chat] as a [Flow]&lt;String&gt;.
+     *
+     * Filters out non-text events (Started, Metrics) and converts terminal
+     * frames into flow signals: [MindlayerEvent.Done] completes the flow,
+     * [MindlayerEvent.Error] throws a [MindlayerException], and an
+     * unexpected [MindlayerEvent.ToolCall] throws with code
+     * `UNSUPPORTED_TOOL_CALL` (silently dropping it would deadlock the
+     * inference because no [submitToolResult] would follow).
+     *
+     * Useful for streaming text directly into a `TextField` without
+     * writing the event-handling boilerplate by hand.
+     *
+     * ```kotlin
+     * mindlayer.chatTextFlow(sessionId, "Tell me a story").collect { delta ->
+     *     textFieldState.value += delta
+     * }
+     * ```
+     */
+    fun chatTextFlow(sessionId: String, text: String): kotlinx.coroutines.flow.Flow<String> =
+        kotlinx.coroutines.flow.flow {
+            val handle = chat(sessionId, text)
+            textDeltaFlow(handle, sessionId).collect { emit(it) }
+        }
+
+    /**
+     * Like [chatTextFlow] but emits the **cumulative** text after each delta.
+     * Each emission is a complete prefix of the response so far — useful for
+     * UIs that want to display the growing answer with simple "set this whole
+     * string" semantics rather than appending.
+     *
+     * The final emission is the full response text. Errors and tool calls
+     * are surfaced the same way as [chatTextFlow].
+     */
+    fun chatFullTextFlow(sessionId: String, text: String): kotlinx.coroutines.flow.Flow<String> =
+        kotlinx.coroutines.flow.flow {
+            val acc = StringBuilder()
+            val handle = chat(sessionId, text)
+            textDeltaFlow(handle, sessionId).collect { delta ->
+                acc.append(delta)
+                emit(acc.toString())
+            }
+        }
+
+    /**
+     * Internal helper: collect an [InferenceHandle] to a complete response
+     * string. Used by [chatOnce], [chatWithImageOnce], [chatWithAudioOnce],
+     * and (transitively) [generate] / [generateWithImage] / [generateWithAudio].
+     *
+     * Replaces four near-identical inline implementations with one source of
+     * truth so the error mapping (Error → typed MindlayerException;
+     * ToolCall → `UNSUPPORTED_TOOL_CALL`) cannot drift between call sites.
+     */
+    private suspend fun collectHandleToString(
+        handle: InferenceHandle,
+        sessionId: String,
     ): String {
         var result: String? = null
         val accumulator = StringBuilder()
-
-        chatWithImage(sessionId, text, bitmap).events.collect { event ->
+        handle.events.collect { event ->
             when (event) {
                 is MindlayerEvent.TextDelta -> accumulator.append(event.text)
                 is MindlayerEvent.Done -> {
                     result = event.fullText ?: accumulator.toString()
                 }
-                is MindlayerEvent.Error -> throw MindlayerException(
+                is MindlayerEvent.Error -> throw MindlayerException.fromStreamError(
                     message = event.message,
-                    code = event.code,
+                    codeName = event.code,
+                    seq = event.seq,
+                    tsMs = event.tsMs,
+                    requestId = handle.requestId,
+                    sessionId = sessionId,
                 )
                 is MindlayerEvent.ToolCall -> throw MindlayerException(
                     message = TOOL_CALL_IN_ONESHOT_MSG,
-                    code = "UNSUPPORTED_TOOL_CALL",
+                    codeName = "UNSUPPORTED_TOOL_CALL",
+                    requestId = handle.requestId,
+                    sessionId = sessionId,
                 )
-                else -> {}
+                else -> { /* Started, Metrics — ignored */ }
             }
         }
-
         return result ?: throw IllegalStateException(
             "Inference stream ended without a Done event"
         )
+    }
+
+    /**
+     * Internal helper: filter an [InferenceHandle]'s events down to a flow
+     * of text deltas, raising on Error/ToolCall and completing on Done.
+     */
+    private fun textDeltaFlow(
+        handle: InferenceHandle,
+        sessionId: String,
+    ): kotlinx.coroutines.flow.Flow<String> = kotlinx.coroutines.flow.flow {
+        handle.events.collect { event ->
+            when (event) {
+                is MindlayerEvent.TextDelta -> emit(event.text)
+                is MindlayerEvent.Done -> return@collect
+                is MindlayerEvent.Error -> throw MindlayerException.fromStreamError(
+                    message = event.message,
+                    codeName = event.code,
+                    seq = event.seq,
+                    tsMs = event.tsMs,
+                    requestId = handle.requestId,
+                    sessionId = sessionId,
+                )
+                is MindlayerEvent.ToolCall -> throw MindlayerException(
+                    message = TOOL_CALL_IN_ONESHOT_MSG,
+                    codeName = "UNSUPPORTED_TOOL_CALL",
+                    requestId = handle.requestId,
+                    sessionId = sessionId,
+                )
+                else -> { /* Started, Metrics — silently dropped */ }
+            }
+        }
     }
 
     /**
@@ -617,6 +1172,28 @@ class Mindlayer private constructor(
         }
     }
 
+    /**
+     * Stateless one-shot text + audio generation.
+     *
+     * @see generate for lifecycle semantics.
+     */
+    suspend fun generateWithAudio(
+        text: String,
+        audioFile: File,
+        configure: SessionConfigBuilder.() -> Unit = {},
+    ): String {
+        val sessionId = createSession(configure)
+        return try {
+            chatWithAudioOnce(sessionId, text, audioFile)
+        } finally {
+            try {
+                destroySession(sessionId)
+            } catch (_: Exception) {
+                // Best-effort cleanup
+            }
+        }
+    }
+
     // -- Internals ------------------------------------------------------------
 
     /**
@@ -662,7 +1239,7 @@ class Mindlayer private constructor(
      *    text.
      * 4. On error/cancellation: mark assistant turn INTERRUPTED.
      */
-    private fun startTrackedInference(
+    private suspend fun startTrackedInference(
         sessionId: String,
         userText: String,
         meta: RequestMeta,
@@ -672,10 +1249,10 @@ class Mindlayer private constructor(
         if (historyStore == null) {
             return startInference(meta, imageProvider, audioProvider)
         }
-
+        val historyStoreLocal = historyStore
         return flow {
             val userTurnId = withContext(Dispatchers.IO) {
-                historyStore.persistUserTurn(sessionId, userText)
+                historyStoreLocal.persistUserTurn(sessionId, userText)
             }
             var assistantTurnId: String? = null
             val textAccumulator = StringBuilder()
@@ -687,8 +1264,8 @@ class Mindlayer private constructor(
                         when (event) {
                             is MindlayerEvent.Started -> {
                                 assistantTurnId = withContext(Dispatchers.IO) {
-                                    historyStore.markUserTurnCompleted(userTurnId)
-                                    historyStore.beginAssistantTurn(sessionId)
+                                    historyStoreLocal.markUserTurnCompleted(userTurnId)
+                                    historyStoreLocal.beginAssistantTurn(sessionId)
                                 }
                             }
                             is MindlayerEvent.TextDelta -> {
@@ -700,7 +1277,7 @@ class Mindlayer private constructor(
                                 val aid = assistantTurnId
                                 if (aid != null) {
                                     withContext(Dispatchers.IO) {
-                                        historyStore.markTurnCompleted(aid, finalText)
+                                        historyStoreLocal.markTurnCompleted(aid, finalText)
                                     }
                                 }
                                 completed = true
@@ -709,7 +1286,7 @@ class Mindlayer private constructor(
                                 val aid = assistantTurnId
                                 if (aid != null) {
                                     withContext(Dispatchers.IO) {
-                                        historyStore.markTurnInterrupted(aid)
+                                        historyStoreLocal.markTurnInterrupted(aid)
                                     }
                                 }
                             }
@@ -722,7 +1299,7 @@ class Mindlayer private constructor(
                     val aid = assistantTurnId
                     if (aid != null) {
                         withContext(Dispatchers.IO) {
-                            historyStore.markTurnInterrupted(aid)
+                            historyStoreLocal.markTurnInterrupted(aid)
                         }
                     }
                 }
@@ -746,7 +1323,7 @@ class Mindlayer private constructor(
      * finally block after the binder call — by that point the service has
      * already dup'd them into its own process.
      */
-    private fun startInference(
+    private suspend fun startInference(
         meta: RequestMeta,
         imageProvider: suspend () -> com.adsamcik.mindlayer.ImageTransfer?,
         audioProvider: suspend () -> com.adsamcik.mindlayer.AudioTransfer?,
@@ -819,6 +1396,155 @@ class Mindlayer private constructor(
             delay(250)
         }
         throw IllegalStateException("Engine did not finish initialization within the expected window")
+    }
+
+    /**
+     * v0.4 inference setup that uses [IMindlayerService.inferMulti] with an
+     * ordered list of media parts. Falls back to the legacy [startInference]
+     * path if the service throws [NoSuchMethodError] / [AbstractMethodError]
+     * (talking to a pre-v0.4 binary that doesn't implement `inferMulti`) —
+     * the fallback caps at one image + one audio per the legacy shape.
+     */
+    private suspend fun startInferenceMulti(
+        meta: RequestMeta,
+        media: List<com.adsamcik.mindlayer.MediaPart>,
+    ): Flow<MindlayerEvent> {
+        val pipe = ParcelFileDescriptor.createReliablePipe()
+        val readEnd = pipe[0]
+        val writeEnd = pipe[1]
+
+        try {
+            val service = connection.awaitConnected()
+            try {
+                withTypedErrorsSync(
+                    service,
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                ) { it.inferMulti(meta, media, writeEnd) }
+            } catch (_: NoSuchMethodError) {
+                // Old service without the v0.4 method — fall back.
+                inferMultiLegacyFallback(service, meta, media, writeEnd)
+            } catch (_: AbstractMethodError) {
+                inferMultiLegacyFallback(service, meta, media, writeEnd)
+            }
+        } catch (e: Exception) {
+            readEnd.close()
+            throw e
+        } finally {
+            writeEnd.close()
+        }
+
+        return TokenStreamReader.readStream(readEnd)
+    }
+
+    /**
+     * Pre-v0.4 fallback: extract the first image and first audio from the
+     * [media] list and call legacy [IMindlayerService.infer]. Same engine
+     * constraints apply as `chatWithImage` / `chatWithAudio`.
+     */
+    private fun inferMultiLegacyFallback(
+        service: com.adsamcik.mindlayer.IMindlayerService,
+        meta: RequestMeta,
+        media: List<com.adsamcik.mindlayer.MediaPart>,
+        writeEnd: ParcelFileDescriptor,
+    ) {
+        val imagePart = media.firstOrNull {
+            it.kind == com.adsamcik.mindlayer.MediaPart.KIND_IMAGE
+        }
+        val audioPart = media.firstOrNull {
+            it.kind == com.adsamcik.mindlayer.MediaPart.KIND_AUDIO
+        }
+        val image = imagePart?.let {
+            com.adsamcik.mindlayer.ImageTransfer(
+                requestId = it.requestId,
+                width = it.width,
+                height = it.height,
+                pixelFormat = it.pixelFormat,
+                rowStride = it.rowStride,
+                payloadBytes = it.payloadBytes.toInt(),
+                source = it.source,
+                isSharedMemory = it.isSharedMemory,
+                mimeType = it.mimeType,
+            )
+        }
+        val audio = audioPart?.let {
+            com.adsamcik.mindlayer.AudioTransfer(
+                requestId = it.requestId,
+                mimeType = it.mimeType ?: "audio/wav",
+                source = it.source,
+                isSharedMemory = it.isSharedMemory,
+                durationMs = it.durationMs,
+            )
+        }
+        withTypedErrorsSync(
+            service,
+            requestId = meta.requestId,
+            sessionId = meta.sessionId,
+        ) { it.infer(meta, image, audio, writeEnd) }
+    }
+
+    /**
+     * Variant of [startTrackedInference] for the [chatWithMedia] entry
+     * point. Same history-persistence semantics; just routes through the
+     * new ordered-media wire shape.
+     */
+    private suspend fun startTrackedInferenceMulti(
+        sessionId: String,
+        userText: String,
+        meta: RequestMeta,
+        media: List<com.adsamcik.mindlayer.MediaPart>,
+    ): Flow<MindlayerEvent> {
+        if (historyStore == null) {
+            return startInferenceMulti(meta, media)
+        }
+
+        val historyStoreLocal = historyStore
+        val innerFlow = startInferenceMulti(meta, media)
+        return flow {
+            val userTurnId = historyStoreLocal.persistUserTurn(sessionId, userText)
+            var assistantTurnId: String? = null
+            val textAccumulator = StringBuilder()
+            var completed = false
+
+            try {
+                innerFlow.collect { event ->
+                    when (event) {
+                        is MindlayerEvent.Started -> {
+                            historyStoreLocal.markUserTurnCompleted(userTurnId)
+                            assistantTurnId = historyStoreLocal.beginAssistantTurn(sessionId)
+                        }
+                        is MindlayerEvent.TextDelta -> {
+                            textAccumulator.append(event.text)
+                        }
+                        is MindlayerEvent.Done -> {
+                            val finalText = event.fullText
+                                ?: textAccumulator.toString()
+                            val aid = assistantTurnId
+                            if (aid != null) {
+                                historyStoreLocal.markTurnCompleted(aid, finalText)
+                            }
+                            completed = true
+                        }
+                        is MindlayerEvent.Error -> {
+                            val aid = assistantTurnId
+                            if (aid != null) {
+                                historyStoreLocal.markTurnInterrupted(aid)
+                            }
+                        }
+                        else -> { /* ToolCall, Metrics — pass through */ }
+                    }
+                    emit(event)
+                }
+            } catch (e: Exception) {
+                if (!completed) {
+                    val aid = assistantTurnId
+                    if (aid != null) {
+                        historyStoreLocal.markTurnInterrupted(aid)
+                    }
+                }
+                throw e
+            }
+        }
     }
 }
 
@@ -908,11 +1634,70 @@ class SessionConfigBuilder {
     }
 
     /**
-     * Register tools (function calling) for this session.
-     * Pass a JSON array of OpenAPI-style tool definitions.
+     * Register tools (function calling) for this session via the typed DSL.
+     * Each [ToolsBuilder.tool] call validates the name and parameters shape
+     * at builder time so malformed configs fail fast instead of being
+     * silently dropped at session-create time.
+     *
+     * ```kotlin
+     * mindlayer.createSession {
+     *     tools {
+     *         tool("get_weather") {
+     *             description("Get current weather for a city")
+     *             parameters("""{"type":"object","required":["city"],"properties":{"city":{"type":"string"}}}""")
+     *         }
+     *     }
+     * }
+     * ```
+     *
      * See [MindlayerEvent.ToolCall] for handling tool invocations.
      */
-    fun tools(json: String) { toolsJson = json }
+    fun tools(configure: ToolsBuilder.() -> Unit) {
+        toolsJson = ToolsBuilder().apply(configure).build()
+    }
+
+    /**
+     * Register tools (function calling) for this session via raw JSON.
+     * Pass a JSON array of OpenAPI-style tool definitions. Prefer the
+     * typed [tools] DSL for in-code tool catalogs — this overload is the
+     * escape hatch for callers that already have a JSON tool registry.
+     *
+     * @throws IllegalArgumentException if [json] is not a valid JSON array
+     *   of objects with `name` and `parameters` keys.
+     */
+    fun tools(json: String) {
+        val parsed = try {
+            kotlinx.serialization.json.Json.parseToJsonElement(json)
+        } catch (t: Throwable) {
+            throw IllegalArgumentException("tools(json) is not valid JSON", t)
+        }
+        require(parsed is kotlinx.serialization.json.JsonArray) {
+            "tools(json) must be a JSON array"
+        }
+        require(parsed.size <= ToolsBuilder.MAX_TOOLS) {
+            "too many tools (${parsed.size} > ${ToolsBuilder.MAX_TOOLS})"
+        }
+        for ((i, tool) in parsed.withIndex()) {
+            require(tool is kotlinx.serialization.json.JsonObject) {
+                "tools[$i] must be a JSON object"
+            }
+            val nameElement = tool["name"] as? kotlinx.serialization.json.JsonPrimitive
+            val name = nameElement?.content
+            require(!name.isNullOrBlank()) { "tools[$i] missing 'name'" }
+            require(!name.startsWith(ToolsBuilder.RESERVED_PREFIX)) {
+                "tools[$i].name '$name' uses reserved prefix"
+            }
+            // parameters is optional — service substitutes an empty
+            // {"type":"object"} schema for missing/null. Validate type
+            // when present.
+            tool["parameters"]?.let {
+                require(it is kotlinx.serialization.json.JsonObject) {
+                    "tools[$i].parameters must be a JSON object when present"
+                }
+            }
+        }
+        toolsJson = json
+    }
 
     /**
      * Additional context passed to the model as grounding data.
@@ -925,6 +1710,9 @@ class SessionConfigBuilder {
      *
      * The service validates the model's response against the supplied schema
      * and (for [JsonOutputStrategy.PromptAndValidate]) retries on mismatch.
+     * Validation is shallow: parseable JSON, top-level required fields, and
+     * top-level property types. Clients that rely on schema output as a
+     * security or business-rule boundary must run full validation locally.
      * If the connected Mindlayer service predates this feature, the config
      * is silently ignored and generation proceeds normally — making this a
      * zero-risk opt-in.
@@ -945,6 +1733,34 @@ class SessionConfigBuilder {
     }
 
     /**
+     * Opt this session into v0.5 [com.adsamcik.mindlayer.shared.StreamEventType.TOKEN_DELTA_BATCH]
+     * coalescing. The service writer accumulates up to 8 tokens or 16 ms
+     * (whichever comes first) into a single batched frame, cutting wire
+     * overhead at high token rates. The SDK reader expands each batched
+     * frame back into per-token [com.adsamcik.mindlayer.sdk.MindlayerEvent.TextDelta]
+     * emissions so consumers see no API change — only fewer syscalls and
+     * lower CPU on both sides.
+     *
+     * Capability-gated via
+     * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TOKEN_BATCH].
+     * If the connected service does not advertise the flag, this call is
+     * still safe — the service ignores the unknown opt-in and the stream
+     * stays on `mindlayer.stream.v1`. Callers that care about confirming
+     * the optimization is live should check capabilities first.
+     *
+     * Default: off (single-token deltas, current behavior).
+     */
+    fun tokenBatching(enabled: Boolean = true) {
+        val envelope = kotlinx.serialization.json.buildJsonObject {
+            put(
+                "token_batch",
+                kotlinx.serialization.json.JsonPrimitive(enabled),
+            )
+        }
+        extraContextJson = mergeExtraContext(extraContextJson, envelope)
+    }
+
+    /**
      * Pre-populate conversation history for session recovery.
      * Turns are injected into the model's context at creation time.
      */
@@ -952,6 +1768,18 @@ class SessionConfigBuilder {
 
     /** Set session expiration in milliseconds. Internal — consumers use [ConversationBuilder.expiration]. */
     internal fun expirationMs(ms: Long) { expirationMs = ms }
+
+    /**
+     * Internal escape hatch: set `toolsJson` directly without running the
+     * v0.3 client-side shape validation. Used by [SessionRecovery] to
+     * preserve a previously-stored tools config across recovery — that
+     * JSON was already accepted by some SDK version (possibly older,
+     * less strict) and re-validating could reject otherwise-fine data.
+     *
+     * **Do not** expose this on the public API surface — public callers
+     * should go through [tools] so they get the shape check.
+     */
+    internal fun toolsJsonRaw(json: String?) { toolsJson = json }
 
     internal fun build(): SessionConfig = SessionConfig(
         sessionId = sessionId,

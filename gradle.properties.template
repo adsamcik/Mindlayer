@@ -1,0 +1,19 @@
+# Mindlayer — local Gradle properties template.
+#
+# Copy values you need into your USER-LEVEL gradle.properties
+# (~/.gradle/gradle.properties on Linux/macOS,
+#  %USERPROFILE%\.gradle\gradle.properties on Windows).
+#
+# DO NOT commit the values into the repo's project-level gradle.properties:
+# the GitHub Packages PAT below is a credential and would be exposed in git
+# history. The user-level file is read by Gradle and never tracked in git.
+#
+# See SDK_INTEGRATION.md for full setup instructions.
+
+# Owner of the GitHub Packages repository hosting Mindlayer's published
+# Maven artifacts. Set this to the org/user that owns the Mindlayer repo.
+# GITHUB_OWNER=
+
+# Personal access token with `read:packages` scope. Create at
+# https://github.com/settings/tokens. Treat as a credential.
+# GITHUB_TOKEN=

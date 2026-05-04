@@ -77,6 +77,19 @@ interface LogDao {
 
     @Query("SELECT errorMessage FROM usage_logs WHERE event = 'engine_fallback' AND backend = 'GPU' ORDER BY timestampMs DESC LIMIT 1")
     suspend fun latestGpuFallbackMessage(): String?
+
+    /**
+     * F-077: latest categorised init-failure row, used by
+     * [com.adsamcik.mindlayer.service.ui.DashboardViewModel] to render
+     * variant-specific remediation copy.
+     *
+     * Returns the full [LogEntry] so the dashboard can extract
+     * [LogEntry.backend], [LogEntry.errorMessage] (safeLabel), and the
+     * variant name from [LogEntry.extraJson]'s `failureCategory` field.
+     * Returns `null` when no init failure has been logged yet.
+     */
+    @Query("SELECT * FROM usage_logs WHERE event = 'init_failure_categorized' ORDER BY timestampMs DESC LIMIT 1")
+    suspend fun latestInitFailure(): LogEntry?
 }
 
 data class ThermalBandCount(

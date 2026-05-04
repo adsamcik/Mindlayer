@@ -146,6 +146,17 @@ class ToolCallPipelineTest {
         return pending
     }
 
+    private fun submitResult(
+        requestId: String,
+        pending: List<ToolCallBridge.PendingToolCall>,
+        toolName: String,
+        resultJson: String,
+        occurrence: Int = 0,
+    ) {
+        val call = pending.filter { it.toolName == toolName }[occurrence]
+        bridge.submitResult(requestId, call.callId, toolName, resultJson)
+    }
+
     /** Write a DONE event to the pipe. */
     private fun writeDoneEvent(
         out: java.io.OutputStream,
@@ -194,7 +205,7 @@ class ToolCallPipelineTest {
         val awaitJob = async {
             bridge.awaitResults(requestId, timeoutMs = 5_000L)
         }
-        bridge.submitResult(requestId, "get_weather", """{"temp":22,"unit":"C"}""")
+        submitResult(requestId, pending, "get_weather", """{"temp":22,"unit":"C"}""")
 
         val results = awaitJob.await()
         assertEquals(1, results.size)
@@ -243,8 +254,8 @@ class ToolCallPipelineTest {
         }
 
         launch {
-            bridge.submitResult(requestId, "get_weather", """{"temp":18}""")
-            bridge.submitResult(requestId, "get_time", """{"time":"14:00"}""")
+            submitResult(requestId, pending, "get_weather", """{"temp":18}""")
+            submitResult(requestId, pending, "get_time", """{"time":"14:00"}""")
         }
 
         val results = awaitJob.await()
@@ -380,7 +391,7 @@ class ToolCallPipelineTest {
 
         // Submit the real tool result and verify
         val awaitJob = async { bridge.awaitResults(requestId, timeoutMs = 5_000L) }
-        bridge.submitResult(requestId, "real_tool", """{"result":"ok"}""")
+        submitResult(requestId, pending, "real_tool", """{"result":"ok"}""")
         val results = awaitJob.await()
         assertEquals(1, results.size)
         assertEquals("real_tool" to """{"result":"ok"}""", results[0])
@@ -401,20 +412,20 @@ class ToolCallPipelineTest {
     fun `toolResult_duplicateSubmission_ignored`() = runTest {
         val requestId = "req-dup"
 
-        bridge.registerPendingToolCalls(requestId, listOf("get_weather" to """{"city":"Prague"}"""))
+        val pending = bridge.registerPendingToolCalls(requestId, listOf("get_weather" to """{"city":"Prague"}"""))
 
         val awaitJob = async {
             bridge.awaitResults(requestId, timeoutMs = 5_000L)
         }
 
         // First submit — should complete the deferred
-        bridge.submitResult(requestId, "get_weather", """{"temp":22}""")
+        submitResult(requestId, pending, "get_weather", """{"temp":22}""")
         val results = awaitJob.await()
         assertEquals(1, results.size)
         assertEquals("get_weather" to """{"temp":22}""", results[0])
 
         // Second submit — requestId already removed by awaitResults, should be silently ignored
-        bridge.submitResult(requestId, "get_weather", """{"temp":99}""")
+        submitResult(requestId, pending, "get_weather", """{"temp":99}""")
         // No crash = pass
     }
 
@@ -422,7 +433,7 @@ class ToolCallPipelineTest {
     fun `toolResult_afterCancellation_ignored`() = runTest {
         val requestId = "req-post-cancel"
 
-        bridge.registerPendingToolCalls(
+        val pending = bridge.registerPendingToolCalls(
             requestId,
             listOf("tool_a" to """{"a":1}"""),
         )
@@ -431,14 +442,14 @@ class ToolCallPipelineTest {
         bridge.cancel(requestId)
 
         // Submit after cancellation — should be silently ignored, no crash
-        bridge.submitResult(requestId, "tool_a", """{"result":"late"}""")
+        submitResult(requestId, pending, "tool_a", """{"result":"late"}""")
         // No crash = pass
     }
 
     @Test
     fun `toolResult_unknownRequestId_ignored`() = runTest {
         // Submit for a request that was never registered
-        bridge.submitResult("req-nonexistent", "some_tool", """{"x":1}""")
+        bridge.submitResult("req-nonexistent", "call-1", "some_tool", """{"x":1}""")
         // No crash = pass. Bridge logs a warning.
     }
 
@@ -446,10 +457,10 @@ class ToolCallPipelineTest {
     fun `toolResult_wrongToolName_ignored`() = runTest {
         val requestId = "req-wrong-name"
 
-        bridge.registerPendingToolCalls(requestId, listOf("get_weather" to """{"city":"Prague"}"""))
+        val pending = bridge.registerPendingToolCalls(requestId, listOf("get_weather" to """{"city":"Prague"}"""))
 
         // Submit with wrong tool name — no matching pending call
-        bridge.submitResult(requestId, "wrong_tool_name", """{"result":"oops"}""")
+        bridge.submitResult(requestId, pending[0].callId, "wrong_tool_name", """{"result":"oops"}""")
 
         // The pending call for get_weather should still be incomplete
         // Verify by cancelling (clean up) — if it had been completed, cancel would be a no-op

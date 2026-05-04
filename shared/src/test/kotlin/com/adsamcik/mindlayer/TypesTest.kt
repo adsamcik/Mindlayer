@@ -125,11 +125,12 @@ class TypesTest {
     fun `ToolResult construction`() {
         val tr = ToolResult(
             requestId = "req-2",
+            callId = "call-1",
             toolName = "search",
             resultJson = """{"results":["a","b"]}""",
         )
         assertEquals("req-2", tr.requestId)
-        assertNull(tr.callId)
+        assertEquals("call-1", tr.callId)
         assertEquals("search", tr.toolName)
         assertEquals("""{"results":["a","b"]}""", tr.resultJson)
     }
@@ -149,18 +150,18 @@ class TypesTest {
 
     @Test
     fun `ToolResult equals and hashCode`() {
-        val a = ToolResult("r", null, "t", "{}")
-        val b = ToolResult("r", null, "t", "{}")
+        val a = ToolResult("r", "call-1", "t", "{}")
+        val b = ToolResult("r", "call-1", "t", "{}")
         assertEquals(a, b)
         assertEquals(a.hashCode(), b.hashCode())
     }
 
     @Test
     fun `ToolResult copy preserves unchanged fields`() {
-        val original = ToolResult("r", null, "calc", """{"ans":42}""")
+        val original = ToolResult("r", "call-1", "calc", """{"ans":42}""")
         val copied = original.copy(toolName = "search")
         assertEquals("r", copied.requestId)
-        assertNull(copied.callId)
+        assertEquals("call-1", copied.callId)
         assertEquals("search", copied.toolName)
         assertEquals("""{"ans":42}""", copied.resultJson)
     }

@@ -83,7 +83,7 @@ class OptionalSecurityHardeningIntegrationTest {
         assertEquals("com.adsamcik.firstparty.client", pending.single().packageName)
         assertEquals("First-party Client", pending.single().displayName)
 
-        dashboardStore.approve(
+        dashboardStore.approveDirect(
             pkg = pending.single().packageName,
             sigSha256 = pending.single().signingCertSha256,
             displayName = pending.single().displayName,
@@ -97,7 +97,7 @@ class OptionalSecurityHardeningIntegrationTest {
     fun `tampered shared allowlist blocks service store until dashboard reapproves`() {
         val dashboardStore = AllowlistStore(appContext, allowlistDirName)
         val serviceStore = AllowlistStore(appContext, allowlistDirName)
-        dashboardStore.approve("com.adsamcik.firstparty.client", "old-sig", "First-party")
+        dashboardStore.approveDirect("com.adsamcik.firstparty.client", "old-sig", "First-party")
         assertTrue(serviceStore.isAllowed("com.adsamcik.firstparty.client", "old-sig"))
 
         val entriesFile = File(allowlistDir(), "entries.json")
@@ -110,7 +110,7 @@ class OptionalSecurityHardeningIntegrationTest {
         assertFalse(serviceStore.isAllowed("com.adsamcik.firstparty.client", "evil-sig"))
         assertFalse(serviceStore.isAllowed("com.adsamcik.firstparty.client", "old-sig"))
 
-        dashboardStore.approve("com.adsamcik.firstparty.client", "new-sig", "First-party")
+        dashboardStore.approveDirect("com.adsamcik.firstparty.client", "new-sig", "First-party")
 
         assertTrue(serviceStore.isAllowed("com.adsamcik.firstparty.client", "new-sig"))
     }
