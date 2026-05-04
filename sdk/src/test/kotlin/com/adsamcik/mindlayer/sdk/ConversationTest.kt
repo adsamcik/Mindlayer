@@ -370,14 +370,10 @@ class ConversationTest {
         // chatStream creates the session and returns a cold-flow handle (not collected)
         val handle = conv.chatStream("a long streaming message")
 
-        // Close the conversation — should cancel handle then destroy session
+        // Close the conversation — should cancel handle then destroy session.
+        // close() is synchronous, so both IPC calls have been dispatched by the
+        // time it returns. No polling/sleeping required.
         conv.close()
-
-        // GlobalScope.launch(Dispatchers.IO) is real, not test-virtual — wait briefly
-        val deadline = System.currentTimeMillis() + 2_000L
-        while (callOrder.size < 2 && System.currentTimeMillis() < deadline) {
-            Thread.sleep(50)
-        }
 
         assertTrue("handle must be marked cancelled after close()", handle.isCancelled)
         assertEquals(
@@ -397,8 +393,6 @@ class ConversationTest {
         conv.close()
         conv.close()
 
-        // destroySession is called inside GlobalScope — wait briefly
-        Thread.sleep(200)
         verify(exactly = 1) { mockService.destroySession(any()) }
     }
 }

@@ -1,9 +1,6 @@
 package com.adsamcik.mindlayer.sdk
 
 import android.graphics.Bitmap
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
@@ -99,24 +96,38 @@ class Conversation internal constructor(
      * those returned by [chatStream] that the caller may still be collecting), then
      * destroys the server-side session.
      *
-     * Cancellation is fire-and-forget (launched on [Dispatchers.IO]) because [cancel]
-     * on [InferenceHandle] is a suspend function and [close] is non-suspend per
-     * [AutoCloseable]. The GlobalScope lifetime is intentional — these coroutines are
-     * short-lived cleanup tasks and must survive the [Conversation] object itself.
+     * **Synchronous and deterministic.** When `close()` returns, both the cancel
+     * IPC for each in-flight handle and the destroy IPC for the session have been
+     * dispatched (best-effort if the service is disconnected). This honors the
+     * [AutoCloseable] contract — callers can rely on resource release without
+     * having to poll, sleep, or join a background job.
+     *
+     * **Threading.** `close()` performs blocking Binder calls on the calling
+     * thread (typically microseconds-to-milliseconds per call). Avoid invoking
+     * it from the Android main thread under StrictMode; prefer a background
+     * dispatcher when called from UI code.
+     *
+     * **Disconnect handling.** If the service binder is currently disconnected,
+     * cleanup is silently skipped — the service-side session is cleaned up
+     * automatically by the per-session expiration timer (see
+     * [ConversationConfig.expiration]).
      */
-    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
     override fun close() {
         if (!closeStarted.compareAndSet(false, true)) return
         val handles = synchronized(inFlight) { inFlight.toList().also { inFlight.clear() } }
         val sid = sessionId.also { sessionId = null }
-        GlobalScope.launch(Dispatchers.IO) {
-            handles.forEach { runCatching { it.cancel() } }
-            if (sid != null) {
-                try {
-                    client.connection.getService()?.destroySession(sid)
-                } catch (_: Exception) {
-                    // Session will be cleaned up server-side on timeout
-                }
+
+        // Cancel handles first so the service stops generating tokens before we
+        // tear down the session. Both calls are best-effort — they no-op when no
+        // service binder is currently connected.
+        handles.forEach { runCatching { it.cancelSync() } }
+
+        if (sid != null) {
+            try {
+                client.connection.getService()?.destroySession(sid)
+            } catch (_: Exception) {
+                // Service died mid-call; session will be cleaned up server-side
+                // on its expiration timer.
             }
         }
     }
