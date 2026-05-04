@@ -8,6 +8,7 @@ import android.os.Binder
 import android.os.IBinder
 import android.util.Log
 import com.adsamcik.mindlayer.IMindlayerService
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -236,6 +237,43 @@ class ConnectionManager {
                 try {
                     service.registerClient(livenessToken)
                 } catch (e: SecurityException) {
+                    // F-074: special-case the crash-loop watchdog throttle.
+                    // The service is alive but is rejecting binds while it
+                    // recovers — back off until cooldownEndsAt and retry
+                    // instead of spinning REJECTED_NOT_APPROVED → reconnect
+                    // → REJECTED again on the next bind, which would
+                    // re-trigger the OOM-killer that caused the throttle in
+                    // the first place.
+                    val typed = MindlayerException.fromAidlSecurityException(e)
+                    if (typed?.code == MindlayerErrorCode.SERVICE_THROTTLED) {
+                        val now = System.currentTimeMillis()
+                        val cooldownEndsAt = typed.cooldownEndsAt
+                        // Coerce to a sane minimum so a clock-skew or
+                        // already-expired cooldown doesn't degenerate into
+                        // a hot retry; cap at MAX_BACKOFF_MS so a
+                        // pathological future timestamp doesn't pin us
+                        // forever.
+                        val rawWait = if (cooldownEndsAt != null) {
+                            cooldownEndsAt - now
+                        } else {
+                            MAX_BACKOFF_MS
+                        }
+                        val waitMs = rawWait
+                            .coerceAtLeast(INITIAL_BACKOFF_MS)
+                            .coerceAtMost(MAX_BACKOFF_MS)
+                        Log.w(
+                            TAG,
+                            "registerClient SERVICE_THROTTLED — retrying in ${waitMs}ms" +
+                                " (cooldownEndsAt=$cooldownEndsAt)",
+                        )
+                        try { binder.unlinkToDeath(recipient, 0) } catch (_: Throwable) { }
+                        deathRecipient = null
+                        invalidateBinder()
+                        _state.value = ConnectionState.RECOVERING
+                        doUnbind()
+                        scheduleReconnect(waitMs)
+                        return
+                    }
                     Log.w(TAG, "registerClient rejected — caller not approved", e)
                     try { binder.unlinkToDeath(recipient, 0) } catch (_: Throwable) { }
                     deathRecipient = null
@@ -339,6 +377,22 @@ class ConnectionManager {
             Log.i(TAG, "Reconnecting in ${wait}ms")
             delay(wait)
             backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong().coerceAtMost(MAX_BACKOFF_MS)
+            doBind()
+        }
+    }
+
+    /**
+     * F-074: deferred reconnect with a caller-supplied delay (used by the
+     * `SERVICE_THROTTLED` retry path so we wait for the service-published
+     * `cooldownEndsAt` instead of the local exponential-backoff cursor).
+     * Does **not** advance [backoffMs] — once the cooldown elapses, a
+     * fresh `registerClient` either succeeds (back to CONNECTED) or
+     * fails again (cycle repeats with the same caller-supplied wait).
+     */
+    private fun scheduleReconnect(delayMs: Long) {
+        scope.launch {
+            Log.i(TAG, "Reconnecting in ${delayMs}ms (deferred)")
+            delay(delayMs)
             doBind()
         }
     }

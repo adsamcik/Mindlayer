@@ -52,6 +52,21 @@ abstract class MindlayerDatabase : RoomDatabase() {
                     "CREATE INDEX IF NOT EXISTS index_turns_conversation_role_state_seq " +
                         "ON turns(conversationId, role, state, seq)",
                 )
+                db.execSQL(
+                    """
+                    UPDATE conversations
+                    SET systemPrompt = NULL,
+                        toolsJson = NULL,
+                        extraContextJson = NULL
+                    """.trimIndent(),
+                )
+                db.execSQL("UPDATE turns SET textContent = NULL")
+                db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'turn_parts'")
+                    .use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            db.execSQL("UPDATE turn_parts SET text = NULL")
+                        }
+                    }
             }
         }
 

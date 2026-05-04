@@ -10,7 +10,7 @@ package com.adsamcik.mindlayer.service.logging
  *   trace.markDecodeEnd(tokenCount = 42)
  *   trace.markPipeWriteComplete()
  *   val summary = trace.summary()
- *   // → "req=abc sess=xyz | prefill=120ms ttft=150ms decode=850ms(42tok,49.4tps) pipe=5ms total=1005ms"
+ *   // -> "req=abc... sess=xyz... ttft=150ms decode=850ms(42tok,49.4tps) total=1005ms"
  */
 class RequestTrace(
     val requestId: String,
@@ -46,7 +46,7 @@ class RequestTrace(
     }
 
     fun summary(): String = buildString {
-        append("req=$requestId sess=$sessionId")
+        append("req=${requestId.loggable()} sess=${sessionId.loggable()}")
         timeToFirstTokenMs?.let { append(" ttft=${it}ms") }
         decodeDurationMs?.let { d ->
             append(" decode=${d}ms(${tokenCount}tok")

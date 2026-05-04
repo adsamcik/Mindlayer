@@ -1,2 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+        F-024: SDK manifest hint — keep the encrypted history DB and SDK key
+        prefs out of host-app backups. The host app's manifest wins for
+        `android:allowBackup` / `android:dataExtractionRules` (the manifest
+        merger applies host-app values). When the host app does NOT provide
+        its own dataExtractionRules, ours is used. When the host DOES provide
+        rules, the host is expected to merge in `databases/mindlayer_history.db`
+        and `mindlayer_sdk_db_*` SharedPreferences exclusions itself; see
+        `SDK_INTEGRATION.md`.
+    -->
+    <application
+        android:dataExtractionRules="@xml/sdk_data_extraction_rules"
+        tools:replace="android:dataExtractionRules"
+        tools:targetApi="s" />
+</manifest>

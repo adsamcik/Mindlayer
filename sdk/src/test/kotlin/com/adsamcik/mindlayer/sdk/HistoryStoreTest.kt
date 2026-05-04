@@ -59,7 +59,7 @@ class HistoryStoreTest {
             .build()
         MindlayerDatabase.setInstance(db)
 
-        store = HistoryStore(context)
+        store = HistoryStore(context, HistoryPolicy.FULL_CONTENT)
     }
 
     @After
@@ -82,6 +82,40 @@ class HistoryStoreTest {
         assertEquals("Be helpful.", loaded!!.systemPrompt)
         assertEquals("GPU", loaded.backend)
         assertEquals(4096, loaded.maxTokens)
+    }
+
+    @Test
+    fun `default history policy stores metadata only`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val metadataOnlyStore = HistoryStore(context)
+        val config = defaultConfig.copy(
+            systemPrompt = "private system prompt",
+            toolsJson = """[{"name":"privateTool"}]""",
+            extraContextJson = """{"secret":"context"}""",
+        )
+
+        metadataOnlyStore.persistConversation("metadata-only", config)
+        val userTurnId = metadataOnlyStore.persistUserTurn("metadata-only", "private user text")
+        metadataOnlyStore.markUserTurnCompleted(userTurnId)
+        val assistantTurnId = metadataOnlyStore.beginAssistantTurn("metadata-only")
+        metadataOnlyStore.markTurnCompleted(assistantTurnId, "private assistant text")
+
+        val conversation = db.conversationDao().get("metadata-only")!!
+        assertNull(conversation.systemPrompt)
+        assertNull(conversation.toolsJson)
+        assertNull(conversation.extraContextJson)
+
+        val turns = db.turnDao().completedForConversation("metadata-only")
+        assertEquals(2, turns.size)
+        assertTrue(turns.all { it.textContent == null })
+        assertTrue(turns.all { it.tokenEstimate > 0 })
+
+        val summary = metadataOnlyStore.listConversations(limit = 10)
+            .first { it.conversationId == "metadata-only" }
+        assertNull(summary.systemPrompt)
+        assertTrue(summary.preview.all { it.text == null })
+
+        assertNull(metadataOnlyStore.getReplayHistory("metadata-only", 1000))
     }
 
     @Test

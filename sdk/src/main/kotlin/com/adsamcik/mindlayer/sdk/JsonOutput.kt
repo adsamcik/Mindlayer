@@ -24,6 +24,52 @@ enum class JsonOutputStrategy(internal val wire: String) {
 }
 
 /**
+ * Server-side validation depth for [JsonOutputBuilder].
+ *
+ * The Mindlayer service does **not** ship a full JSON-Schema (draft-07)
+ * validator — adding one would mean a heavy dependency for a feature most
+ * callers can re-validate locally with their own preferred lib. Instead the
+ * service runs a recursive subset validator (`type`, `required`, `enum`,
+ * `pattern`, `minLength`/`maxLength`, numeric range, `properties`,
+ * `additionalProperties`, `items`); features like `format`, `$ref`, `oneOf`,
+ * `allOf` are **not** validated server-side.
+ *
+ * For security-critical schemas, callers should re-validate the returned
+ * JSON locally with a full schema validator regardless of which depth they
+ * select here.
+ *
+ * - [SHALLOW] — current default. Recursive subset validation as documented
+ *   above. Retries on validation failure up to `maxRetries` times.
+ * - [NONE] — server emits whatever the model produced without validating.
+ *   Use this when you have a stricter local validator and don't want the
+ *   service to retry on differences-of-opinion. Faster (no validation
+ *   overhead) but cb-style "garbage in, garbage out" — the response may
+ *   not be valid JSON at all.
+ * - [CALLER_VALIDATES] — alias for [NONE] documenting caller intent.
+ *   Useful as a self-documenting flag in code-review.
+ */
+enum class JsonValidationDepth(internal val wire: String) {
+    /**
+     * The service validates the response against a recursive subset of
+     * JSON-Schema and retries up to `maxRetries` times. Default for
+     * backward-compatibility with pre-v0.5 behavior.
+     */
+    SHALLOW("shallow"),
+
+    /**
+     * The service does not validate the response. Caller is responsible
+     * for parsing and validation. Faster path; no retries on shape errors.
+     */
+    NONE("none"),
+
+    /**
+     * Same wire effect as [NONE] but documents that the caller has its own
+     * full-schema validator and intends to handle validation client-side.
+     */
+    CALLER_VALIDATES("none"),
+}
+
+/**
  * DSL builder for requesting structured JSON output from the model.
  *
  * Produced via [SessionConfigBuilder.jsonOutput]:
@@ -52,6 +98,7 @@ class JsonOutputBuilder internal constructor() {
     private var schemaElement: JsonElement? = null
     private var strategy: JsonOutputStrategy = JsonOutputStrategy.PromptAndValidate
     private var maxRetries: Int = 3
+    private var validationDepth: JsonValidationDepth = JsonValidationDepth.SHALLOW
 
     /**
      * JSON Schema (draft-07 subset) describing the desired response shape.
@@ -93,6 +140,17 @@ class JsonOutputBuilder internal constructor() {
         maxRetries = n
     }
 
+    /**
+     * Server-side validation depth. See [JsonValidationDepth] for the
+     * trade-offs. Default: [JsonValidationDepth.SHALLOW] (matches pre-v0.5
+     * behavior). Pass [JsonValidationDepth.CALLER_VALIDATES] when you
+     * intend to validate the response with your own full-schema validator
+     * client-side and want the service to skip retries on shape errors.
+     */
+    fun validation(depth: JsonValidationDepth) {
+        validationDepth = depth
+    }
+
     internal fun build(): JsonObject {
         val schema = schemaElement
             ?: throw IllegalStateException(
@@ -105,6 +163,7 @@ class JsonOutputBuilder internal constructor() {
                     put("schema", schema)
                     put("strategy", JsonPrimitive(strategy.wire))
                     put("max_retries", JsonPrimitive(maxRetries))
+                    put("validation_depth", JsonPrimitive(validationDepth.wire))
                 },
             )
         }

@@ -18,15 +18,15 @@ class MindlayerSession internal constructor(
     val sessionId: String,
 ) {
     /** Send a text message and return an [InferenceHandle]. */
-    fun chat(text: String): InferenceHandle =
+    suspend fun chat(text: String): InferenceHandle =
         client.chat(sessionId, text)
 
     /** Send a text + bitmap message and return an [InferenceHandle]. */
-    fun chatWithImage(text: String, bitmap: Bitmap): InferenceHandle =
+    suspend fun chatWithImage(text: String, bitmap: Bitmap): InferenceHandle =
         client.chatWithImage(sessionId, text, bitmap)
 
     /** Send a text + audio file message and return an [InferenceHandle]. */
-    fun chatWithAudio(text: String, audioFile: File): InferenceHandle =
+    suspend fun chatWithAudio(text: String, audioFile: File): InferenceHandle =
         client.chatWithAudio(sessionId, text, audioFile)
 
     /** @see Mindlayer.chatOnce */
@@ -37,24 +37,25 @@ class MindlayerSession internal constructor(
     suspend fun chatWithImageOnce(text: String, bitmap: Bitmap): String =
         client.chatWithImageOnce(sessionId, text, bitmap)
 
-    /** Submit a tool result for continued inference. */
+    /** @see Mindlayer.chatWithAudioOnce */
+    suspend fun chatWithAudioOnce(text: String, audioFile: File): String =
+        client.chatWithAudioOnce(sessionId, text, audioFile)
+
+    /** @see Mindlayer.chatTextFlow */
+    fun chatTextFlow(text: String): kotlinx.coroutines.flow.Flow<String> =
+        client.chatTextFlow(sessionId, text)
+
+    /** @see Mindlayer.chatFullTextFlow */
+    fun chatFullTextFlow(text: String): kotlinx.coroutines.flow.Flow<String> =
+        client.chatFullTextFlow(sessionId, text)
+
+    /** Submit a tool result for continued inference using the ToolCall callId. */
     suspend fun submitToolResult(
         requestId: String,
         callId: String,
         toolName: String,
         resultJson: String,
     ) = client.submitToolResult(requestId, callId, toolName, resultJson)
-
-    @Deprecated(
-        "Use the 4-arg overload that takes callId from MindlayerEvent.ToolCall.callId. " +
-            "The legacy overload cannot disambiguate parallel calls of the same tool.",
-        ReplaceWith("submitToolResult(requestId, callId, toolName, resultJson)"),
-    )
-    suspend fun submitToolResult(
-        requestId: String,
-        toolName: String,
-        resultJson: String,
-    ) = client.submitToolResult(requestId, toolName, resultJson)
 
     /** Cancel an in-flight inference. */
     suspend fun cancelInference(requestId: String) =

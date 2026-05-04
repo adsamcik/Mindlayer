@@ -12,6 +12,7 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -314,11 +315,33 @@ class StructuredOutputHelperTest {
     }
 
     @Test
+    fun `validate parse error does not include model output snippet`() {
+        val schema = buildTestSchema("answer" to "string", required = listOf("answer"))
+        val secretOutput = "not json but includes patient name Adam Smith"
+
+        val result = StructuredOutputHelper.validateJsonOutput(secretOutput, schema)
+
+        assertTrue(result is ValidationResult.Invalid)
+        val errors = (result as ValidationResult.Invalid).errors.joinToString("\n")
+        assertFalse(errors.contains("Adam Smith"))
+        assertFalse(errors.contains("patient name"))
+        assertTrue(errors.contains("Not valid JSON"))
+    }
+
+    @Test
     fun `validate JSON array when object expected returns Invalid`() {
         val schema = buildTestSchema("x" to "string")
         val result = StructuredOutputHelper.validateJsonOutput("""[1,2,3]""", schema)
         assertTrue(result is ValidationResult.Invalid)
-        assertTrue((result as ValidationResult.Invalid).errors.any { it.contains("Expected JSON object") })
+        // F-037: the native subset validator emits "expected object, got array".
+        // The previous shallow validator emitted "Expected JSON object …".
+        // Either form should satisfy the spirit of this regression.
+        val errors = (result as ValidationResult.Invalid).errors.joinToString(" | ")
+        assertTrue(
+            "Expected an error mentioning object/array mismatch, got: $errors",
+            errors.contains("expected object", ignoreCase = true) ||
+                errors.contains("array", ignoreCase = true),
+        )
     }
 
     @Test

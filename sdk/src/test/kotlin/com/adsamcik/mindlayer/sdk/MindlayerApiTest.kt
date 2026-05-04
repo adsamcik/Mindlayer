@@ -81,7 +81,7 @@ class MindlayerApiTest {
             .build()
         MindlayerDatabase.setInstance(db)
 
-        store = HistoryStore(context)
+        store = HistoryStore(context, HistoryPolicy.FULL_CONTENT)
 
         mockService = mockk(relaxed = true) {
             every { createSession(any()) } returns "session-abc"
@@ -451,14 +451,14 @@ class MindlayerApiTest {
         val resultSlot = slot<ToolResult>()
         every { mockService.submitToolResult(any(), capture(resultSlot)) } returns Unit
 
-        mindlayer.submitToolResult("req-tool", "search", """{"results":[]}""")
+        mindlayer.submitToolResult("req-tool", "call-1", "search", """{"results":[]}""")
 
         verify(exactly = 1) { mockService.submitToolResult(eq("req-tool"), any()) }
         val captured = resultSlot.captured
         assertEquals("req-tool", captured.requestId)
+        assertEquals("call-1", captured.callId)
         assertEquals("search", captured.toolName)
         assertEquals("""{"results":[]}""", captured.resultJson)
-        assertNull(captured.callId)
     }
 
     @Test
