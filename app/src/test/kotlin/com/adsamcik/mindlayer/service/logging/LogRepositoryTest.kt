@@ -57,6 +57,14 @@ class LogRepositoryTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         db = Room.inMemoryDatabaseBuilder(context, LogDatabase::class.java)
             .allowMainThreadQueries()
+            // Force synchronous query/transaction executors so the LogRepository drain loop
+            // (running on Dispatchers.Unconfined) and the test-thread reads via dao.getRecent
+            // serialize on the calling thread instead of racing on Room's default 4-thread
+            // pool. Without this, the suspending Room operations dispatch to background
+            // threads that aren't synchronized with runTest's scheduler, producing
+            // intermittent "Expected exactly 1 log entry" failures on CI.
+            .setQueryExecutor(Runnable::run)
+            .setTransactionExecutor(Runnable::run)
             .build()
         dao = db.logDao()
         repo = LogRepository(dao, Dispatchers.Unconfined)
