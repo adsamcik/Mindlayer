@@ -3,7 +3,6 @@ import java.util.Base64
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
     id("org.jetbrains.kotlin.plugin.compose") version libs.versions.kotlin.get()
@@ -50,7 +49,9 @@ android {
 
         // Only bundle resources for the locales we actually ship.
         // Expand this list when translations are added.
-        resourceConfigurations += listOf("en")
+        androidResources {
+            localeFilters += listOf("en")
+        }
     }
 
     signingConfigs {
