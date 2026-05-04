@@ -620,8 +620,16 @@ class Mindlayer private constructor(
     // -- Internals ------------------------------------------------------------
 
     /**
-     * Creates an [InferenceHandle] with a cancel callback that reaches
-     * through to the service's [IMindlayerService.cancelInference].
+     * Creates an [InferenceHandle] with cancel callbacks that reach through
+     * to the service's [IMindlayerService.cancelInference].
+     *
+     * Two callbacks are wired:
+     *  - `cancelCallback` (suspend): used by user-driven [InferenceHandle.cancel].
+     *    Waits for an active connection via [awaitConnected] so the cancel
+     *    survives a transient disconnect.
+     *  - `syncCancelCallback` (non-suspend): used by cleanup paths such as
+     *    [Conversation.close]. Best-effort against the currently-cached
+     *    binder; silently drops the cancel when no connection is available.
      */
     private fun buildHandle(requestId: String, flow: Flow<MindlayerEvent>): InferenceHandle {
         return InferenceHandle(requestId, flow).also { handle ->
@@ -632,6 +640,13 @@ class Mindlayer private constructor(
                     }
                 } catch (_: Exception) {
                     // Best-effort cancel — service may be disconnected
+                }
+            }
+            handle.setSyncCancelCallback {
+                try {
+                    connection.getService()?.cancelInference(requestId)
+                } catch (_: Exception) {
+                    // Best-effort cancel — service died or rejected the call
                 }
             }
         }
