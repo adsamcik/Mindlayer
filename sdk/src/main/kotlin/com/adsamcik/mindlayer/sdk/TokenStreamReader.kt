@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.floatOrNull
@@ -114,17 +115,66 @@ object TokenStreamReader {
                     break
                 }
 
-                require(len in 0..MAX_FRAME_BYTES) { "Invalid frame length: $len" }
+                // Guard all per-frame operations: a malicious service must not crash the collector.
+                // emit() is intentionally placed OUTSIDE the try block so CancellationException
+                // from a cancelled collector propagates correctly and is never swallowed.
+                var terminalError: MindlayerEvent.Error? = null
+                val parsedEvents: List<MindlayerEvent>? = try {
+                    require(len in 0..MAX_FRAME_BYTES) { "Invalid frame length: $len" }
+                    val payload = ByteArray(len)
+                    input.readFully(payload)
+                    parseFrameMulti(payload.decodeToString())
+                } catch (e: EOFException) {
+                    terminalError = MindlayerEvent.Error(
+                        message = "Protocol error: truncated frame",
+                        code = "PROTOCOL_ERROR_EOF",
+                        seq = -1,
+                    )
+                    null
+                } catch (e: IllegalArgumentException) {
+                    terminalError = MindlayerEvent.Error(
+                        message = "Protocol error: invalid frame length",
+                        code = "PROTOCOL_ERROR_LENGTH",
+                        seq = -1,
+                    )
+                    null
+                } catch (e: SerializationException) {
+                    // Defensive: parseFrameMulti already catches this, but guard against future changes.
+                    terminalError = MindlayerEvent.Error(
+                        message = "Protocol error: invalid frame encoding",
+                        code = "PROTOCOL_ERROR_JSON",
+                        seq = -1,
+                    )
+                    null
+                } catch (e: Throwable) {
+                    terminalError = MindlayerEvent.Error(
+                        message = "Protocol error",
+                        code = "PROTOCOL_ERROR",
+                        seq = -1,
+                    )
+                    null
+                }
 
-                val payload = ByteArray(len)
-                input.readFully(payload)
-                val jsonStr = payload.decodeToString()
-
-                // Most frames produce one event; v0.5 TOKEN_DELTA_BATCH
-                // expands into many ordered TextDelta emissions. Local
-                // List<MindlayerEvent> avoids widening parseFrame's signature.
-                for (event in parseFrameMulti(jsonStr)) {
-                    emit(event)
+                when {
+                    terminalError != null -> { emit(terminalError); break }
+                    parsedEvents == null -> {
+                        // Unrecognised frame — not a StreamEvent or StreamHeader.
+                        emit(
+                            MindlayerEvent.Error(
+                                message = "Protocol error: unrecognised frame",
+                                code = "PROTOCOL_ERROR_JSON",
+                                seq = -1,
+                            ),
+                        )
+                        break
+                    }
+                    else -> {
+                        // Most frames produce one event; v0.5 TOKEN_DELTA_BATCH
+                        // expands into many ordered TextDelta emissions.
+                        for (event in parsedEvents) {
+                            emit(event)
+                        }
+                    }
                 }
             }
 

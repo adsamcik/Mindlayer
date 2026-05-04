@@ -17,6 +17,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -25,6 +27,9 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
@@ -36,6 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [ test ]
+    if: github.ref_type == 'tag'
     permissions:
       packages: write
       contents: write
@@ -72,6 +78,9 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
 
@@ -91,7 +100,7 @@ jobs:
 
       - name: Create GitHub Release
         if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           generate_release_notes: true
           body: |

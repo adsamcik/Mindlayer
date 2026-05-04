@@ -1,18 +1,28 @@
-package com.adsamcik.mindlayer.service.logging
+﻿package com.adsamcik.mindlayer.service.logging
 
 import android.content.Context
 import android.util.Log
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import io.mockk.coEvery
 import io.mockk.every
+import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -47,9 +57,17 @@ class LogRepositoryTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         db = Room.inMemoryDatabaseBuilder(context, LogDatabase::class.java)
             .allowMainThreadQueries()
+            // Force synchronous query/transaction executors so the LogRepository drain loop
+            // (running on Dispatchers.Unconfined) and the test-thread reads via dao.getRecent
+            // serialize on the calling thread instead of racing on Room's default 4-thread
+            // pool. Without this, the suspending Room operations dispatch to background
+            // threads that aren't synchronized with runTest's scheduler, producing
+            // intermittent "Expected exactly 1 log entry" failures on CI.
+            .setQueryExecutor(Runnable::run)
+            .setTransactionExecutor(Runnable::run)
             .build()
         dao = db.logDao()
-        repo = LogRepository(dao)
+        repo = LogRepository(dao, Dispatchers.Unconfined)
     }
 
     @After
@@ -59,14 +77,16 @@ class LogRepositoryTest {
         unmockkAll()
     }
 
-    /** Wait for fire-and-forget coroutines to complete and return the single inserted entry. */
-    private suspend fun awaitSingleEntry(): LogEntry {
-        // Give the fire-and-forget coroutine time to complete
-        Thread.sleep(200)
+    /** Flush any pending drain-loop work, then return the single inserted entry. */
+    private suspend fun TestScope.awaitSingleEntry(): LogEntry {
+        advanceUntilIdle()
         val entries = dao.getRecent(10)
         assertEquals("Expected exactly 1 log entry", 1, entries.size)
         return entries[0]
     }
+
+    private fun parsedExtra(entry: LogEntry) =
+        Json.parseToJsonElement(entry.extraJson!!).jsonObject
 
     // --- logInferenceStart ---
 
@@ -107,7 +127,8 @@ class LogRepositoryTest {
     // --- logInferenceError ---
 
     @Test
-    fun `logInferenceError includes error message`() = runTest {
+    fun `logInferenceError sanitizes error message`() = runTest {
+        // "OOM crash" → spaces removed → "OOMcrash"
         repo.logInferenceError("req-3", "sess-3", "OOM crash")
         val e = awaitSingleEntry()
 
@@ -115,7 +136,8 @@ class LogRepositoryTest {
         assertEquals(LogEvent.REQUEST_ERROR, e.event)
         assertEquals("req-3", e.requestId)
         assertEquals("sess-3", e.sessionId)
-        assertEquals("OOM crash", e.errorMessage)
+        // Sanitized: spaces stripped
+        assertEquals("OOMcrash", e.errorMessage)
     }
 
     @Test
@@ -125,7 +147,38 @@ class LogRepositoryTest {
 
         assertEquals(LogCategory.ERROR, e.category)
         assertEquals(null, e.sessionId)
-        assertEquals("No session", e.errorMessage)
+        // Sanitized: space stripped
+        assertEquals("Nosession", e.errorMessage)
+    }
+
+    // --- M19: sanitizeErrorClass ---
+
+    @Test
+    fun `logInferenceError sanitizes long chatty string to le64 chars`() = runTest {
+        // Input has spaces (stripped) and is very long (capped at 64)
+        val longMessage = "leaked: SECRET PROMPT " + "x".repeat(200)
+        repo.logInferenceError("req-san", "sess-san", longMessage)
+        val e = awaitSingleEntry()
+
+        assertNotNull(e.errorMessage)
+        assertTrue("errorMessage should be <= 64 chars", e.errorMessage!!.length <= 64)
+        assertFalse("errorMessage should not contain spaces", e.errorMessage.contains(" "))
+    }
+
+    @Test
+    fun `logInferenceError preserves safe exception class names`() = runTest {
+        repo.logInferenceError("req-cls", "sess-cls", "OutOfMemoryError-IOException")
+        val e = awaitSingleEntry()
+
+        assertEquals("OutOfMemoryError-IOException", e.errorMessage)
+    }
+
+    @Test
+    fun `logInferenceError with blank message stores null`() = runTest {
+        repo.logInferenceError("req-blank", "sess-blank", "   ")
+        val e = awaitSingleEntry()
+
+        assertNull(e.errorMessage)
     }
 
     // --- logThermalBandChange ---
@@ -159,6 +212,14 @@ class LogRepositoryTest {
         assertTrue(e.extraJson!!.contains("2048"))
     }
 
+    @Test
+    fun `logSessionCreated writes parseable numeric extraJson`() = runTest {
+        repo.logSessionCreated("sess-json", "GPU", 2048)
+        val extra = parsedExtra(awaitSingleEntry())
+
+        assertEquals(2048, extra["maxTokens"]!!.jsonPrimitive.int)
+    }
+
     // --- logSessionDestroyed ---
 
     @Test
@@ -183,6 +244,16 @@ class LogRepositoryTest {
         assertEquals("sess-7", e.sessionId)
         assertNotNull(e.extraJson)
         assertTrue(e.extraJson!!.contains("memory_pressure"))
+    }
+
+    @Test
+    fun `logSessionEvicted escapes reason as valid JSON`() = runTest {
+        val reason = "memory \"pressure\" at C:\\models\\gemma"
+
+        repo.logSessionEvicted("sess-json", reason)
+        val extra = parsedExtra(awaitSingleEntry())
+
+        assertEquals(reason, extra["reason"]!!.jsonPrimitive.content)
     }
 
     // --- logMemoryPressure ---
@@ -213,6 +284,16 @@ class LogRepositoryTest {
         assertEquals(3500L, e.durationMs)
         assertNotNull(e.extraJson)
         assertTrue(e.extraJson!!.contains("/data/models/llama.bin"))
+    }
+
+    @Test
+    fun `logEngineInit escapes model path as valid JSON`() = runTest {
+        val modelPath = "C:\\models\\Gemma \"4\"\\model.litertlm"
+
+        repo.logEngineInit("GPU", 3500L, modelPath)
+        val extra = parsedExtra(awaitSingleEntry())
+
+        assertEquals(modelPath, extra["modelPath"]!!.jsonPrimitive.content)
     }
 
     // --- logEngineShutdown ---
@@ -254,5 +335,80 @@ class LogRepositoryTest {
         assertEquals(1, dao.totalCount())
         val remaining = dao.getRecent(10)
         assertTrue(remaining[0].timestampMs >= oneDayAgo)
+    }
+
+    // --- backpressure ---
+
+    private fun dummyEntry() = LogEntry(
+        timestampMs = System.currentTimeMillis(),
+        category = LogCategory.INFERENCE,
+        event = LogEvent.REQUEST_START,
+    )
+
+    /**
+     * log() must never block the caller even when the channel is full.
+     * Uses a mock DAO that blocks indefinitely to keep the drain loop stuck,
+     * then verifies that 10_000 non-blocking log() calls complete in well
+     * under a second.
+     */
+    @Test(timeout = 10_000)
+    fun `log does not block when channel is full`() {
+        val drainStarted = java.util.concurrent.CountDownLatch(1)
+        val blockDrain = java.util.concurrent.CountDownLatch(1)
+        val blockingDao = mockk<LogDao>()
+        coEvery { blockingDao.insertAll(any()) } coAnswers {
+            drainStarted.countDown()
+            blockDrain.await() // blocks the drain coroutine's IO thread
+        }
+
+        val capacity = 16
+        val testRepo = LogRepository(blockingDao, Dispatchers.IO, bufferCapacity = capacity)
+
+        // Send one entry to start the drain loop and get it stuck on the DAO.
+        testRepo.log(dummyEntry())
+        drainStarted.await()
+
+        // Drain loop is now blocked. Channel buffer is empty (first entry claimed).
+        // 10_000 log() calls should complete quickly: first `capacity` go to buffer, rest are dropped.
+        val start = System.currentTimeMillis()
+        repeat(10_000) { testRepo.log(dummyEntry()) }
+        val elapsedMs = System.currentTimeMillis() - start
+
+        assertTrue("10_000 log() calls took ${elapsedMs}ms, expected <1000ms", elapsedMs < 1000)
+
+        blockDrain.countDown()
+        testRepo.shutdown()
+    }
+
+    /**
+     * droppedLogCount() must increase when the channel overflows.
+     */
+    @Test(timeout = 10_000)
+    fun `droppedLogCount increases when buffer overflows`() {
+        val drainStarted = java.util.concurrent.CountDownLatch(1)
+        val blockDrain = java.util.concurrent.CountDownLatch(1)
+        val blockingDao = mockk<LogDao>()
+        coEvery { blockingDao.insertAll(any()) } coAnswers {
+            drainStarted.countDown()
+            blockDrain.await()
+        }
+
+        val capacity = 16
+        val testRepo = LogRepository(blockingDao, Dispatchers.IO, bufferCapacity = capacity)
+
+        // Trigger drain loop and get it stuck.
+        testRepo.log(dummyEntry())
+        drainStarted.await()
+
+        // Now fill beyond capacity so drops accumulate.
+        repeat(capacity * 5) { testRepo.log(dummyEntry()) }
+
+        assertTrue(
+            "Expected droppedLogCount > 0 after overflow, got ${testRepo.droppedLogCount()}",
+            testRepo.droppedLogCount() > 0L,
+        )
+
+        blockDrain.countDown()
+        testRepo.shutdown()
     }
 }

@@ -24,6 +24,12 @@ import java.util.concurrent.ConcurrentHashMap
  *  4. Results are returned to the orchestrator for injection into the
  *     conversation
  *
+ * H3a — bookkeeping is keyed by the composite `(uid, requestId)` rather than
+ * the raw client-supplied request id. Two unrelated client apps may pick the
+ * same request id; without uid isolation, app B could submit a tool result
+ * that fulfils app A's pending call. The composite key prevents that without
+ * forcing a globally-unique id scheme on clients.
+ *
  * Thread-safety: the [pending] map is a [ConcurrentHashMap]; individual
  * [PendingToolCall.resultDeferred] instances are coroutine-safe by design.
  */
@@ -89,6 +95,10 @@ class ToolCallBridge {
      * the unfinished pending call matching both [callId] and [toolName],
      * unblocking the streaming coroutine in [awaitResults].
      *
+     * If no pending call matches, all remaining pending entries for this
+     * [scopedKey] are failed immediately so [awaitResults] unblocks fast
+     * rather than waiting for the full timeout (H3).
+     *
      * @return `true` when a matching pending call was found and the result
      *   was delivered; `false` when the request has no pending calls or no
      *   call with the given (callId, toolName) is awaiting a result. The
@@ -112,11 +122,22 @@ class ToolCallBridge {
         }
 
         if (match == null) {
+            // H3 — surface mismatched submitResult IMMEDIATELY rather than letting awaitResults block.
             MindlayerLog.w(
                 TAG,
                 "submitResult: no pending call for call ${callId.loggable()} " +
-                    "tool='$toolName' request ${requestLabel(scopedKey)}",
+                    "tool='$toolName' request ${requestLabel(scopedKey)} — failing pending entries",
             )
+            // Fail every still-pending entry for this request so awaitResults unblocks fast.
+            synchronized(calls) {
+                calls.filter { !it.resultDeferred.isCompleted }.forEach {
+                    it.resultDeferred.completeExceptionally(
+                        IllegalStateException(
+                            "Client submitted result for unmatched tool call (callId=${callId.loggable()}, tool='$toolName')",
+                        ),
+                    )
+                }
+            }
             return false
         }
 

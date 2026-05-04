@@ -133,6 +133,7 @@ class MultimodalInferenceTest {
             every { createConversation(any()) } returns mockConversation
         }
         engineManager = mockk(relaxed = true) {
+            every { isInitialized } returns true
             every { requireEngine() } returns mockEngine
             every { currentBackend } returns "GPU"
             every { isInitialized } returns true

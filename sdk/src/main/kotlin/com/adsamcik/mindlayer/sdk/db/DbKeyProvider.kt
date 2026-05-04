@@ -6,9 +6,16 @@ import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
+import androidx.annotation.VisibleForTesting
+import java.io.File
+import java.io.IOException
+import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.security.GeneralSecurityException
 import java.security.KeyStore
 import java.security.SecureRandom
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -19,7 +26,13 @@ import javax.crypto.spec.GCMParameterSpec
  *
  * The passphrase is a random 32-byte blob wrapped (AES/GCM) with a Keystore-resident AES key
  * (alias `mindlayer.sdk.db.key`, distinct from the service's own alias so the two DBs cannot
- * share keys). Only the wrapped ciphertext + IV is persisted in SharedPreferences.
+ * share keys).
+ *
+ * **Storage** (was: SharedPreferences pre-fix; see H7):
+ * The wrapped key + IV are persisted in a binary file [KEY_FILE] in `filesDir`, read and
+ * written exclusively inside the cross-process FileLock. SharedPreferences are per-process
+ * cached and do *not* honour cross-process commits even after a FileLock is released —
+ * that race produced divergent passphrases and bricked the encrypted DB.
  *
  * Fail-closed: if the Keystore is unavailable, [get] throws [IllegalStateException]. Callers
  * must propagate rather than silently falling back to a plaintext DB.
@@ -32,30 +45,32 @@ internal object DbKeyProvider {
     private const val TAG = "Mindlayer.SdkDbKey"
     private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
     private const val KEY_ALIAS = "mindlayer.sdk.db.key"
-    /** F-049: HMAC alias for tamper-evident strike counter. */
-    private const val KEY_ALIAS_HMAC = "mindlayer.sdk.db.key.hmac"
-    private const val PREF_FILE = "mindlayer_sdk_db_key"
-    private const val PREF_WRAPPED = "wrapped_key"
-    private const val PREF_IV = "wrapped_iv"
-    /** F-049: persisted unwrap-failure strike counter. */
-    private const val PREF_FAIL_COUNT = "unwrap_fail_count"
-    /** F-049: HMAC over the strike count, base-64 encoded. */
-    private const val PREF_FAIL_MAC = "unwrap_fail_mac"
+
+    private const val KEY_FILE = "mindlayer_sdk_db_key.bin"
+
+    private const val LEGACY_PREF_FILE = "mindlayer_sdk_db_key"
+    private const val LEGACY_PREF_WRAPPED = "wrapped_key"
+    private const val LEGACY_PREF_IV = "wrapped_iv"
+
     private const val LOCK_FILE = "mindlayer_sdk_db_key.lock"
     private const val PASSPHRASE_LEN = 32
     private const val GCM_TAG_BITS = 128
     private const val AES_GCM_TRANSFORM = "AES/GCM/NoPadding"
-    private const val HMAC_ALGORITHM = "HmacSHA256"
-    /** F-049: see app-side `DbKeyProvider.MAX_UNWRAP_FAILS` for rationale. */
-    private const val MAX_UNWRAP_FAILS = 3
+
+    @VisibleForTesting internal const val MAGIC = 0x4D4C4B31 // 'MLK1'
+    @VisibleForTesting internal const val VERSION: Short = 1
+    private const val HEADER_BYTES = 4 + 2 + 2
+    private const val MAX_IV_LEN = 64
+    private const val MAX_WRAPPED_LEN = 4096
 
     private val lock = Any()
 
     /**
-     * Returns the passphrase for the DB named [databaseName]. If regeneration is forced,
-     * the existing DB file is **deleted** first — otherwise Room would try to open stale
-     * ciphertext with a new key and crash. Callers must not cache the returned array;
-     * zero their reference once the database is built.
+     * Returns the passphrase for the DB named [databaseName]. If regeneration is forced
+     * (Keystore key permanently invalidated), the existing DB file is deleted first. AEAD
+     * authentication failures are treated as tamper and **do not** delete the DB; they
+     * quarantine the key file and throw [IllegalStateException]. Callers must not cache
+     * the returned array; zero their reference once the database is built.
      */
     fun get(context: Context, databaseName: String): ByteArray {
         val appContext = context.applicationContext
@@ -67,9 +82,9 @@ internal object DbKeyProvider {
     }
 
     private inline fun <T> withCrossProcessLock(context: Context, block: () -> T): T {
-        val lockFile = java.io.File(context.filesDir, LOCK_FILE)
+        val lockFile = File(context.filesDir, LOCK_FILE)
         lockFile.parentFile?.mkdirs()
-        java.io.RandomAccessFile(lockFile, "rw").use { raf ->
+        RandomAccessFile(lockFile, "rw").use { raf ->
             raf.channel.use { channel ->
                 val fileLock = channel.lock()
                 try {
@@ -81,49 +96,30 @@ internal object DbKeyProvider {
         }
     }
 
-    private fun loadOrCreate(context: Context, databaseName: String): ByteArray {
-        val prefs = context.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
-        val wrappedB64 = prefs.getString(PREF_WRAPPED, null)
-        val ivB64 = prefs.getString(PREF_IV, null)
+    private fun keyFile(context: Context): File = File(context.filesDir, KEY_FILE)
 
-        if (wrappedB64 != null && ivB64 != null) {
+    private fun loadOrCreate(context: Context, databaseName: String): ByteArray {
+        val keyFile = keyFile(context)
+
+        if (!keyFile.exists()) {
+            migrateLegacyPrefsIfPresent(context, keyFile)
+        }
+
+        val record = readKeyFile(keyFile)
+        if (record != null) {
             try {
                 val key = loadKeystoreKey()
-                if (key == null) {
-                    // F-026: wrapped blob exists but Keystore entry is gone
-                    // (uninstall/restore, factory reset of the Keystore alone,
-                    // or aggressive cleaner). Match the GeneralSecurityException
-                    // recovery path: wipe orphaned ciphertext + prefs and
-                    // regenerate.
-                    Log.w(TAG, "Keystore entry missing despite wrapped blob present; regenerating DB passphrase and wiping $databaseName.")
-                    forceReset(context, prefs, databaseName)
-                    return createAndPersist(prefs)
-                }
-                val wrapped = Base64.decode(wrappedB64, Base64.NO_WRAP)
-                val iv = Base64.decode(ivB64, Base64.NO_WRAP)
+                    ?: error("Keystore key missing despite wrapped blob present")
                 val cipher = Cipher.getInstance(AES_GCM_TRANSFORM)
-                cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
-                val passphrase = cipher.doFinal(wrapped)
-                resetFailCount(prefs)
-                return passphrase
+                cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, record.iv))
+                return cipher.doFinal(record.wrapped)
             } catch (e: KeyPermanentlyInvalidatedException) {
                 Log.w(TAG, "Keystore key invalidated; regenerating DB passphrase and wiping $databaseName.", e)
-                forceReset(context, prefs, databaseName)
+                forceReset(context, keyFile, databaseName)
+            } catch (e: AEADBadTagException) {
+                handleTamper(keyFile, e)
             } catch (e: GeneralSecurityException) {
-                // F-049: tamper-evident strike counter; only reset after
-                // MAX_UNWRAP_FAILS verified strikes. See the app-side
-                // `DbKeyProvider` for the rationale.
-                val strikes = incrementVerifiedFailCount(prefs)
-                if (strikes >= MAX_UNWRAP_FAILS) {
-                    Log.w(TAG, "Failed to unwrap DB passphrase (${e.javaClass.simpleName}); $strikes/$MAX_UNWRAP_FAILS strikes — regenerating and wiping $databaseName.", e)
-                    forceReset(context, prefs, databaseName)
-                } else {
-                    Log.w(TAG, "Failed to unwrap DB passphrase (${e.javaClass.simpleName}); $strikes/$MAX_UNWRAP_FAILS strikes — refusing to start.", e)
-                    throw IllegalStateException(
-                        "DB unwrap failed (strike $strikes of $MAX_UNWRAP_FAILS); retry on next launch or clear app data manually",
-                        e,
-                    )
-                }
+                handleTamper(keyFile, e)
             } catch (e: IllegalStateException) {
                 throw e
             } catch (e: Exception) {
@@ -131,31 +127,51 @@ internal object DbKeyProvider {
             }
         }
 
-        return createAndPersist(prefs)
+        return createAndPersist(keyFile)
     }
 
-    private fun forceReset(
-        context: Context,
-        prefs: android.content.SharedPreferences,
-        databaseName: String,
-    ) {
+    /**
+     * Quarantines the on-disk wrapped key and throws. AEAD authentication failures
+     * mean the wrapped key has been altered. We MUST NOT call [Context.deleteDatabase]
+     * here — a single bit flip in a SharedPreferences/file blob would otherwise
+     * silently wipe the user's DB. Recovery is a deliberate manual action (clear app data).
+     */
+    private fun handleTamper(keyFile: File, cause: Throwable): Nothing {
+        val ts = System.currentTimeMillis()
+        val quarantine = File(keyFile.parentFile, "${keyFile.name}.tampered-$ts")
+        val moved = try {
+            keyFile.renameTo(quarantine)
+        } catch (_: Throwable) {
+            false
+        }
+        val quarantinePath = if (moved) quarantine.absolutePath else "<rename failed: ${keyFile.absolutePath}>"
+        Log.e(
+            TAG,
+            "Wrapped DB key authentication failed (${cause.javaClass.simpleName}); " +
+                "quarantined to $quarantinePath. Refusing to delete the DB — manual app-data " +
+                "clear is required if recovery is desired.",
+            cause,
+        )
+        if (!moved) {
+            try { keyFile.delete() } catch (_: Throwable) { /* ignore */ }
+        }
+        throw IllegalStateException(
+            "Wrapped DB key authentication failed — file may have been tampered. Quarantined to $quarantinePath",
+            cause,
+        )
+    }
+
+    private fun forceReset(context: Context, keyFile: File, databaseName: String) {
         if (!context.deleteDatabase(databaseName)) {
             Log.w(TAG, "deleteDatabase($databaseName) returned false during key-reset; future open may fail.")
         }
-        val ok = prefs.edit()
-            .remove(PREF_WRAPPED)
-            .remove(PREF_IV)
-            .remove(PREF_FAIL_COUNT)
-            .remove(PREF_FAIL_MAC)
-            .commit()
-        if (!ok) {
-            throw IllegalStateException("Could not persist DB-key reset to SharedPreferences")
+        if (keyFile.exists() && !keyFile.delete()) {
+            throw IllegalStateException("Could not delete stale wrapped DB key file: ${keyFile.absolutePath}")
         }
         deleteKeystoreKey()
-        deleteHmacKey()
     }
 
-    private fun createAndPersist(prefs: android.content.SharedPreferences): ByteArray {
+    private fun createAndPersist(keyFile: File): ByteArray {
         val key = try {
             generateKeystoreKey()
         } catch (e: Exception) {
@@ -167,16 +183,25 @@ internal object DbKeyProvider {
             cipher.init(Cipher.ENCRYPT_MODE, key)
             val iv = cipher.iv
             val wrapped = cipher.doFinal(passphrase)
-            val ok = prefs.edit()
-                .putString(PREF_WRAPPED, Base64.encodeToString(wrapped, Base64.NO_WRAP))
-                .putString(PREF_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
-                .commit()
-            if (!ok) {
-                throw IllegalStateException("Could not persist wrapped DB key to SharedPreferences")
-            }
+            writeKeyFile(keyFile, KeyRecord(iv, wrapped))
             return passphrase
         } catch (e: GeneralSecurityException) {
             throw IllegalStateException("Failed to wrap DB passphrase with Keystore key", e)
+        }
+    }
+
+    private fun migrateLegacyPrefsIfPresent(context: Context, keyFile: File) {
+        val prefs = context.getSharedPreferences(LEGACY_PREF_FILE, Context.MODE_PRIVATE)
+        val wrappedB64 = prefs.getString(LEGACY_PREF_WRAPPED, null) ?: return
+        val ivB64 = prefs.getString(LEGACY_PREF_IV, null) ?: return
+        try {
+            val wrapped = Base64.decode(wrappedB64, Base64.NO_WRAP)
+            val iv = Base64.decode(ivB64, Base64.NO_WRAP)
+            writeKeyFile(keyFile, KeyRecord(iv, wrapped))
+            prefs.edit().clear().commit()
+            Log.i(TAG, "Migrated wrapped DB key from legacy SharedPreferences to ${keyFile.name}.")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to migrate legacy wrapped DB key from prefs; will regenerate.", e)
         }
     }
 
@@ -197,42 +222,7 @@ internal object DbKeyProvider {
 
     private fun generateKeystoreKey(): SecretKey {
         val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        // F-048: prefer StrongBox-backed + unlocked-device-required; fall
-        // back to TEE-backed unlocked-device-required; final fallback is the
-        // baseline spec for devices that reject either flag at key gen time.
-        return try {
-            gen.init(buildKeySpec(strongBox = true))
-            gen.generateKey()
-        } catch (_: Exception) {
-            try {
-                gen.init(buildKeySpec(strongBox = false))
-                gen.generateKey()
-            } catch (_: Exception) {
-                gen.init(buildBaselineKeySpec())
-                gen.generateKey()
-            }
-        }
-    }
-
-    private fun buildKeySpec(strongBox: Boolean): KeyGenParameterSpec {
-        val builder = KeyGenParameterSpec.Builder(
-            KEY_ALIAS,
-            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-        )
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setKeySize(256)
-            .setUserAuthenticationRequired(false)
-            .setRandomizedEncryptionRequired(true)
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-            builder.setUnlockedDeviceRequired(true)
-            if (strongBox) builder.setIsStrongBoxBacked(true)
-        }
-        return builder.build()
-    }
-
-    private fun buildBaselineKeySpec(): KeyGenParameterSpec =
-        KeyGenParameterSpec.Builder(
+        val spec = KeyGenParameterSpec.Builder(
             KEY_ALIAS,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
         )
@@ -242,82 +232,101 @@ internal object DbKeyProvider {
             .setUserAuthenticationRequired(false)
             .setRandomizedEncryptionRequired(true)
             .build()
-
-    // ── F-049 strike-counter HMAC plumbing ──────────────────────────────
-
-    private fun verifiedFailCount(prefs: android.content.SharedPreferences): Int {
-        val count = prefs.getInt(PREF_FAIL_COUNT, 0)
-        if (count <= 0) return 0
-        val storedMac = prefs.getString(PREF_FAIL_MAC, null) ?: return 0
-        val key = try { loadOrCreateHmacKey() } catch (_: Exception) { return 0 }
-        val computed = computeFailCountMac(count, key)
-        return if (constantTimeEquals(computed, storedMac)) count else {
-            Log.w(TAG, "Unwrap-fail-count HMAC mismatch — counter rejected as tampered")
-            prefs.edit().remove(PREF_FAIL_COUNT).remove(PREF_FAIL_MAC).apply()
-            0
-        }
-    }
-
-    private fun incrementVerifiedFailCount(prefs: android.content.SharedPreferences): Int {
-        val newCount = verifiedFailCount(prefs) + 1
-        try {
-            val key = loadOrCreateHmacKey()
-            val mac = computeFailCountMac(newCount, key)
-            prefs.edit()
-                .putInt(PREF_FAIL_COUNT, newCount)
-                .putString(PREF_FAIL_MAC, mac)
-                .apply()
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to persist strike counter HMAC", e)
-            prefs.edit().remove(PREF_FAIL_COUNT).remove(PREF_FAIL_MAC).apply()
-        }
-        return newCount
-    }
-
-    private fun resetFailCount(prefs: android.content.SharedPreferences) {
-        val current = prefs.getInt(PREF_FAIL_COUNT, 0)
-        if (current == 0 && prefs.getString(PREF_FAIL_MAC, null) == null) return
-        prefs.edit().remove(PREF_FAIL_COUNT).remove(PREF_FAIL_MAC).apply()
-    }
-
-    private fun computeFailCountMac(count: Int, key: javax.crypto.SecretKey): String {
-        val mac = javax.crypto.Mac.getInstance(HMAC_ALGORITHM)
-        mac.init(key)
-        return Base64.encodeToString(
-            mac.doFinal(count.toString().toByteArray(Charsets.US_ASCII)),
-            Base64.NO_WRAP,
-        )
-    }
-
-    private fun constantTimeEquals(a: String, b: String): Boolean {
-        if (a.length != b.length) return false
-        var diff = 0
-        for (i in a.indices) {
-            diff = diff or (a[i].code xor b[i].code)
-        }
-        return diff == 0
-    }
-
-    private fun loadOrCreateHmacKey(): javax.crypto.SecretKey {
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        val existing = ks.getEntry(KEY_ALIAS_HMAC, null) as? KeyStore.SecretKeyEntry
-        if (existing != null) return existing.secretKey
-        val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_HMAC_SHA256, KEYSTORE_PROVIDER)
-        gen.init(
-            KeyGenParameterSpec.Builder(
-                KEY_ALIAS_HMAC,
-                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY,
-            ).setDigests(KeyProperties.DIGEST_SHA256).build()
-        )
+        gen.init(spec)
         return gen.generateKey()
     }
 
-    private fun deleteHmacKey() {
+    // -----------------------------------------------------------------------------
+    // Key file binary format (pure JVM logic; unit-testable without Android).
+    // -----------------------------------------------------------------------------
+
+    @VisibleForTesting
+    internal data class KeyRecord(val iv: ByteArray, val wrapped: ByteArray) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is KeyRecord) return false
+            return iv.contentEquals(other.iv) && wrapped.contentEquals(other.wrapped)
+        }
+        override fun hashCode(): Int = 31 * iv.contentHashCode() + wrapped.contentHashCode()
+    }
+
+    @VisibleForTesting
+    internal fun encodeKeyRecord(record: KeyRecord): ByteArray {
+        require(record.iv.size in 1..MAX_IV_LEN) { "iv length out of range: ${record.iv.size}" }
+        require(record.wrapped.size in 1..MAX_WRAPPED_LEN) { "wrapped length out of range: ${record.wrapped.size}" }
+        val total = HEADER_BYTES + record.iv.size + 4 + record.wrapped.size
+        val buf = ByteBuffer.allocate(total).order(ByteOrder.LITTLE_ENDIAN)
+        buf.putInt(MAGIC)
+        buf.putShort(VERSION)
+        buf.putShort(record.iv.size.toShort())
+        buf.put(record.iv)
+        buf.putInt(record.wrapped.size)
+        buf.put(record.wrapped)
+        return buf.array()
+    }
+
+    @VisibleForTesting
+    internal fun decodeKeyRecord(bytes: ByteArray): KeyRecord? {
+        if (bytes.size < HEADER_BYTES + 4) return null
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         try {
-            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-            if (ks.containsAlias(KEY_ALIAS_HMAC)) ks.deleteEntry(KEY_ALIAS_HMAC)
+            val magic = buf.int
+            if (magic != MAGIC) return null
+            val version = buf.short
+            if (version != VERSION) return null
+            val ivLen = buf.short.toInt() and 0xFFFF
+            if (ivLen <= 0 || ivLen > MAX_IV_LEN) return null
+            if (buf.remaining() < ivLen + 4) return null
+            val iv = ByteArray(ivLen)
+            buf.get(iv)
+            val wrappedLen = buf.int
+            if (wrappedLen <= 0 || wrappedLen > MAX_WRAPPED_LEN) return null
+            if (buf.remaining() < wrappedLen) return null
+            val wrapped = ByteArray(wrappedLen)
+            buf.get(wrapped)
+            return KeyRecord(iv, wrapped)
         } catch (_: Exception) {
-            // best effort
+            return null
+        }
+    }
+
+    private fun readKeyFile(file: File): KeyRecord? {
+        if (!file.exists()) return null
+        return try {
+            RandomAccessFile(file, "r").use { raf ->
+                val len = raf.length()
+                if (len <= 0 || len > (HEADER_BYTES + 4 + MAX_IV_LEN + MAX_WRAPPED_LEN).toLong()) return null
+                val bytes = ByteArray(len.toInt())
+                raf.readFully(bytes)
+                decodeKeyRecord(bytes)
+            }
+        } catch (_: IOException) {
+            null
+        } catch (_: SecurityException) {
+            null
+        }
+    }
+
+    private fun writeKeyFile(file: File, record: KeyRecord) {
+        val bytes = encodeKeyRecord(record)
+        val parent = file.parentFile
+        parent?.mkdirs()
+        val tmp = File(parent, "${file.name}.tmp")
+        try {
+            RandomAccessFile(tmp, "rw").use { raf ->
+                raf.setLength(0)
+                raf.write(bytes)
+                try { raf.fd.sync() } catch (_: Throwable) { /* best effort */ }
+            }
+            if (file.exists() && !file.delete()) {
+                throw IOException("Could not delete previous key file: ${file.absolutePath}")
+            }
+            if (!tmp.renameTo(file)) {
+                throw IOException("Atomic rename failed: ${tmp.absolutePath} -> ${file.absolutePath}")
+            }
+        } catch (e: IOException) {
+            try { tmp.delete() } catch (_: Throwable) { /* best effort */ }
+            throw IllegalStateException("Could not persist wrapped DB key to ${file.absolutePath}", e)
         }
     }
 }

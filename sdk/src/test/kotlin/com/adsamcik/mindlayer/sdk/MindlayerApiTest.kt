@@ -75,16 +75,25 @@ class MindlayerApiTest {
 
         val context = ApplicationProvider.getApplicationContext<Context>()
 
-        resetDbSingleton()
+        MindlayerDatabase.clearInstance()
         db = Room.inMemoryDatabaseBuilder(context, MindlayerDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        setDbSingleton(db)
+        MindlayerDatabase.setInstance(db)
 
         store = HistoryStore(context, HistoryPolicy.FULL_CONTENT)
 
         mockService = mockk(relaxed = true) {
             every { createSession(any()) } returns "session-abc"
+            every { status } returns ServiceStatus(
+                isEngineLoaded = true,
+                activeSessionCount = 0,
+                activeInferenceCount = 0,
+                backend = "GPU",
+                thermalBand = "COOL",
+                isForeground = false,
+                uptimeMs = 0L,
+            )
         }
 
         mockConnection = mockk(relaxed = true) {
@@ -102,23 +111,11 @@ class MindlayerApiTest {
     @After
     fun tearDown() {
         db.close()
-        resetDbSingleton()
+        MindlayerDatabase.clearInstance()
         unmockkAll()
     }
 
     // -- Helpers --------------------------------------------------------------
-
-    private fun resetDbSingleton() {
-        val field = MindlayerDatabase::class.java.getDeclaredField("instance")
-        field.isAccessible = true
-        field.set(null, null)
-    }
-
-    private fun setDbSingleton(database: MindlayerDatabase) {
-        val field = MindlayerDatabase::class.java.getDeclaredField("instance")
-        field.isAccessible = true
-        field.set(null, database)
-    }
 
     private fun buildMindlayer(conn: ConnectionManager, historyStore: HistoryStore?): Mindlayer {
         val ctor = Mindlayer::class.java.getDeclaredConstructor(
@@ -464,6 +461,26 @@ class MindlayerApiTest {
         assertEquals("""{"results":[]}""", captured.resultJson)
     }
 
+    @Test
+    fun `submitToolResult_withCallId_forwardsCallIdToAidl`() = runTest {
+        val resultSlot = slot<ToolResult>()
+        every { mockService.submitToolResult(any(), capture(resultSlot)) } returns Unit
+
+        mindlayer.submitToolResult(
+            requestId = "req-tool-2",
+            callId = "call-abc123",
+            toolName = "weather",
+            resultJson = """{"temp":20}""",
+        )
+
+        verify(exactly = 1) { mockService.submitToolResult(eq("req-tool-2"), any()) }
+        val captured = resultSlot.captured
+        assertEquals("req-tool-2", captured.requestId)
+        assertEquals("call-abc123", captured.callId)
+        assertEquals("weather", captured.toolName)
+        assertEquals("""{"temp":20}""", captured.resultJson)
+    }
+
     // ═════════════════════════════════════════════════════════════════════
     //  Service status
     // ═════════════════════════════════════════════════════════════════════
@@ -623,5 +640,43 @@ class MindlayerApiTest {
 
         assertTrue(handle.isCancelled)
         coVerify(exactly = 1) { mockService.cancelInference(handle.requestId) }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  M20 — persistHistory opt-in (privacy-by-default)
+    // ═════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `connect default persistHistory false gives null historyStore (historyCount is 0)`() = runTest {
+        // buildMindlayer(conn, null) simulates connect(ctx, persistHistory=false)
+        val ml = buildMindlayer(mockConnection, null)
+        assertEquals(0, ml.historyCount())
+        assertEquals(emptyList<ConversationSummary>(), ml.listHistory())
+    }
+
+    @Test
+    fun `connect persistHistory true gives live historyStore`() = runTest {
+        // buildMindlayer(conn, store) simulates connect(ctx, persistHistory=true)
+        val ml = buildMindlayer(mockConnection, store)
+        ml.createSession {}
+        assertEquals(1, ml.historyCount())
+    }
+
+    @Test
+    fun `eraseAllHistory clears all conversations`() = runTest {
+        val ml = buildMindlayer(mockConnection, store)
+        ml.createSession {}
+        assertEquals(1, ml.historyCount())
+
+        ml.eraseAllHistory()
+        assertEquals(0, ml.historyCount())
+    }
+
+    @Test
+    fun `eraseAllHistory is no-op when historyStore is null`() = runTest {
+        // Should not throw when persistHistory=false
+        val ml = buildMindlayer(mockConnection, null)
+        ml.eraseAllHistory() // must not throw
+        assertEquals(0, ml.historyCount())
     }
 }

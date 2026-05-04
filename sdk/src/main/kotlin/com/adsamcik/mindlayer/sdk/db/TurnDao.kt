@@ -106,6 +106,10 @@ abstract class TurnDao {
     @Query("DELETE FROM turns WHERE turnId = :turnId")
     abstract suspend fun delete(turnId: String)
 
+    /** Delete all turns. Used by [HistoryStore.clearAll]. */
+    @Query("DELETE FROM turns")
+    abstract suspend fun deleteAll(): Int
+
     /** Count completed turns for a conversation. */
     @Query("SELECT COUNT(*) FROM turns WHERE conversationId = :conversationId AND state = 'COMPLETED'")
     abstract suspend fun countCompleted(conversationId: String): Int
@@ -113,4 +117,17 @@ abstract class TurnDao {
     /** Get the last N turns for a conversation (for preview). */
     @Query("SELECT * FROM turns WHERE conversationId = :conversationId AND state = 'COMPLETED' ORDER BY seq DESC LIMIT :limit")
     abstract suspend fun lastNTurns(conversationId: String, limit: Int): List<TurnEntity>
+
+    /** Completed turns for a page of conversations, newest first within each conversation. */
+    @Query(
+        """
+        SELECT * FROM turns
+        WHERE conversationId IN (:conversationIds)
+            AND state = 'COMPLETED'
+        ORDER BY conversationId ASC, seq DESC
+        """,
+    )
+    abstract suspend fun completedForConversationsDescending(
+        conversationIds: List<String>,
+    ): List<TurnEntity>
 }

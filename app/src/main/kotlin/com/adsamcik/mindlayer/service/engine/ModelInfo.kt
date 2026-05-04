@@ -12,6 +12,8 @@ data class ModelInfo(
     val path: String,
     /** File size in bytes. */
     val sizeBytes: Long,
+    /** Verified SHA-256 when integrity metadata was available. */
+    val sha256: String? = null,
     /** Whether this is the default/recommended model. */
     val isDefault: Boolean = false,
 )

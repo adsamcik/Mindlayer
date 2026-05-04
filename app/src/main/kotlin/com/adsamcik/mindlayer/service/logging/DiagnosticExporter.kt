@@ -64,10 +64,13 @@ class DiagnosticExporter(
                 put("backend", engineManager.currentBackend)
                 put("initTimeSeconds", engineManager.initTimeSeconds)
                 if (scopeUid == null) {
-                    // Host-only: model path and GPU failure reason can echo
-                    // backend exception text and reveal install paths.
+                    // Host-only: GPU failure reason can echo backend
+                    // exception text and reveal install paths.
                     put("lastGpuFailureReason", engineManager.lastGpuFailureReason)
-                    try { put("modelPath", engineManager.modelPath) } catch (_: Exception) {}
+                }
+                val loadedModelPath = engineManager.currentModel?.path
+                if (loadedModelPath != null) {
+                    put("modelPath", loadedModelPath.redactedFileName())
                 }
             }
 
@@ -151,11 +154,18 @@ class DiagnosticExporter(
                         entry.tokensGenerated?.let { put("tokensGenerated", it) }
                         entry.tokensPerSec?.let { put("tokensPerSec", it) }
                         entry.thermalBand?.let { put("thermalBand", it) }
-                        // Only expose raw errorMessage to the host-side
-                        // dashboard; error text can echo prompt fragments
-                        // (see F-006).
-                        if (scopeUid == null) {
-                            entry.errorMessage?.let { put("errorMessage", it) }
+                        entry.errorMessage?.let { msg ->
+                            if (scopeUid == null) {
+                                // Host-only: expose raw errorMessage to the
+                                // dashboard; error text can echo prompt fragments
+                                // (see F-006).
+                                put("errorMessage", msg)
+                            }
+                            // Sanitize at emit time (defence-in-depth: strips prompt
+                            // fragments, caps at 64 chars, then take up to 256 for JSON).
+                            sanitizeErrorClass(msg)?.take(256)?.let { safe ->
+                                put("errorClass", safe)
+                            }
                         }
                     }
                 }

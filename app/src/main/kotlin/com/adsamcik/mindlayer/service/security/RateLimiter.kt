@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicLong
 class RateLimiter(
     private val maxRequestsPerMinute: Int = DEFAULT_RPM,
     private val maxConcurrent: Int = DEFAULT_MAX_CONCURRENT,
+    private val maxRejectionsPerMinute: Int = DEFAULT_REJECTIONS_PER_MINUTE,
     private val idleEvictMs: Long = DEFAULT_IDLE_EVICT_MS,
     private val maxRejectedPerMinute: Int = DEFAULT_REJECT_RPM,
     /**
@@ -149,6 +150,36 @@ class RateLimiter(
         }
     }
 
+    /**
+     * Secondary bucket used to throttle the cost of REJECTING un-allowlisted
+     * callers. A separate, smaller-capacity bucket so that an attacker
+     * spamming allowlist misses cannot trigger unbounded `recordPending`
+     * disk I/O / log writes via [com.adsamcik.mindlayer.service.security.AllowlistStore].
+     *
+     * Returns true if a "we'll do the expensive rejection bookkeeping"
+     * token was available; false means swallow the rejection silently.
+     */
+    fun tryAcquireRejection(uid: Int): Boolean {
+        val bucket = buckets.getOrPut(uid) { Bucket(capacity = maxRequestsPerMinute.toDouble()) }
+        synchronized(bucket) {
+            val now = timeSource()
+            val elapsed = now - bucket.lastRejectionRefillMs
+            if (elapsed > 0) {
+                val refill = elapsed * maxRejectionsPerMinute / 60_000.0
+                bucket.rejectionTokens = (bucket.rejectionTokens + refill)
+                    .coerceAtMost(maxRejectionsPerMinute.toDouble())
+                bucket.lastRejectionRefillMs = now
+            }
+            bucket.lastAccessMs = now
+            return if (bucket.rejectionTokens >= 1.0) {
+                bucket.rejectionTokens -= 1.0
+                true
+            } else {
+                false
+            }
+        }
+    }
+
     private fun evictIdleOpportunistically() {
         val now = timeSource()
         // F-052: race-free eviction. If two threads both observe a stale
@@ -191,11 +222,14 @@ class RateLimiter(
         @JvmField var lastRefillMs: Long = 0L
         @JvmField var lastAccessMs: Long = 0L
         @JvmField var concurrent: Int = 0
+        @JvmField var rejectionTokens: Double = DEFAULT_REJECTIONS_PER_MINUTE.toDouble()
+        @JvmField var lastRejectionRefillMs: Long = 0L
     }
 
     companion object {
         const val DEFAULT_RPM = 60
         const val DEFAULT_MAX_CONCURRENT = 4
+        const val DEFAULT_REJECTIONS_PER_MINUTE = 6
         const val DEFAULT_IDLE_EVICT_MS = 10 * 60 * 1000L
         /**
          * F-033: 6 rejected calls per minute per UID — one every 10 s

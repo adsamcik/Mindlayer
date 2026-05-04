@@ -117,6 +117,39 @@ class StructuredOutputHelperTest {
         assertEquals(5, config!!.maxRetries)
     }
 
+    // M5 — clamp client-supplied max_retries to a safe range so a malicious
+    // app cannot pin an inference loop on extreme reflection counts.
+
+    @Test
+    fun `parseConfig clamps oversized max_retries to 5`() {
+        val input = """
+        {
+          "structured_output": {
+            "schema": { "type": "object", "properties": {} },
+            "max_retries": 9999
+          }
+        }
+        """.trimIndent()
+        val config = StructuredOutputHelper.parseConfig(input)
+        assertNotNull(config)
+        assertEquals(5, config!!.maxRetries)
+    }
+
+    @Test
+    fun `parseConfig clamps negative max_retries to 0`() {
+        val input = """
+        {
+          "structured_output": {
+            "schema": { "type": "object", "properties": {} },
+            "max_retries": -1
+          }
+        }
+        """.trimIndent()
+        val config = StructuredOutputHelper.parseConfig(input)
+        assertNotNull(config)
+        assertEquals(0, config!!.maxRetries)
+    }
+
     @Test
     fun `parseConfig returns null for null input`() {
         assertNull(StructuredOutputHelper.parseConfig(null))

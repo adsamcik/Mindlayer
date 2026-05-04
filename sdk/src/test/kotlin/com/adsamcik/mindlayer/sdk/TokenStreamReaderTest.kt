@@ -101,6 +101,9 @@ class TokenStreamReaderTest {
     /**
      * JVM-side reader that mirrors [TokenStreamReader.readStream] but works
      * with plain [InputStream] instead of ParcelFileDescriptor.
+     *
+     * Mirrors the guarded implementation exactly so regression tests validate
+     * the same error-handling paths.
      */
     private fun readStreamFromInputStream(input: InputStream): Flow<MindlayerEvent> = flow {
         val dis = DataInputStream(BufferedInputStream(input))
@@ -111,12 +114,57 @@ class TokenStreamReaderTest {
                 } catch (_: EOFException) {
                     break
                 }
-                require(len in 0..MAX_FRAME_BYTES) { "Invalid frame length: $len" }
-                val payload = ByteArray(len)
-                dis.readFully(payload)
-                val jsonStr = payload.decodeToString()
-                val event = parseFrame(jsonStr)
-                if (event != null) emit(event)
+
+                var terminalError: MindlayerEvent.Error? = null
+                val parsedEvent: MindlayerEvent? = try {
+                    require(len in 0..MAX_FRAME_BYTES) { "Invalid frame length: $len" }
+                    val payload = ByteArray(len)
+                    dis.readFully(payload)
+                    parseFrame(payload.decodeToString())
+                } catch (e: EOFException) {
+                    terminalError = MindlayerEvent.Error(
+                        message = "Protocol error: truncated frame",
+                        code = "PROTOCOL_ERROR_EOF",
+                        seq = -1,
+                    )
+                    null
+                } catch (e: IllegalArgumentException) {
+                    terminalError = MindlayerEvent.Error(
+                        message = "Protocol error: invalid frame length",
+                        code = "PROTOCOL_ERROR_LENGTH",
+                        seq = -1,
+                    )
+                    null
+                } catch (e: kotlinx.serialization.SerializationException) {
+                    terminalError = MindlayerEvent.Error(
+                        message = "Protocol error: invalid frame encoding",
+                        code = "PROTOCOL_ERROR_JSON",
+                        seq = -1,
+                    )
+                    null
+                } catch (e: Throwable) {
+                    terminalError = MindlayerEvent.Error(
+                        message = "Protocol error",
+                        code = "PROTOCOL_ERROR",
+                        seq = -1,
+                    )
+                    null
+                }
+
+                when {
+                    terminalError != null -> { emit(terminalError); break }
+                    parsedEvent == null -> {
+                        emit(
+                            MindlayerEvent.Error(
+                                message = "Protocol error: unrecognised frame",
+                                code = "PROTOCOL_ERROR_JSON",
+                                seq = -1,
+                            ),
+                        )
+                        break
+                    }
+                    else -> emit(parsedEvent)
+                }
             }
         } finally {
             dis.close()
@@ -405,5 +453,82 @@ class TokenStreamReaderTest {
     @Test
     fun `MAX_FRAME_BYTES constant is 1 MiB`() {
         assertEquals(1_048_576, MAX_FRAME_BYTES)
+    }
+
+    // =========================================================================
+    // Protocol error regression tests — H10
+    // In every case the flow MUST complete cleanly (toList() returns),
+    // emit exactly one Error frame, and close the underlying stream.
+    // No uncaught exception must escape to the collector.
+    // =========================================================================
+
+    private fun writeLengthOnly(out: OutputStream, len: Int) {
+        val header = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(len).array()
+        out.write(header)
+        out.flush()
+    }
+
+    @Test
+    fun `frame with len -1 emits PROTOCOL_ERROR_LENGTH then flow completes cleanly`() = runTest {
+        val pipeIn = PipedInputStream()
+        val pipeOut = PipedOutputStream(pipeIn)
+        writeLengthOnly(pipeOut, -1)
+        pipeOut.close()
+
+        val events = readStreamFromInputStream(pipeIn).toList()
+
+        assertEquals("Expected exactly one event", 1, events.size)
+        val error = events[0] as? MindlayerEvent.Error
+            ?: error("Expected MindlayerEvent.Error, got ${events[0]}")
+        assertEquals("PROTOCOL_ERROR_LENGTH", error.code)
+    }
+
+    @Test
+    fun `frame with len exceeding MAX_FRAME_BYTES emits PROTOCOL_ERROR_LENGTH then flow completes cleanly`() = runTest {
+        val pipeIn = PipedInputStream()
+        val pipeOut = PipedOutputStream(pipeIn)
+        writeLengthOnly(pipeOut, MAX_FRAME_BYTES + 1)
+        pipeOut.close()
+
+        val events = readStreamFromInputStream(pipeIn).toList()
+
+        assertEquals("Expected exactly one event", 1, events.size)
+        val error = events[0] as? MindlayerEvent.Error
+            ?: error("Expected MindlayerEvent.Error, got ${events[0]}")
+        assertEquals("PROTOCOL_ERROR_LENGTH", error.code)
+    }
+
+    @Test
+    fun `truncated frame emits PROTOCOL_ERROR_EOF then flow completes cleanly`() = runTest {
+        val pipeIn = PipedInputStream()
+        val pipeOut = PipedOutputStream(pipeIn)
+        // Declare 100-byte payload but only write 50 bytes, then close.
+        writeLengthOnly(pipeOut, 100)
+        pipeOut.write(ByteArray(50) { 0x00 })
+        pipeOut.close()
+
+        val events = readStreamFromInputStream(pipeIn).toList()
+
+        assertEquals("Expected exactly one event", 1, events.size)
+        val error = events[0] as? MindlayerEvent.Error
+            ?: error("Expected MindlayerEvent.Error, got ${events[0]}")
+        assertEquals("PROTOCOL_ERROR_EOF", error.code)
+    }
+
+    @Test
+    fun `malformed JSON frame emits PROTOCOL_ERROR_JSON then flow completes cleanly`() = runTest {
+        val pipeIn = PipedInputStream()
+        val pipeOut = PipedOutputStream(pipeIn)
+        val garbage = "not valid json {{{}}}".encodeToByteArray()
+        writeLengthOnly(pipeOut, garbage.size)
+        pipeOut.write(garbage)
+        pipeOut.close()
+
+        val events = readStreamFromInputStream(pipeIn).toList()
+
+        assertEquals("Expected exactly one event", 1, events.size)
+        val error = events[0] as? MindlayerEvent.Error
+            ?: error("Expected MindlayerEvent.Error, got ${events[0]}")
+        assertEquals("PROTOCOL_ERROR_JSON", error.code)
     }
 }

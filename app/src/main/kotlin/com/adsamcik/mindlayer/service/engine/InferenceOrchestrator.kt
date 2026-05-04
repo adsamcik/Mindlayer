@@ -7,7 +7,6 @@ import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Message
-import com.google.gson.Gson
 import com.adsamcik.mindlayer.AudioTransfer
 import com.adsamcik.mindlayer.ImageTransfer
 import com.adsamcik.mindlayer.RequestMeta
@@ -18,6 +17,10 @@ import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.ipc.StagedMedia
 import com.adsamcik.mindlayer.service.ipc.TokenStreamWriter
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
+import com.adsamcik.mindlayer.service.logging.LogCategory
+import com.adsamcik.mindlayer.service.logging.LogEntry
+import com.adsamcik.mindlayer.service.logging.LogEvent
+import com.google.gson.Gson
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -25,9 +28,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -70,7 +77,6 @@ class InferenceOrchestrator(
 
     companion object {
         private const val TAG = "InferenceOrchestrator"
-
         /**
          * Hard cap on the number of tool-call rounds per inference. Surfaced
          * via `ServiceCapabilities.maxToolRounds` so client SDKs can plan
@@ -113,6 +119,7 @@ class InferenceOrchestrator(
          * a session forever and leak its slot/concurrency budget.
          */
         const val MAX_INFERENCE_MS = 5L * 60L * 1000L
+        const val INFERENCE_DEADLINE_MS = MAX_INFERENCE_MS
 
         private val gson = Gson()
     }
@@ -316,6 +323,7 @@ class InferenceOrchestrator(
 
     fun shutdown() {
         activeJobs.values.forEach { it.cancel() }
+        runBlocking { awaitAllJobs(timeoutMs = 5_000) }
         activeJobs.clear()
         sharedMemoryPool.cleanupAll()
         sessionManager.shutdown()
@@ -335,6 +343,23 @@ class InferenceOrchestrator(
             } catch (t: Throwable) {
                 MindlayerLog.w(TAG, "cancelAll: cancelInference($scopedKey) raised ${t.safeLabel()}")
             }
+        }
+    }
+
+    /**
+     * Suspend until all active inference jobs finish (or [timeoutMs] elapses).
+     *
+     * Call this before any destructive engine operation (backend switch,
+     * session shutdown) to ensure no in-flight [Conversation.sendMessageAsync]
+     * calls race against teardown.
+     */
+    suspend fun awaitAllJobs(timeoutMs: Long = 5_000) {
+        val jobs = activeJobs.values.toList()
+        if (jobs.isEmpty()) return
+        try {
+            withTimeout(timeoutMs) { jobs.joinAll() }
+        } catch (_: TimeoutCancellationException) {
+            MindlayerLog.w(TAG, "awaitAllJobs timed out; ${activeJobs.size} job(s) still active")
         }
     }
 
@@ -391,6 +416,7 @@ class InferenceOrchestrator(
             return
         }
 
+        val deadlineNs = System.nanoTime() + INFERENCE_DEADLINE_MS * 1_000_000L
         // Single-writer: serialize sends for this session
         handle.mutex.withLock {
             handle.activeRequestId = scopedKey
@@ -560,6 +586,12 @@ class InferenceOrchestrator(
 
                 // --- Tool call loop -----------------------------------------
                 while (accumulatedToolCalls.isNotEmpty() && toolCallRound < MAX_TOOL_ROUNDS) {
+                    if (handle.estimatedTokens >= handle.effectiveMaxTokens) {
+                        MindlayerLog.w(TAG, "Inference token budget exceeded (${handle.estimatedTokens}/${handle.effectiveMaxTokens})", requestId = meta.requestId, sessionId = meta.sessionId)
+                        writer.writeDone(seq, "token_limit")
+                        seq++
+                        return@withTimeout
+                    }
                     // F-041: between tool rounds, sample the live thermal
                     // policy and insert a `restSeconds` delay if the
                     // device is in HOT / CRITICAL. This duty-cycles GPU
@@ -620,10 +652,10 @@ class InferenceOrchestrator(
                     for (call in pending) {
                         writer.writeToolCall(seq, call.callId, call.toolName, call.arguments)
                         seq++
-                        logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
+                        logRepository?.log(LogEntry(
                             timestampMs = System.currentTimeMillis(),
-                            category = com.adsamcik.mindlayer.service.logging.LogCategory.INFERENCE,
-                            event = com.adsamcik.mindlayer.service.logging.LogEvent.TOOL_CALL,
+                            category = LogCategory.INFERENCE,
+                            event = LogEvent.TOOL_CALL,
                             requestId = meta.requestId,
                             sessionId = meta.sessionId,
                             // F-044: build JSON via the kotlinx-serialization
@@ -665,6 +697,8 @@ class InferenceOrchestrator(
                 }
 
                 val finishReason = when {
+                    System.nanoTime() > deadlineNs -> "wallclock_limit"
+                    handle.estimatedTokens >= handle.effectiveMaxTokens -> "token_limit"
                     toolCallRound >= MAX_TOOL_ROUNDS -> "tool_call_limit"
                     else -> "stop"
                 }

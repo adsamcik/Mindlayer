@@ -5,7 +5,12 @@ import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "conversations")
+@Entity(
+    tableName = "conversations",
+    indices = [
+        Index(value = ["updatedAtMs"], name = "index_conversations_updatedAtMs"),
+    ],
+)
 data class ConversationEntity(
     @PrimaryKey val conversationId: String,
     val systemPrompt: String?,
@@ -40,6 +45,14 @@ object ConversationState {
     indices = [
         Index("conversationId"),
         Index(value = ["conversationId", "seq"], unique = true),
+        Index(
+            value = ["conversationId", "state", "seq"],
+            name = "index_turns_conversation_state_seq",
+        ),
+        Index(
+            value = ["conversationId", "role", "state", "seq"],
+            name = "index_turns_conversation_role_state_seq",
+        ),
     ],
 )
 data class TurnEntity(

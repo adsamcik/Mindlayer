@@ -17,6 +17,8 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -26,6 +28,9 @@ jobs:
         with:
           java-version: '21'
           distribution: 'temurin'
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
@@ -88,6 +93,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: ${{ matrix.api-level != 33 }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -112,6 +119,9 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
 
@@ -122,7 +132,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: AVD cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         id: avd-cache
         with:
           path: |
@@ -166,6 +176,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -175,6 +187,9 @@ jobs:
         with:
           java-version: '21'
           distribution: 'temurin'
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
@@ -197,6 +212,8 @@ jobs:
     timeout-minutes: 20
     needs: [ build-and-test ]
     if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -206,6 +223,9 @@ jobs:
         with:
           java-version: '21'
           distribution: 'temurin'
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
@@ -223,6 +243,24 @@ jobs:
         run: ./gradlew :app:bundleRelease --no-daemon -PmodelSha256="${MODEL_SHA256}"
         env:
           MODEL_SHA256: ${{ vars.MODEL_SHA256 }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Report release signing mode
+        shell: bash
+        run: |
+          if [[ -n "${ANDROID_KEYSTORE_BASE64:-}" && -n "${ANDROID_KEYSTORE_PASSWORD:-}" && -n "${ANDROID_KEY_ALIAS:-}" && -n "${ANDROID_KEY_PASSWORD:-}" ]]; then
+            echo "Release AAB was built with CI signing secrets."
+          else
+            echo "::warning::Release AAB is unsigned because CI signing secrets are not configured."
+          fi
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
       - name: Upload AAB
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

@@ -17,12 +17,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
@@ -100,6 +102,15 @@ class Mindlayer private constructor(
          * History is metadata-only by default. Pass [HistoryPolicy.FULL_CONTENT]
          * only if the client explicitly needs local replay/recovery and has its
          * own consent/retention controls for prompt and model-output content.
+         *
+         * @param historyPolicy controls what — if anything — is persisted in the
+         *   SQLCipher-encrypted Room database at
+         *   `context.getDatabasePath("mindlayer_history.db")`. Defaults to
+         *   [HistoryPolicy.METADATA_ONLY] (privacy-by-default; metadata only,
+         *   no prompt or model-output content). Pass [HistoryPolicy.FULL_CONTENT]
+         *   only when the host app explicitly opts in to full conversation
+         *   history (to power a history UI or enable session recovery after
+         *   process death) and has its own consent/retention controls.
          */
         fun connect(
             context: Context,
@@ -380,8 +391,10 @@ class Mindlayer private constructor(
      * @param backend the preferred backend to initialize.
      */
     suspend fun prewarm(backend: InferenceBackend = InferenceBackend.GPU) {
-        val service = connection.awaitConnected()
-        service.prewarm(backend.value)
+        withContext(Dispatchers.IO) {
+            val service = connection.awaitConnected()
+            service.prewarm(backend.value)
+        }
     }
 
     /**
@@ -439,7 +452,7 @@ class Mindlayer private constructor(
      */
     suspend fun createSession(
         configure: SessionConfigBuilder.() -> Unit = {},
-    ): String {
+    ): String = withContext(Dispatchers.IO) {
         val config = SessionConfigBuilder().apply(configure).build()
 
         // 1. Persist locally as CREATING (survives process death)
@@ -468,7 +481,7 @@ class Mindlayer private constructor(
         // 3. Confirm local record
         historyStore?.confirmConversation(sessionId)
 
-        return sessionId
+        sessionId
     }
 
     private suspend fun createSessionWithInitRetry(configWithId: SessionConfig): String {
@@ -551,8 +564,8 @@ class Mindlayer private constructor(
                 sessionId = sessionId,
                 textContent = text,
             ),
-            image = null,
-            audio = null,
+            imageProvider = { null },
+            audioProvider = { null },
         )
         return buildHandle(requestId, flow)
     }
@@ -568,7 +581,6 @@ class Mindlayer private constructor(
         bitmap: Bitmap,
     ): InferenceHandle {
         val requestId = UUID.randomUUID().toString()
-        val imageTransfer = MediaTransfer.fromBitmap(requestId, bitmap)
         val flow = startTrackedInference(
             sessionId = sessionId,
             userText = text,
@@ -577,8 +589,8 @@ class Mindlayer private constructor(
                 sessionId = sessionId,
                 textContent = text,
             ),
-            image = imageTransfer,
-            audio = null,
+            imageProvider = { MediaTransfer.fromBitmap(requestId, bitmap) },
+            audioProvider = { null },
         )
         return buildHandle(requestId, flow)
     }
@@ -594,7 +606,6 @@ class Mindlayer private constructor(
         audioFile: File,
     ): InferenceHandle {
         val requestId = UUID.randomUUID().toString()
-        val audioTransfer = MediaTransfer.fromAudioFile(requestId, audioFile)
         val flow = startTrackedInference(
             sessionId = sessionId,
             userText = text,
@@ -603,8 +614,8 @@ class Mindlayer private constructor(
                 sessionId = sessionId,
                 textContent = text,
             ),
-            image = null,
-            audio = audioTransfer,
+            imageProvider = { null },
+            audioProvider = { MediaTransfer.fromAudioFile(requestId, audioFile) },
         )
         return buildHandle(requestId, flow)
     }
@@ -875,7 +886,9 @@ class Mindlayer private constructor(
      * ```
      */
     suspend fun listHistory(limit: Int = 50, offset: Int = 0): List<ConversationSummary> {
-        val summaries = historyStore?.listConversations(limit, offset) ?: emptyList()
+        val summaries = withContext(Dispatchers.IO) {
+            historyStore?.listConversations(limit, offset) ?: emptyList()
+        }
         val activeSessions = try {
             if (connectionState.value == ConnectionState.CONNECTED) {
                 listSessions().map { it.sessionId }.toSet()
@@ -897,7 +910,9 @@ class Mindlayer private constructor(
      *   or the conversation was pruned).
      */
     suspend fun getHistory(conversationId: String): List<TurnPreview> {
-        return historyStore?.getConversationHistory(conversationId) ?: emptyList()
+        return withContext(Dispatchers.IO) {
+            historyStore?.getConversationHistory(conversationId) ?: emptyList()
+        }
     }
 
     /**
@@ -906,14 +921,33 @@ class Mindlayer private constructor(
      */
     suspend fun pruneHistory(maxAgeDays: Int = 30): Int {
         val maxAgeMs = maxAgeDays.toLong() * 24 * 60 * 60 * 1000
-        return historyStore?.pruneOlderThan(maxAgeMs) ?: 0
+        return withContext(Dispatchers.IO) {
+            historyStore?.pruneOlderThan(maxAgeMs) ?: 0
+        }
     }
 
     /**
      * Count total conversations in history.
      */
     suspend fun historyCount(): Int {
-        return historyStore?.conversationCount() ?: 0
+        return withContext(Dispatchers.IO) {
+            historyStore?.conversationCount() ?: 0
+        }
+    }
+
+    /**
+     * Erase all conversation history from the local database.
+     *
+     * This is a destructive operation. It deletes all conversations and their
+     * turns from the encrypted history DB on this device. The service-side
+     * sessions are NOT affected — only the SDK-side persistence is cleared.
+     *
+     * No-op when [connect] was called without `persistHistory = true`.
+     */
+    suspend fun eraseAllHistory() {
+        withContext(Dispatchers.IO) {
+            historyStore?.clearAll()
+        }
     }
 
     // -- Convenience ----------------------------------------------------------
@@ -1163,16 +1197,33 @@ class Mindlayer private constructor(
     // -- Internals ------------------------------------------------------------
 
     /**
-     * Creates an [InferenceHandle] with a cancel callback that reaches
-     * through to the service's [IMindlayerService.cancelInference].
+     * Creates an [InferenceHandle] with cancel callbacks that reach through
+     * to the service's [IMindlayerService.cancelInference].
+     *
+     * Two callbacks are wired:
+     *  - `cancelCallback` (suspend): used by user-driven [InferenceHandle.cancel].
+     *    Waits for an active connection via [awaitConnected] so the cancel
+     *    survives a transient disconnect.
+     *  - `syncCancelCallback` (non-suspend): used by cleanup paths such as
+     *    [Conversation.close]. Best-effort against the currently-cached
+     *    binder; silently drops the cancel when no connection is available.
      */
     private fun buildHandle(requestId: String, flow: Flow<MindlayerEvent>): InferenceHandle {
         return InferenceHandle(requestId, flow).also { handle ->
             handle.setCancelCallback {
                 try {
-                    connection.awaitConnected().cancelInference(requestId)
+                    withContext(Dispatchers.IO) {
+                        connection.awaitConnected().cancelInference(requestId)
+                    }
                 } catch (_: Exception) {
                     // Best-effort cancel — service may be disconnected
+                }
+            }
+            handle.setSyncCancelCallback {
+                try {
+                    connection.getService()?.cancelInference(requestId)
+                } catch (_: Exception) {
+                    // Best-effort cancel — service died or rejected the call
                 }
             }
         }
@@ -1192,56 +1243,64 @@ class Mindlayer private constructor(
         sessionId: String,
         userText: String,
         meta: RequestMeta,
-        image: com.adsamcik.mindlayer.ImageTransfer?,
-        audio: com.adsamcik.mindlayer.AudioTransfer?,
+        imageProvider: suspend () -> com.adsamcik.mindlayer.ImageTransfer?,
+        audioProvider: suspend () -> com.adsamcik.mindlayer.AudioTransfer?,
     ): Flow<MindlayerEvent> {
         if (historyStore == null) {
-            return startInference(meta, image, audio)
+            return startInference(meta, imageProvider, audioProvider)
         }
-        // Capture the eagerly-issued flow before returning the wrapper so
-        // the IPC + history hook fire under the suspend caller's context.
         val historyStoreLocal = historyStore
-        val innerFlow = startInference(meta, image, audio)
         return flow {
-            val userTurnId = historyStoreLocal.persistUserTurn(sessionId, userText)
+            val userTurnId = withContext(Dispatchers.IO) {
+                historyStoreLocal.persistUserTurn(sessionId, userText)
+            }
             var assistantTurnId: String? = null
             val textAccumulator = StringBuilder()
             var completed = false
 
             try {
-                innerFlow.collect { event ->
-                    when (event) {
-                        is MindlayerEvent.Started -> {
-                            historyStoreLocal.markUserTurnCompleted(userTurnId)
-                            assistantTurnId = historyStoreLocal.beginAssistantTurn(sessionId)
-                        }
-                        is MindlayerEvent.TextDelta -> {
-                            textAccumulator.append(event.text)
-                        }
-                        is MindlayerEvent.Done -> {
-                            val finalText = event.fullText
-                                ?: textAccumulator.toString()
-                            val aid = assistantTurnId
-                            if (aid != null) {
-                                historyStoreLocal.markTurnCompleted(aid, finalText)
+                startInference(meta, imageProvider, audioProvider)
+                    .collect { event ->
+                        when (event) {
+                            is MindlayerEvent.Started -> {
+                                assistantTurnId = withContext(Dispatchers.IO) {
+                                    historyStoreLocal.markUserTurnCompleted(userTurnId)
+                                    historyStoreLocal.beginAssistantTurn(sessionId)
+                                }
                             }
-                            completed = true
-                        }
-                        is MindlayerEvent.Error -> {
-                            val aid = assistantTurnId
-                            if (aid != null) {
-                                historyStoreLocal.markTurnInterrupted(aid)
+                            is MindlayerEvent.TextDelta -> {
+                                textAccumulator.append(event.text)
                             }
+                            is MindlayerEvent.Done -> {
+                                val finalText = event.fullText
+                                    ?: textAccumulator.toString()
+                                val aid = assistantTurnId
+                                if (aid != null) {
+                                    withContext(Dispatchers.IO) {
+                                        historyStoreLocal.markTurnCompleted(aid, finalText)
+                                    }
+                                }
+                                completed = true
+                            }
+                            is MindlayerEvent.Error -> {
+                                val aid = assistantTurnId
+                                if (aid != null) {
+                                    withContext(Dispatchers.IO) {
+                                        historyStoreLocal.markTurnInterrupted(aid)
+                                    }
+                                }
+                            }
+                            else -> { /* ToolCall, Metrics — pass through */ }
                         }
-                        else -> { /* ToolCall, Metrics — pass through */ }
+                        emit(event)
                     }
-                    emit(event)
-                }
             } catch (e: Exception) {
                 if (!completed) {
                     val aid = assistantTurnId
                     if (aid != null) {
-                        historyStoreLocal.markTurnInterrupted(aid)
+                        withContext(Dispatchers.IO) {
+                            historyStoreLocal.markTurnInterrupted(aid)
+                        }
                     }
                 }
                 throw e
@@ -1259,32 +1318,84 @@ class Mindlayer private constructor(
      * The write-end PFD is closed immediately after handing it off (the
      * service duplicates the fd internally). The read-end PFD is closed
      * by [TokenStreamReader] when the flow completes or is cancelled.
+     *
+     * Media source FDs (image.source / audio.source) are closed in the
+     * finally block after the binder call — by that point the service has
+     * already dup'd them into its own process.
      */
     private suspend fun startInference(
         meta: RequestMeta,
-        image: com.adsamcik.mindlayer.ImageTransfer?,
-        audio: com.adsamcik.mindlayer.AudioTransfer?,
+        imageProvider: suspend () -> com.adsamcik.mindlayer.ImageTransfer?,
+        audioProvider: suspend () -> com.adsamcik.mindlayer.AudioTransfer?,
     ): Flow<MindlayerEvent> {
-        val pipe = ParcelFileDescriptor.createReliablePipe()
-        val readEnd = pipe[0]
-        val writeEnd = pipe[1]
+        return flow {
+            val readEnd = withContext(Dispatchers.IO) {
+                val image = imageProvider()
+                val audio = try {
+                    audioProvider()
+                } catch (e: Throwable) {
+                    // audioProvider failed after imageProvider may have allocated an FD
+                    image?.source?.closeQuietly()
+                    throw e
+                }
+                val pipe = ParcelFileDescriptor.createReliablePipe()
+                val readEnd = pipe[0]
+                val writeEnd = pipe[1]
 
+                try {
+                    val service = connection.requireService()
+                    service.infer(meta, image, audio, writeEnd)
+                    readEnd
+                } catch (e: Exception) {
+                    readEnd.close()
+                    throw e
+                } finally {
+                    // Always close our copies — the service has dup'd all three.
+                    writeEnd.close()
+                    image?.source?.closeQuietly()
+                    audio?.source?.closeQuietly()
+                }
+            }
+
+            TokenStreamReader.readStream(readEnd).collect { emit(it) }
+        }
+    }
+
+    private fun ParcelFileDescriptor.closeQuietly() = try { close() } catch (_: Exception) {}
+
+    private suspend fun createRemoteSessionWhenReady(
+        service: com.adsamcik.mindlayer.IMindlayerService,
+        config: SessionConfig,
+    ): String {
         try {
-            val service = connection.awaitConnected()
-            withTypedErrorsSync(
-                service,
-                requestId = meta.requestId,
-                sessionId = meta.sessionId,
-            ) { it.infer(meta, image, audio, writeEnd) }
-        } catch (e: Exception) {
-            readEnd.close()
-            throw e
-        } finally {
-            // Always close our copy of the write end — the service has dup'd it
-            writeEnd.close()
+            return service.createSession(config)
+        } catch (e: android.os.RemoteException) {
+            // RemoteException wraps service-side IllegalStateException; let through to the warming retry below.
+        } catch (e: IllegalStateException) {
+            // Same shape (some platforms surface IllegalStateException directly).
         }
 
-        return TokenStreamReader.readStream(readEnd)
+        val status = service.status
+        if (!status.isEngineLoaded || status.engineWarming) {
+            if (!status.engineWarming) {
+                // Engine not even warming yet — kick it off.
+                service.prewarm(config.backend)
+            }
+            waitForEngineLoaded(service)
+            return service.createSession(config)
+        }
+        // Engine claims loaded but createSession failed for a different reason — retry once
+        // and let the exception propagate if it persists.
+        return service.createSession(config)
+    }
+
+    private suspend fun waitForEngineLoaded(service: com.adsamcik.mindlayer.IMindlayerService) {
+        repeat(60) {
+            val s = service.status
+            if (s.isEngineLoaded && !s.engineWarming) return
+            delay(250)
+        }
+        throw IllegalStateException("Engine did not finish initialization within the expected window")
     }
 
     /**
