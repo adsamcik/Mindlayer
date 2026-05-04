@@ -106,4 +106,10 @@ Production builds for the Play Store are **signed locally**. See [`RELEASE.md`](
 
 ## License
 
-[Add your license here]
+Copyright © 2026 adsamcik
+
+Mindlayer is licensed under the **GNU Affero General Public License, version 3** (AGPL-3.0-only). See [`LICENSE`](LICENSE) for the full text.
+
+In short: you are free to use, modify, and distribute this software, including over a network. **If you do, you must release the complete corresponding source of your modifications under the same AGPL-3.0 license, including when the software is used as a network service.** This is a deliberate choice to keep derivative works open; if AGPL-3.0 obligations are incompatible with your use case, please open an issue to discuss alternative licensing.
+
+`SPDX-License-Identifier: AGPL-3.0-only`
