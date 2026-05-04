@@ -91,7 +91,10 @@ release: 0.4.0
 ### 2.2 Build the signed AAB
 
 ```powershell
-./gradlew.bat clean :app:bundleRelease
+$modelPath = Get-ChildItem gemma_model -Recurse -Filter *.litertlm | Select-Object -First 1
+if ($null -eq $modelPath) { throw "Place the release .litertlm model under gemma_model before building." }
+$modelSha256 = (Get-FileHash $modelPath.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+./gradlew.bat clean :app:bundleRelease -PmodelSha256=$modelSha256
 ```
 
 Output:
@@ -109,11 +112,13 @@ This is the file you upload to Play. It is:
 
 > ⚠️ The Gemma `.litertlm` model is **not** checked into git. For a Play
 > Store release, place the real model binary at the path expected by the
-> `:gemma_model` module before running `:app:bundleRelease`, and include a
-> SHA-256 sidecar named `<model>.litertlm.sha256`. Release builds reject model
-> files without matching integrity metadata. If the model is absent, the AAB
-> will still build but the AI-Pack will ship empty and the installed app won't
-> find the model at runtime.
+> ⚠️ The Gemma `.litertlm` model is **not** checked into git. For a Play
+> Store release, place the real model binary at the path expected by the
+> `:gemma_model` module before running `:app:bundleRelease`. If the model is
+> absent, the release build should fail. Release builds also require
+> `-PmodelSha256=<64 lowercase hex SHA-256>` for the exact `.litertlm` file
+> being bundled; debug builds keep advisory model-hash behavior for local
+> development.
 
 ### 2.3 (Optional) Build a signed universal APK for side-loading
 
@@ -182,14 +187,44 @@ bundletool dump manifest --bundle app\build\outputs\bundle\release\app-release.a
 | `:app:testDebugUnitTest`        | ✅ every push                 | ✅                                        |
 | `:app:connectedDebugAndroidTest`| ✅ every push (API 33 AVD)    | ✅ with connected device                  |
 | `lintDebug`                     | ✅ every push                 | ✅                                        |
-| `:app:bundleRelease` (unsigned) | ✅ on `main` when signing secrets are absent | ✅ |
-| `:app:bundleRelease` (signed)   | ✅ when CI signing secrets are configured | ✅ only when `keystore.properties` is set |
+| `:app:bundleRelease` (unsigned) | ✅ on `main` with `MODEL_SHA256` repo variable when CI signing secrets are absent | ✅ with `-PmodelSha256=...` |
+| `:app:bundleRelease` (signed)   | ✅ on `main` when `MODEL_SHA256` and CI signing secrets are configured | ✅ only when `keystore.properties` is set |
 
 CI can sign the release AAB when `ANDROID_KEYSTORE_BASE64`,
 `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`
-are configured as repository secrets. Without those secrets, CI still builds an
-unsigned `app-release.aab` on `main`; that artifact is **not** uploadable to
-Play and only proves that R8 + resource shrinking still succeeds end-to-end.
+are configured as repository secrets, in addition to the `MODEL_SHA256`
+repository variable that all release builds require. Without the signing
+secrets, CI still builds an unsigned `app-release.aab` on `main`; that
+artifact is **not** uploadable to Play and only proves that R8 + resource
+shrinking still succeeds end-to-end with the same model-hash manifest a real
+release must provide.
+
+### 5.1 Dependency-integrity policy (F-067)
+
+Mindlayer relies on **Maven Central's repository signing** (TUF-style) plus
+`https`-only resolvers (`google()`, `mavenCentral()` via the locked
+`dependencyResolutionManagement` block in `settings.gradle.kts`) for binary
+integrity, **not** on a local `gradle/verification-metadata.xml`.
+
+Why: the Android Gradle Plugin's auto-resolved `aapt2` distribution is
+platform-specific (one artifact per `windows`/`linux`/`darwin`), and a
+locally-generated `verification-metadata.xml` only captures the developer's
+own platform. Either every contributor regenerates the file on every
+gradle-version bump, or CI fails for half the team. The maintenance burden
+turned out to materially exceed the marginal security benefit for a
+pinned-dep, signature-verified Maven setup; this is the same trade-off the
+Phase 2 rubber-duck review documented when first considering F-067.
+
+If your threat model requires local hash verification, run:
+
+```bash
+./gradlew --write-verification-metadata sha256 help
+```
+
+and add a per-platform component for `com.android.tools.build:aapt2`
+(plus any platform-conditional native artifacts). This is opt-in
+per-fork; we accept the friction so the default contributor path stays
+unblocked.
 
 ---
 
@@ -212,3 +247,72 @@ Play and only proves that R8 + resource shrinking still succeeds end-to-end.
   the `<string>` element *or* provide translations. `MissingTranslation`
   is a fatal release-check (see `lint { fatal += … }` in
   `app/build.gradle.kts`).
+
+---
+
+## 7. Hardware-touching PR checklist
+
+Emulator CI catches API-level regressions but cannot exercise the NPU/GPU
+backends, real thermal throttling, true low-RAM device tiers, or the
+foreground-service lifecycle that Android imposes on physical hardware. PRs
+that touch any of the surfaces below **must** be verified on at least one
+real device by the author before merge. The **npu-soc-list-expansion
+(F-080)** work explicitly depends on this checklist as its real-device
+validation gate.
+
+### Trigger paths
+
+A PR is "hardware-touching" if it modifies any of:
+
+* `app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/**` — engine,
+  thermal, memory, NPU SoC list, session/inference orchestration
+* `app/src/main/kotlin/com/adsamcik/mindlayer/service/MindlayerMlService.kt`
+  — foreground-service lifecycle (`startForeground` / `stopForeground`,
+  `specialUse` promotion/demotion, binder-death linkage)
+* `app/src/main/AndroidManifest.xml` — `foregroundServiceType`,
+  service `<intent-filter>`, signature-level permissions, process name
+* `gemma_model/**` — the Play AI Pack module that delivers the
+  `.litertlm` weights
+
+### Verification steps
+
+Copy this block into the PR description and tick every box that applies.
+
+```markdown
+- [ ] Built and installed on at least one real device per ABI we ship
+      (`arm64-v8a` mandatory; `armeabi-v7a` only if the F-079
+      `litertlm-aar-abi-inspection` allow-list confirms the AAR exposes it).
+- [ ] Tested device-tier extremes: at least one **≤ 6 GB** device and one
+      **≥ 12 GB** device, so `MemoryBudget` tier selection is exercised at
+      both ends.
+- [ ] Captured `adb logcat -s "Mindlayer.*:D"` for a 3-message inference
+      run and attached the trimmed log to the PR description (no prompt or
+      output text — log metadata only, per the no-PII invariant).
+- [ ] Confirmed the **dashboard** renders the correct thermal band and
+      memory tier *during* inference (not just at idle).
+- [ ] **EngineManager change?** Exercised every backend (NPU / GPU / CPU)
+      that the test devices support, OR documented in the PR why a backend
+      could not be exercised on the available hardware.
+- [ ] **FGS lifecycle change?** Backgrounded the app mid-inference (Home
+      key, then a 30 s wait) and confirmed the token stream still
+      completes without `ForegroundServiceDidNotStartInTimeException` or
+      premature termination.
+- [ ] **NPU SoC list change?** (any edit to `QUALCOMM_NPU_SOCS`,
+      `MEDIATEK_NPU_SOCS`, `GOOGLE_TENSOR_NPU_SOCS`, or
+      `SAMSUNG_NPU_SOCS`): tested on a **Pixel 6 or newer** *and* a
+      **recent Samsung flagship** (Galaxy S22 or newer), since the
+      Tensor and Snapdragon NPU paths diverge.
+```
+
+### What this list deliberately leaves out
+
+* API-level matrix coverage (26 / 33 / 34) — handled by emulator CI.
+* Unit-test regressions — handled by `:app:testDebugUnitTest` and
+  `:sdk:testDebugUnitTest` on every push.
+* Static lint and AIDL drift — handled by `lintDebug` and the AIDL
+  byte-identity check.
+
+Once F-078 (extended emulator matrix) and F-079
+(litertlm-aar-abi-inspection) land, items in the checklist that those
+gates fully cover should be removed. The list above is the **upper bound**
+— too long means people skip it.

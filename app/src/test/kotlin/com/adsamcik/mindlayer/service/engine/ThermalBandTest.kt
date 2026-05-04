@@ -270,6 +270,26 @@ class ThermalBandTest {
         assertEquals(2000L, ts)
     }
 
+    // ---- ThermalSample.telemetryAvailable (F-070) --------------------------
+    // Distinguishes "device reported COOL" from "device cannot report at all".
+    // The audit found that on Android 8 / 8.1 (API 26-28) the band always
+    // computes COOL because there is no thermal API available, which masks
+    // actual thermal stress. These tests pin the explicit signal so future
+    // consumers (dashboard, RequestTrace, thermal policy) can reason about
+    // telemetry-blind hardware.
+    //
+    // Note: the API-level-mocking tests live in [ThermalSampleTelemetryTest]
+    // because they need Robolectric to make `Build.VERSION.SDK_INT`
+    // overridable; this class runs as plain JUnit.
+
+    @Test
+    fun `ThermalSample telemetryAvailable defaults to true for existing fixtures`() {
+        // Existing test fixtures across the codebase construct ThermalSample
+        // with concrete values; the default keeps them compiling unchanged.
+        val sample = ThermalSample(0, null, null, 1000L)
+        assertTrue(sample.telemetryAvailable)
+    }
+
     // ---- ThermalPolicy data class ------------------------------------------
 
     @Test

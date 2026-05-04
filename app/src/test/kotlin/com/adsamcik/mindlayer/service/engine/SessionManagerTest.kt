@@ -7,6 +7,7 @@ import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.Engine
 import com.adsamcik.mindlayer.SessionConfig
 import io.mockk.every
+import io.mockk.coVerify
 import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
@@ -14,6 +15,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -51,6 +53,11 @@ class SessionManagerTest {
             every { isInitialized } returns true
             every { requireEngine() } returns mockEngine
             every { currentBackend } returns "GPU"
+            // F-018: default to already-initialised so existing tests that
+            // exercise the create-session happy path don't trip the new
+            // EngineNotReadyException fast-fail. Tests that exercise lazy
+            // init explicitly override this in their @Test body.
+            every { isInitialized } returns true
         }
 
         // Default: generous 16GB tier so session limits don't interfere
@@ -86,12 +93,14 @@ class SessionManagerTest {
     private fun createDefaultSession(
         sessionId: String? = null,
         maxTokens: Int = 4096,
+        ownerToken: Any? = null,
     ): String {
         return sessionManager.createSession(
             SessionConfig(
                 sessionId = sessionId,
                 maxTokens = maxTokens,
-            )
+            ),
+            ownerToken,
         )
     }
 
@@ -267,10 +276,17 @@ class SessionManagerTest {
     }
 
     @Test
-    fun `createSession requires initialized engine instead of blocking for lazy init`() {
+    fun `createSession passes backend and maxTokens during lazy init`() {
+        // F-018: createSession no longer runBlocking-init's the engine; it
+        // throws EngineNotReadyException and kicks off background init on a
+        // dedicated dispatcher. Assert the typed exception fires AND the
+        // background init invocation passes through the right backend/token
+        // values.
         every { engineManager.isInitialized } returns false
 
-        try {
+        val ex = org.junit.Assert.assertThrows(
+            com.adsamcik.mindlayer.service.engine.EngineNotReadyException::class.java
+        ) {
             sessionManager.createSession(
                 SessionConfig(
                     sessionId = "single-model",
@@ -278,12 +294,27 @@ class SessionManagerTest {
                     maxTokens = 2048,
                 )
             )
-            fail("Expected createSession to reject uninitialized engines")
-        } catch (e: IllegalStateException) {
-            assertTrue(
-                e.message.orEmpty().contains("Engine is not initialized")
-            )
         }
+        assertTrue("Expected positive retryAfterMs", ex.retryAfterMs > 0L)
+
+        // Background init runs on the limitedParallelism(1) IO slice.
+        // Wait briefly for it to schedule + invoke initialize().
+        val deadline = System.currentTimeMillis() + 5_000
+        var observed = false
+        while (System.currentTimeMillis() < deadline && !observed) {
+            try {
+                coVerify(exactly = 1) {
+                    engineManager.initialize(
+                        preferredBackend = "CPU",
+                        maxTokens = 2048,
+                    )
+                }
+                observed = true
+            } catch (_: AssertionError) {
+                Thread.sleep(20)
+            }
+        }
+        assertTrue("Expected engineManager.initialize to be invoked", observed)
     }
 
     @Test
@@ -513,6 +544,61 @@ class SessionManagerTest {
         assertNotNull(sessionManager.getSession("streaming-1")) // protected
         assertNull(sessionManager.getSession("non-streaming-1")) // evicted
         assertNotNull(sessionManager.getSession("s3"))
+    }
+
+    @Test
+    fun `owned create at capacity evicts only caller-owned session`() {
+        val tightTier = DeviceTier(2, 4096, 4096, 8 * 1024L)
+        every { memoryBudget.deviceTier } returns tightTier
+
+        createDefaultSession(sessionId = "caller-old", ownerToken = 1001)
+        createDefaultSession(sessionId = "other", ownerToken = 2002)
+        sessionManager.getSession("caller-old")!!.lastAccessedElapsedMs = 0L
+        sessionManager.getSession("other")!!.lastAccessedElapsedMs = 0L
+
+        createDefaultSession(sessionId = "caller-new", ownerToken = 1001)
+
+        assertNull(sessionManager.getSession("caller-old"))
+        assertNotNull(sessionManager.getSession("other"))
+        assertNotNull(sessionManager.getSession("caller-new"))
+        assertEquals(2, sessionManager.sessionCount)
+    }
+
+    @Test
+    fun `owned create at capacity rejects instead of evicting another owner`() {
+        val tightTier = DeviceTier(2, 4096, 4096, 8 * 1024L)
+        every { memoryBudget.deviceTier } returns tightTier
+
+        createDefaultSession(sessionId = "owner-a", ownerToken = 1001)
+        createDefaultSession(sessionId = "owner-b", ownerToken = 2002)
+
+        assertThrows(IllegalStateException::class.java) {
+            createDefaultSession(sessionId = "owner-c", ownerToken = 3003)
+        }
+
+        assertNotNull(sessionManager.getSession("owner-a"))
+        assertNotNull(sessionManager.getSession("owner-b"))
+        assertNull(sessionManager.getSession("owner-c"))
+        assertEquals(2, sessionManager.sessionCount)
+    }
+
+    @Test
+    fun `owned create at capacity rejects when caller-owned sessions are streaming`() {
+        val tightTier = DeviceTier(2, 4096, 4096, 8 * 1024L)
+        every { memoryBudget.deviceTier } returns tightTier
+
+        createDefaultSession(sessionId = "caller-stream", ownerToken = 1001)
+        createDefaultSession(sessionId = "other", ownerToken = 2002)
+        sessionManager.getSession("caller-stream")!!.isStreaming = true
+
+        assertThrows(IllegalStateException::class.java) {
+            createDefaultSession(sessionId = "caller-new", ownerToken = 1001)
+        }
+
+        assertNotNull(sessionManager.getSession("caller-stream"))
+        assertNotNull(sessionManager.getSession("other"))
+        assertNull(sessionManager.getSession("caller-new"))
+        assertEquals(2, sessionManager.sessionCount)
     }
 
     // ---- evictUnderPressure ------------------------------------------------

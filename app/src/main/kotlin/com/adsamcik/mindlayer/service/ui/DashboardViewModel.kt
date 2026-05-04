@@ -13,6 +13,7 @@ import com.adsamcik.mindlayer.RequestMeta
 import com.adsamcik.mindlayer.ServiceStatus
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.SessionInfo
+import com.adsamcik.mindlayer.service.health.MlHealthRecorder
 import com.adsamcik.mindlayer.service.logging.LogDao
 import com.adsamcik.mindlayer.service.logging.LogDatabase
 import com.adsamcik.mindlayer.service.logging.LogEntry
@@ -30,6 +31,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedInputStream
 import java.io.DataInputStream
@@ -46,6 +48,7 @@ class DashboardViewModel : ViewModel() {
     val uiState: StateFlow<DashboardUiState> = _uiState.asStateFlow()
 
     private var logDao: LogDao? = null
+    private var mlHealthRecorder: MlHealthRecorder? = null
     private var service: com.adsamcik.mindlayer.IMindlayerService? = null
     private var bound = false
     private var statusPollingJob: Job? = null
@@ -94,6 +97,11 @@ class DashboardViewModel : ViewModel() {
     fun bindService(context: Context) {
         if (bound) return
         logDao = LogDatabase.getInstance(context).logDao()
+        // F-074: the dashboard reads the watchdog state directly from the
+        // shared file in `filesDir/ml_health/` — no AIDL hop required.
+        // The service writes from `:ml`, atomic-rename means we never see
+        // a torn JSON, and self-UID AIDL would be throttled by design.
+        mlHealthRecorder = MlHealthRecorder(context)
 
         _uiState.update {
             it.copy(
@@ -146,6 +154,33 @@ class DashboardViewModel : ViewModel() {
         }
     }
 
+    /**
+     * F-055: ask the `:ml` service (over self-UID AIDL) to revoke a caller
+     * package. The service:
+     *   1. Removes the entry from `entries.json` under the file lock.
+     *   2. Tears down any sessions currently owned by the revoked UID
+     *      (in-flight inferences are killed cleanly).
+     *   3. Logs a SECURITY_DECISION audit row.
+     *
+     * The dashboard's own `AllowlistStore` picks up the change on its next
+     * `refresh()` cycle (it polls every 2 s) since the file is shared between
+     * the main process and `:ml`.
+     */
+    fun revokeApp(packageName: String) {
+        val svc = service ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                svc.revokeApp(packageName)
+            } catch (t: Throwable) {
+                _uiState.update { current ->
+                    current.copy(
+                        statusErrorMessage = "Revoke failed: ${t.toDashboardMessage()}",
+                    )
+                }
+            }
+        }
+    }
+
     private fun startPolling() {
         statusPollingJob?.cancel()
         statusPollingJob = viewModelScope.launch {
@@ -166,6 +201,19 @@ class DashboardViewModel : ViewModel() {
                         )
                     }
 
+                    // F-074: peek the watchdog file (cross-process) so the
+                    // banner stays in sync with whatever `:ml` last wrote.
+                    // Cheap unlocked read; atomic rename guarantees no
+                    // torn JSON.
+                    val healthSnapshot = mlHealthRecorder?.peek()
+                    val cooldownEndsAt = mlHealthRecorder?.cooldownEndsAt() ?: 0L
+                    val throttled = mlHealthRecorder?.shouldThrottleBinds() == true
+                    val cooldownRemaining = if (throttled && cooldownEndsAt > now) {
+                        ((cooldownEndsAt - now + 999L) / 1000L).toInt().coerceAtLeast(0)
+                    } else {
+                        0
+                    }
+
                     _uiState.update { current ->
                         current.copy(
                             connectionState = DashboardConnectionState.CONNECTED,
@@ -176,6 +224,16 @@ class DashboardViewModel : ViewModel() {
                             backend = status.backend,
                             uptimeMs = status.uptimeMs,
                             thermalBand = status.thermalBand,
+                            // F-073: the service writes the sentinel
+                            // `UNAVAILABLE` into thermalBand when the
+                            // current ThermalPolicy is INFERRED (Android
+                            // 8 / 8.1, no thermal telemetry). Surface
+                            // that to the UI via a typed boolean.
+                            thermalTelemetryAvailable = !status.thermalBand
+                                .equals("UNAVAILABLE", ignoreCase = true),
+                            serviceThrottled = throttled,
+                            throttleCooldownSecondsRemaining = cooldownRemaining,
+                            recentDeathCount = healthSnapshot?.deathCount ?: 0,
                             headroom = status.headroom,
                             memoryPressure = status.memoryPressure,
                             availableRamMb = status.availableRamMb,
@@ -233,19 +291,25 @@ class DashboardViewModel : ViewModel() {
                 }
 
                 try {
-                    val (recent, gpuFailure, now) = withContext(Dispatchers.IO) {
+                    val sample = withContext(Dispatchers.IO) {
                         DashboardLogSample(
                             recent = dao.getRecent(20),
                             gpuFailure = dao.latestGpuFallbackMessage(),
                             sampledAtMs = System.currentTimeMillis(),
+                            initFailure = dao.latestInitFailure()?.let(::parseInitFailureLogRow),
                         )
                     }
+                    val recent = sample.recent
+                    val gpuFailure = sample.gpuFailure
+                    val now = sample.sampledAtMs
+                    val initFailure = sample.initFailure
                     _uiState.update { current ->
                         current.copy(
                             isLogsLoading = false,
                             lastLogsUpdateMs = now,
                             logsErrorMessage = null,
                             gpuFailureReason = gpuFailure,
+                            lastInitFailure = initFailure,
                             recentLogs = recent.map { entry ->
                                 LogUiItem(
                                     timestampLabel = formatRelativeTimestamp(entry.timestampMs, now),
@@ -513,5 +577,45 @@ class DashboardViewModel : ViewModel() {
         val recent: List<LogEntry>,
         val gpuFailure: String?,
         val sampledAtMs: Long,
+        val initFailure: com.adsamcik.mindlayer.service.engine.InitFailure? = null,
     )
+}
+
+/**
+ * F-077: parse a `LogEvent.INIT_FAILURE_CATEGORIZED` row back into the
+ * typed [com.adsamcik.mindlayer.service.engine.InitFailure] sealed
+ * class. Returns `null` for rows that have no `failureCategory` field
+ * in `extraJson`, an unknown category name, or malformed JSON — the
+ * dashboard simply hides the variant card in that case rather than
+ * surfacing a parse error.
+ *
+ * Visible (`internal`) for testing — the round-trip
+ * `LogRepository.logInitFailureCategorized` ⇌ `parseInitFailureLogRow`
+ * is the contract that pins F-077's wire format.
+ */
+internal fun parseInitFailureLogRow(
+    entry: LogEntry,
+): com.adsamcik.mindlayer.service.engine.InitFailure? {
+    val extra = entry.extraJson ?: return null
+    val category = try {
+        Json.parseToJsonElement(extra)
+            .jsonObject["failureCategory"]
+            ?.jsonPrimitive
+            ?.contentOrNull
+    } catch (_: Exception) {
+        null
+    } ?: return null
+    return when (category) {
+        "LowMemory" -> com.adsamcik.mindlayer.service.engine.InitFailure.LowMemory
+        "ModelMissing" -> com.adsamcik.mindlayer.service.engine.InitFailure.ModelMissing
+        "IntegrityMismatch" -> com.adsamcik.mindlayer.service.engine.InitFailure.IntegrityMismatch
+        "BackendUnavailable" -> com.adsamcik.mindlayer.service.engine.InitFailure.BackendUnavailable(
+            backend = entry.backend.orEmpty(),
+            safeLabel = entry.errorMessage.orEmpty(),
+        )
+        "NativeError" -> com.adsamcik.mindlayer.service.engine.InitFailure.NativeError(
+            safeLabel = entry.errorMessage.orEmpty(),
+        )
+        else -> null
+    }
 }

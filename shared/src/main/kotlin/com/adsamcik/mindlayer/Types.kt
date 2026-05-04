@@ -6,7 +6,14 @@ import kotlinx.parcelize.Parcelize
 
 @Parcelize
 data class HistoryTurn(
-    val role: String,   // "user" | "model" | "tool"
+    /**
+     * One of `com.adsamcik.mindlayer.shared.Role`'s constants
+     * (`"user"` / `"model"` / `"tool"` / `"system"`). Validated at the
+     * AIDL boundary; invalid values are rejected with a typed
+     * `INVALID_SESSION_CONFIG` error. Note: the wire spelling is `"model"`
+     * for assistant responses — `"assistant"` is **not** valid.
+     */
+    val role: String,
     val text: String,
 ) : Parcelable {
     override fun toString(): String =
@@ -41,7 +48,20 @@ data class RequestMeta(
     val requestId: String,
     val sessionId: String,
     val textContent: String? = null,
+    /**
+     * Vestigial — only validated against `com.adsamcik.mindlayer.shared.Role`
+     * by `IpcInputValidator`, never read by the service. Defaults to
+     * `"user"` because that is the only sensible value at the request
+     * boundary today (tool results flow through `submitToolResult`, not
+     * `infer`). Frozen on the wire; do not repurpose.
+     */
     val role: String = "user",
+    /**
+     * Vestigial — declared on the wire but not consumed anywhere in the
+     * service. Reserved for a future per-request priority hint; until
+     * then the field is wire-stable and should be left at the default.
+     * Frozen; do not repurpose.
+     */
     val priority: Int = 0,
 ) : Parcelable {
     override fun toString(): String =
@@ -75,12 +95,13 @@ data class AudioTransfer(
 @Parcelize
 data class ToolResult(
     val requestId: String,
-    val callId: String? = null,
+    val callId: String,
     val toolName: String,
     val resultJson: String,
 ) : Parcelable {
     override fun toString(): String =
-        "ToolResult(requestId=$requestId, callId=$callId, toolName=$toolName, resultJson=<redacted:${resultJson.length}>)"
+        "ToolResult(requestId=$requestId, callId=$callId, toolName=$toolName, " +
+            "resultJson=<redacted:${resultJson.length}>)"
 }
 
 @Parcelize
@@ -125,5 +146,11 @@ data class SessionInfo(
     /** Session expiration duration in milliseconds. */
     val expirationMs: Long = 14L * 24 * 60 * 60 * 1000,
     /** Absolute wall-clock time when this session expires. */
-    val expiresAtMs: Long = createdAtMs + expirationMs,
+    val expiresAtMs: Long = safeExpiresAtMs(createdAtMs, expirationMs),
 ) : Parcelable
+
+private fun safeExpiresAtMs(createdAtMs: Long, expirationMs: Long): Long {
+    if (expirationMs <= 0) return createdAtMs
+    val remaining = Long.MAX_VALUE - createdAtMs
+    return if (expirationMs > remaining) Long.MAX_VALUE else createdAtMs + expirationMs
+}

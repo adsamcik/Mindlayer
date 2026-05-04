@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.service.engine
 
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
+import com.adsamcik.mindlayer.service.logging.loggable
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
 import java.util.UUID
@@ -10,11 +11,16 @@ import java.util.concurrent.ConcurrentHashMap
  * Coordinates the tool-call loop between the inference streaming coroutine
  * and client-side [submitResult] calls arriving via AIDL.
  *
+ * Internal map keys are **scoped keys** (`uid:publicRequestId`) so that two
+ * authorized callers with colliding public `requestId` values cannot poison
+ * each other's pending tool-call list (F-007). The orchestrator and the
+ * binder are the only callers; both already handle scoping.
+ *
  * Flow:
  *  1. Streaming detects tool calls → [registerPendingToolCalls] stores them
  *  2. Tool call events are written to the pipe for the client
  *  3. Streaming suspends on [awaitResults] until the client submits every
- *     pending result via [submitResult]
+ *     pending result via [submitResult], correlated by callId and tool name
  *  4. Results are returned to the orchestrator for injection into the
  *     conversation
  *
@@ -31,146 +37,134 @@ class ToolCallBridge {
 
     companion object {
         private const val TAG = "ToolCallBridge"
-        const val DEFAULT_TIMEOUT_MS = 60_000L
-
-        /** Sentinel uid used by legacy callers that do not supply one. */
-        const val LEGACY_UID = -1
+        /**
+         * F-061: a single tool round-trip times out after 30 s. Reduced from
+         * the previous 60 s because the orchestrator now enforces a
+         * 5-minute total wall-clock cap on the whole inference; long tool
+         * round-trips were the dominant way to get close to the old cap.
+         */
+        const val DEFAULT_TIMEOUT_MS = 30_000L
     }
 
     data class PendingToolCall(
-        val requestId: String,
+        val scopedKey: String,
         val callId: String,
         val toolName: String,
         val arguments: String,
         val resultDeferred: CompletableDeferred<String> = CompletableDeferred(),
     )
 
-    /** "uid:requestId" → list of pending tool calls for that inference request. */
+    /** scopedKey → list of pending tool calls for that inference request. */
     private val pending = ConcurrentHashMap<String, MutableList<PendingToolCall>>()
 
-    private fun key(uid: Int, requestId: String): String = "$uid:$requestId"
+    private fun requestLabel(scopedKey: String): String =
+        scopedKey.substringAfter(':', scopedKey).loggable()
 
     /**
      * Register tool calls that the model wants executed.
      *
      * Generates a unique [PendingToolCall.callId] for each call and stores
-     * them keyed by `(uid, requestId)`. Returns the list so the caller can
-     * write corresponding pipe events.
+     * them keyed by the orchestrator-supplied [scopedKey]. Returns the list
+     * so the caller can write corresponding pipe events.
      */
     fun registerPendingToolCalls(
-        uid: Int,
-        requestId: String,
+        scopedKey: String,
         toolCalls: List<Pair<String, String>>,
     ): List<PendingToolCall> {
         val calls = toolCalls.map { (name, args) ->
             PendingToolCall(
-                requestId = requestId,
+                scopedKey = scopedKey,
                 callId = UUID.randomUUID().toString(),
                 toolName = name,
                 arguments = args,
             )
         }
-        pending[key(uid, requestId)] = calls.toMutableList()
+        pending[scopedKey] = calls.toMutableList()
         MindlayerLog.d(
             TAG,
-            "Registered ${calls.size} pending tool call(s) for uid=$uid request $requestId",
-            requestId = requestId,
+            "Registered ${calls.size} pending tool call(s) for request ${requestLabel(scopedKey)}",
         )
         return calls
     }
 
-    /** Backwards-compat overload (uid omitted → [LEGACY_UID]). */
-    fun registerPendingToolCalls(
-        requestId: String,
-        toolCalls: List<Pair<String, String>>,
-    ): List<PendingToolCall> = registerPendingToolCalls(LEGACY_UID, requestId, toolCalls)
-
     /**
      * Called from the AIDL binder thread when the client submits a tool result.
      *
-     * When [callId] is provided, routes to the exact matching pending call (post-C1
-     * clients).  Falls back to first-unfinished by [toolName] for legacy clients that
-     * do not supply a callId.
+     * [scopedKey] is the binder-side namespaced key derived from the caller's
+     * UID and the public requestId. Completes the [CompletableDeferred] of
+     * the unfinished pending call matching both [callId] and [toolName],
+     * unblocking the streaming coroutine in [awaitResults].
      *
-     * If no pending call matches, all remaining pending entries are failed immediately
-     * so [awaitResults] unblocks fast rather than waiting for the full timeout (H3).
+     * If no pending call matches, all remaining pending entries for this
+     * [scopedKey] are failed immediately so [awaitResults] unblocks fast
+     * rather than waiting for the full timeout (H3).
      *
-     * H3a — [uid] selects the per-app slot. Submissions from other uids cannot
-     * see or fulfil a pending call belonging to a different uid even when the
-     * raw [requestId] strings collide.
+     * @return `true` when a matching pending call was found and the result
+     *   was delivered; `false` when the request has no pending calls or no
+     *   call with the given (callId, toolName) is awaiting a result. The
+     *   return value powers the v0.4 [com.adsamcik.mindlayer.ToolSubmitResult]
+     *   tri-state.
      */
-    fun submitResult(uid: Int, requestId: String, callId: String?, toolName: String, resultJson: String) {
-        val calls = pending[key(uid, requestId)]
+    fun submitResult(scopedKey: String, callId: String, toolName: String, resultJson: String): Boolean {
+        val calls = pending[scopedKey]
         if (calls == null) {
             MindlayerLog.w(
                 TAG,
-                "submitResult: no pending calls for uid=$uid request $requestId",
-                requestId = requestId,
+                "submitResult: no pending calls for request ${requestLabel(scopedKey)}",
             )
-            return
+            return false
         }
 
         val match = synchronized(calls) {
-            // 1. Prefer exact callId match (post-C1 clients).
-            if (callId != null) {
-                val byId = calls.firstOrNull { it.callId == callId && !it.resultDeferred.isCompleted }
-                if (byId != null) return@synchronized byId
+            calls.firstOrNull {
+                it.callId == callId && it.toolName == toolName && !it.resultDeferred.isCompleted
             }
-            // 2. Fall back to first-unfinished by toolName (legacy clients).
-            calls.firstOrNull { it.toolName == toolName && !it.resultDeferred.isCompleted }
         }
 
         if (match == null) {
             // H3 — surface mismatched submitResult IMMEDIATELY rather than letting awaitResults block.
             MindlayerLog.w(
                 TAG,
-                "submitResult: no pending call matches (callId=$callId, tool='$toolName') for uid=$uid request $requestId — failing pending entries",
-                requestId = requestId,
+                "submitResult: no pending call for call ${callId.loggable()} " +
+                    "tool='$toolName' request ${requestLabel(scopedKey)} — failing pending entries",
             )
             // Fail every still-pending entry for this request so awaitResults unblocks fast.
             synchronized(calls) {
                 calls.filter { !it.resultDeferred.isCompleted }.forEach {
                     it.resultDeferred.completeExceptionally(
                         IllegalStateException(
-                            "Client submitted result for unmatched tool call (callId=$callId, tool='$toolName')",
+                            "Client submitted result for unmatched tool call (callId=${callId.loggable()}, tool='$toolName')",
                         ),
                     )
                 }
             }
-            return
+            return false
         }
 
         match.resultDeferred.complete(resultJson)
         MindlayerLog.d(
             TAG,
-            "Result submitted for tool '${match.toolName}' (callId=${match.callId}) in uid=$uid request $requestId",
-            requestId = requestId,
+            "Result submitted for call ${callId.loggable()} tool='$toolName' " +
+                "request ${requestLabel(scopedKey)}",
         )
+        return true
     }
 
-    /** Backwards-compat overload — assumes [LEGACY_UID]. */
-    fun submitResult(requestId: String, callId: String?, toolName: String, resultJson: String) =
-        submitResult(LEGACY_UID, requestId, callId, toolName, resultJson)
-
-    /** Backwards-compat overload — assumes [LEGACY_UID] and no callId. */
-    fun submitResult(requestId: String, toolName: String, resultJson: String) =
-        submitResult(LEGACY_UID, requestId, callId = null, toolName = toolName, resultJson = resultJson)
-
     /**
-     * Suspend until every pending tool call for [uid]/[requestId] has a result, or
+     * Suspend until every pending tool call for [scopedKey] has a result, or
      * [timeoutMs] expires (throws [kotlinx.coroutines.TimeoutCancellationException]).
      *
      * Returns `(toolName, resultJson)` pairs in the same order as registration.
      * Cleans up the pending entry regardless of outcome.
      */
     suspend fun awaitResults(
-        uid: Int,
-        requestId: String,
+        scopedKey: String,
         timeoutMs: Long = DEFAULT_TIMEOUT_MS,
     ): List<Pair<String, String>> {
-        val k = key(uid, requestId)
-        val calls = pending[k]
-            ?: throw IllegalStateException("No pending tool calls for uid=$uid request $requestId")
+        val calls = pending[scopedKey]
+            ?: throw IllegalStateException(
+                "No pending tool calls for request ${requestLabel(scopedKey)}"
+            )
 
         return try {
             withTimeout(timeoutMs) {
@@ -180,23 +174,14 @@ class ToolCallBridge {
                 }
             }
         } finally {
-            pending.remove(k)
+            pending.remove(scopedKey)
         }
     }
 
-    /** Backwards-compat overload — assumes [LEGACY_UID]. */
-    suspend fun awaitResults(
-        requestId: String,
-        timeoutMs: Long = DEFAULT_TIMEOUT_MS,
-    ): List<Pair<String, String>> = awaitResults(LEGACY_UID, requestId, timeoutMs)
-
     /** Clean up pending calls for a request (e.g. on cancellation). */
-    fun cancel(uid: Int, requestId: String) {
-        pending.remove(key(uid, requestId))?.forEach { call ->
+    fun cancel(scopedKey: String) {
+        pending.remove(scopedKey)?.forEach { call ->
             call.resultDeferred.cancel()
         }
     }
-
-    /** Backwards-compat overload — assumes [LEGACY_UID]. */
-    fun cancel(requestId: String) = cancel(LEGACY_UID, requestId)
 }

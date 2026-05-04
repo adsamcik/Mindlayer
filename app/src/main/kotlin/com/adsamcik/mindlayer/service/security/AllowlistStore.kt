@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.service.security
 
 import android.content.Context
+import androidx.annotation.VisibleForTesting
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -14,6 +15,7 @@ import java.nio.channels.FileLock
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -24,11 +26,36 @@ data class AllowlistEntry(
     val displayName: String? = null,
 )
 
+/**
+ * Pending caller-approval row.
+ *
+ * - [previousSigSha256] (F-032): set when a package previously approved
+ *   under a *different* signing certificate is now requesting approval again
+ *   with a new sig. Triggers the cert-rotation banner in the UI. `null`
+ *   means first-time approval (no prior trust). The field is additive in
+ *   `pending.json` (`prevSig`) and round-trips via `optString` reads, so
+ *   older on-disk files remain compatible.
+ */
 data class PendingApproval(
     val packageName: String,
     val signingCertSha256: String,
     val firstRequestedAtMs: Long,
     val displayName: String? = null,
+    val previousSigSha256: String? = null,
+)
+
+/**
+ * Thrown by [AllowlistStore.approve] when the live signing certificate for
+ * the target package no longer matches the sig the user saw in the dashboard
+ * row. F-031 — closes the TOCTOU window between display and tap.
+ */
+class CertificateMismatchException(
+    val pkg: String,
+    val expectedSig: String,
+    val liveSig: String,
+) : SecurityException(
+    "Signing certificate for $pkg changed since approval was requested " +
+        "(expected=${expectedSig.take(8)}…, live=${liveSig.take(8)}…)",
 )
 
 /**
@@ -103,6 +130,14 @@ class AllowlistStore(
     }
 
     /**
+     * F-033: per-process in-memory dedup keyed by `(pkg, sig)`. A hostile
+     * caller that already has a pending row should not be able to re-acquire
+     * the FileLock + re-fsync the JSON on every blocked request. Lives only
+     * in `:ml` (the dashboard process never calls [recordPending]).
+     */
+    private val recentPendingDedup = ConcurrentHashMap<DedupKey, Long>()
+
+    /**
      * Fast path — always reads from disk so a dashboard approval in the main
      * process is visible to the `:ml` service's next check. File I/O cost is
      * tolerable since the caller-authorization path is already rate-limited.
@@ -122,22 +157,72 @@ class AllowlistStore(
         _pending.value = readPending()
     }
 
-    fun approve(pkg: String, sigSha256: String, displayName: String? = null) {
+    /**
+     * F-031: production approval entry point — re-verifies the live signing
+     * certificate against [expectedSigSha256] under the file lock and writes
+     * the entry only if it matches. Closes the TOCTOU window between
+     * dashboard render and the user's tap.
+     *
+     * @throws CertificateMismatchException if the live signer disagrees with
+     *   what the user saw on screen.
+     * @throws SecurityException if the package is no longer installed or its
+     *   signing info cannot be resolved.
+     */
+    fun approve(
+        context: Context,
+        pkg: String,
+        expectedSigSha256: String,
+        displayName: String? = null,
+    ) {
         withFileLock {
-            val now = System.currentTimeMillis()
-            val current = readEntries()
-            val updated = current.filterNot { it.packageName == pkg } +
-                AllowlistEntry(pkg, sigSha256, now, displayName)
-            writeEntries(updated)
-            _entries.value = updated
-
-            val pendingUpdated = readPending().filterNot { it.packageName == pkg }
-            writePending(pendingUpdated)
-            _pending.value = pendingUpdated
-
+            val live = CallerVerifier.identifyByPackage(context, pkg)
+                ?: throw SecurityException("Package $pkg no longer installed or signer unresolved")
+            if (!live.signingCertSha256.equals(expectedSigSha256, ignoreCase = true)) {
+                throw CertificateMismatchException(
+                    pkg = pkg,
+                    expectedSig = expectedSigSha256,
+                    liveSig = live.signingCertSha256,
+                )
+            }
+            val sanitized = CallerVerifier.sanitizeLabel(live.displayName ?: displayName)
+            writeApprovalLocked(pkg, live.signingCertSha256, sanitized)
             // Clear any denial when explicitly approved.
             writeDenied(readDenied().filterNot { it.packageName == pkg })
         }
+    }
+
+    /**
+     * F-031 / data-layer: direct write of an approval entry without sig
+     * re-verify. **Production code must use the [approve] overload that
+     * takes a [Context]** — this entry point is intended for tests and
+     * recovery paths that already hold the verified identity.
+     */
+    @VisibleForTesting
+    internal fun approveDirect(pkg: String, sigSha256: String, displayName: String? = null) {
+        withFileLock {
+            writeApprovalLocked(pkg, sigSha256, CallerVerifier.sanitizeLabel(displayName))
+        }
+    }
+
+    private fun writeApprovalLocked(pkg: String, sigSha256: String, displayName: String?) {
+        val now = System.currentTimeMillis()
+        val current = readEntries()
+        val updated = current.filterNot { it.packageName == pkg } +
+            AllowlistEntry(pkg, sigSha256, now, displayName)
+        writeEntries(updated)
+        _entries.value = updated
+
+        // F-031: only remove the matching pending row. Sig-swap pending rows
+        // (a different sig on the same pkg) are kept so the user can still
+        // see them in the dashboard.
+        val pendingUpdated = readPending().filterNot {
+            it.packageName == pkg && it.signingCertSha256.equals(sigSha256, ignoreCase = true)
+        }
+        writePending(pendingUpdated)
+        _pending.value = pendingUpdated
+        // Drop any dedup entries for this pkg — a fresh approval cycle
+        // should be observable again.
+        recentPendingDedup.keys.removeIf { it.pkg == pkg }
     }
 
     fun revoke(pkg: String) {
@@ -158,13 +243,34 @@ class AllowlistStore(
 
     /**
      * Record a caller that attempted to connect but is not on the allowlist.
+     * Used by the dashboard UI so the user can approve/deny.
+     *
+     * F-031: append-only across cert mismatches — if a previously-pending
+     * package now requests approval with a *different* sig, both rows are
+     * kept so the user can see the sig change.
+     *
+     * F-032: the new row carries [PendingApproval.previousSigSha256] when an
+     * already-approved entry exists for the same package under a different
+     * sig — the UI uses that to render the cert-rotation banner.
+     *
+     * F-033: short-circuits via an in-memory dedup TTL keyed by `(pkg, sig)`
+     * so a hammering caller does not even reacquire the FileLock; capped at
+     * [MAX_PENDING_ROWS] (FIFO) to bound on-disk growth.
+     *
      * Silently ignored if [pkg] is within its denial TTL or if [pkg] exceeds [MAX_PACKAGE_NAME_LENGTH].
-     * The pending list is capped at [MAX_PENDING] entries (most-recent retained).
      */
     fun recordPending(pkg: String, sigSha256: String, displayName: String? = null) {
         if (pkg.length > MAX_PACKAGE_NAME_LENGTH) return
+        val key = DedupKey(pkg, sigSha256.lowercase())
+        val now = System.currentTimeMillis()
+        val prev = recentPendingDedup[key]
+        if (prev != null && now - prev < DEDUP_TTL_MS) return
+        recentPendingDedup[key] = now
+        if (recentPendingDedup.size > DEDUP_MAP_SOFT_CAP) {
+            recentPendingDedup.entries.removeIf { now - it.value > DEDUP_TTL_MS }
+        }
+
         withFileLock {
-            val now = System.currentTimeMillis()
             // Suppress if the package is within its denial TTL.
             val denied = readDenied()
             if (denied.any {
@@ -174,17 +280,47 @@ class AllowlistStore(
                 }) {
                 return@withFileLock
             }
-            val current = readPending()
-            val existing = current.firstOrNull { it.packageName == pkg }
-            if (existing != null && existing.signingCertSha256.equals(sigSha256, ignoreCase = true)) {
+
+            // F-054 (related): re-check entries.json under the lock — if the
+            // pkg is already approved with this sig, skip writing a pending
+            // row at all.
+            val approved = readEntries().firstOrNull { it.packageName == pkg }
+            if (approved != null && approved.signingCertSha256.equals(sigSha256, ignoreCase = true)) {
                 return@withFileLock
             }
-            val base = current.filterNot { it.packageName == pkg } +
-                PendingApproval(pkg, sigSha256, now, displayName)
-            // Cap at MAX_PENDING, keeping the most-recent entries.
-            val updated = base.sortedByDescending { it.firstRequestedAtMs }.take(MAX_PENDING)
-            writePending(updated)
-            _pending.value = updated
+
+            val current = readPending()
+            // Exact dup — same (pkg, sig) already pending — no-op.
+            if (current.any {
+                    it.packageName == pkg &&
+                        it.signingCertSha256.equals(sigSha256, ignoreCase = true)
+                }
+            ) {
+                return@withFileLock
+            }
+
+            // F-032: was this pkg previously approved under a different sig?
+            val prevSig = approved
+                ?.signingCertSha256
+                ?.takeIf { !it.equals(sigSha256, ignoreCase = true) }
+
+            // F-031 + F-033: append (no overwrite of prior sig rows for this
+            // pkg) and FIFO-cap at MAX_PENDING_ROWS.
+            val sanitized = CallerVerifier.sanitizeLabel(displayName)
+            val appended = current + PendingApproval(
+                packageName = pkg,
+                signingCertSha256 = sigSha256,
+                firstRequestedAtMs = now,
+                displayName = sanitized,
+                previousSigSha256 = prevSig,
+            )
+            val capped = if (appended.size > MAX_PENDING_ROWS) {
+                appended.subList(appended.size - MAX_PENDING_ROWS, appended.size)
+            } else {
+                appended
+            }
+            writePending(capped)
+            _pending.value = capped
         }
     }
 
@@ -200,6 +336,7 @@ class AllowlistStore(
             val updatedPending = current.filterNot { it.packageName == pkg }
             writePending(updatedPending)
             _pending.value = updatedPending
+            recentPendingDedup.keys.removeIf { it.pkg == pkg }
         }
     }
 
@@ -253,6 +390,7 @@ class AllowlistStore(
                 put("sig", e.signingCertSha256)
                 put("firstRequestedAtMs", e.firstRequestedAtMs)
                 e.displayName?.let { put("displayName", it) }
+                e.previousSigSha256?.let { put("prevSig", it) }
             })
         }
         atomicWrite(pendingFile, signedEnvelope(PENDING_KEY, array).toString())
@@ -273,14 +411,48 @@ class AllowlistStore(
         atomicWrite(deniedFile, signedEnvelope(DENIED_KEY, array).toString())
     }
 
+    /**
+     * F-025: atomic write with fsync.
+     *
+     * Writes to a `.tmp` sibling, fsyncs the contents, then renames over
+     * the target with [java.nio.file.StandardCopyOption.ATOMIC_MOVE].
+     * This guarantees that a crash mid-write cannot leave a half-written
+     * file that subsequently parses as an empty allowlist (silent
+     * revocation of every approval).
+     *
+     * If the platform refuses ATOMIC_MOVE (e.g. cross-filesystem rename
+     * on some emulators), we fall back to a plain rename — but never to
+     * "write directly to target" because that is the failure mode we are
+     * defending against.
+     */
     private fun atomicWrite(target: File, content: String) {
         val tmp = File(target.parentFile, target.name + ".tmp")
         try {
-            tmp.writeText(content)
-            if (!tmp.renameTo(target)) {
-                // Fallback — some filesystems refuse cross-fs renames; do best-effort copy.
-                target.writeText(content)
-                tmp.delete()
+            // Write + fsync the bytes before any rename.
+            java.io.FileOutputStream(tmp).use { fos ->
+                fos.write(content.toByteArray(Charsets.UTF_8))
+                fos.flush()
+                try { fos.fd.sync() } catch (_: Throwable) { /* fsync best effort */ }
+            }
+            try {
+                java.nio.file.Files.move(
+                    tmp.toPath(),
+                    target.toPath(),
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                )
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                if (!tmp.renameTo(target)) {
+                    // Last-resort REPLACE_EXISTING without atomicity. We
+                    // accept this only after ATOMIC_MOVE explicitly
+                    // failed; we still avoid the "write directly to
+                    // target" anti-pattern.
+                    java.nio.file.Files.move(
+                        tmp.toPath(),
+                        target.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    )
+                }
             }
         } catch (e: IOException) {
             tmp.delete()
@@ -321,6 +493,7 @@ class AllowlistStore(
                             signingCertSha256 = o.getString("sig"),
                             firstRequestedAtMs = o.optLong("firstRequestedAtMs", 0L),
                             displayName = o.optString("displayName").ifEmpty { null },
+                            previousSigSha256 = o.optString("prevSig").ifEmpty { null },
                         )
                     )
                 }
@@ -329,6 +502,8 @@ class AllowlistStore(
             emptyList()
         }
     }
+
+    private data class DedupKey(val pkg: String, val sig: String)
 
     private fun readDenied(): List<DeniedEntry> {
         val array = readSignedArray(deniedFile, DENIED_KEY) ?: return emptyList()
@@ -529,6 +704,23 @@ class AllowlistStore(
     companion object {
         private const val TAG = "AllowlistStore"
         const val DEFAULT_DIR_NAME = "mindlayer_allowlist"
+
+        /**
+         * F-033: cap pending-approval rows to bound disk growth on a flooder.
+         * FIFO eviction: oldest rows fall off first, so a real user-initiated
+         * pending request stays at the top of the list.
+         */
+        const val MAX_PENDING_ROWS = 32
+
+        /** Alias retained for source-compat with security tests. */
+        const val MAX_PENDING = MAX_PENDING_ROWS
+
+        /** F-033: in-memory dedup TTL. Per-process; lives in `:ml`. */
+        @VisibleForTesting
+        internal const val DEDUP_TTL_MS: Long = 30_000L
+
+        private const val DEDUP_MAP_SOFT_CAP = 256
+
         // Bumped to 2 when canonicalPayload was changed to include version+arrayKey
         // domain separator (audit M6). Verifier accepts MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION.
         private const val SIGNED_FILE_VERSION = 2
@@ -542,7 +734,6 @@ class AllowlistStore(
         private val HEX_SHA256 = Regex("(?i)^[0-9a-f]{64}$")
 
         // Anti-DoS caps for the pending list (audit H2/F-B-O-1).
-        const val MAX_PENDING = 32
         const val MAX_PACKAGE_NAME_LENGTH = 255
         // Length of denial cooldown after denyPending / revoke (audit M8).
         const val DENIAL_TTL_MS = 7L * 24 * 60 * 60 * 1000

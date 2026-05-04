@@ -91,33 +91,40 @@ class DiagnosticExporterTest {
         every { Log.e(any(), any()) } returns 0
         every { SystemClock.elapsedRealtime() } returns 300_000L
 
-        engineManager = mockk(relaxed = true) {
-            every { isInitialized } returns true
-            every { currentBackend } returns "GPU"
-            every { initTimeSeconds } returns 2.3f
-            every { currentModel } returns ModelInfo(
-                id = "model",
-                displayName = "Model",
-                path = "/data/app/model.litertlm",
-                sizeBytes = 1L,
-                isDefault = true,
-            )
-        }
-        thermalMonitor = mockk(relaxed = true) {
-            every { currentPolicy } returns MutableStateFlow(defaultPolicy)
-            every { latestSample } returns MutableStateFlow(defaultSample)
-            every { canReenableGpu() } returns true
-        }
-        memoryBudget = mockk(relaxed = true) {
-            every { currentSnapshot() } returns defaultSnapshot
-            every { deviceTier } returns defaultTier
-        }
-        sessionManager = mockk(relaxed = true) {
-            every { listSessions() } returns listOf(
-                SessionInfo("s1", "GPU", 4096, 120, 5, 1000, 2000, false),
-                SessionInfo("s2", "CPU", 2048, 50, 2, 1500, 2500, true),
-            )
-        }
+        // The trailing-lambda form `mockk(relaxed = true) { every { … } }`
+        // hits a project-wide mockk + JDK-17 incompatibility on this
+        // codebase that throws `MockKException: Missing mocked calls
+        // inside every { ... } block` from `setUp`. Using explicit flat
+        // `every { mock.foo } returns bar` calls (the documented
+        // alternative form) avoids the recorder issue.
+        engineManager = mockk(relaxed = true)
+        every { engineManager.isInitialized } returns true
+        every { engineManager.currentBackend } returns "GPU"
+        every { engineManager.initTimeSeconds } returns 2.3f
+        every { engineManager.currentModel } returns ModelInfo(
+            id = "model",
+            displayName = "Model",
+            path = "/data/app/model.litertlm",
+            sizeBytes = 1L,
+            isDefault = true,
+        )
+
+        thermalMonitor = mockk(relaxed = true)
+        every { thermalMonitor.currentPolicy } returns MutableStateFlow(defaultPolicy)
+        every { thermalMonitor.latestSample } returns MutableStateFlow(defaultSample)
+        every { thermalMonitor.canReenableGpu() } returns true
+
+        memoryBudget = mockk(relaxed = true)
+        every { memoryBudget.currentSnapshot() } returns defaultSnapshot
+        every { memoryBudget.deviceTier } returns defaultTier
+
+        sessionManager = mockk(relaxed = true)
+        every { sessionManager.listSessions() } returns listOf(
+            SessionInfo("s1", "GPU", 4096, 120, 5, 1000, 2000, false),
+            SessionInfo("s2", "CPU", 2048, 50, 2, 1500, 2500, true),
+        )
+
+
         logDao = mockk(relaxed = true)
         coEvery { logDao.getRecent(50) } returns listOf(
             LogEntry(

@@ -16,24 +16,25 @@ import com.adsamcik.mindlayer.service.MindlayerMlService
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.ipc.StagedMedia
 import com.adsamcik.mindlayer.service.ipc.TokenStreamWriter
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import com.adsamcik.mindlayer.service.logging.LogCategory
 import com.adsamcik.mindlayer.service.logging.LogEntry
 import com.adsamcik.mindlayer.service.logging.LogEvent
+import com.google.gson.Gson
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import kotlinx.serialization.json.put
-import com.adsamcik.mindlayer.service.logging.logExtraJson
-import org.json.JSONArray
-import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -52,12 +53,75 @@ class InferenceOrchestrator(
     private val sharedMemoryPool: SharedMemoryPool,
     private val logRepository: com.adsamcik.mindlayer.service.logging.LogRepository? = null,
     private val writerFactory: (ParcelFileDescriptor) -> TokenStreamWriter = ::TokenStreamWriter,
+    ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /**
+     * F-061: total wall-clock cap on a single inference. Tests inject a
+     * smaller value so the timeout path is exercised without waiting the
+     * full production budget.
+     */
+    private val maxInferenceMs: Long = MAX_INFERENCE_MS,
+    /**
+     * F-041: thermal policy provider. Default reads the live policy from
+     * the service's `ThermalMonitor` so the orchestrator can refuse GPU
+     * work in CRITICAL and pace tool-round retries on HOT. Tests inject
+     * a fixed policy via this lambda. Failures from the live read fall
+     * back to a COOL policy so a misconfigured `service` mock or a
+     * partially-initialised service can't accidentally close every
+     * inference with `thermal_critical`.
+     */
+    private val thermalPolicy: () -> ThermalPolicy = {
+        try { service.thermalMonitor.currentPolicy.value ?: COOL_POLICY }
+        catch (_: Throwable) { COOL_POLICY }
+    },
 ) {
 
     companion object {
         private const val TAG = "InferenceOrchestrator"
-        private const val MAX_TOOL_ROUNDS = 25
-        private const val INFERENCE_DEADLINE_MS = 5L * 60 * 1000   // 5 minutes
+        /**
+         * Hard cap on the number of tool-call rounds per inference. Surfaced
+         * via `ServiceCapabilities.maxToolRounds` so client SDKs can plan
+         * their tool-runner loops; bumped from internal `private const`
+         * to `const` for the v0.2 capability handshake.
+         */
+        const val MAX_TOOL_ROUNDS = 25
+
+        /**
+         * F-041: fallback policy applied when the live ThermalMonitor read
+         * fails (typically: a test using a relaxed `service` mock). COOL
+         * means "no thermal interventions" so the orchestrator behaves as
+         * it did before F-041.
+         */
+        private val COOL_POLICY = ThermalPolicy(
+            band = ThermalBand.COOL,
+            recommendedBackend = "GPU",
+            burstSeconds = 12,
+            restSeconds = 0,
+            chunkTokens = 128,
+        )
+
+        /**
+         * F-036: cap on the JSON-encoded length of model-emitted tool
+         * arguments. The 1 MiB pipe-frame limit is the upstream constraint
+         * (`MAX_FRAME_BYTES`); 64 KiB matches the symmetric incoming
+         * limit `IpcInputValidator.MAX_TOOL_RESULT_LEN` and leaves
+         * headroom for envelope overhead. Truncating raw JSON yields
+         * invalid JSON — that is the desired UX: the SDK's tool runner
+         * sees malformed JSON and treats the call as a tool error.
+         */
+        const val MAX_TOOL_ARGS_LEN = 64 * 1024
+
+        /**
+         * F-061: hard wall-clock cap on a single inference. The SDK's tool
+         * round-trip cap (`ToolCallBridge.DEFAULT_TIMEOUT_MS`) bounds a
+         * single tool round; this bounds the whole conversation turn
+         * (prefill + decode + every tool round combined) so a
+         * runaway-loopy model or a deadlocked tool client cannot pin
+         * a session forever and leak its slot/concurrency budget.
+         */
+        const val MAX_INFERENCE_MS = 5L * 60L * 1000L
+        const val INFERENCE_DEADLINE_MS = MAX_INFERENCE_MS
+
+        private val gson = Gson()
     }
 
     /** Extract concatenated text from a [Message]'s contents. */
@@ -66,26 +130,18 @@ class InferenceOrchestrator(
         return if (parts.isEmpty()) null else parts.joinToString("") { it.text }
     }
 
-    private fun encodeToolArguments(arguments: Any?): String {
-        if (arguments == null) return "{}"
-        if (arguments is String) {
-            val trimmed = arguments.trim()
-            return if (trimmed.isEmpty()) "{}" else trimmed
-        }
-        if (arguments is JSONObject || arguments is JSONArray) return arguments.toString()
-        val wrapped = JSONObject.wrap(arguments)
-        if (wrapped == null || wrapped == JSONObject.NULL) {
-            return arguments.toString().trim().takeIf { it.looksLikeJson() } ?: "{}"
-        }
-        return wrapped.toString()
-    }
+    // F-009: orchestrator runs on Dispatchers.IO (default). The IO pool is
+    // sized for blocking work (~64 threads on Android), so even a worst-case
+    // wedged-pipe burst cannot exhaust workers within the writer's 5s
+    // backpressure-timeout window. Tests inject StandardTestDispatcher.
+    private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
 
-    private fun String.looksLikeJson(): Boolean =
-        (startsWith("{") && endsWith("}")) || (startsWith("[") && endsWith("]"))
-
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-
-    // Active inference jobs keyed by requestId for cancellation
+    /**
+     * Active inference jobs keyed by **scoped key** (`uid:publicRequestId`,
+     * see `ServiceBinder.inferenceKey`). Namespacing by UID prevents a
+     * co-signed peer from cancelling another caller's inference by guessing
+     * the public requestId (F-007).
+     */
     private val activeJobs = ConcurrentHashMap<String, Job>()
 
     /** Bridge between the streaming coroutine and AIDL submitToolResult(). */
@@ -99,17 +155,35 @@ class InferenceOrchestrator(
     fun createSession(config: SessionConfig, ownerToken: Any?): String =
         sessionManager.createSession(config, ownerToken)
 
-    fun closeAllOwnedBy(ownerToken: Any): List<String> =
-        sessionManager.closeAllOwnedBy(ownerToken)
+    fun closeAllOwnedBy(ownerToken: Any): List<String> {
+        sessionManager.activeRequestIdsOwnedBy(ownerToken).forEach { scopedKey ->
+            cancelInference(scopedKey)
+        }
+        return sessionManager.closeAllOwnedBy(ownerToken)
+    }
 
-    fun getSessionOwner(sessionId: String): Any? =
+    fun closeAllOwnedByUid(ownerUid: Int): List<String> {
+        sessionManager.activeRequestIdsOwnedByUid(ownerUid).forEach { scopedKey ->
+            cancelInference(scopedKey)
+        }
+        return sessionManager.closeAllOwnedByUid(ownerUid)
+    }
+
+    fun getSessionOwner(sessionId: String): Int? =
         sessionManager.getSessionOwner(sessionId)
 
-    fun listSessionsOwnedBy(ownerToken: Any): List<SessionInfo> =
-        sessionManager.listSessionsOwnedBy(ownerToken)
+    fun getSessionOwnerToken(sessionId: String): Any? =
+        sessionManager.getSessionOwnerToken(sessionId)
 
-    fun destroySession(sessionId: String) =
+    fun listSessionsOwnedBy(ownerUid: Int): List<SessionInfo> =
+        sessionManager.listSessionsOwnedBy(ownerUid)
+
+    fun destroySession(sessionId: String) {
+        sessionManager.activeRequestIdForSession(sessionId)?.let { scopedKey ->
+            cancelInference(scopedKey)
+        }
         sessionManager.destroySession(sessionId)
+    }
 
     fun getSessionInfo(sessionId: String): SessionInfo? =
         sessionManager.getSessionInfo(sessionId)
@@ -131,12 +205,13 @@ class InferenceOrchestrator(
      * produce valid output until that issue is resolved.
      */
     fun infer(
+        scopedKey: String,
         meta: RequestMeta,
         image: ImageTransfer?,
         audio: AudioTransfer?,
         pipeWriteEnd: ParcelFileDescriptor,
     ) {
-        infer(meta, image, audio, pipeWriteEnd, onComplete = null)
+        infer(scopedKey, meta, image, audio, pipeWriteEnd, onComplete = null)
     }
 
     /**
@@ -144,84 +219,107 @@ class InferenceOrchestrator(
      * the orchestrator's coroutine scope when the request finishes (success,
      * error, or cancellation). Used by [ServiceBinder] to release per-UID
      * rate-limit concurrency slots.
+     *
+     * [scopedKey] is the binder-supplied namespaced key (`uid:publicRequestId`)
+     * used for all in-process state (activeJobs, ToolCallBridge.pending,
+     * SharedMemoryPool.stagedFiles, SessionHandle.activeRequestId). The
+     * public `meta.requestId` continues to flow to the SDK in stream events
+     * unmodified.
      */
     fun infer(
+        scopedKey: String,
         meta: RequestMeta,
         image: ImageTransfer?,
         audio: AudioTransfer?,
         pipeWriteEnd: ParcelFileDescriptor,
         onComplete: (() -> Unit)?,
     ) {
-        // H3a — key activeJobs/bridge state by (uid, requestId). The owner uid
-        // is recorded on the SessionConfig at create-session time; if the
-        // session is unknown (e.g. test stubs that bypass SessionManager) we
-        // fall back to LEGACY_UID so behaviour is preserved.
-        val uid = uidForSession(meta.sessionId)
-        val key = jobKey(uid, meta.requestId)
-        val job = scope.launch {
-            runInference(meta, image, audio, pipeWriteEnd, uid)
+        // F-072: synchronous KV-budget gate. Look up the session's
+        // already-reserved overhead (system prompt + tool defs +
+        // structured-output schema + initialHistory) and compare against
+        // the estimated input cost (text + image + audio + per-turn
+        // chat-template envelope). If the request would overflow the
+        // KV ceiling, throw BEFORE `scope.launch { runInference }` so
+        // the engine never sees the prompt and the SDK's `infer()` AIDL
+        // call surfaces the typed error synchronously via
+        // [com.adsamcik.mindlayer.service.ServiceBinder].
+        //
+        // When the session is unknown / expired (peekTokenBudget == null),
+        // skip the gate and let `runInference` produce the standard
+        // SESSION_NOT_FOUND_OR_NOT_OWNED pipe error.
+        val budget = sessionManager.peekTokenBudget(meta.sessionId)
+        if (budget != null) {
+            val estimatedInputTokens = estimateInputTokens(
+                text = meta.textContent,
+                image = image,
+                audio = audio,
+            )
+            if (budget.reservedTokens + estimatedInputTokens > budget.effectiveMaxTokens) {
+                throw ContextOverflowException(
+                    reservedTokens = budget.reservedTokens,
+                    estimatedInputTokens = estimatedInputTokens,
+                    effectiveMaxTokens = budget.effectiveMaxTokens,
+                )
+            }
         }
-        activeJobs[key] = job
+        // F-076: synchronous SharedMemoryPool bounds gate. Fails fast at
+        // the binder thread when the pool is at capacity, BEFORE we
+        // launch the inference coroutine that would block in
+        // stageImageWithTimeout / stageAudioWithTimeout for up to 20 s
+        // each. ServiceBinder maps the typed exception to a wire-prefixed
+        // SecurityException with code TRANSIENT_RESOURCE_EXHAUSTED.
+        if (image != null || audio != null) {
+            val numImages = if (image != null) 1 else 0
+            val numAudios = if (audio != null) 1 else 0
+            val expectedBytes: Long = (image?.payloadBytes?.toLong()?.coerceAtLeast(1L) ?: 0L) +
+                (if (audio != null) com.adsamcik.mindlayer.service.ipc.MAX_MEDIA_BYTES.toLong() else 0L)
+            sharedMemoryPool.precheckBounds(numImages, numAudios, expectedBytes)?.let { throw it }
+        }
+        val job = scope.launch {
+            runInference(scopedKey, meta, image, audio, pipeWriteEnd)
+        }
+        activeJobs[scopedKey] = job
         job.invokeOnCompletion {
-            activeJobs.remove(key)
+            activeJobs.remove(scopedKey)
             onComplete?.invoke()
         }
     }
 
-    /**
-     * Cancel an in-flight inference. Verifies that [callerUid] matches the
-     * session owner so a malicious app cannot cancel another app's request
-     * even if it guesses (or scrapes from logs) the request id (H3a).
-     *
-     * Pass [ToolCallBridge.LEGACY_UID] to skip the uid check (used by the
-     * single-arg overload and by tests that bypass UID validation).
-     */
-    fun cancelInference(callerUid: Int, requestId: String) {
-        val handle = sessionManager.findSessionByActiveRequest(requestId)
+    fun cancelInference(scopedKey: String) {
+        val publicRequestId = scopedKey.substringAfter(':', scopedKey)
+        val handle = sessionManager.findSessionByActiveRequest(scopedKey)
         if (handle != null) {
-            val ownerUid = handle.ownerToken as? Int ?: ToolCallBridge.LEGACY_UID
-            if (callerUid != ToolCallBridge.LEGACY_UID && ownerUid != ToolCallBridge.LEGACY_UID && callerUid != ownerUid) {
-                MindlayerLog.w(
-                    TAG,
-                    "Refusing cross-uid cancel: caller=$callerUid owner=$ownerUid request=$requestId",
-                    requestId = requestId,
-                    sessionId = handle.sessionId,
-                )
-                return
-            }
-            MindlayerLog.i(TAG, "Cancelling native inference for request $requestId", requestId = requestId, sessionId = handle.sessionId)
+            MindlayerLog.i(
+                TAG,
+                "Cancelling native inference",
+                requestId = publicRequestId,
+                sessionId = handle.sessionId,
+            )
             try {
                 handle.conversation.cancelProcess()
             } catch (t: Throwable) {
-                MindlayerLog.w(TAG, "cancelProcess() failed: ${t.safeLabel()}", requestId = requestId)
+                MindlayerLog.w(TAG, "cancelProcess() failed: ${t.safeLabel()}")
             }
-            val uid = ownerUid
-            toolCallBridge.cancel(uid, requestId)
-            activeJobs[jobKey(uid, requestId)]?.cancel()
-        } else {
-            // Session unknown (already destroyed?). Best-effort: cancel under
-            // both the resolved-uid slot (legacy) and the caller's slot.
-            toolCallBridge.cancel(callerUid, requestId)
-            activeJobs[jobKey(callerUid, requestId)]?.cancel()
         }
+        sharedMemoryPool.cleanup(scopedKey)
+        toolCallBridge.cancel(scopedKey)
+        activeJobs[scopedKey]?.cancel()
         logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = com.adsamcik.mindlayer.service.logging.LogCategory.INFERENCE,
             event = com.adsamcik.mindlayer.service.logging.LogEvent.REQUEST_CANCEL,
-            requestId = requestId,
+            // Strip the uid namespace prefix so the persisted requestId
+            // matches what the client recognises.
+            requestId = publicRequestId,
             sessionId = handle?.sessionId,
         ))
-        MindlayerLog.i(TAG, "Cancelled request $requestId", requestId = requestId, sessionId = handle?.sessionId)
+        MindlayerLog.i(
+            TAG,
+            "Cancelled inference request",
+            requestId = publicRequestId,
+            sessionId = handle?.sessionId,
+        )
     }
-
-    /**
-     * Backwards-compat overload — uid-blind. ServiceBinder validates the uid
-     * at the AIDL boundary before delegating, so single-tenant tests and
-     * pre-H3a callers still work. Internal call paths should use the
-     * uid-aware overload above whenever possible.
-     */
-    fun cancelInference(requestId: String) =
-        cancelInference(ToolCallBridge.LEGACY_UID, requestId)
 
     fun shutdown() {
         activeJobs.values.forEach { it.cancel() }
@@ -229,6 +327,23 @@ class InferenceOrchestrator(
         activeJobs.clear()
         sharedMemoryPool.cleanupAll()
         sessionManager.shutdown()
+    }
+
+    /**
+     * F-043: cancel every in-flight inference. Used by [MindlayerMlService]
+     * when handling the foreground notification's STOP action. Each entry
+     * goes through the standard [cancelInference] path so native
+     * `cancelProcess()` is called and the SDK sees a clean cancellation
+     * frame on the pipe.
+     */
+    fun cancelAll() {
+        activeJobs.keys.toList().forEach { scopedKey ->
+            try {
+                cancelInference(scopedKey)
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "cancelAll: cancelInference($scopedKey) raised ${t.safeLabel()}")
+            }
+        }
     }
 
     /**
@@ -250,54 +365,69 @@ class InferenceOrchestrator(
 
     // ---- Private -----------------------------------------------------------
 
-    private fun jobKey(uid: Int, requestId: String): String = "$uid:$requestId"
-
-    /** Resolve the uid that owns [sessionId], or [ToolCallBridge.LEGACY_UID]. */
-    private fun uidForSession(sessionId: String): Int =
-        sessionManager.getSessionOwner(sessionId) as? Int ?: ToolCallBridge.LEGACY_UID
-
     private suspend fun runInference(
+        scopedKey: String,
         meta: RequestMeta,
         image: ImageTransfer?,
         audio: AudioTransfer?,
         pipeWriteEnd: ParcelFileDescriptor,
-        uid: Int = ToolCallBridge.LEGACY_UID,
     ) {
         val handle = sessionManager.getSession(meta.sessionId) ?: run {
             val writer = writerFactory(pipeWriteEnd)
-            writer.closeWithError(0, "Unknown session: ${meta.sessionId}")
+            writer.closeWithError(
+                0,
+                "Unknown session: ${meta.sessionId}",
+                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+            )
             return
         }
 
         val trace = RequestTrace(meta.requestId, meta.sessionId)
 
         // Stage media outside the session lock so PFD I/O doesn't block other
-        // sessions. Staging is idempotent per requestId.
+        // sessions. Staging is keyed by the scoped key (uid:requestId) so a
+        // co-signed peer with the same public requestId cannot delete or
+        // collide with another caller's staged files (F-007).
         var stagedImage: StagedMedia? = null
         var stagedAudio: StagedMedia? = null
         try {
             if (image != null) {
-                stagedImage = sharedMemoryPool.stageImage(image)
-                MindlayerLog.d(TAG, "Staged image for request", requestId = meta.requestId, sessionId = meta.sessionId)
+                stagedImage = sharedMemoryPool.stageImageWithTimeout(scopedKey, image)
+                MindlayerLog.d(TAG, "Staged image: ${stagedImage.filePath}", requestId = meta.requestId, sessionId = meta.sessionId)
             }
             if (audio != null) {
-                stagedAudio = sharedMemoryPool.stageAudio(audio)
-                MindlayerLog.d(TAG, "Staged audio for request", requestId = meta.requestId, sessionId = meta.sessionId)
+                stagedAudio = sharedMemoryPool.stageAudioWithTimeout(scopedKey, audio)
+                MindlayerLog.d(TAG, "Staged audio: ${stagedAudio.filePath}", requestId = meta.requestId, sessionId = meta.sessionId)
             }
         } catch (t: Throwable) {
-            MindlayerLog.e(TAG, "Media staging failed for request ${meta.requestId}: ${t.safeLabel()}", requestId = meta.requestId, sessionId = meta.sessionId)
-            sharedMemoryPool.cleanup(meta.requestId)
+            MindlayerLog.e(
+                TAG,
+                "Media staging failed: ${t.safeLabel()}",
+                requestId = meta.requestId,
+                sessionId = meta.sessionId,
+            )
+            sharedMemoryPool.cleanup(scopedKey)
             val writer = writerFactory(pipeWriteEnd)
-            writer.closeWithError(0, "media_staging_failed: ${t.safeLabel()}")
+            writer.closeWithError(
+                0,
+                "media_staging_failed: ${t.safeLabel()}",
+                MindlayerErrorCode.INVALID_REQUEST,
+            )
             return
         }
 
         val deadlineNs = System.nanoTime() + INFERENCE_DEADLINE_MS * 1_000_000L
         // Single-writer: serialize sends for this session
         handle.mutex.withLock {
-            handle.activeRequestId = meta.requestId
+            handle.activeRequestId = scopedKey
             handle.isStreaming = true
             val writer = writerFactory(pipeWriteEnd)
+            // v0.5: opt the writer into TOKEN_DELTA_BATCH coalescing if the
+            // session was created with `extraContextJson.token_batch=true`.
+            // Must happen BEFORE writeHeader so the header advertises v2.
+            if (handle.preferBatchedDeltas) {
+                writer.enableBatching()
+            }
             service.enterForeground()
             val inferenceStartNs = System.nanoTime()
             logRepository?.logInferenceStart(
@@ -309,6 +439,31 @@ class InferenceOrchestrator(
                 tokenCount = ((meta.textContent?.length ?: 0) / 4).coerceAtLeast(if (meta.textContent.isNullOrEmpty()) 0 else 1),
             )
             try {
+                kotlinx.coroutines.withTimeout(maxInferenceMs) {
+                // F-041: thermal duty-cycle gate. CRITICAL band on GPU
+                // means the device is at the edge of throttling; refuse
+                // new GPU work outright so the engine isn't asked to
+                // sustain a long decode loop while the SoC is too hot.
+                // The recommended-backend signal flips to CPU when
+                // CRITICAL is reached, but the engine doesn't switch
+                // mid-session — refusing here lets the client reconnect
+                // when thermal headroom recovers.
+                val initialPolicy = thermalPolicy()
+                val currentBackend = service.engineManager.currentBackend
+                if (initialPolicy.band == ThermalBand.CRITICAL && currentBackend == "GPU") {
+                    MindlayerLog.w(
+                        TAG,
+                        "Refusing inference under CRITICAL thermal band on GPU backend",
+                        requestId = meta.requestId,
+                        sessionId = meta.sessionId,
+                    )
+                    writer.closeWithError(
+                        0,
+                        "thermal_critical",
+                        MindlayerErrorCode.THERMAL_CRITICAL,
+                    )
+                    return@withTimeout
+                }
                 writer.writeHeader(meta.requestId)
 
                 // Build multimodal content parts.
@@ -318,7 +473,14 @@ class InferenceOrchestrator(
                 val parts = mutableListOf<Content>()
                 val textContent = meta.textContent
                 if (textContent != null) {
-                    parts.add(Content.Text(textContent))
+                    // F-069: defense-in-depth scrub of user-supplied text.
+                    // LiteRT-LM's `Content.Text` is structurally separated
+                    // from system/tool roles, but the chat template
+                    // flattens to a single string at tokenisation time —
+                    // strip Gemma turn / image / sentinel tokens and any
+                    // C0 controls so a hostile client cannot smuggle a
+                    // role-flip marker via `RequestMeta.textContent`.
+                    parts.add(Content.Text(ToolOutputSanitizer.scrub(textContent)))
                 }
                 if (stagedImage != null) {
                     parts.add(Content.ImageFile(stagedImage.filePath))
@@ -371,9 +533,7 @@ class InferenceOrchestrator(
                             firstTokenSeen = true
                         }
                     }
-                    for (tc in chunk.toolCalls) {
-                        accumulatedToolCalls.add(tc.name to encodeToolArguments(tc.arguments))
-                    }
+                    acceptToolCalls(handle, chunk.toolCalls, accumulatedToolCalls, meta)
                 }
 
                 // --- Structured output: TOOL_ROUTING extraction -------------
@@ -385,7 +545,20 @@ class InferenceOrchestrator(
                         accumulatedToolCalls.removeAll {
                             it.first == StructuredOutputHelper.TOOL_NAME
                         }
-                        writer.writeTokenDelta(seq, structuredResult)
+                        val validated = validateAndMaybeRetry(
+                            handle = handle,
+                            initialOutput = structuredResult,
+                            config = soConfig!!,
+                            meta = meta,
+                            writer = writer,
+                            isToolRouting = true,
+                        )
+                        if (validated == null) {
+                            // Helper already emitted the closeWithError frame
+                            // and logged. Fall through to finally for cleanup.
+                            return@withTimeout
+                        }
+                        writer.writeTokenDelta(seq, validated)
                         seq++
                         handle.estimatedTokens++
                         requestTokenCount++
@@ -394,38 +567,18 @@ class InferenceOrchestrator(
 
                 // --- Structured output: PROMPT_AND_VALIDATE retry -----------
                 if (isPromptValidate && responseBuffer != null) {
-                    var output = responseBuffer.toString()
-                    for (attempt in 0..soConfig.maxRetries) {
-                        when (val result = StructuredOutputHelper.validateJsonOutput(
-                            output, soConfig.schema,
-                        )) {
-                            is ValidationResult.Valid -> {
-                                output = result.json
-                                break
-                            }
-                            is ValidationResult.Invalid -> {
-                                if (attempt >= soConfig.maxRetries) {
-                                    MindlayerLog.w(TAG, "Structured output: validation failed " +
-                                        "after $attempt retries, using last output", requestId = meta.requestId, sessionId = meta.sessionId)
-                                    break
-                                }
-                                MindlayerLog.w(TAG, "Structured output: validation failed " +
-                                    "(retry ${attempt + 1}/${soConfig.maxRetries}): " +
-                                    "${result.errors}", requestId = meta.requestId, sessionId = meta.sessionId)
-                                val retryPrompt = StructuredOutputHelper.buildRetryPrompt(
-                                    result.errors, soConfig.schema,
-                                )
-                                val retryBuf = StringBuilder()
-                                handle.conversation
-                                    .sendMessageAsync(Contents.of(retryPrompt))
-                                    .collect { chunk ->
-                                        chunk.text()?.let { retryBuf.append(it) }
-                                    }
-                                output = retryBuf.toString()
-                            }
-                        }
+                    val validated = validateAndMaybeRetry(
+                        handle = handle,
+                        initialOutput = responseBuffer.toString(),
+                        config = soConfig!!,
+                        meta = meta,
+                        writer = writer,
+                        isToolRouting = false,
+                    )
+                    if (validated == null) {
+                        return@withTimeout
                     }
-                    writer.writeTokenDelta(seq, output)
+                    writer.writeTokenDelta(seq, validated)
                     seq++
                     handle.estimatedTokens++
                     requestTokenCount++
@@ -433,17 +586,30 @@ class InferenceOrchestrator(
 
                 // --- Tool call loop -----------------------------------------
                 while (accumulatedToolCalls.isNotEmpty() && toolCallRound < MAX_TOOL_ROUNDS) {
-                    if (System.nanoTime() > deadlineNs) {
-                        MindlayerLog.w(TAG, "Inference wallclock exceeded after $toolCallRound tool round(s)", requestId = meta.requestId, sessionId = meta.sessionId)
-                        writer.writeDone(seq, "wallclock_limit")
-                        seq++
-                        return@withLock
-                    }
                     if (handle.estimatedTokens >= handle.effectiveMaxTokens) {
                         MindlayerLog.w(TAG, "Inference token budget exceeded (${handle.estimatedTokens}/${handle.effectiveMaxTokens})", requestId = meta.requestId, sessionId = meta.sessionId)
                         writer.writeDone(seq, "token_limit")
                         seq++
-                        return@withLock
+                        return@withTimeout
+                    }
+                    // F-041: between tool rounds, sample the live thermal
+                    // policy and insert a `restSeconds` delay if the
+                    // device is in HOT / CRITICAL. This duty-cycles GPU
+                    // pressure across multi-round tool conversations
+                    // without aborting the request — tools that aren't
+                    // dominated by inference time will barely notice.
+                    if (toolCallRound > 0) {
+                        val pol = thermalPolicy()
+                        if (pol.restSeconds > 0) {
+                            MindlayerLog.d(
+                                TAG,
+                                "Thermal duty-cycle: pausing ${pol.restSeconds}s " +
+                                    "(band=${pol.band}) before tool round ${toolCallRound + 1}",
+                                requestId = meta.requestId,
+                                sessionId = meta.sessionId,
+                            )
+                            kotlinx.coroutines.delay(pol.restSeconds * 1000L)
+                        }
                     }
                     // TOOL_ROUTING: intercept synthetic tool before forwarding
                     if (isToolRouting) {
@@ -453,7 +619,18 @@ class InferenceOrchestrator(
                             accumulatedToolCalls.removeAll {
                                 it.first == StructuredOutputHelper.TOOL_NAME
                             }
-                            writer.writeTokenDelta(seq, structuredResult)
+                            val validated = validateAndMaybeRetry(
+                                handle = handle,
+                                initialOutput = structuredResult,
+                                config = soConfig!!,
+                                meta = meta,
+                                writer = writer,
+                                isToolRouting = true,
+                            )
+                            if (validated == null) {
+                                return@withTimeout
+                            }
+                            writer.writeTokenDelta(seq, validated)
                             seq++
                             handle.estimatedTokens++
                             requestTokenCount++
@@ -462,11 +639,15 @@ class InferenceOrchestrator(
                     }
 
                     toolCallRound++
-                    MindlayerLog.i(TAG, "Tool call round $toolCallRound for request ${meta.requestId} " +
-                        "(${accumulatedToolCalls.size} call(s))", requestId = meta.requestId, sessionId = meta.sessionId)
+                    MindlayerLog.i(
+                        TAG,
+                        "Tool call round $toolCallRound (${accumulatedToolCalls.size} call(s))",
+                        requestId = meta.requestId,
+                        sessionId = meta.sessionId,
+                    )
 
                     val pending = toolCallBridge.registerPendingToolCalls(
-                        uid, meta.requestId, accumulatedToolCalls.toList()
+                        scopedKey, accumulatedToolCalls.toList()
                     )
                     for (call in pending) {
                         writer.writeToolCall(seq, call.callId, call.toolName, call.arguments)
@@ -477,20 +658,26 @@ class InferenceOrchestrator(
                             event = LogEvent.TOOL_CALL,
                             requestId = meta.requestId,
                             sessionId = meta.sessionId,
-                            extraJson = logExtraJson {
-                                put("tool", call.toolName)
-                                put("round", toolCallRound)
-                            },
+                            // F-044: build JSON via the kotlinx-serialization
+                            // builder so attacker-controlled toolNames cannot
+                            // corrupt the persisted log entry.
+                            extraJson = kotlinx.serialization.json.buildJsonObject {
+                                put("tool", kotlinx.serialization.json.JsonPrimitive(call.toolName))
+                                put("round", kotlinx.serialization.json.JsonPrimitive(toolCallRound))
+                            }.toString(),
                         ))
                     }
                     accumulatedToolCalls.clear()
 
                     // Suspend until client submits all tool results (or timeout)
-                    val results = toolCallBridge.awaitResults(uid, meta.requestId)
+                    val results = toolCallBridge.awaitResults(scopedKey)
 
-                    // Inject tool responses into the conversation
+                    // F-035: scrub Gemma turn-tokens and wrap each tool
+                    // result in a per-request-nonced envelope. The model's
+                    // safety preamble (set in SessionManager) tells it that
+                    // envelope contents are untrusted data, never instructions.
                     val toolResponses = results.map { (name, result) ->
-                        Content.ToolResponse(name, result)
+                        Content.ToolResponse(name, ToolOutputSanitizer.wrap(name, result))
                     }
                     val response = handle.conversation.sendMessage(
                         Message.tool(Contents.of(toolResponses))
@@ -506,9 +693,7 @@ class InferenceOrchestrator(
                     }
 
                     // Check whether the model wants more tool calls
-                    for (tc in response.toolCalls) {
-                        accumulatedToolCalls.add(tc.name to encodeToolArguments(tc.arguments))
-                    }
+                    acceptToolCalls(handle, response.toolCalls, accumulatedToolCalls, meta)
                 }
 
                 val finishReason = when {
@@ -541,8 +726,43 @@ class InferenceOrchestrator(
                 )
                 MindlayerLog.i(TAG, trace.summary(), requestId = meta.requestId, sessionId = meta.sessionId)
 
+                } // end withTimeout(MAX_INFERENCE_MS)
+
+            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                // F-061: total wall-clock budget for a single inference is
+                // MAX_INFERENCE_MS. On expiry, cancel native generation,
+                // mark the trace, log, and emit a terminal error frame so
+                // the SDK reports a stable `inference_timeout` reason
+                // instead of a generic cancellation.
+                toolCallBridge.cancel(scopedKey)
+                try {
+                    handle.conversation.cancelProcess()
+                } catch (t: Throwable) {
+                    MindlayerLog.w(TAG, "cancelProcess() after timeout raised ${t.safeLabel()}", requestId = meta.requestId, sessionId = meta.sessionId)
+                }
+                trace.markError("inference_timeout")
+                MindlayerLog.w(
+                    TAG,
+                    "Inference exceeded wall-clock cap (${maxInferenceMs} ms)",
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                )
+                logRepository?.logInferenceError(
+                    meta.requestId, meta.sessionId, "inference_timeout"
+                )
+                kotlinx.coroutines.withContext(NonCancellable) {
+                    try {
+                        writer.closeWithError(
+                            0,
+                            "inference_timeout",
+                            MindlayerErrorCode.INTERNAL,
+                        )
+                    } catch (_: Throwable) { }
+                }
+                // Don't re-throw — caller treats timeout as a clean termination
+                // for the slot/concurrency accounting. The job completes normally.
             } catch (e: CancellationException) {
-                toolCallBridge.cancel(uid, meta.requestId)
+                toolCallBridge.cancel(scopedKey)
                 // Flow cancellation does NOT cancel native generation — the LiteRT-LM
                 // engine keeps decoding in the background unless we ask it to stop.
                 // This matters on broken-pipe (client died mid-stream) because the
@@ -553,27 +773,202 @@ class InferenceOrchestrator(
                     MindlayerLog.w(TAG, "cancelProcess() after CancellationException raised ${t.safeLabel()}", requestId = meta.requestId, sessionId = meta.sessionId)
                 }
                 trace.markError("cancelled")
-                MindlayerLog.i(TAG, "Inference cancelled for request ${meta.requestId}", requestId = meta.requestId, sessionId = meta.sessionId)
-                writer.writeDone(0, "cancelled")
+                MindlayerLog.i(
+                    TAG,
+                    "Inference cancelled",
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                )
+                // F-009: writer.writeDone() is suspend, but we are in a
+                // CancellationException catch — coroutine is being torn
+                // down. Wrap with NonCancellable so the terminal frame
+                // can flush before the pipe closes.
+                withContext(NonCancellable) {
+                    try { writer.writeDone(0, "cancelled") } catch (_: Throwable) {
+                        // Best-effort terminal frame; pipe may already be closed.
+                    }
+                }
                 throw e
             } catch (t: Throwable) {
-                toolCallBridge.cancel(uid, meta.requestId)
+                toolCallBridge.cancel(scopedKey)
                 val safe = t.safeLabel()
                 trace.markError(safe)
-                MindlayerLog.e(TAG, "Inference failed for request ${meta.requestId}: $safe", requestId = meta.requestId, sessionId = meta.sessionId)
+                MindlayerLog.e(
+                    TAG,
+                    "Inference failed: $safe",
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                )
                 logRepository?.logInferenceError(
                     meta.requestId, meta.sessionId, safe
                 )
-                writer.closeWithError(0, safe)
+                writer.closeWithError(0, safe, MindlayerErrorCode.INTERNAL)
                 return
             } finally {
                 writer.close()
                 handle.activeRequestId = null
                 handle.isStreaming = false
                 service.exitForeground()
-                // Clean up staged media files regardless of outcome
-                sharedMemoryPool.cleanup(meta.requestId)
+                // Clean up staged media files regardless of outcome — keyed
+                // by scopedKey so a co-signed peer with the same public
+                // requestId cannot trigger early cleanup of our files.
+                sharedMemoryPool.cleanup(scopedKey)
             }
         }
+    }
+
+    /**
+     * F-036: filter the model-emitted tool calls in [toolCalls] against
+     * [SessionManager.SessionHandle.allowedToolNames]. Unknown names are
+     * dropped (and logged); known names whose serialised arguments exceed
+     * [MAX_TOOL_ARGS_LEN] are truncated (yielding invalid JSON, which the
+     * SDK treats as a tool error — fail-closed by design).
+     */
+    private fun acceptToolCalls(
+        handle: SessionManager.SessionHandle,
+        toolCalls: List<com.google.ai.edge.litertlm.ToolCall>,
+        accumulator: MutableList<Pair<String, String>>,
+        meta: RequestMeta,
+    ) {
+        for (tc in toolCalls) {
+            if (tc.name !in handle.allowedToolNames) {
+                MindlayerLog.w(
+                    TAG,
+                    "Dropped model-emitted tool call with unknown name '${tc.name.take(64)}'",
+                    requestId = meta.requestId, sessionId = meta.sessionId,
+                )
+                logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
+                    timestampMs = System.currentTimeMillis(),
+                    category = com.adsamcik.mindlayer.service.logging.LogCategory.SECURITY,
+                    event = com.adsamcik.mindlayer.service.logging.LogEvent.TOOL_CALL_REJECTED,
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                    extraJson = kotlinx.serialization.json.buildJsonObject {
+                        put("dropped_tool", kotlinx.serialization.json.JsonPrimitive(tc.name.take(64)))
+                        put("reason", kotlinx.serialization.json.JsonPrimitive("unknown_name"))
+                    }.toString(),
+                ))
+                continue
+            }
+            val argsJson = gson.toJson(tc.arguments)
+            val cappedArgs = if (argsJson.length > MAX_TOOL_ARGS_LEN) {
+                MindlayerLog.w(
+                    TAG,
+                    "Truncated tool args for '${tc.name}' from ${argsJson.length} to $MAX_TOOL_ARGS_LEN bytes",
+                    requestId = meta.requestId, sessionId = meta.sessionId,
+                )
+                logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
+                    timestampMs = System.currentTimeMillis(),
+                    category = com.adsamcik.mindlayer.service.logging.LogCategory.SECURITY,
+                    event = com.adsamcik.mindlayer.service.logging.LogEvent.TOOL_CALL_REJECTED,
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                    extraJson = kotlinx.serialization.json.buildJsonObject {
+                        put("tool", kotlinx.serialization.json.JsonPrimitive(tc.name))
+                        put("reason", kotlinx.serialization.json.JsonPrimitive("oversize_args"))
+                        put("size", kotlinx.serialization.json.JsonPrimitive(argsJson.length))
+                    }.toString(),
+                ))
+                // Intentionally produce invalid JSON: the SDK's tool runner
+                // will fail to parse it and surface a tool-error to the
+                // caller. Smart truncation could elide a closing brace and
+                // produce shorter-but-still-parseable malicious args.
+                argsJson.substring(0, MAX_TOOL_ARGS_LEN)
+            } else argsJson
+            accumulator.add(tc.name to cappedArgs)
+        }
+    }
+
+    /**
+     * F-038: shared validation + retry helper for both PROMPT_AND_VALIDATE
+     * and TOOL_ROUTING. On retry exhaustion both strategies fail-closed —
+     * the helper writes `closeWithError(seq, "structured_output_validation_failed")`
+     * and returns `null` instead of leaking the last invalid output to the
+     * client.
+     *
+     * For TOOL_ROUTING the retry loop re-prompts the model with the
+     * standard retry prompt; the model is expected to invoke the
+     * synthetic structured-output tool again. For PROMPT_AND_VALIDATE the
+     * retry yields free-text JSON.
+     *
+     * @return validated JSON string on success, or `null` if the helper
+     *         already emitted the terminal error frame and the caller
+     *         must unwind the request.
+     */
+    private suspend fun validateAndMaybeRetry(
+        handle: SessionManager.SessionHandle,
+        initialOutput: String,
+        config: StructuredOutputConfig,
+        meta: RequestMeta,
+        writer: TokenStreamWriter,
+        isToolRouting: Boolean,
+    ): String? {
+        // v0.5: caller can opt out of server-side validation entirely via
+        // JsonValidationDepth.NONE / CALLER_VALIDATES. The model output is
+        // returned verbatim — caller is expected to validate locally.
+        if (!config.serverValidate) {
+            return initialOutput
+        }
+        var output = initialOutput
+        for (attempt in 0..config.maxRetries) {
+            when (val result = StructuredOutputHelper.validateJsonOutput(output, config.schema)) {
+                is ValidationResult.Valid -> return result.json
+                is ValidationResult.Invalid -> {
+                    if (attempt >= config.maxRetries) {
+                        MindlayerLog.w(
+                            TAG,
+                            "Structured output validation failed after $attempt retries; " +
+                                "failing request (strategy=${if (isToolRouting) "tool_routing" else "prompt_and_validate"}, " +
+                                "errorCount=${result.errors.size})",
+                            requestId = meta.requestId, sessionId = meta.sessionId,
+                        )
+                        logRepository?.logInferenceError(
+                            meta.requestId, meta.sessionId,
+                            "structured_output_validation_failed",
+                        )
+                        writer.closeWithError(
+                            0,
+                            "structured_output_validation_failed",
+                            MindlayerErrorCode.INVALID_REQUEST,
+                        )
+                        return null
+                    }
+                    MindlayerLog.w(
+                        TAG,
+                        "Structured output: validation failed " +
+                            "(retry ${attempt + 1}/${config.maxRetries}, " +
+                            "errorCount=${result.errors.size}, " +
+                            "strategy=${if (isToolRouting) "tool_routing" else "prompt_and_validate"})",
+                        requestId = meta.requestId, sessionId = meta.sessionId,
+                    )
+                    val retryPrompt = StructuredOutputHelper.buildRetryPrompt(
+                        result.errors, config.schema,
+                    )
+                    val retryBuf = StringBuilder()
+                    handle.conversation
+                        .sendMessageAsync(Contents.of(retryPrompt))
+                        .collect { chunk ->
+                            chunk.text()?.let { retryBuf.append(it) }
+                            if (isToolRouting) {
+                                // The synthetic tool's arguments are what
+                                // we want to validate. Capture every
+                                // emitted call to the structured-output
+                                // tool and prefer its arguments over any
+                                // free-text output.
+                                for (tc in chunk.toolCalls) {
+                                    if (tc.name == StructuredOutputHelper.TOOL_NAME) {
+                                        retryBuf.clear()
+                                        retryBuf.append(gson.toJson(tc.arguments))
+                                    }
+                                }
+                            }
+                        }
+                    output = retryBuf.toString()
+                }
+            }
+        }
+        // Unreachable: the loop body always returns or breaks via the
+        // exhaustion branch above.
+        return null
     }
 }

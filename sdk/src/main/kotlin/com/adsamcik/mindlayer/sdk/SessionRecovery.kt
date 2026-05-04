@@ -3,6 +3,7 @@ package com.adsamcik.mindlayer.sdk
 import android.util.Log
 import com.adsamcik.mindlayer.HistoryTurn
 import com.adsamcik.mindlayer.sdk.db.TurnRole
+import com.adsamcik.mindlayer.shared.Role
 
 /**
  * Orchestrates session recovery after an OOM kill or service crash.
@@ -42,7 +43,7 @@ class SessionRecovery internal constructor(
         sessionId: String,
         maxReplayTokens: Int = FOREGROUND_REPLAY_BUDGET,
     ): RecoveryResult? {
-        Log.i(TAG, "Starting recovery for session $sessionId")
+        Log.i(TAG, "Starting session recovery")
 
         // 1. Clean up streaming/interrupted assistant turns
         val cleaned = historyStore.cleanupInterruptedTurns(sessionId)
@@ -50,7 +51,7 @@ class SessionRecovery internal constructor(
         // 2. Load replay data from Room
         val replay = historyStore.getReplayHistory(sessionId, maxReplayTokens)
         if (replay == null) {
-            Log.w(TAG, "No local history found for $sessionId")
+            Log.w(TAG, "No replayable local history found")
             return null
         }
 
@@ -58,17 +59,22 @@ class SessionRecovery internal constructor(
         val historyTurns = replay.turns.map { turn ->
             HistoryTurn(
                 role = when (turn.role) {
-                    TurnRole.USER -> "user"
-                    TurnRole.ASSISTANT -> "model"
-                    TurnRole.TOOL -> "tool"
-                    else -> "user"
+                    TurnRole.USER -> Role.USER
+                    TurnRole.ASSISTANT -> Role.MODEL  // wire spells assistant as "model"
+                    TurnRole.TOOL -> Role.TOOL
+                    else -> Role.USER
                 },
                 text = turn.textContent ?: "",
             )
         }
 
-        // Destroy old session (best-effort) before creating replacement
-        try { mindlayer.connection.awaitConnected().destroySession(sessionId) } catch (_: Exception) {}
+        // Destroy old session (best-effort) before creating replacement.
+        // Best-effort: any service-thrown error here is informational only.
+        try {
+            mindlayer.connection.awaitConnected().destroySession(sessionId)
+        } catch (_: Exception) {
+            // Already gone, evicted, or service shutting down — fine.
+        }
 
         // 4. Create a fresh server session seeded with history via initialHistory
         val config = SessionConfigBuilder().apply {
@@ -79,19 +85,22 @@ class SessionRecovery internal constructor(
             topK(replay.config.samplerTopK)
             topP(replay.config.samplerTopP)
             temperature(replay.config.samplerTemperature)
-            replay.config.toolsJson?.let { tools(it) }
+            replay.config.toolsJson?.let { toolsJsonRaw(it) }
             replay.config.extraContextJson?.let { extraContext(it) }
             if (historyTurns.isNotEmpty()) {
                 initialHistory(historyTurns)
             }
         }.build()
 
-        val newSessionId = mindlayer.connection.awaitConnected().createSession(config)
+        val newSessionId = try {
+            mindlayer.connection.awaitConnected().createSession(config)
+        } catch (e: SecurityException) {
+            throw MindlayerException.fromAidlSecurityException(e, sessionId = sessionId) ?: throw e
+        }
 
         Log.i(
             TAG,
-            "Recovered session $sessionId → $newSessionId " +
-                "(${replay.turns.size} turns replayed, $cleaned cleaned)",
+            "Recovered session (${replay.turns.size} turns replayed, $cleaned cleaned)",
         )
 
         return RecoveryResult(

@@ -50,7 +50,7 @@ class AllowlistStoreTest {
 
     @Test
     fun `approve then isAllowed succeeds`() {
-        store.approve("com.example", "abc123", "Example App")
+        store.approveDirect("com.example", "abc123", "Example App")
         assertTrue(store.isAllowed("com.example", "abc123"))
         assertEquals(1, store.list().size)
         assertEquals("Example App", store.list().first().displayName)
@@ -58,19 +58,19 @@ class AllowlistStoreTest {
 
     @Test
     fun `isAllowed fails on signature mismatch`() {
-        store.approve("com.example", "abc123", null)
+        store.approveDirect("com.example", "abc123", null)
         assertFalse(store.isAllowed("com.example", "different"))
     }
 
     @Test
     fun `isAllowed is case-insensitive on signature`() {
-        store.approve("com.example", "ABCDEF", null)
+        store.approveDirect("com.example", "ABCDEF", null)
         assertTrue(store.isAllowed("com.example", "abcdef"))
     }
 
     @Test
     fun `revoke removes the entry`() {
-        store.approve("com.example", "abc123")
+        store.approveDirect("com.example", "abc123")
         store.revoke("com.example")
         assertFalse(store.isAllowed("com.example", "abc123"))
         assertTrue(store.list().isEmpty())
@@ -78,8 +78,8 @@ class AllowlistStoreTest {
 
     @Test
     fun `approve replaces existing entry for same package`() {
-        store.approve("com.example", "old")
-        store.approve("com.example", "new")
+        store.approveDirect("com.example", "old")
+        store.approveDirect("com.example", "new")
         assertEquals(1, store.list().size)
         assertTrue(store.isAllowed("com.example", "new"))
         assertFalse(store.isAllowed("com.example", "old"))
@@ -93,17 +93,22 @@ class AllowlistStoreTest {
     }
 
     @Test
-    fun `recordPending replaces entry if signature changes`() {
+    fun `recordPending appends a new row when signature changes`() {
+        // F-031: pending becomes append-only across cert mismatches so a
+        // sig-swap cannot silently overwrite the prior pending row before
+        // the user has a chance to see it.
         store.recordPending("com.example", "sig1")
         store.recordPending("com.example", "sig2")
-        assertEquals(1, store.listPending().size)
-        assertEquals("sig2", store.listPending().first().signingCertSha256)
+        assertEquals(2, store.listPending().size)
+        val sigs = store.listPending().map { it.signingCertSha256 }.toSet()
+        assertTrue(sigs.contains("sig1"))
+        assertTrue(sigs.contains("sig2"))
     }
 
     @Test
     fun `approve clears any pending entry for the same package`() {
         store.recordPending("com.example", "sig1")
-        store.approve("com.example", "sig1")
+        store.approveDirect("com.example", "sig1")
         assertTrue(store.listPending().isEmpty())
         assertTrue(store.isAllowed("com.example", "sig1"))
     }
@@ -117,7 +122,7 @@ class AllowlistStoreTest {
 
     @Test
     fun `entries persist across instances`() {
-        store.approve("com.example", "sig")
+        store.approveDirect("com.example", "sig")
         val reopened = AllowlistStore(context, dirName)
         assertTrue(reopened.isAllowed("com.example", "sig"))
     }
@@ -129,13 +134,13 @@ class AllowlistStoreTest {
         // the other's isAllowed check on the very next call — no refresh().
         val writer = AllowlistStore(context, dirName)
         val reader = AllowlistStore(context, dirName)
-        writer.approve("com.example", "sig")
+        writer.approveDirect("com.example", "sig")
         assertTrue(reader.isAllowed("com.example", "sig"))
     }
 
     @Test
     fun `approved entries are written with integrity envelope`() {
-        store.approve("com.example", "sig")
+        store.approveDirect("com.example", "sig")
 
         val envelope = JSONObject(File(dir(), "entries.json").readText())
 
@@ -145,7 +150,7 @@ class AllowlistStoreTest {
 
     @Test
     fun `tampered signed entries are rejected`() {
-        store.approve("com.example", "sig")
+        store.approveDirect("com.example", "sig")
         val entriesFile = File(dir(), "entries.json")
         val envelope = JSONObject(entriesFile.readText())
         envelope.getJSONArray("entries")
@@ -159,7 +164,7 @@ class AllowlistStoreTest {
 
     @Test
     fun `approve recovers store after entries file corruption`() {
-        store.approve("com.example", "sig")
+        store.approveDirect("com.example", "sig")
         val entriesFile = File(dir(), "entries.json")
         val envelope = JSONObject(entriesFile.readText())
         envelope.getJSONArray("entries")
@@ -168,7 +173,7 @@ class AllowlistStoreTest {
         entriesFile.writeText(envelope.toString())
         assertTrue(store.list().isEmpty())
 
-        store.approve("com.example", "recovered", "Recovered App")
+        store.approveDirect("com.example", "recovered", "Recovered App")
 
         assertTrue(store.isAllowed("com.example", "recovered"))
         assertEquals("Recovered App", store.list().single().displayName)
@@ -176,7 +181,7 @@ class AllowlistStoreTest {
 
     @Test
     fun `corrupted entries file does not hide valid pending approvals`() {
-        store.approve("com.example", "sig")
+        store.approveDirect("com.example", "sig")
         store.recordPending("com.pending", "pending-sig", "Pending App")
         File(dir(), "entries.json").writeText("{not-json")
 
@@ -218,7 +223,7 @@ class AllowlistStoreTest {
 
     @Test
     fun `corrupted pending file does not invalidate approved entries`() {
-        store.approve("com.example", "sig")
+        store.approveDirect("com.example", "sig")
         store.recordPending("com.pending", "pending-sig")
         File(dir(), "pending.json").writeText("{not-json")
 
@@ -230,7 +235,7 @@ class AllowlistStoreTest {
     fun `malformed entries file is replaced by next approval`() {
         File(dir(), "entries.json").writeText("{not-json")
 
-        store.approve("com.example", "sig", "Recovered")
+        store.approveDirect("com.example", "sig", "Recovered")
 
         assertTrue(store.isAllowed("com.example", "sig"))
         val envelope = JSONObject(File(dir(), "entries.json").readText())
@@ -240,7 +245,7 @@ class AllowlistStoreTest {
 
     @Test
     fun `corrupted hmac key invalidates existing approvals`() {
-        store.approve("com.example", "sig")
+        store.approveDirect("com.example", "sig")
         File(dir(), "allowlist.hmac").writeText("not-base64")
 
         assertFalse(store.isAllowed("com.example", "sig"))
@@ -249,11 +254,11 @@ class AllowlistStoreTest {
 
     @Test
     fun `approve recovers by rotating hmac key after key corruption`() {
-        store.approve("com.example", "sig")
+        store.approveDirect("com.example", "sig")
         File(dir(), "allowlist.hmac").writeText("not-base64")
         assertFalse(store.isAllowed("com.example", "sig"))
 
-        store.approve("com.example", "new-sig")
+        store.approveDirect("com.example", "new-sig")
 
         assertTrue(store.isAllowed("com.example", "new-sig"))
         assertEquals(1, store.list().size)
@@ -261,7 +266,7 @@ class AllowlistStoreTest {
 
     @Test
     fun `signed entries survive json key reordering`() {
-        store.approve("com.example", "sig", "Example")
+        store.approveDirect("com.example", "sig", "Example")
         val entriesFile = File(dir(), "entries.json")
         val envelope = JSONObject(entriesFile.readText())
         val entry = envelope.getJSONArray("entries").getJSONObject(0)
@@ -307,7 +312,7 @@ class AllowlistStoreTest {
 
     @Test
     fun `legacy array injection after migration is rejected`() {
-        store.approve("com.example", "sig")
+        store.approveDirect("com.example", "sig")
         File(dir(), "entries.json").writeText(
             """[{"pkg":"com.evil","sig":"sig","grantedAtMs":1}]""",
         )

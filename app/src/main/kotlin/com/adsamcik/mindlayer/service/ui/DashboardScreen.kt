@@ -84,6 +84,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerColors
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerTheme
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerType
@@ -247,6 +248,13 @@ fun DashboardScreen(
     onTestInference: () -> Unit = {},
     onNavigateToHistory: () -> Unit = {},
     onNavigateToLogs: () -> Unit = {},
+    logRepository: LogRepository? = null,
+    /**
+     * F-055: cross-process revoke hook. The activity wires this to
+     * [DashboardViewModel.revokeApp] so a tap in the Allowed Apps card
+     * goes through the `:ml` AIDL path and tears down owned sessions.
+     */
+    onRevokeApp: ((packageName: String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -286,7 +294,14 @@ fun DashboardScreen(
                 item { CardEnterAnimation(3) { ActiveSessionsCard(state) } }
                 item { CardEnterAnimation(4) { ActivityNavigationCard(onNavigateToHistory, onNavigateToLogs) } }
                 item { CardEnterAnimation(5) { TestInferenceCard(state, onTestInference) } }
-                item { CardEnterAnimation(6) { AllowedAppsCard() } }
+                item {
+                    CardEnterAnimation(6) {
+                        AllowedAppsCard(
+                            logRepository = logRepository,
+                            onRevokeAidl = onRevokeApp,
+                        )
+                    }
+                }
                 item { Spacer(Modifier.height(8.dp)) }
             }
         }
@@ -482,6 +497,26 @@ private fun StatusSection(state: DashboardUiState) {
                 DiagnosticCallout(message = state.statusErrorMessage, tone = DashboardMessageTone.ERROR)
             }
 
+            // F-074: surface the crash-loop watchdog throttle banner.
+            // Distinct from statusErrorMessage so it shows alongside any
+            // other failure context. Hidden while the recorder reports
+            // healthy.
+            if (state.serviceThrottled) {
+                val secs = state.throttleCooldownSecondsRemaining
+                val deathCount = state.recentDeathCount
+                val message = if (secs > 0) {
+                    "Service throttled — cooling down (${secs}s) " +
+                        "after $deathCount recent crash${if (deathCount == 1) "" else "es"}."
+                } else {
+                    "Service throttled after $deathCount recent crash" +
+                        "${if (deathCount == 1) "" else "es"} — retrying soon."
+                }
+                DiagnosticCallout(
+                    message = message,
+                    tone = DashboardMessageTone.ERROR,
+                )
+            }
+
             // Engine detail grid — 2 columns to save vertical space
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -516,16 +551,79 @@ private fun StatusSection(state: DashboardUiState) {
                 )
             }
 
-            state.gpuFailureReason?.let { reason ->
-                if (state.backend.equals("CPU", ignoreCase = true)) {
-                    Text(
-                        text = "⚠ GPU init failed: $reason",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
+            // F-077: typed init-failure rendering. Each variant gets a
+            // specific message + suggested remediation. When the typed
+            // signal is absent (e.g. legacy `engine_fallback` rows from
+            // before this build) fall through to the GPU-only string
+            // shim so existing dashboards don't go silent during the
+            // upgrade window.
+            val initFailure = state.lastInitFailure
+            if (initFailure != null) {
+                val (tone, message) = describeInitFailure(initFailure, state.backend)
+                DiagnosticCallout(message = message, tone = tone)
+            } else {
+                state.gpuFailureReason?.let { reason ->
+                    if (state.backend.equals("CPU", ignoreCase = true)) {
+                        Text(
+                            text = "⚠ GPU init failed: $reason",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
             }
         }
+    }
+}
+
+/**
+ * F-077: render an [com.adsamcik.mindlayer.service.engine.InitFailure] as
+ * a `(tone, message)` pair for the dashboard's StatusSection callout.
+ *
+ * The mapping:
+ *  - [InitFailure.LowMemory] → ERROR, "Free up memory and retry"
+ *  - [InitFailure.ModelMissing] → ERROR, "install the AI Pack"
+ *  - [InitFailure.IntegrityMismatch] → ERROR, "reinstall"
+ *  - [InitFailure.BackendUnavailable] → WARNING when a fallback is in
+ *    use (engine still works on CPU), ERROR otherwise (backend === "NONE"
+ *    means the whole chain failed)
+ *  - [InitFailure.NativeError] → ERROR, surfaces the safeLabel so
+ *    operators can correlate with logs
+ *
+ * Visible (`internal`) for testing; the table is the contract that
+ * pins which variant maps to which user-facing copy.
+ */
+internal fun describeInitFailure(
+    failure: com.adsamcik.mindlayer.service.engine.InitFailure,
+    currentBackend: String,
+): Pair<DashboardMessageTone, String> = when (failure) {
+    com.adsamcik.mindlayer.service.engine.InitFailure.LowMemory -> {
+        DashboardMessageTone.ERROR to
+            "Engine init refused: insufficient memory. Free up memory and retry."
+    }
+    com.adsamcik.mindlayer.service.engine.InitFailure.ModelMissing -> {
+        DashboardMessageTone.ERROR to
+            "Model file missing — install the AI Pack."
+    }
+    com.adsamcik.mindlayer.service.engine.InitFailure.IntegrityMismatch -> {
+        DashboardMessageTone.ERROR to
+            "Model file corrupted — reinstall."
+    }
+    is com.adsamcik.mindlayer.service.engine.InitFailure.BackendUnavailable -> {
+        val recovered = currentBackend.isNotBlank() &&
+            !currentBackend.equals("NONE", ignoreCase = true) &&
+            !currentBackend.equals(failure.backend, ignoreCase = true)
+        if (recovered) {
+            DashboardMessageTone.WARNING to
+                "${failure.backend} backend failed (${failure.safeLabel}) — running on $currentBackend."
+        } else {
+            DashboardMessageTone.ERROR to
+                "${failure.backend} backend failed (${failure.safeLabel})."
+        }
+    }
+    is com.adsamcik.mindlayer.service.engine.InitFailure.NativeError -> {
+        DashboardMessageTone.ERROR to
+            "Native runtime error (${failure.safeLabel})."
     }
 }
 
@@ -549,8 +647,13 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
     val tint = thermalColor(state.thermalBand)
     val isHot = state.thermalBand.equals("HOT", ignoreCase = true) ||
         state.thermalBand.equals("CRITICAL", ignoreCase = true)
+    val telemetryBlind = !state.thermalTelemetryAvailable
     val headroomDescription = state.headroom?.let { "Headroom ${"%.0f".format(it * 100)} percent" }
-        ?: "Headroom not reported"
+        ?: if (telemetryBlind) {
+            "Telemetry unavailable on this device"
+        } else {
+            "Headroom not reported"
+        }
 
     ElevatedCard(modifier = modifier) {
         Column(
@@ -603,10 +706,28 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
                     color = tint,
                 )
             } ?: run {
+                // F-073: telemetry-blind devices (Android 8 / 8.1) have
+                // no headroom readout AND no current/10s thermal status,
+                // so we surface the fact explicitly instead of letting
+                // "Headroom not reported" silently misrepresent the
+                // service as healthy when it is actually running on a
+                // conservative duty-cycle policy.
                 Text(
-                    text = "Headroom not reported",
+                    text = if (telemetryBlind) {
+                        "Telemetry unavailable"
+                    } else {
+                        "Headroom not reported"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                )
+            }
+            if (telemetryBlind) {
+                Text(
+                    text = "Conservative policy active",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.Medium,
                 )
             }
             if (isHot) {

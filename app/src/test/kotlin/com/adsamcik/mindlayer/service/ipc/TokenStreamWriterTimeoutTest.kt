@@ -5,6 +5,7 @@ import io.mockk.every
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -44,7 +45,7 @@ class TokenStreamWriterTimeoutTest {
     }
 
     @Test
-    fun `writeFrame surfaces cancellation when underlying stream stalls past timeout`() {
+    fun `writeFrame surfaces cancellation when underlying stream stalls past timeout`() = runBlocking {
         val gate = CountDownLatch(1)
         val stalling = object : OutputStream() {
             override fun write(b: Int) {
@@ -81,7 +82,7 @@ class TokenStreamWriterTimeoutTest {
     }
 
     @Test
-    fun `closeWithError swallows pipe failure and does not throw`() {
+    fun `closeWithError swallows pipe failure and does not throw`() = runBlocking {
         val gate = CountDownLatch(1)
         val stalling = object : OutputStream() {
             override fun write(b: Int) { gate.await() }
