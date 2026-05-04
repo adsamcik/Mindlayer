@@ -26,6 +26,10 @@ import java.io.IOException
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * Hard upper bound on a single framed JSON payload sent through the pipe.
@@ -36,6 +40,12 @@ import java.nio.ByteOrder
  * must fail fast rather than be truncated or streamed.
  */
 private const val MAX_FRAME_BYTES = 1_048_576
+
+/**
+ * Default per-write timeout (H4). A stalled pipe reader must not pin the
+ * inference coroutine, the per-session mutex, or the foreground service.
+ */
+private const val DEFAULT_WRITE_TIMEOUT_MS = 5_000L
 
 /**
  * Writes length-prefixed JSON events to a [ParcelFileDescriptor] pipe.
@@ -113,6 +123,13 @@ class TokenStreamWriter private constructor(
     }
 
     private val json = Json { encodeDefaults = true }
+
+    /**
+     * L6 — `@Volatile` so the cancellation/close path racing the orchestrator
+     * coroutine sees an up-to-date value without going through a synchronized
+     * block. Combined with the H4 timeout this prevents writers from queueing
+     * more frames against an already-doomed pipe.
+     */
     @Volatile private var closed = false
 
     /**
@@ -134,6 +151,16 @@ class TokenStreamWriter private constructor(
     fun enableBatching() {
         require(!closed) { "writer is closed" }
         batchingEnabled = true
+    }
+
+    /**
+     * H4 — single-thread executor used to bound each pipe write with a
+     * Future timeout. A stalled reader (e.g. dead client) cannot pin the
+     * orchestrator coroutine indefinitely; instead the IOException we throw
+     * here surfaces as a CancellationException to the inference coroutine.
+     */
+    private val ioExec = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "mindlayer-pipe-writer").apply { isDaemon = true }
     }
 
     // ---- Public API --------------------------------------------------------
@@ -240,19 +267,25 @@ class TokenStreamWriter private constructor(
                 tokenBatchByteCount = 0
             }
         }
-        // F-020: independent try/catch around flush and close. The
-        // previous code wrapped both in a single `catch(IOException)`,
-        // so any non-IOException from `flush()` skipped `close()` and
-        // leaked the FD permanently (closed=true was already set above).
-        try { output.flush() } catch (e: IOException) {
+        // F-020 + H4: independent timed-flush/close. Each runs through
+        // [runBlockingIo] so an unresponsive reader on shutdown cannot pin
+        // the orchestrator forever. Independent try/catch ensures a non-
+        // IOException from flush() does NOT skip close() (FD leak guard).
+        try {
+            runBlockingIo { output.flush() }
+        } catch (e: IOException) {
             MindlayerLog.w(TAG, "IOException flushing pipe (client may have disconnected)", throwable = e)
         } catch (t: Throwable) {
             MindlayerLog.w(TAG, "Non-IOException flushing pipe: ${t.safeLabel()}")
         }
-        try { output.close() } catch (e: IOException) {
+        try {
+            runBlockingIo { output.close() }
+        } catch (e: IOException) {
             MindlayerLog.w(TAG, "IOException closing pipe (client may have disconnected)", throwable = e)
         } catch (t: Throwable) {
             MindlayerLog.w(TAG, "Non-IOException closing pipe: ${t.safeLabel()}")
+        } finally {
+            ioExec.shutdownNow()
         }
     }
 
@@ -409,5 +442,42 @@ class TokenStreamWriter private constructor(
         }
         // Fallback: bionic message is "write failed: EAGAIN (Try again)"
         return e.message?.contains("EAGAIN") == true
+    }
+
+    /**
+     * H4 — submit [block] to the dedicated pipe-writer executor and bound it
+     * with [writeTimeoutMs]. On timeout, cancel the future, mark the writer
+     * closed, and raise [IOException] so callers convert it into a
+     * cancellation that unwinds the inference coroutine and the per-session
+     * mutex. Used by [close] for bounded flush+close on shutdown; the hot
+     * write path uses [writeAllNonBlocking] + [withTimeout] instead so
+     * EAGAIN backpressure can be retried in-flight.
+     */
+    private fun runBlockingIo(block: () -> Unit) {
+        if (ioExec.isShutdown) {
+            // Writer already closed — fall back to the existing behaviour
+            // (write directly; the OutputStream is presumed closed and will
+            // throw IOException, which the caller handles).
+            block()
+            return
+        }
+        val future = ioExec.submit(block)
+        try {
+            future.get(writeTimeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+            future.cancel(true)
+            closed = true
+            throw IOException("Pipe write timeout after ${writeTimeoutMs}ms", e)
+        } catch (e: ExecutionException) {
+            val cause = e.cause
+            if (cause is IOException) throw cause
+            if (cause is RuntimeException) throw cause
+            if (cause is Error) throw cause
+            throw IOException("Pipe write failed", cause ?: e)
+        } catch (e: InterruptedException) {
+            future.cancel(true)
+            Thread.currentThread().interrupt()
+            throw IOException("Pipe write interrupted", e)
+        }
     }
 }

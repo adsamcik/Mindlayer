@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.sdk.db
 
 import androidx.room.Dao
+import androidx.room.Embedded
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
@@ -59,6 +60,24 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations ORDER BY updatedAtMs DESC LIMIT :limit OFFSET :offset")
     suspend fun listPaged(limit: Int, offset: Int): List<ConversationEntity>
 
+    /** List conversations with completed turn counts, newest first. */
+    @Query(
+        """
+        SELECT c.*, COUNT(t.turnId) AS completedTurnCount
+        FROM conversations c
+        LEFT JOIN turns t
+            ON t.conversationId = c.conversationId
+            AND t.state = 'COMPLETED'
+        GROUP BY c.conversationId
+        ORDER BY c.updatedAtMs DESC
+        LIMIT :limit OFFSET :offset
+        """,
+    )
+    suspend fun listPagedWithCompletedTurnCounts(
+        limit: Int,
+        offset: Int,
+    ): List<ConversationWithTurnCount>
+
     /** Count all conversations. */
     @Query("SELECT COUNT(*) FROM conversations")
     suspend fun count(): Int
@@ -66,4 +85,13 @@ interface ConversationDao {
     /** Delete conversations older than a given timestamp. */
     @Query("DELETE FROM conversations WHERE updatedAtMs < :beforeMs")
     suspend fun deleteOlderThan(beforeMs: Long): Int
+
+    /** Delete all conversations. Used by [HistoryStore.clearAll]. */
+    @Query("DELETE FROM conversations")
+    suspend fun deleteAll(): Int
 }
+
+data class ConversationWithTurnCount(
+    @Embedded val conversation: ConversationEntity,
+    val completedTurnCount: Int,
+)

@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.sdk.db
 
 import android.content.Context
+import androidx.annotation.VisibleForTesting
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
@@ -40,6 +41,18 @@ abstract class MindlayerDatabase : RoomDatabase() {
         private val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_conversations_updatedAtMs " +
+                        "ON conversations(updatedAtMs)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_turns_conversation_state_seq " +
+                        "ON turns(conversationId, state, seq)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_turns_conversation_role_state_seq " +
+                        "ON turns(conversationId, role, state, seq)",
+                )
+                db.execSQL(
                     """
                     UPDATE conversations
                     SET systemPrompt = NULL,
@@ -62,6 +75,18 @@ abstract class MindlayerDatabase : RoomDatabase() {
                 instance ?: build(context.applicationContext).also { instance = it }
             }
 
+        /** Test-only seam: inject an in-memory database in place of the encrypted singleton. */
+        @VisibleForTesting
+        fun setInstance(db: MindlayerDatabase) {
+            synchronized(this) { instance = db }
+        }
+
+        /** Test-only seam: clear the cached singleton so the next call rebuilds it. */
+        @VisibleForTesting
+        fun clearInstance() {
+            synchronized(this) { instance = null }
+        }
+
         private fun build(appContext: Context): MindlayerDatabase {
             migrateFromPlaintextIfNeeded(appContext)
             try { System.loadLibrary("sqlcipher") } catch (_: UnsatisfiedLinkError) { }
@@ -78,18 +103,60 @@ abstract class MindlayerDatabase : RoomDatabase() {
             }
         }
 
-        /** First encrypted run: drop any pre-existing plaintext DB (SQLCipher would reject it). */
+        /**
+         * First encrypted run: drop any pre-existing plaintext DB (SQLCipher would reject it).
+         *
+         * The marker lives in [SharedPreferences] (per-process cached) and may drift between
+         * processes — we therefore must not trust it alone. Before deleting, peek the first
+         * 16 bytes: if they match SQLite's plaintext magic, delete; otherwise the file is
+         * already SQLCipher-encrypted (header randomised) and we skip the delete to avoid
+         * wiping live encrypted data on a marker drift / corruption. Marker is written
+         * **after** the conditional delete.
+         */
         private fun migrateFromPlaintextIfNeeded(appContext: Context) {
             val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
             if (prefs.getBoolean(PREF_ENCRYPTED_V1, false)) return
             val dbFile = appContext.getDatabasePath(DB_NAME)
             if (dbFile.exists()) {
-                if (!appContext.deleteDatabase(DB_NAME)) return
+                if (isPlaintextSqlite(dbFile)) {
+                    if (!appContext.deleteDatabase(DB_NAME)) return
+                } else {
+                    android.util.Log.w(
+                        "Mindlayer.SdkDb",
+                        "Migration marker '$PREF_ENCRYPTED_V1' was unset but $DB_NAME does not " +
+                            "have a plaintext SQLite header — assuming already encrypted and skipping delete.",
+                    )
+                }
             }
             if (!prefs.edit().putBoolean(PREF_ENCRYPTED_V1, true).commit()) {
                 // Leave marker unset — we'll retry on next launch.
             }
         }
+
+        /**
+         * Returns true iff [file] starts with the canonical 16-byte SQLite plaintext header
+         * `"SQLite format 3\u0000"`. Returns false on any read error or short file.
+         */
+        @VisibleForTesting
+        internal fun isPlaintextSqlite(file: java.io.File): Boolean {
+            if (!file.exists() || !file.isFile) return false
+            return try {
+                java.io.RandomAccessFile(file, "r").use { raf ->
+                    if (raf.length() < SQLITE_MAGIC.size) return false
+                    val buf = ByteArray(SQLITE_MAGIC.size)
+                    raf.readFully(buf)
+                    buf.contentEquals(SQLITE_MAGIC)
+                }
+            } catch (_: java.io.IOException) {
+                false
+            } catch (_: SecurityException) {
+                false
+            }
+        }
+
+        /** SQLite's plaintext file magic, exactly 16 bytes including trailing NUL. */
+        @VisibleForTesting
+        internal val SQLITE_MAGIC: ByteArray =
+            "SQLite format 3\u0000".toByteArray(Charsets.US_ASCII)
     }
 }
-

@@ -1,5 +1,6 @@
 package com.adsamcik.mindlayer.service.ipc
 
+import android.graphics.PixelFormat
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.test.core.app.ApplicationProvider
@@ -17,8 +18,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.EOFException
 import java.io.File
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -53,6 +56,12 @@ class SharedMemoryPoolTest {
     private fun createPfdFromBytes(content: ByteArray, extension: String = "bin"): ParcelFileDescriptor {
         val tmp = File.createTempFile("test_source_", ".$extension", cacheDir)
         tmp.writeBytes(content)
+        return ParcelFileDescriptor.open(tmp, ParcelFileDescriptor.MODE_READ_ONLY)
+    }
+
+    private fun createSparsePfd(sizeBytes: Long, extension: String = "bin"): ParcelFileDescriptor {
+        val tmp = File.createTempFile("test_sparse_", ".$extension", cacheDir)
+        RandomAccessFile(tmp, "rw").use { it.setLength(sizeBytes) }
         return ParcelFileDescriptor.open(tmp, ParcelFileDescriptor.MODE_READ_ONLY)
     }
 
@@ -102,6 +111,60 @@ class SharedMemoryPoolTest {
         )
     }
 
+    @Test
+    fun `stageAudio sanitizes requestId before creating staged filename`() {
+        val pfd = createPfdFromBytes(byteArrayOf(1, 2, 3), "wav")
+        val transfer = AudioTransfer(
+            requestId = "../escape\\req:1",
+            mimeType = "audio/wav",
+            source = pfd,
+            isSharedMemory = false,
+        )
+
+        val result = pool.stageAudio("req-audio-sanitize", transfer)
+        val staged = File(result.filePath)
+
+        assertEquals(File(cacheDir, "media_staging").canonicalPath, staged.parentFile!!.canonicalPath)
+        assertFalse("Staged filename should not contain parent traversal", staged.name.contains(".."))
+        assertFalse("Staged filename should not contain slash", staged.name.contains('/'))
+        assertFalse("Staged filename should not contain backslash", staged.name.contains('\\'))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `stageAudio rejects oversized SharedMemory stat size before copying`() {
+        val pfd = createSparsePfd(101L * 1024L * 1024L, "wav")
+        val transfer = AudioTransfer(
+            requestId = "req-audio-oversized",
+            mimeType = "audio/wav",
+            source = pfd,
+            isSharedMemory = true,
+        )
+
+        try {
+            pool.stageAudio("req-audio-oversized", transfer)
+        } finally {
+            try { pfd.close() } catch (_: Throwable) {}
+        }
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `stageAudio rejects declared payload over limit before copying`() {
+        val pfd = createPfdFromBytes(byteArrayOf(1), "wav")
+        val transfer = AudioTransfer(
+            requestId = "req-audio-declared-oversized",
+            mimeType = "audio/wav",
+            source = pfd,
+            isSharedMemory = false,
+            payloadBytes = 101 * 1024 * 1024,
+        )
+
+        try {
+            pool.stageAudio("req-audio-declared-oversized", transfer)
+        } finally {
+            try { pfd.close() } catch (_: Throwable) {}
+        }
+    }
+
     // =========================================================================
     // stageImage (non-SharedMemory, encoded image via PFD)
     // =========================================================================
@@ -131,6 +194,24 @@ class SharedMemoryPoolTest {
 
         val stagedContent = File(result.filePath).readBytes()
         assertTrue("Staged file content should match source", jpegBytes.contentEquals(stagedContent))
+    }
+
+    @Test(expected = EOFException::class)
+    fun `stageImage throws EOFException when SharedMemory source is shorter than declared payload`() {
+        val pfd = createPfdFromBytes(byteArrayOf(1, 2), "png")
+        val transfer = ImageTransfer(
+            requestId = "req-short-read",
+            width = 0,
+            height = 0,
+            pixelFormat = 0,
+            rowStride = 0,
+            payloadBytes = 4,
+            source = pfd,
+            isSharedMemory = true,
+            mimeType = "image/png",
+        )
+
+        pool.stageImage("req-short-read", transfer)
     }
 
     // =========================================================================
@@ -204,6 +285,19 @@ class SharedMemoryPoolTest {
         assertTrue("Request B file should NOT be deleted", fB.exists())
     }
 
+    @Test
+    fun `cleanup deletes every staged file for repeated requestId`() {
+        val results = (1..3).map { index ->
+            pool.stageAudio("req-repeat", AudioTransfer("req-repeat", "audio/wav", createPfdFromBytes(byteArrayOf(index.toByte()))))
+        }
+        val files = results.map { File(it.filePath) }
+        assertTrue(files.all { it.exists() })
+
+        pool.cleanup("req-repeat")
+
+        assertTrue("All files for the repeated request should be deleted", files.none { it.exists() })
+    }
+
     // =========================================================================
     // StagedMedia data class
     // =========================================================================
@@ -271,6 +365,164 @@ class SharedMemoryPoolTest {
             pool.stageImage("123:req-zero", transfer)
         } finally {
             try { pfd.close() } catch (_: Throwable) {}
+        }
+    }
+
+    // =========================================================================
+    // M4 — validatePixelBufferLayout dimension guard
+    // =========================================================================
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `validatePixelBufferLayout rejects width exceeding MAX_IMAGE_DIM`() {
+        // width=20000 > 8192 must throw before any Bitmap allocation
+        validatePixelBufferLayout(
+            width = 20000,
+            height = 1,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 0,
+            bufferSize = 20000 * 4,
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `validatePixelBufferLayout rejects height exceeding MAX_IMAGE_DIM`() {
+        validatePixelBufferLayout(
+            width = 1,
+            height = 20000,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 0,
+            bufferSize = 20000 * 4,
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `validatePixelBufferLayout rejects zero width`() {
+        validatePixelBufferLayout(
+            width = 0,
+            height = 4,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 0,
+            bufferSize = 16,
+        )
+    }
+
+    // =========================================================================
+    // C2 — validatePixelBufferLayout rowStride support
+    // =========================================================================
+
+    @Test
+    fun `validatePixelBufferLayout tight rowStride returns correct tight size`() {
+        // width=4, height=4, bpp=4 → tight = 16*4 = 64
+        val tightSize = validatePixelBufferLayout(
+            width = 4,
+            height = 4,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 0, // 0 means tight
+            bufferSize = 64,
+        )
+        assertEquals(64L, tightSize)
+    }
+
+    @Test
+    fun `validatePixelBufferLayout non-tight rowStride accepts padded buffer and returns tight size`() {
+        // width=4, height=4, bpp=4 → tightRowBytes=16, rowStride=20, buffer=20*4=80
+        val tightSize = validatePixelBufferLayout(
+            width = 4,
+            height = 4,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 20,
+            bufferSize = 80,
+        )
+        assertEquals(64L, tightSize) // tight = 16*4
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `validatePixelBufferLayout rejects buffer sized for tight layout when rowStride indicates padding`() {
+        // rowStride=20 means buffer must be 20*4=80, not 64
+        validatePixelBufferLayout(
+            width = 4,
+            height = 4,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 20,
+            bufferSize = 64,
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `validatePixelBufferLayout rejects rowStride smaller than width times bpp`() {
+        // rowStride=10 < tightRowBytes=16 is invalid
+        validatePixelBufferLayout(
+            width = 4,
+            height = 4,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 10,
+            bufferSize = 40,
+        )
+    }
+
+    @Test
+    fun `bytesPerPixel returns 4 for ARGB_8888 and 2 for RGB_565`() {
+        assertEquals(4, bytesPerPixel(android.graphics.Bitmap.Config.ARGB_8888))
+        assertEquals(2, bytesPerPixel(android.graphics.Bitmap.Config.RGB_565))
+    }
+
+    // =========================================================================
+    // H1 — pixel format allowlist
+    // =========================================================================
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `validatePixelBufferLayout rejects pixel formats outside allowlist`() {
+        // RGBA_F16 / unknown sentinel must not silently coerce to ARGB_8888.
+        validatePixelBufferLayout(
+            width = 4,
+            height = 4,
+            pixelFormat = 0x1234, // arbitrary non-allowlisted value
+            rowStride = 0,
+            bufferSize = 64,
+        )
+    }
+
+    @Test
+    fun `validatePixelBufferLayout accepts RGB_565 from allowlist`() {
+        // RGB_565 has 2 bpp → 4*4*2 = 32 bytes.
+        val tight = validatePixelBufferLayout(
+            width = 4,
+            height = 4,
+            pixelFormat = PixelFormat.RGB_565,
+            rowStride = 0,
+            bufferSize = 32,
+        )
+        assertEquals(32L, tight)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `validatePixelBufferLayout rejects pixel-count overflow before allocation`() {
+        // 100_000 * 100_000 * 4 ≈ 40 GB → must fail the Long pixel-count guard
+        // even though each individual dimension is under MAX_IMAGE_DIM only
+        // when the cap is large enough — here both are over the cap so the
+        // dimension check fires first; this asserts dimension cap is enforced.
+        validatePixelBufferLayout(
+            width = 100_000,
+            height = 100_000,
+            pixelFormat = PixelFormat.RGBA_8888,
+            rowStride = 0,
+            bufferSize = Int.MAX_VALUE,
+        )
+    }
+
+    // =========================================================================
+    // H5 — assertSafePfdType: regular files accepted, fstat-unavailable allowed
+    // =========================================================================
+
+    @Test
+    fun `assertSafePfdType permits regular file PFDs`() {
+        val pfd = createPfdFromBytes(byteArrayOf(1, 2, 3), "bin")
+        try {
+            // Should not throw — temp file is a regular file (or fstat is
+            // stubbed under Robolectric, in which case the helper must permit).
+            pool.assertSafePfdType(pfd)
+        } finally {
+            pfd.close()
         }
     }
 }

@@ -46,6 +46,7 @@ class DaoTest {
         systemPrompt: String? = "You are helpful.",
         backend: String = "GPU",
         maxTokens: Int = 4096,
+        updatedAtMs: Long = 1000L,
     ) = ConversationEntity(
         conversationId = id,
         systemPrompt = systemPrompt,
@@ -57,7 +58,7 @@ class DaoTest {
         tokenEstimateTotal = 0,
         lastStableSeq = 0,
         createdAtMs = 1000L,
-        updatedAtMs = 1000L,
+        updatedAtMs = updatedAtMs,
     )
 
     private fun makeTurn(
@@ -198,6 +199,29 @@ class DaoTest {
         assertNull(loaded.systemPrompt)
     }
 
+    @Test
+    fun `listPagedWithCompletedTurnCounts orders conversations and counts completed turns`() = runTest {
+        conversationDao.upsert(makeConversation(id = "old", updatedAtMs = 1_000L))
+        conversationDao.upsert(makeConversation(id = "new", updatedAtMs = 2_000L))
+        turnDao.upsert(makeTurn("old-complete-1", conversationId = "old", seq = 0, state = TurnState.COMPLETED))
+        turnDao.upsert(makeTurn("old-pending", conversationId = "old", seq = 1, state = TurnState.PENDING))
+        turnDao.upsert(makeTurn("old-complete-2", conversationId = "old", seq = 2, state = TurnState.COMPLETED))
+        turnDao.upsert(makeTurn("new-complete", conversationId = "new", seq = 0, state = TurnState.COMPLETED))
+
+        val rows = conversationDao.listPagedWithCompletedTurnCounts(limit = 10, offset = 0)
+
+        assertEquals(listOf("new", "old"), rows.map { it.conversation.conversationId })
+        assertEquals(listOf(1, 2), rows.map { it.completedTurnCount })
+    }
+
+    @Test
+    fun `history query indexes are present`() {
+        assertTrue(indexNames("conversations").contains("index_conversations_updatedAtMs"))
+        val turnIndexes = indexNames("turns")
+        assertTrue(turnIndexes.contains("index_turns_conversation_state_seq"))
+        assertTrue(turnIndexes.contains("index_turns_conversation_role_state_seq"))
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     //  TurnDao tests
     // ═══════════════════════════════════════════════════════════════════
@@ -256,6 +280,42 @@ class DaoTest {
         val completed = turnDao.completedForConversation("conv-1")
         assertEquals(2, completed.size)
         assertEquals(listOf("t0", "t3"), completed.map { it.turnId })
+    }
+
+    @Test
+    fun `completedForConversationsDescending returns completed turns newest first per conversation`() = runTest {
+        conversationDao.upsert(makeConversation(id = "c1"))
+        conversationDao.upsert(makeConversation(id = "c2"))
+        repeat(4) { index ->
+            turnDao.upsert(
+                makeTurn(
+                    turnId = "c1-$index",
+                    conversationId = "c1",
+                    seq = index,
+                    state = TurnState.COMPLETED,
+                ),
+            )
+        }
+        turnDao.upsert(makeTurn("c1-pending", conversationId = "c1", seq = 4, state = TurnState.PENDING))
+        repeat(2) { index ->
+            turnDao.upsert(
+                makeTurn(
+                    turnId = "c2-$index",
+                    conversationId = "c2",
+                    seq = index,
+                    state = TurnState.COMPLETED,
+                ),
+            )
+        }
+
+        val previews = turnDao.completedForConversationsDescending(
+            conversationIds = listOf("c1", "c2"),
+        )
+
+        assertEquals(
+            listOf("c1-3", "c1-2", "c1-1", "c1-0", "c2-1", "c2-0"),
+            previews.map { it.turnId },
+        )
     }
 
     @Test
@@ -646,5 +706,19 @@ class DaoTest {
 
         assertNull(conversationDao.get("orphan"))
         assertNull(turnDao.get("t1"))
+    }
+
+    private fun indexNames(tableName: String): Set<String> {
+        val names = mutableSetOf<String>()
+        val cursor = db.openHelper.readableDatabase.query("PRAGMA index_list(`$tableName`)")
+        try {
+            val nameColumn = cursor.getColumnIndexOrThrow("name")
+            while (cursor.moveToNext()) {
+                names += cursor.getString(nameColumn)
+            }
+        } finally {
+            cursor.close()
+        }
+        return names
     }
 }

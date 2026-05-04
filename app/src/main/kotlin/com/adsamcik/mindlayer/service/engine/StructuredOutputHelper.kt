@@ -73,11 +73,12 @@ object StructuredOutputHelper {
                 "tool_routing" -> StructuredOutputStrategy.TOOL_ROUTING
                 else -> StructuredOutputStrategy.PROMPT_AND_VALIDATE
             }
-            val maxRetries = (so["max_retries"]?.jsonPrimitive?.intOrNull ?: 3)
-                // F-034: cap retries so an unmatchable schema cannot run
-                // an unbounded number of full inference round-trips. 5 is
-                // the practical limit before we admit defeat.
-                .coerceIn(0, 5)
+            // F-034 / M5: cap retries so an unmatchable schema cannot run an
+            // unbounded number of full inference round-trips, and so a malicious
+            // caller cannot spin tool-routing reflection loops to exhaust the
+            // conversation KV-cache budget on a single request. 5 is the
+            // practical limit before we admit defeat.
+            val maxRetries = (so["max_retries"]?.jsonPrimitive?.intOrNull ?: 3).coerceIn(0, 5)
 
             // v0.5: validation_depth. Wire values: "shallow" (default) or
             // "none" (caller opts out of server validation). Unknown

@@ -4,7 +4,11 @@ import android.content.Context
 import com.adsamcik.mindlayer.service.BuildConfig
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import org.json.JSONObject
 import java.io.File
+import java.io.FileInputStream
+import java.nio.file.Files
+import java.security.MessageDigest
 import java.util.Locale
 
 /**
@@ -32,6 +36,8 @@ object ModelRegistry {
     private const val TAG = "ModelRegistry"
     private const val MODEL_EXTENSION = ".litertlm"
     private val SAFE_NAME_PATTERN = Regex("^[A-Za-z0-9_.-]+\\.litertlm$")
+    private const val INTEGRITY_MANIFEST = "model_integrity.json"
+    private val SHA256_REGEX = Regex("(?i)^[0-9a-f]{64}$")
 
     /** Strict ordering of trust tiers. Lower ordinal = more trusted. */
     private enum class Origin { AI_PACK, FILES_DIR, EXTERNAL_FILES, CACHE_DIR, SIDELOAD }
@@ -47,12 +53,17 @@ object ModelRegistry {
      *  4. `context.cacheDir`
      *  5. `/data/local/tmp/` — debug builds only
      */
-    fun discoverModels(context: Context): List<ModelInfo> {
+    fun discoverModels(
+        context: Context,
+        requireIntegrity: Boolean = !BuildConfig.DEBUG,
+    ): List<ModelInfo> {
         val seen = mutableSetOf<String>()
         val models = mutableListOf<Pair<Origin, ModelInfo>>()
+        val manifest = loadIntegrityManifest(context)
 
         fun scanDir(origin: Origin, dir: File?) {
             if (dir == null || !dir.isDirectory) return
+            val dirCanonical = try { dir.canonicalFile } catch (_: Exception) { dir.absoluteFile }
             dir.listFiles()
                 ?.filter { it.isFile && it.name.endsWith(MODEL_EXTENSION) }
                 ?.forEach { file ->
@@ -61,8 +72,24 @@ object ModelRegistry {
                         MindlayerLog.w(TAG, "Skipping model with unexpected name: ${file.name}")
                         return@forEach
                     }
+                    // Reject symlinks — prevents attacker-controlled mmap targets via linked paths
+                    if (Files.isSymbolicLink(file.toPath())) {
+                        MindlayerLog.w(TAG, "Skipping symlink in model dir: ${file.name}")
+                        return@forEach
+                    }
+                    // Defense-in-depth: canonical path must still be a direct child of dir
+                    val canonical = try { file.canonicalFile } catch (_: Exception) { null }
+                    if (canonical == null || canonical.parentFile?.canonicalPath != dirCanonical.canonicalPath) {
+                        MindlayerLog.w(TAG, "Skipping model outside scan dir (path traversal?): ${file.name}")
+                        return@forEach
+                    }
+                    val verification = verifyModelFile(file, manifest[file.name], requireIntegrity)
+                    if (!verification.accepted) {
+                        MindlayerLog.w(TAG, "Skipping model without valid integrity metadata: ${file.name}")
+                        return@forEach
+                    }
                     seen += file.name
-                    models += origin to buildModelInfo(file)
+                    models += origin to buildModelInfo(file, verification.sha256)
                 }
         }
 
@@ -78,6 +105,12 @@ object ModelRegistry {
                     MindlayerLog.w(TAG, "Skipping AI-Pack asset with unexpected name: $name")
                     continue
                 }
+                if (name in seen) continue
+                val expected = manifest[name]
+                if (requireIntegrity && expected == null) {
+                    MindlayerLog.w(TAG, "Skipping AI pack model without integrity metadata: $name")
+                    continue
+                }
 
                 val extracted = File(context.filesDir, name)
                 if (!extracted.exists()) {
@@ -89,8 +122,14 @@ object ModelRegistry {
                     }
                     MindlayerLog.i(TAG, "Extracted: ${extracted.length() / 1_048_576}MB")
                 }
-                seen += name
-                models += Origin.AI_PACK to buildModelInfo(extracted)
+                val verification = verifyModelFile(extracted, expected, requireIntegrity)
+                if (verification.accepted) {
+                    seen += name
+                    models += Origin.AI_PACK to buildModelInfo(extracted, verification.sha256)
+                } else {
+                    extracted.delete()
+                    MindlayerLog.w(TAG, "Skipping AI pack model with invalid integrity metadata: $name")
+                }
             }
         } catch (e: Exception) {
             MindlayerLog.w(TAG, "AI pack asset scan failed: ${e.safeLabel()}")
@@ -164,13 +203,96 @@ object ModelRegistry {
 
     // -- Internal helpers -----------------------------------------------------
 
-    private fun buildModelInfo(file: File): ModelInfo {
+    private fun buildModelInfo(file: File, sha256: String?) : ModelInfo {
         val id = file.nameWithoutExtension
         return ModelInfo(
             id = id,
             displayName = deriveDisplayName(file.name),
             path = file.absolutePath,
             sizeBytes = file.length(),
+            sha256 = sha256,
         )
     }
+
+    private fun verifyModelFile(
+        file: File,
+        manifestEntry: IntegrityMetadata?,
+        requireIntegrity: Boolean,
+    ): VerificationResult {
+        val expected = manifestEntry ?: readSidecarIntegrity(file)
+        if (expected == null) {
+            return VerificationResult(accepted = !requireIntegrity, sha256 = null)
+        }
+        if (expected.sizeBytes != null && expected.sizeBytes != file.length()) {
+            return VerificationResult(accepted = false, sha256 = null)
+        }
+        val actualSha256 = sha256(file)
+        return VerificationResult(
+            accepted = actualSha256.equals(expected.sha256, ignoreCase = true),
+            sha256 = actualSha256,
+        )
+    }
+
+    private fun loadIntegrityManifest(context: Context): Map<String, IntegrityMetadata> {
+        val raw = try {
+            context.assets.open(INTEGRITY_MANIFEST).bufferedReader().use { it.readText() }
+        } catch (_: Exception) {
+            return emptyMap()
+        }
+        return try {
+            val root = JSONObject(raw)
+            val models = root.optJSONArray("models") ?: return emptyMap()
+            buildMap {
+                for (i in 0 until models.length()) {
+                    val model = models.getJSONObject(i)
+                    val filename = model.optString("filename").takeIf { it.endsWith(MODEL_EXTENSION) }
+                        ?: continue
+                    val sha256 = model.optString("sha256").lowercase(Locale.ROOT)
+                    if (!SHA256_REGEX.matches(sha256)) continue
+                    val size = model.optLong("sizeBytes", -1L).takeIf { it > 0L }
+                    put(filename, IntegrityMetadata(sha256, size))
+                }
+            }
+        } catch (e: Exception) {
+            MindlayerLog.w(TAG, "Model integrity manifest is invalid: ${e.message}")
+            emptyMap()
+        }
+    }
+
+    private fun readSidecarIntegrity(file: File): IntegrityMetadata? {
+        val candidates = listOf(
+            File(file.parentFile, "${file.name}.sha256"),
+            File(file.parentFile, "${file.nameWithoutExtension}.sha256"),
+        )
+        val sidecar = candidates.firstOrNull { it.isFile } ?: return null
+        val sha256 = sidecar.readText()
+            .lineSequence()
+            .map { it.trim().substringBefore(' ').lowercase(Locale.ROOT) }
+            .firstOrNull { SHA256_REGEX.matches(it) }
+            ?: return null
+        return IntegrityMetadata(sha256, sizeBytes = null)
+    }
+
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        FileInputStream(file).use { input ->
+            while (true) {
+                val read = input.read(buffer)
+                if (read == -1) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private data class IntegrityMetadata(
+        val sha256: String,
+        val sizeBytes: Long?,
+    )
+
+    private data class VerificationResult(
+        val accepted: Boolean,
+        val sha256: String?,
+    )
 }

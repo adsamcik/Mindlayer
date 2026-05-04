@@ -89,6 +89,7 @@ data class AudioTransfer(
     val source: ParcelFileDescriptor,
     val isSharedMemory: Boolean = false,
     val durationMs: Long? = null,
+    val payloadBytes: Int = 0,
 ) : Parcelable
 
 @Parcelize
@@ -106,6 +107,7 @@ data class ToolResult(
 @Parcelize
 data class ServiceStatus(
     val isEngineLoaded: Boolean,
+    val engineWarming: Boolean = false,
     val activeSessionCount: Int,
     val activeInferenceCount: Int,
     val backend: String,

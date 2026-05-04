@@ -1,18 +1,66 @@
 package com.adsamcik.mindlayer.service.logging
 
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import java.util.concurrent.atomic.AtomicLong
 
-class LogRepository(private val dao: LogDao) {
+class LogRepository(
+    private val dao: LogDao,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    bufferCapacity: Int = BUFFER_CAPACITY,
+) {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    companion object {
+        private const val TAG = "LogRepo"
+        private const val BUFFER_CAPACITY = 1024
+        private const val BATCH_MAX = 128
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + dispatcher)
+
+    // Bounded queue — trySend never blocks; fails (and drops) when the buffer is full.
+    private val queue = Channel<LogEntry>(bufferCapacity)
+    private val droppedCount = AtomicLong(0)
+
+    init {
+        scope.launch { drainLoop() }
+    }
 
     // Fire-and-forget log (non-blocking)
     fun log(entry: LogEntry) {
-        scope.launch { dao.insert(entry) }
+        val ok = queue.trySend(entry).isSuccess
+        if (!ok) droppedCount.incrementAndGet()
     }
+
+    private suspend fun drainLoop() {
+        val batch = ArrayList<LogEntry>(BATCH_MAX)
+        while (true) {
+            // Block for at least one entry, then opportunistically drain more.
+            val first = try {
+                queue.receive()
+            } catch (_: ClosedReceiveChannelException) {
+                return
+            }
+            batch.add(first)
+            while (batch.size < BATCH_MAX) {
+                val next = queue.tryReceive().getOrNull() ?: break
+                batch.add(next)
+            }
+            try {
+                dao.insertAll(batch)
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "Failed to flush ${batch.size} log entries", throwable = t)
+            }
+            batch.clear()
+        }
+    }
+
+    /** Number of log entries dropped due to backpressure since process start. */
+    fun droppedLogCount(): Long = droppedCount.get()
 
     // Convenience builders
     fun logInferenceStart(requestId: String, sessionId: String, backend: String) {
@@ -46,7 +94,7 @@ class LogRepository(private val dao: LogDao) {
             category = LogCategory.ERROR,
             event = LogEvent.REQUEST_ERROR,
             requestId = requestId, sessionId = sessionId,
-            errorMessage = errorMessage,
+            errorMessage = sanitizeErrorClass(errorMessage),
         ))
     }
 
@@ -56,10 +104,10 @@ class LogRepository(private val dao: LogDao) {
             category = LogCategory.THERMAL,
             event = LogEvent.BAND_CHANGE,
             thermalBand = toBand, backend = backend,
-            extraJson = buildJsonObject {
-                put("from", JsonPrimitive(fromBand))
-                put("to", JsonPrimitive(toBand))
-            }.toString(),
+            extraJson = logExtraJson {
+                put("from", fromBand)
+                put("to", toBand)
+            },
         ))
     }
 
@@ -69,7 +117,7 @@ class LogRepository(private val dao: LogDao) {
             category = LogCategory.SESSION,
             event = LogEvent.SESSION_CREATED,
             sessionId = sessionId, backend = backend,
-            extraJson = buildJsonObject { put("maxTokens", maxTokens) }.toString(),
+            extraJson = logExtraJson { put("maxTokens", maxTokens) },
         ))
     }
 
@@ -88,7 +136,7 @@ class LogRepository(private val dao: LogDao) {
             category = LogCategory.SESSION,
             event = LogEvent.SESSION_EVICTED,
             sessionId = sessionId,
-            extraJson = buildJsonObject { put("reason", JsonPrimitive(reason)) }.toString(),
+            extraJson = logExtraJson { put("reason", reason) },
         ))
     }
 
@@ -99,7 +147,7 @@ class LogRepository(private val dao: LogDao) {
             event = LogEvent.PRESSURE_CHANGE,
             memoryAvailableMb = availableMb,
             memoryUsedMb = totalMb - availableMb,
-            extraJson = buildJsonObject { put("pressure", JsonPrimitive(pressure)) }.toString(),
+            extraJson = logExtraJson { put("pressure", pressure) },
         ))
     }
 
@@ -109,7 +157,7 @@ class LogRepository(private val dao: LogDao) {
             category = LogCategory.ENGINE,
             event = LogEvent.ENGINE_INIT,
             backend = backend, durationMs = durationMs,
-            extraJson = buildJsonObject { put("modelPath", JsonPrimitive(modelPath)) }.toString(),
+            extraJson = logExtraJson { put("modelPath", modelPath) },
         ))
     }
 
@@ -205,7 +253,7 @@ class LogRepository(private val dao: LogDao) {
             event = LogEvent.USER_MESSAGE,
             requestId = requestId,
             sessionId = sessionId,
-            extraJson = buildJsonObject { put("tokenCount", tokenCount) }.toString(),
+            extraJson = logExtraJson { put("tokenCount", tokenCount) },
         ))
     }
 
@@ -221,7 +269,7 @@ class LogRepository(private val dao: LogDao) {
             event = LogEvent.MODEL_RESPONSE,
             requestId = requestId,
             sessionId = sessionId,
-            extraJson = buildJsonObject { put("tokenCount", tokenCount) }.toString(),
+            extraJson = logExtraJson { put("tokenCount", tokenCount) },
         ))
     }
 
@@ -231,5 +279,8 @@ class LogRepository(private val dao: LogDao) {
         dao.deleteOlderThan(cutoff)
     }
 
-    fun shutdown() { scope.cancel() }
+    fun shutdown() {
+        queue.close()
+        scope.cancel()
+    }
 }

@@ -62,8 +62,12 @@ object CallerVerifier {
             return null
         }
 
-        val displayName = sanitizeLabel(rawApplicationLabel(pm, pkg))
-
+        val displayName = try {
+            val appInfo = pm.getApplicationInfo(pkg, 0)
+            sanitizeDisplayName(pm.getApplicationLabel(appInfo).toString())
+        } catch (_: Throwable) {
+            null
+        }
         return CallerIdentity(pkg, sha, displayName)
     }
 
@@ -141,5 +145,29 @@ object CallerVerifier {
         return sb.toString()
     }
 
+    private fun sanitizeDisplayName(label: String): String? {
+        val sanitized = buildString(label.length) {
+            label.forEach { ch ->
+                if (!Character.isISOControl(ch) && ch !in BIDI_CONTROLS) append(ch)
+            }
+        }.trim()
+        return sanitized.takeIf { it.isNotEmpty() }?.take(MAX_DISPLAY_NAME_CHARS)
+    }
+
     private val HEX = "0123456789abcdef".toCharArray()
+    private const val MAX_DISPLAY_NAME_CHARS = 64
+    private val BIDI_CONTROLS = setOf(
+        '\u061C',
+        '\u200E',
+        '\u200F',
+        '\u202A',
+        '\u202B',
+        '\u202C',
+        '\u202D',
+        '\u202E',
+        '\u2066',
+        '\u2067',
+        '\u2068',
+        '\u2069',
+    )
 }

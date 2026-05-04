@@ -23,6 +23,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -453,6 +454,153 @@ class ConnectionManagerTest {
         // Should not throw
         mgr.disconnect()
         assertEquals(ConnectionState.DISCONNECTED, mgr.state.value)
+    }
+
+    // -- Give-up after MAX_RECONNECT_ATTEMPTS ---------------------------------
+
+    @Test
+    fun `bindGaveUp is false initially`() {
+        assertFalse(mgr.bindGaveUp)
+    }
+
+    @Test
+    fun `give up after MAX_RECONNECT_ATTEMPTS consecutive onBindingDied fires`() {
+        mgr.connect(mockContext)
+        deliverBinder()
+
+        // Fire onBindingDied MAX_RECONNECT_ATTEMPTS times without a successful reconnect.
+        // Each call to onBindingDied invokes scheduleReconnect() synchronously before
+        // launching the delay coroutine, so the counter advances without time advancement.
+        repeat(ConnectionManager.MAX_RECONNECT_ATTEMPTS) {
+            connSlot.captured.onBindingDied(stubComponent())
+        }
+
+        assertTrue(mgr.bindGaveUp)
+        assertEquals(ConnectionState.BIND_GAVE_UP, mgr.state.value)
+    }
+
+    @Test
+    fun `no further reconnect scheduled after give-up`() {
+        mgr.connect(mockContext)
+        deliverBinder()
+
+        repeat(ConnectionManager.MAX_RECONNECT_ATTEMPTS) {
+            connSlot.captured.onBindingDied(stubComponent())
+        }
+        assertTrue(mgr.bindGaveUp)
+        assertEquals(ConnectionState.BIND_GAVE_UP, mgr.state.value)
+
+        // Additional onBindingDied calls after give-up must not flip bindGaveUp back
+        // or change state (the guard at the top of scheduleReconnect() returns early).
+        connSlot.captured.onBindingDied(stubComponent())
+        connSlot.captured.onBindingDied(stubComponent())
+
+        assertTrue(mgr.bindGaveUp)
+        assertEquals(ConnectionState.BIND_GAVE_UP, mgr.state.value)
+    }
+
+    @Test
+    fun `getService returns null when in BIND_GAVE_UP state`() {
+        mgr.connect(mockContext)
+        deliverBinder()
+
+        repeat(ConnectionManager.MAX_RECONNECT_ATTEMPTS) {
+            connSlot.captured.onBindingDied(stubComponent())
+        }
+
+        assertEquals(ConnectionState.BIND_GAVE_UP, mgr.state.value)
+        assertNull(mgr.getService())
+    }
+
+    @Test
+    fun `connect after give-up resets counter and retries binding`() {
+        mgr.connect(mockContext)
+        deliverBinder()
+
+        repeat(ConnectionManager.MAX_RECONNECT_ATTEMPTS) {
+            connSlot.captured.onBindingDied(stubComponent())
+        }
+        assertTrue(mgr.bindGaveUp)
+        assertEquals(ConnectionState.BIND_GAVE_UP, mgr.state.value)
+
+        // Explicit reconnect should clear give-up state and start a new bind
+        mgr.connect(mockContext)
+
+        assertFalse(mgr.bindGaveUp)
+        assertEquals(ConnectionState.CONNECTING, mgr.state.value)
+        // bindService called at least twice (initial + retry after give-up)
+        verify(atLeast = 2) {
+            mockAppContext.bindService(any<Intent>(), any(), any<Int>())
+        }
+    }
+
+    @Test
+    fun `connect after give-up resets consecutiveFailures so give-up re-arms`() {
+        val consecutiveFailuresField =
+            ConnectionManager::class.java.getDeclaredField("consecutiveFailures")
+        consecutiveFailuresField.isAccessible = true
+
+        mgr.connect(mockContext)
+        deliverBinder()
+
+        repeat(ConnectionManager.MAX_RECONNECT_ATTEMPTS) {
+            connSlot.captured.onBindingDied(stubComponent())
+        }
+        assertTrue(mgr.bindGaveUp)
+
+        mgr.connect(mockContext)
+
+        assertFalse(mgr.bindGaveUp)
+        assertEquals(0, consecutiveFailuresField.getInt(mgr))
+    }
+
+    @Test
+    fun `successful reconnect after partial failures resets counter`() {
+        val consecutiveFailuresField =
+            ConnectionManager::class.java.getDeclaredField("consecutiveFailures")
+        consecutiveFailuresField.isAccessible = true
+
+        mgr.connect(mockContext)
+        deliverBinder()
+
+        // Trigger some failures (less than MAX)
+        val partialCount = ConnectionManager.MAX_RECONNECT_ATTEMPTS - 3
+        repeat(partialCount) {
+            connSlot.captured.onBindingDied(stubComponent())
+        }
+        assertEquals(partialCount, consecutiveFailuresField.getInt(mgr))
+        assertFalse(mgr.bindGaveUp)
+
+        // Successful reconnect resets the counter
+        deliverBinder()
+
+        assertEquals(0, consecutiveFailuresField.getInt(mgr))
+        assertFalse(mgr.bindGaveUp)
+        assertEquals(ConnectionState.CONNECTED, mgr.state.value)
+    }
+
+    @Test
+    fun `awaitConnected throws IllegalStateException when BIND_GAVE_UP`() = runTest {
+        mgr.connect(mockContext)
+        deliverBinder()
+
+        val deferred = async {
+            try {
+                mgr.awaitConnected(timeoutMs = 10_000L)
+                null
+            } catch (e: IllegalStateException) {
+                e
+            }
+        }
+
+        // Drive the manager to BIND_GAVE_UP
+        repeat(ConnectionManager.MAX_RECONNECT_ATTEMPTS) {
+            connSlot.captured.onBindingDied(stubComponent())
+        }
+
+        val ex = deferred.await()
+        assertNotNull(ex)
+        assertTrue(ex!!.message!!.contains("permanently unavailable"))
     }
 
     // -- Helpers --------------------------------------------------------------
