@@ -73,6 +73,81 @@ The PR template asks for explicit confirmation that AIDL changes are mirrored. D
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ```
 
+## Worktree + PR workflow
+
+All non-trivial work — features, fixes, refactors, dep bumps, even docs of a certain size — runs in a **dedicated git worktree on its own feature branch**, lands on origin as a **PR**, and is reviewed before merge. Direct commits to local `main` are never the destination; they are at most a stop on the way to a PR. The pattern lets multiple agents work simultaneously without colliding on the working tree, keeps `main` in a known-clean state for diagnostics, and makes "abandon this attempt" cheap (just remove the worktree).
+
+### Recipe
+
+```powershell
+# 1. Branch off the upstream you're targeting (origin/main for clean PRs;
+#    an in-flight feature branch on origin if you're stacking).
+git -C C:\Users\adam-\GitHub\Mindlayer worktree add `
+  C:\Users\adam-\GitHub\Mindlayer-<short-name> -b <branch-name> origin/main
+Copy-Item C:\Users\adam-\GitHub\Mindlayer\local.properties `
+  C:\Users\adam-\GitHub\Mindlayer-<short-name>\
+
+# 2. Put the JDK 21 toolchain on PATH for tests (LiteRT-LM `Backend` is
+#    class-file v65; tests fail on JDK 17). The Gradle wrapper just runs
+#    `java.exe` from PATH and is JDK-agnostic — see DEVELOPMENT.md.
+$env:PATH = "C:\Users\adam-\.gradle\jdks\jetbrains_s_r_o_-21-amd64-windows.2\bin;$env:PATH"
+
+# 3. Work, test, commit in the worktree.
+cd C:\Users\adam-\GitHub\Mindlayer-<short-name>
+.\gradlew.bat :app:testDebugUnitTest --console=plain --no-daemon
+git add <files> ; git commit -m "..."
+
+# 4. Push the feature branch (NEVER push directly to origin/main).
+git push origin <branch-name>
+
+# 5. Open a PR (via `gh pr create` or the URL printed by `git push`).
+
+# 6. After the PR is merged on GitHub, clean up locally.
+git -C C:\Users\adam-\GitHub\Mindlayer worktree remove `
+  C:\Users\adam-\GitHub\Mindlayer-<short-name>
+git -C C:\Users\adam-\GitHub\Mindlayer branch -D <branch-name>
+git -C C:\Users\adam-\GitHub\Mindlayer fetch --prune origin   # remove the deleted remote ref
+```
+
+### Branch + worktree naming
+
+| Kind | Branch | Worktree dir |
+|---|---|---|
+| Feature | `feat/<scope>-<summary>` | `Mindlayer-<summary>` |
+| Fix | `fix/<scope>-<summary>` | `Mindlayer-<summary>` |
+| Test-only | `test/<scope>-<summary>` | `Mindlayer-<summary>` |
+| Documentation | `docs/<summary>` | `Mindlayer-<summary>` |
+| Chore / deps | `chore/<summary>` | `Mindlayer-<summary>` |
+| Reliability invariants (F-NNN) | `reliability/<summary>` | `Mindlayer-<summary>` |
+
+Keep the worktree dir name aligned with the branch's short summary so parallel worktrees stay legible.
+
+### Coordinating multiple agents in parallel
+
+When several agents work concurrently:
+
+- Each claims its target files via the **agent-messages MCP** `claim_resources` before editing shared files.
+- Whichever agent merges first wins; later ones rebase onto the new tip and re-run tests.
+- For tightly-coupled changes (e.g. AGP + Gradle wrapper bumps, both touching `gradle/`), combine into ONE PR rather than fight over the same file in two PRs.
+- If a sub-agent abandons mid-flight (claim TTL expires, no recent activity), a later agent can claim the worktree and continue.
+
+### Cleanup is part of "done"
+
+A task is not complete until ALL of these are true:
+
+1. Branch exists on origin (`git push origin <branch>`).
+2. PR is open (or a URL has been handed to the user to open it).
+3. After the PR merges:
+   - Worktree removed (`git worktree remove`).
+   - Local branch deleted (`git branch -D`).
+   - `git fetch --prune origin` confirms the remote branch ref is gone.
+
+A worktree left behind after merge is a bug, not a memento. Sub-agents must clean up before signing off.
+
+### Exceptions
+
+Read-only operations (`git status`, `git log`, `git blame`) and zero-file investigations don't need a worktree — just operate in the main repo. The worktree+PR rule applies whenever you're going to **change files**.
+
 ## Common tasks
 
 | Task | Where to look |
