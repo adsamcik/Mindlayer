@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.service.engine
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import com.adsamcik.mindlayer.service.BuildConfig
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
@@ -52,10 +53,20 @@ object ModelRegistry {
      *  3. `context.getExternalFilesDir(null)`
      *  4. `context.cacheDir`
      *  5. `/data/local/tmp/` — debug builds only
+     *
+     * Integrity gating: when [requireIntegrity] is true, every candidate
+     * must have a matching SHA-256 manifest entry (or sidecar `.sha256`)
+     * or it is silently skipped. The default — `!isDebuggable(context)`
+     * — derives from the APPLICATION's runtime debuggable flag (not
+     * `BuildConfig.DEBUG`), so a release-flagged install fails-closed
+     * even when the unit-test JVM is running a debug variant. This
+     * complements `EngineManager.verifyModelIntegrity` (which checks
+     * `BuildConfig.MODEL_SHA256` at load time) by adding a second
+     * fail-closed layer at discovery time.
      */
     fun discoverModels(
         context: Context,
-        requireIntegrity: Boolean = !BuildConfig.DEBUG,
+        requireIntegrity: Boolean = !isDebuggable(context),
     ): List<ModelInfo> {
         val seen = mutableSetOf<String>()
         val models = mutableListOf<Pair<Origin, ModelInfo>>()
@@ -285,6 +296,9 @@ object ModelRegistry {
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
+
+    private fun isDebuggable(context: Context): Boolean =
+        (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
 
     private data class IntegrityMetadata(
         val sha256: String,
