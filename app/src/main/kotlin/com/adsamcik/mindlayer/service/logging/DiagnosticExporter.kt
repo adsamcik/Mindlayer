@@ -65,12 +65,14 @@ class DiagnosticExporter(
                 put("initTimeSeconds", engineManager.initTimeSeconds)
                 if (scopeUid == null) {
                     // Host-only: GPU failure reason can echo backend
-                    // exception text and reveal install paths.
+                    // exception text and reveal install paths. modelPath
+                    // (even redacted to filename) is host-internal — F-005
+                    // requires it to stay scoped to the dashboard.
                     put("lastGpuFailureReason", engineManager.lastGpuFailureReason)
-                }
-                val loadedModelPath = engineManager.currentModel?.path
-                if (loadedModelPath != null) {
-                    put("modelPath", loadedModelPath.redactedFileName())
+                    val loadedModelPath = engineManager.currentModel?.path
+                    if (loadedModelPath != null) {
+                        put("modelPath", loadedModelPath.redactedFileName())
+                    }
                 }
             }
 
@@ -155,14 +157,12 @@ class DiagnosticExporter(
                         entry.tokensPerSec?.let { put("tokensPerSec", it) }
                         entry.thermalBand?.let { put("thermalBand", it) }
                         entry.errorMessage?.let { msg ->
-                            if (scopeUid == null) {
-                                // Host-only: expose raw errorMessage to the
-                                // dashboard; error text can echo prompt fragments
-                                // (see F-006).
-                                put("errorMessage", msg)
-                            }
-                            // Sanitize at emit time (defence-in-depth: strips prompt
-                            // fragments, caps at 64 chars, then take up to 256 for JSON).
+                            // Privacy invariant (HARD-RULE): raw errorMessage
+                            // can echo prompt fragments from native LiteRT-LM
+                            // exceptions and MUST NEVER appear in a diagnostic
+                            // export — not even on the self-UID dashboard,
+                            // because exports are user-shareable bug reports.
+                            // Always sanitize via errorClass and cap at 256.
                             sanitizeErrorClass(msg)?.take(256)?.let { safe ->
                                 put("errorClass", safe)
                             }
