@@ -100,20 +100,51 @@ class ThermalMonitor(
     private val logRepository: com.adsamcik.mindlayer.service.logging.LogRepository? = null,
     private val clock: () -> Long = { SystemClock.uptimeMillis() },
     /**
-     * F-070: SDK version provider, mockable for tests.
+     * F-070 / F-073 test seam — thermal status reader.
      *
-     * `Build.VERSION.SDK_INT` is a `static final int` and the Kotlin
-     * compiler inlines reads as compile-time constants from the
-     * `android.jar` stub (where it is `0`). That makes static-field
-     * reflection unreliable for asserting API-level branches —
-     * EngineManagerTest's similar pattern only "passes" because its
-     * assertions are negative (`assertFalse`) which match the inlined
-     * fallback. This indirection lets the
-     * [ThermalSampleTelemetryTest] reliably exercise the API 26-28
-     * "telemetry unavailable" path without touching production
-     * dispatch behaviour in production callers, who keep the default.
+     * Returns the platform [PowerManager.getCurrentThermalStatus] value
+     * on API 29+, or `null` when the API is unavailable
+     * (Android 8 / 8.1, API 26-28). Tests inject a fake to drive the
+     * "telemetry available / unavailable" branch deterministically
+     * without depending on Robolectric's `@Config(sdk = N)` (which the
+     * existing `ThermalSampleTelemetryTest` does not use — it is plain
+     * JUnit so it can run cheaply across the API matrix).
+     *
+     * Production default delegates to [defaultReadThermalStatus], which
+     * contains a *direct* `Build.VERSION.SDK_INT` guard so AGP lint can
+     * recognise it as a valid version check. An earlier seam indirected
+     * the SDK_INT read through a `() -> Int` lambda; AGP 9 lint flags
+     * that as `NewApi` because the version comparison is no longer a
+     * literal `Build.VERSION.SDK_INT` read. The lambda lives at this
+     * higher level — over the *result* of the API call, not the SDK
+     * read — so the production-side guard remains lint-friendly while
+     * tests retain a clean override point.
+     *
+     * `null` is required for the seam: without it the test cannot
+     * distinguish "API 29 returned `THERMAL_STATUS_NONE`" from "API < 29
+     * so we synthesised `THERMAL_STATUS_NONE`," which is the
+     * `telemetryAvailable` decision the F-073 contract pins.
      */
-    private val sdkInt: () -> Int = { Build.VERSION.SDK_INT },
+    readThermalStatus: (() -> Int?)? = null,
+    /**
+     * F-070 / F-073 test seam — raw thermal headroom reader.
+     *
+     * Returns the platform [PowerManager.getThermalHeadroom] value on
+     * API 30+ (which may be `Float.NaN` or `Float.POSITIVE_INFINITY` on
+     * misbehaving drivers — the `takeIf { it.isFinite() }` filter in
+     * [takeSample] handles those), or `Float.NaN` when the API is
+     * unavailable (API < 30). Tests inject a fake to drive the
+     * headroom-availability branch.
+     *
+     * Production default delegates to [defaultReadThermalHeadroomRaw]
+     * which keeps a direct `Build.VERSION.SDK_INT` guard for lint.
+     * The `takeIf { it.isFinite() }` filter intentionally lives in
+     * [takeSample] (not in the reader) so the
+     * "platform returned infinity, status saves the day" scenario in
+     * [ThermalSampleTelemetryTest] continues to be exercised
+     * end-to-end through the production filter logic.
+     */
+    readThermalHeadroomRaw: ((Int) -> Float)? = null,
 ) {
 
     companion object {
@@ -138,6 +169,11 @@ class ThermalMonitor(
     }
 
     private val pm = context.getSystemService(PowerManager::class.java)
+
+    private val readThermalStatus: () -> Int? =
+        readThermalStatus ?: ::defaultReadThermalStatus
+    private val readThermalHeadroomRaw: (Int) -> Float =
+        readThermalHeadroomRaw ?: ::defaultReadThermalHeadroomRaw
 
     private val _currentBand = MutableStateFlow(ThermalBand.COOL)
     val currentBand: StateFlow<ThermalBand> = _currentBand.asStateFlow()
@@ -258,20 +294,12 @@ class ThermalMonitor(
     }
 
     private fun takeSample(): ThermalSample {
-        val statusAvailable = sdkInt() >= Build.VERSION_CODES.Q
-        val status = if (statusAvailable) {
-            pm.currentThermalStatus
-        } else {
-            PowerManager.THERMAL_STATUS_NONE
-        }
+        val statusValue = readThermalStatus()
+        val statusAvailable = statusValue != null
+        val status = statusValue ?: PowerManager.THERMAL_STATUS_NONE
 
-        val headroomNow = if (sdkInt() >= Build.VERSION_CODES.R) {
-            pm.getThermalHeadroom(0).takeIf { it.isFinite() }
-        } else null
-
-        val headroom10s = if (sdkInt() >= Build.VERSION_CODES.R) {
-            pm.getThermalHeadroom(10).takeIf { it.isFinite() }
-        } else null
+        val headroomNow = readThermalHeadroomRaw(0).takeIf { it.isFinite() }
+        val headroom10s = readThermalHeadroomRaw(10).takeIf { it.isFinite() }
 
         // F-070: distinguish "device reported COOL" from "device cannot
         // report at all" so consumers can choose a conservative policy
@@ -287,6 +315,35 @@ class ThermalMonitor(
             telemetryAvailable = telemetryAvailable,
         )
     }
+
+    /**
+     * Production default for [readThermalStatus]. The direct
+     * `Build.VERSION.SDK_INT` read here is what AGP lint recognises as a
+     * valid `@RequiresApi(Q)` guard — keep it that way. Returns `null`
+     * on API < 29 so [takeSample] can treat the absence of telemetry as
+     * a distinct signal (F-073) rather than synthesising
+     * `THERMAL_STATUS_NONE` and losing the distinction.
+     */
+    private fun defaultReadThermalStatus(): Int? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            pm.currentThermalStatus
+        } else {
+            null
+        }
+
+    /**
+     * Production default for [readThermalHeadroomRaw]. Direct
+     * `Build.VERSION.SDK_INT` guard for lint. Returns `Float.NaN` on
+     * API < 30; [takeSample]'s `takeIf { it.isFinite() }` filter then
+     * collapses both unavailability and platform infinity/NaN to the
+     * same `null` headroom.
+     */
+    private fun defaultReadThermalHeadroomRaw(forecastSeconds: Int): Float =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            pm.getThermalHeadroom(forecastSeconds)
+        } else {
+            Float.NaN
+        }
 
     /**
      * Determine the target [ThermalBand] given the latest [sample] and
