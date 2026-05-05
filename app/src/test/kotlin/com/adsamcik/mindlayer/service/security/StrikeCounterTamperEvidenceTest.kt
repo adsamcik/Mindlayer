@@ -35,6 +35,23 @@ import org.robolectric.annotation.Config
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
+@org.junit.Ignore(
+    "Architectural drift surfaced by post-merge rereview: the " +
+        "SharedPreferences-based strike counter (unwrap_fail_count + " +
+        "unwrap_fail_mac under prefs file 'mindlayer_db_key') was " +
+        "replaced during the H7 security-hardening pass with a " +
+        "file-quarantine model — a corrupted wrapped-key blob is " +
+        "renamed `<file>.tampered-<ts>` and a fresh key is generated " +
+        "(see DbKeyProvider.kt:155). The reflective hooks this test " +
+        "drives (`DbKeyProvider.verifiedFailCount(SharedPreferences)`) " +
+        "no longer exist. Equivalent coverage of the new design lives " +
+        "in DbKeyProviderTest's quarantine path; restoring this exact " +
+        "test would require resurrecting the prefs-based mechanism, " +
+        "which is a *worse* design (HMAC-on-prefs has the same key " +
+        "bootstrap problem the AEAD-on-blob approach already solves). " +
+        "Tracking deletion as a follow-up — keeping the file in place " +
+        "for now to preserve git blame for security review."
+)
 class StrikeCounterTamperEvidenceTest {
 
     private lateinit var context: Context
