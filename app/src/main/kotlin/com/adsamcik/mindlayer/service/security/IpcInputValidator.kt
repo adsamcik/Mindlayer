@@ -56,6 +56,13 @@ object IpcInputValidator {
     const val MAX_BACKEND_NAME_LEN = 16
     const val MAX_SESSION_EXPIRATION_MS = 90L * 24L * 60L * 60L * 1000L
 
+    // ── Priority bounds ──────────────────────────────────────────────────
+    // Legacy ServiceBinder.validateRequestMeta enforced -10..10; restored
+    // here after the security-hardening pass migrated validation to
+    // IpcInputValidator without porting the priority check (b15b656).
+    const val MIN_PRIORITY = -10
+    const val MAX_PRIORITY = 10
+
     // ── Image budgets ─────────────────────────────────────────────────────
     const val MAX_IMG_DIMENSION = 8192
     const val MAX_IMG_PIXELS = 64L * 1024L * 1024L // 64 megapixels
@@ -125,6 +132,14 @@ object IpcInputValidator {
         }
         require(meta.role.length <= 16) { "role too long" }
         require(Role.isValid(meta.role)) { "role must be one of ${Role.ALL}" }
+        // Priority is a small integer hint to the orchestrator's scheduler;
+        // accept the same -10..10 window the legacy private validator used
+        // (see ServiceBinder.kt git history pre-b15b656). Out-of-range values
+        // signal a buggy or hostile caller and are rejected at ingress so
+        // downstream code can treat priority as already-bounded.
+        require(meta.priority in MIN_PRIORITY..MAX_PRIORITY) {
+            "priority must be in $MIN_PRIORITY..$MAX_PRIORITY (got: ${meta.priority})"
+        }
     }
 
     private val ALLOWED_ROLES = Role.ALL
