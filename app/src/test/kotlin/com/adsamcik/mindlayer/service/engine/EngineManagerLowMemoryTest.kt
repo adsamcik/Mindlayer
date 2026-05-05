@@ -77,7 +77,15 @@ class EngineManagerLowMemoryTest {
 
         activityManager = mockk(relaxed = true)
         val nativeLib = File(tmpRoot, "lib").apply { mkdirs() }
-        val appInfo = ApplicationInfo().apply { nativeLibraryDir = nativeLib.absolutePath }
+        // FLAG_DEBUGGABLE makes ModelRegistry.discoverModels() default to
+        // requireIntegrity = false so the bogus 4 KB stub file is
+        // accepted; otherwise PR #21's fail-closed default rejects it
+        // before initialize() can reach the low-memory check. Mirrors
+        // EngineManagerTest's setup.
+        val appInfo = ApplicationInfo().apply {
+            nativeLibraryDir = nativeLib.absolutePath
+            flags = ApplicationInfo.FLAG_DEBUGGABLE
+        }
 
         val assetManager = mockk<android.content.res.AssetManager>(relaxed = true) {
             every { list("") } returns emptyArray()
