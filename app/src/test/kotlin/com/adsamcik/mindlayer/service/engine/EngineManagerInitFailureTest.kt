@@ -84,7 +84,17 @@ class EngineManagerInitFailureTest {
         nativeLibDir = File(tmpRoot, "lib").apply { mkdirs() }
 
         activityManager = mockk(relaxed = true)
-        val appInfo = ApplicationInfo().apply { nativeLibraryDir = nativeLibDir.absolutePath }
+        // FLAG_DEBUGGABLE makes ModelRegistry.discoverModels() default to
+        // requireIntegrity = false, so the bogus 4 KB file from
+        // writeModelFile() is accepted at discovery time. Without this,
+        // PR #21's correctly-restored fail-closed default rejects the
+        // file as missing-integrity-metadata and every test in this
+        // class crashes with "No .litertlm model files found" before it
+        // can exercise its actual assertion. Mirrors EngineManagerTest.
+        val appInfo = ApplicationInfo().apply {
+            nativeLibraryDir = nativeLibDir.absolutePath
+            flags = ApplicationInfo.FLAG_DEBUGGABLE
+        }
         val assetManager = mockk<android.content.res.AssetManager>(relaxed = true) {
             every { list("") } returns emptyArray()
         }
