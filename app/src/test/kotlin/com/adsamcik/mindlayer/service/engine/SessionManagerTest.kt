@@ -6,6 +6,7 @@ import android.util.Log
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.Engine
 import com.adsamcik.mindlayer.SessionConfig
+import com.adsamcik.mindlayer.service.security.IpcInputValidator
 import io.mockk.every
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -443,20 +444,25 @@ class SessionManagerTest {
 
     @Test
     fun `createSession at capacity rejects caller with no owned eviction candidate`() {
-        // Fair-share analysis: tier=2, owner-A and owner-B each own 1 session.
-        // When owner-C arrives: activeOwners=[A,B] (size=2),
-        //   fairShare = floor((2+2)/(2+1)) = floor(4/3) = 1, coerceAtLeast(1) = 1.
-        // C owns 0 < fairShare=1 → enters fair-share path.
-        // A owns 1, B owns 1; neither is ABOVE fairShare (need > 1), so no candidate found.
-        // Falls through to evictLowestPriorityOwnedBy(C) → C owns nothing → returns false → throws.
+        // After the security-hardening pass introduced per-caller eviction
+        // (commit cf5631c), createSession at capacity tries to evict one of
+        // the *calling* UID's sessions before stealing from another UID.
+        // If the caller owns nothing in the map, evictLowestPriorityOwnedByUid
+        // returns false and we throw "Session limit reached".
+        //
+        // ownerUidFor() only matches `Int` and `SessionOwnerToken`, so the
+        // ownerToken values here MUST be Ints — anything else collapses to
+        // ownerUid=null and falls back to evictLowestPriority(), which would
+        // happily evict another caller's session and silently succeed,
+        // defeating the rejection invariant this test guards.
         val tightTier = DeviceTier(2, 4096, 4096, 8 * 1024L)
         every { memoryBudget.deviceTier } returns tightTier
 
-        sessionManager.createSession(SessionConfig(sessionId = "a1"), ownerToken = "owner-a")
-        sessionManager.createSession(SessionConfig(sessionId = "b1"), ownerToken = "owner-b")
+        sessionManager.createSession(SessionConfig(sessionId = "a1"), ownerToken = 1001)
+        sessionManager.createSession(SessionConfig(sessionId = "b1"), ownerToken = 1002)
 
         try {
-            sessionManager.createSession(SessionConfig(sessionId = "c1"), ownerToken = "owner-c")
+            sessionManager.createSession(SessionConfig(sessionId = "c1"), ownerToken = 1003)
             fail("Expected session creation to fail rather than evict another owner")
         } catch (e: IllegalStateException) {
             assertTrue(e.message.orEmpty().contains("Session limit reached"))
@@ -801,18 +807,26 @@ class SessionManagerTest {
     // ---- SessionHandle data tests ------------------------------------------
 
     // ---- validateSessionConfig bounds (H2) ---------------------------------
+    //
+    // The canonical limits live in IpcInputValidator. SessionManager.MAX_*_CHARS
+    // are looser legacy constants used by the AIDL-boundary fast-fail in
+    // ServiceBinder; the deeper IpcInputValidator check (called from
+    // SessionManager.validateSessionConfig itself) is what these tests exercise,
+    // so they reference IpcInputValidator's tightened budgets directly.
 
     @Test
-    fun `validateSessionConfig accepts sessionId exactly 256 chars`() {
-        val id = "a".repeat(256)
+    fun `validateSessionConfig accepts sessionId at exactly MAX_ID_LEN chars`() {
+        val id = "a".repeat(IpcInputValidator.MAX_ID_LEN)
         sessionManager.createSession(SessionConfig(sessionId = id))
         assertNotNull(sessionManager.getSession(id))
     }
 
     @Test
-    fun `validateSessionConfig rejects sessionId over 256 chars`() {
+    fun `validateSessionConfig rejects sessionId over MAX_ID_LEN chars`() {
         try {
-            sessionManager.createSession(SessionConfig(sessionId = "a".repeat(257)))
+            sessionManager.createSession(
+                SessionConfig(sessionId = "a".repeat(IpcInputValidator.MAX_ID_LEN + 1))
+            )
             fail("Expected sessionId too long to be rejected")
         } catch (e: IllegalArgumentException) {
             assertTrue(e.message.orEmpty().contains("sessionId too long"))
@@ -820,14 +834,20 @@ class SessionManagerTest {
     }
 
     @Test
-    fun `validateSessionConfig accepts systemPrompt at exactly MAX_SYSTEM_PROMPT_CHARS`() {
-        val prompt = "x".repeat(SessionManager.MAX_SYSTEM_PROMPT_CHARS)
-        sessionManager.createSession(SessionConfig(systemPrompt = prompt))
+    fun `validateSessionConfig accepts systemPrompt at exactly MAX_SYSTEM_PROMPT_LEN`() {
+        val prompt = "x".repeat(IpcInputValidator.MAX_SYSTEM_PROMPT_LEN)
+        // 32 KiB system prompt reserves ~10923 tokens, which would overrun the
+        // default 4096-token KV budget and trip ContextOverflowException before
+        // the length validator gets to assert success. Bump maxTokens to the
+        // ceiling so the boundary check is what actually runs.
+        sessionManager.createSession(
+            SessionConfig(systemPrompt = prompt, maxTokens = 32_768)
+        )
     }
 
     @Test
-    fun `validateSessionConfig rejects systemPrompt over MAX_SYSTEM_PROMPT_CHARS`() {
-        val prompt = "x".repeat(SessionManager.MAX_SYSTEM_PROMPT_CHARS + 1)
+    fun `validateSessionConfig rejects systemPrompt over MAX_SYSTEM_PROMPT_LEN`() {
+        val prompt = "x".repeat(IpcInputValidator.MAX_SYSTEM_PROMPT_LEN + 1)
         try {
             sessionManager.createSession(SessionConfig(systemPrompt = prompt))
             fail("Expected systemPrompt too long to be rejected")
@@ -837,8 +857,8 @@ class SessionManagerTest {
     }
 
     @Test
-    fun `validateSessionConfig accepts toolsJson at exactly MAX_TOOLS_JSON_CHARS`() {
-        val json = "x".repeat(SessionManager.MAX_TOOLS_JSON_CHARS)
+    fun `validateSessionConfig accepts toolsJson at exactly MAX_TOOLS_JSON_LEN`() {
+        val json = "x".repeat(IpcInputValidator.MAX_TOOLS_JSON_LEN)
         // toolsJson is parsed — pass something that fails JSON parse; validate only checks length
         // We only check that validation itself does not throw an IAE about length.
         try {
@@ -850,8 +870,8 @@ class SessionManagerTest {
     }
 
     @Test
-    fun `validateSessionConfig rejects toolsJson over MAX_TOOLS_JSON_CHARS`() {
-        val json = "x".repeat(SessionManager.MAX_TOOLS_JSON_CHARS + 1)
+    fun `validateSessionConfig rejects toolsJson over MAX_TOOLS_JSON_LEN`() {
+        val json = "x".repeat(IpcInputValidator.MAX_TOOLS_JSON_LEN + 1)
         try {
             sessionManager.createSession(SessionConfig(toolsJson = json))
             fail("Expected toolsJson too long to be rejected")
@@ -861,8 +881,8 @@ class SessionManagerTest {
     }
 
     @Test
-    fun `validateSessionConfig accepts extraContextJson at exactly MAX_EXTRA_CONTEXT_CHARS`() {
-        val ctx = "x".repeat(SessionManager.MAX_EXTRA_CONTEXT_CHARS)
+    fun `validateSessionConfig accepts extraContextJson at exactly MAX_EXTRA_CONTEXT_JSON_LEN`() {
+        val ctx = "x".repeat(IpcInputValidator.MAX_EXTRA_CONTEXT_JSON_LEN)
         try {
             sessionManager.createSession(SessionConfig(extraContextJson = ctx))
         } catch (e: IllegalArgumentException) {
@@ -871,8 +891,8 @@ class SessionManagerTest {
     }
 
     @Test
-    fun `validateSessionConfig rejects extraContextJson over MAX_EXTRA_CONTEXT_CHARS`() {
-        val ctx = "x".repeat(SessionManager.MAX_EXTRA_CONTEXT_CHARS + 1)
+    fun `validateSessionConfig rejects extraContextJson over MAX_EXTRA_CONTEXT_JSON_LEN`() {
+        val ctx = "x".repeat(IpcInputValidator.MAX_EXTRA_CONTEXT_JSON_LEN + 1)
         try {
             sessionManager.createSession(SessionConfig(extraContextJson = ctx))
             fail("Expected extraContextJson too long to be rejected")
@@ -882,56 +902,69 @@ class SessionManagerTest {
     }
 
     @Test
-    fun `validateSessionConfig accepts initialHistory at exactly MAX_INITIAL_HISTORY_TURNS`() {
-        val hist = List(SessionManager.MAX_INITIAL_HISTORY_TURNS) {
+    fun `validateSessionConfig accepts initialHistory at exactly MAX_HISTORY_TURNS`() {
+        val hist = List(IpcInputValidator.MAX_HISTORY_TURNS) {
             com.adsamcik.mindlayer.HistoryTurn(role = "user", text = "hi")
         }
         sessionManager.createSession(SessionConfig(initialHistory = hist))
     }
 
     @Test
-    fun `validateSessionConfig rejects initialHistory over MAX_INITIAL_HISTORY_TURNS`() {
-        val hist = List(SessionManager.MAX_INITIAL_HISTORY_TURNS + 1) {
+    fun `validateSessionConfig rejects initialHistory over MAX_HISTORY_TURNS`() {
+        val hist = List(IpcInputValidator.MAX_HISTORY_TURNS + 1) {
             com.adsamcik.mindlayer.HistoryTurn(role = "user", text = "hi")
         }
         try {
             sessionManager.createSession(SessionConfig(initialHistory = hist))
             fail("Expected too many history turns to be rejected")
         } catch (e: IllegalArgumentException) {
-            assertTrue(e.message.orEmpty().contains("initialHistory too many turns"))
+            assertTrue(e.message.orEmpty().contains("initialHistory has too many turns"))
         }
     }
 
     @Test
-    fun `validateSessionConfig accepts history turn text at exactly MAX_HISTORY_TURN_CHARS`() {
+    fun `validateSessionConfig accepts history turn text at exactly MAX_HISTORY_TURN_LEN`() {
         val hist = listOf(
-            com.adsamcik.mindlayer.HistoryTurn(role = "user", text = "x".repeat(SessionManager.MAX_HISTORY_TURN_CHARS))
+            com.adsamcik.mindlayer.HistoryTurn(
+                role = "user",
+                text = "x".repeat(IpcInputValidator.MAX_HISTORY_TURN_LEN),
+            )
         )
-        sessionManager.createSession(SessionConfig(initialHistory = hist))
+        // 16 KiB (~4096 estimated tokens) of history would exhaust the default
+        // 4096-token KV budget, tripping ContextOverflowException before the
+        // length validator gets to assert success. Use the maximum maxTokens
+        // accepted by IpcInputValidator so the engine can fit the turn.
+        sessionManager.createSession(
+            SessionConfig(initialHistory = hist, maxTokens = 32_768)
+        )
     }
 
     @Test
-    fun `validateSessionConfig rejects history turn text over MAX_HISTORY_TURN_CHARS`() {
+    fun `validateSessionConfig rejects history turn text over MAX_HISTORY_TURN_LEN`() {
         val hist = listOf(
-            com.adsamcik.mindlayer.HistoryTurn(role = "user", text = "x".repeat(SessionManager.MAX_HISTORY_TURN_CHARS + 1))
+            com.adsamcik.mindlayer.HistoryTurn(
+                role = "user",
+                text = "x".repeat(IpcInputValidator.MAX_HISTORY_TURN_LEN + 1),
+            )
         )
         try {
             sessionManager.createSession(SessionConfig(initialHistory = hist))
             fail("Expected history turn too long to be rejected")
         } catch (e: IllegalArgumentException) {
-            assertTrue(e.message.orEmpty().contains("initialHistory turn too long"))
+            assertTrue(e.message.orEmpty().contains("text too long"))
         }
     }
 
     @Test
-    fun `validateSessionConfig accepts expirationMs at exactly 365 days`() {
-        val maxExpiry = 365L * 24 * 60 * 60 * 1000
-        sessionManager.createSession(SessionConfig(expirationMs = maxExpiry))
+    fun `validateSessionConfig accepts expirationMs at exactly MAX_SESSION_EXPIRATION_MS`() {
+        sessionManager.createSession(
+            SessionConfig(expirationMs = IpcInputValidator.MAX_SESSION_EXPIRATION_MS)
+        )
     }
 
     @Test
-    fun `validateSessionConfig rejects expirationMs over 365 days`() {
-        val tooLong = 365L * 24 * 60 * 60 * 1000 + 1
+    fun `validateSessionConfig rejects expirationMs over MAX_SESSION_EXPIRATION_MS`() {
+        val tooLong = IpcInputValidator.MAX_SESSION_EXPIRATION_MS + 1
         try {
             sessionManager.createSession(SessionConfig(expirationMs = tooLong))
             fail("Expected expirationMs too large to be rejected")
@@ -962,8 +995,8 @@ class SessionManagerTest {
             fail("Expected reserved tool name to be rejected")
         } catch (e: IllegalArgumentException) {
             assertTrue(
-                "Error must mention reserved name; got: ${e.message}",
-                e.message.orEmpty().contains("Reserved tool name"),
+                "Error must mention reserved prefix; got: ${e.message}",
+                e.message.orEmpty().contains("reserved prefix"),
             )
         }
     }
@@ -977,7 +1010,7 @@ class SessionManagerTest {
             sessionManager.createSession(SessionConfig(toolsJson = toolsJson))
             fail("Expected __ prefix to be rejected")
         } catch (e: IllegalArgumentException) {
-            assertTrue(e.message.orEmpty().contains("Reserved tool name"))
+            assertTrue(e.message.orEmpty().contains("reserved prefix"))
         }
     }
 
