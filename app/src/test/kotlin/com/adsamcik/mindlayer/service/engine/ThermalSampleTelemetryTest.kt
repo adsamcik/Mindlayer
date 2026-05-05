@@ -1,7 +1,6 @@
 package com.adsamcik.mindlayer.service.engine
 
 import android.content.Context
-import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
@@ -20,41 +19,51 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
-import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
-import org.robolectric.annotation.Config
 
 /**
- * Robolectric-hosted regression coverage for
- * [ThermalSample.telemetryAvailable] across Android API levels.
+ * Plain-JUnit regression coverage for [ThermalSample.telemetryAvailable]
+ * across the API matrix the production default supports.
  *
  * The audit found that on Android 8 / 8.1 (API 26-28) the band always
  * computes COOL because neither [PowerManager.getCurrentThermalStatus]
  * (API 29+) nor [PowerManager.getThermalHeadroom] (API 30+) is
  * available — which masks actual thermal stress on ~15-20 % of the
- * install base. The fix adds an explicit `telemetryAvailable` flag so
- * consumers (dashboard, [RequestTrace], future thermal policy) can
- * distinguish "device reported COOL" from "device cannot report at all".
+ * install base. The fix added an explicit `telemetryAvailable` flag so
+ * consumers (dashboard, [RequestTrace], thermal policy) can distinguish
+ * "device reported COOL" from "device cannot report at all".
  *
- * This class is a separate Robolectric runner so the reflection-based
- * [setStaticField] override of `Build.VERSION.SDK_INT` actually takes
- * effect — under plain JUnit the field is the static-final default
- * (effectively inlined to 0) and writes are silently ignored.
+ * Drives API-level scenarios via the `readThermalStatus` /
+ * `readThermalHeadroomRaw` injection seams on [ThermalMonitor]. Each
+ * test substitutes a reader that simulates the platform behaviour at
+ * the chosen API level — `null` from `readThermalStatus` for
+ * API < 29, `Float.NaN` from `readThermalHeadroomRaw` for API < 30.
+ *
+ * The seams replaced an earlier `sdkInt: () -> Int` injection
+ * because AGP 9 lint flagged the lambda-indirected `Build.VERSION.SDK_INT`
+ * comparison as `NewApi` (the version comparison must read the SDK
+ * field directly to satisfy lint's API-guard heuristic). Production
+ * defaults retain direct `Build.VERSION.SDK_INT` guards inside the
+ * reader implementations; an integrated proof that the production
+ * defaults read `SDK_INT` correctly under Robolectric lives in
+ * [ThermalMonitorApi26Test].
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ThermalSampleTelemetryTest {
 
     private lateinit var context: Context
-    private lateinit var powerManager: PowerManager
 
-    /** Mutable so each test can pick the SDK level for ThermalMonitor to read. */
-    private var fakeSdkInt: Int = 33
+    /** Status reader override, mutable per test. `null` = "API < 29". */
+    private var statusReader: () -> Int? = { null }
+
+    /** Headroom reader override, mutable per test. `Float.NaN` = "API < 30". */
+    private var headroomReader: (Int) -> Float = { _ -> Float.NaN }
 
     private fun freshMonitor(): ThermalMonitor =
         ThermalMonitor(
             context = context,
             scope = TestScope(),
-            sdkInt = { fakeSdkInt },
+            readThermalStatus = { statusReader() },
+            readThermalHeadroomRaw = { s -> headroomReader(s) },
         )
 
     @Before
@@ -73,7 +82,7 @@ class ThermalSampleTelemetryTest {
         every { MindlayerLog.w(any(), any(), any(), any(), any()) } returns Unit
         every { MindlayerLog.e(any(), any(), any(), any(), any()) } returns Unit
 
-        powerManager = mockk(relaxed = true)
+        val powerManager = mockk<PowerManager>(relaxed = true)
         context = mockk {
             every { getSystemService(PowerManager::class.java) } returns powerManager
         }
@@ -86,10 +95,9 @@ class ThermalSampleTelemetryTest {
 
     @Test
     fun `takeSample on API 30+ marks telemetry as available`() {
-        fakeSdkInt = Build.VERSION_CODES.R
-        every { powerManager.currentThermalStatus } returns PowerManager.THERMAL_STATUS_NONE
-        every { powerManager.getThermalHeadroom(0) } returns 0.5f
-        every { powerManager.getThermalHeadroom(10) } returns 0.5f
+        // API 30+: both status and headroom return concrete values.
+        statusReader = { PowerManager.THERMAL_STATUS_NONE }
+        headroomReader = { _ -> 0.5f }
 
         val sample = invokeTakeSample(freshMonitor())
 
@@ -102,8 +110,9 @@ class ThermalSampleTelemetryTest {
 
     @Test
     fun `takeSample on API 29 marks telemetry as available via status alone`() {
-        fakeSdkInt = Build.VERSION_CODES.Q
-        every { powerManager.currentThermalStatus } returns PowerManager.THERMAL_STATUS_NONE
+        // API 29: status is concrete; headroom API does not exist (NaN).
+        statusReader = { PowerManager.THERMAL_STATUS_NONE }
+        headroomReader = { _ -> Float.NaN }
 
         val sample = invokeTakeSample(freshMonitor())
 
@@ -118,7 +127,9 @@ class ThermalSampleTelemetryTest {
 
     @Test
     fun `takeSample on API 28 (Android 9) marks telemetry as unavailable`() {
-        fakeSdkInt = Build.VERSION_CODES.P
+        // API 28: neither API exists. Status reader returns null; headroom is NaN.
+        statusReader = { null }
+        headroomReader = { _ -> Float.NaN }
 
         val sample = invokeTakeSample(freshMonitor())
 
@@ -134,7 +145,9 @@ class ThermalSampleTelemetryTest {
 
     @Test
     fun `takeSample on API 26 (minSdk Android 8) marks telemetry as unavailable`() {
-        fakeSdkInt = Build.VERSION_CODES.O
+        // API 26 (minSdk): same shape as API 28 — neither API exists.
+        statusReader = { null }
+        headroomReader = { _ -> Float.NaN }
 
         val sample = invokeTakeSample(freshMonitor())
 
@@ -149,12 +162,12 @@ class ThermalSampleTelemetryTest {
     fun `takeSample on API 30+ with infinite headroom still marks telemetry available via status`() {
         // Devices occasionally return Float.POSITIVE_INFINITY from
         // getThermalHeadroom under transient conditions. The takeIf{isFinite}
-        // filters those to null, but status from API 29+ still provides a
-        // signal — so telemetryAvailable must remain true.
-        fakeSdkInt = Build.VERSION_CODES.R
-        every { powerManager.currentThermalStatus } returns PowerManager.THERMAL_STATUS_LIGHT
-        every { powerManager.getThermalHeadroom(0) } returns Float.POSITIVE_INFINITY
-        every { powerManager.getThermalHeadroom(10) } returns Float.POSITIVE_INFINITY
+        // filter inside takeSample collapses that to null, but status from
+        // API 29+ still provides a signal — so telemetryAvailable must remain
+        // true. We feed the raw infinity through the seam so the production
+        // filter is exercised end-to-end.
+        statusReader = { PowerManager.THERMAL_STATUS_LIGHT }
+        headroomReader = { _ -> Float.POSITIVE_INFINITY }
 
         val sample = invokeTakeSample(freshMonitor())
 
