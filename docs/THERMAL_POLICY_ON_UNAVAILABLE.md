@@ -222,9 +222,9 @@ swaps the headroom bar (which is null anyway) for an explanatory text.
    consequences are rolled back.
 4. **Acceptance**: `ThermalPolicyTelemetryUnavailableTest`
    (Robolectric, `@Config(sdk = [33])`) drives the API-level branch
-   via the `sdkInt: () -> Int` injection seam and asserts the
-   conservative policy values. Existing 35 `ThermalBandTest` cases
-   plus `ThermalStateMachineTest` plus
+   via the `readThermalStatus` / `readThermalHeadroomRaw` injection
+   seams and asserts the conservative policy values. Existing 35
+   `ThermalBandTest` cases plus `ThermalStateMachineTest` plus
    `ThermalPolicyOrchestratorWiringTest` continue to pass unchanged
    (they exercise `OBSERVED`).
 

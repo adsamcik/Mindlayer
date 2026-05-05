@@ -1,7 +1,6 @@
 package com.adsamcik.mindlayer.service.engine
 
 import android.content.Context
-import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
@@ -15,7 +14,6 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
@@ -35,10 +33,19 @@ import org.robolectric.annotation.Config
  * `burstSeconds` / `restSeconds` / `chunkTokens` come from the conservative
  * variant of the table documented in `docs/THERMAL_POLICY_ON_UNAVAILABLE.md`.
  *
- * Drives API levels via the `sdkInt: () -> Int` injection seam introduced
- * in `91afbb5`, NOT via static-field reflection on `Build.VERSION.SDK_INT`
- * — the audit established that pattern as unreliable because the Kotlin
- * compiler inlines static-final reads at the call site.
+ * Drives API-level scenarios via the `readThermalStatus` /
+ * `readThermalHeadroomRaw` injection seams on [ThermalMonitor], NOT via
+ * static-field reflection on `Build.VERSION.SDK_INT` — the audit
+ * established that pattern as unreliable because the Kotlin compiler
+ * inlines static-final reads at the call site.
+ *
+ * The seams replaced an earlier `sdkInt: () -> Int` injection because
+ * AGP 9 lint flagged the lambda-indirected `Build.VERSION.SDK_INT`
+ * comparison as `NewApi`. Production-side defaults in [ThermalMonitor]
+ * keep direct `Build.VERSION.SDK_INT` guards inside their reader
+ * implementations; an integrated proof that those defaults read the
+ * runtime SDK level correctly under Robolectric lives in
+ * [ThermalMonitorApi26Test].
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -48,15 +55,45 @@ class ThermalPolicyTelemetryUnavailableTest {
     private lateinit var context: Context
     private lateinit var powerManager: PowerManager
 
-    /** Mutable so each test can pick the SDK level for ThermalMonitor to read. */
-    private var fakeSdkInt: Int = 33
+    /**
+     * Mutable readers so each test can simulate a target API level
+     * without touching `Build.VERSION.SDK_INT`. `null` from
+     * [statusReader] models "API < 29"; `Float.NaN` from
+     * [headroomReader] models "API < 30". Defaults to a
+     * telemetry-blind device — most tests in this class are about the
+     * INFERRED branch.
+     */
+    private var statusReader: () -> Int? = { null }
+    private var headroomReader: (Int) -> Float = { _ -> Float.NaN }
 
     private fun freshMonitor(): ThermalMonitor =
         ThermalMonitor(
             context = context,
             scope = TestScope(),
-            sdkInt = { fakeSdkInt },
+            readThermalStatus = { statusReader() },
+            readThermalHeadroomRaw = { s -> headroomReader(s) },
         )
+
+    /** Configure readers to model an API 30+ device with concrete telemetry. */
+    private fun simulateApi30PlusWithTelemetry(
+        status: Int = PowerManager.THERMAL_STATUS_NONE,
+        headroom: Float = 0.4f,
+    ) {
+        statusReader = { status }
+        headroomReader = { _ -> headroom }
+    }
+
+    /** Configure readers to model an API 29 device (status only, no headroom). */
+    private fun simulateApi29(status: Int = PowerManager.THERMAL_STATUS_NONE) {
+        statusReader = { status }
+        headroomReader = { _ -> Float.NaN }
+    }
+
+    /** Configure readers to model a telemetry-blind device (API < 29). */
+    private fun simulateTelemetryBlind() {
+        statusReader = { null }
+        headroomReader = { _ -> Float.NaN }
+    }
 
     @Before
     fun setUp() {
@@ -113,7 +150,7 @@ class ThermalPolicyTelemetryUnavailableTest {
 
     @Test
     fun `API 26 sample produces INFERRED policy with conservative duty-cycle`() {
-        fakeSdkInt = Build.VERSION_CODES.O
+        simulateTelemetryBlind()
         val monitor = freshMonitor()
 
         invokeProcessSample(monitor)
@@ -148,7 +185,7 @@ class ThermalPolicyTelemetryUnavailableTest {
     fun `API 28 sample produces INFERRED policy identical to API 26`() {
         // Both API 26 and API 28 lack getCurrentThermalStatus + headroom;
         // the policy table treats them identically.
-        fakeSdkInt = Build.VERSION_CODES.P
+        simulateTelemetryBlind()
         val monitor = freshMonitor()
 
         invokeProcessSample(monitor)
@@ -166,8 +203,7 @@ class ThermalPolicyTelemetryUnavailableTest {
 
     @Test
     fun `API 29 sample with status produces OBSERVED policy with legacy values`() {
-        fakeSdkInt = Build.VERSION_CODES.Q
-        every { powerManager.currentThermalStatus } returns PowerManager.THERMAL_STATUS_NONE
+        simulateApi29(PowerManager.THERMAL_STATUS_NONE)
         val monitor = freshMonitor()
 
         invokeProcessSample(monitor)
@@ -187,10 +223,10 @@ class ThermalPolicyTelemetryUnavailableTest {
 
     @Test
     fun `API 30 sample with headroom produces OBSERVED policy with legacy values`() {
-        fakeSdkInt = Build.VERSION_CODES.R
-        every { powerManager.currentThermalStatus } returns PowerManager.THERMAL_STATUS_NONE
-        every { powerManager.getThermalHeadroom(0) } returns 0.4f
-        every { powerManager.getThermalHeadroom(10) } returns 0.4f
+        simulateApi30PlusWithTelemetry(
+            status = PowerManager.THERMAL_STATUS_NONE,
+            headroom = 0.4f,
+        )
         val monitor = freshMonitor()
 
         invokeProcessSample(monitor)
@@ -207,8 +243,8 @@ class ThermalPolicyTelemetryUnavailableTest {
 
     @Test
     fun `policy refreshes when telemetryAvailable flips even if band is unchanged`() {
-        // Initial: API 26 (telemetry-blind) → INFERRED.
-        fakeSdkInt = Build.VERSION_CODES.O
+        // Initial: telemetry-blind device → INFERRED.
+        simulateTelemetryBlind()
         val monitor = freshMonitor()
         invokeProcessSample(monitor)
         val inferred = monitor.currentPolicy.value
@@ -218,10 +254,10 @@ class ThermalPolicyTelemetryUnavailableTest {
         // We re-sample with API 30 + telemetry returning a healthy
         // reading — the band stays COOL but confidence must flip to
         // OBSERVED and the policy values must refresh.
-        fakeSdkInt = Build.VERSION_CODES.R
-        every { powerManager.currentThermalStatus } returns PowerManager.THERMAL_STATUS_NONE
-        every { powerManager.getThermalHeadroom(0) } returns 0.3f
-        every { powerManager.getThermalHeadroom(10) } returns 0.3f
+        simulateApi30PlusWithTelemetry(
+            status = PowerManager.THERMAL_STATUS_NONE,
+            headroom = 0.3f,
+        )
 
         invokeProcessSample(monitor)
         val observed = monitor.currentPolicy.value
@@ -241,18 +277,18 @@ class ThermalPolicyTelemetryUnavailableTest {
     @Test
     fun `policy refreshes when telemetryAvailable disappears`() {
         // Initial: API 30 with telemetry → OBSERVED.
-        fakeSdkInt = Build.VERSION_CODES.R
-        every { powerManager.currentThermalStatus } returns PowerManager.THERMAL_STATUS_NONE
-        every { powerManager.getThermalHeadroom(0) } returns 0.4f
-        every { powerManager.getThermalHeadroom(10) } returns 0.4f
+        simulateApi30PlusWithTelemetry(
+            status = PowerManager.THERMAL_STATUS_NONE,
+            headroom = 0.4f,
+        )
         val monitor = freshMonitor()
         invokeProcessSample(monitor)
         assertEquals(ThermalConfidence.OBSERVED, monitor.currentPolicy.value.confidence)
 
         // Telemetry disappears (e.g. the API starts returning NaN/Infinity
         // and getCurrentThermalStatus is no longer wired by the stub).
-        // Drive that by switching to an SDK that lacks both APIs.
-        fakeSdkInt = Build.VERSION_CODES.O
+        // Drive that by switching readers to telemetry-blind.
+        simulateTelemetryBlind()
         invokeProcessSample(monitor)
 
         val policy = monitor.currentPolicy.value
@@ -347,7 +383,7 @@ class ThermalPolicyTelemetryUnavailableTest {
         // pin that the source of truth is the confidence enum, not a
         // band-name match. This keeps ServiceBinder's branch logic
         // testable in isolation from the thermal-state machine.
-        fakeSdkInt = Build.VERSION_CODES.O
+        simulateTelemetryBlind()
         val monitor = freshMonitor()
         invokeProcessSample(monitor)
 
