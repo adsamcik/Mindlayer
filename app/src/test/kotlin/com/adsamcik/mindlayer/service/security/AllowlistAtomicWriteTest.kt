@@ -55,9 +55,18 @@ class AllowlistAtomicWriteTest {
         )
         assertTrue("entries.json must exist", entriesFile.exists())
 
+        // Production format (post-b15b656 H7 hardening): the persisted
+        // shape is `{"version":2,"entries":[...],"mac":"<hex>"}` — an
+        // HMAC-integrity envelope around the entry array. Earlier
+        // versions of this test asserted the file was a raw JSON array,
+        // which silently broke when integrity was added. We now assert
+        // both the envelope shape AND the inner entries layout.
         val text = entriesFile.readText()
-        assertTrue("entries.json must be a JSON array", text.startsWith("[") && text.endsWith("]"))
-        val arr = JSONArray(text)
+        val envelope = JSONObject(text)
+        assertEquals("envelope version must be 2", 2, envelope.getInt("version"))
+        val mac = envelope.getString("mac")
+        assertTrue("mac must be a non-empty hex string", mac.isNotEmpty() && mac.matches(Regex("^[0-9a-fA-F]+$")))
+        val arr = envelope.getJSONArray("entries")
         assertEquals(1, arr.length())
         val o = arr.getJSONObject(0)
         assertEquals("com.example.a", o.getString("pkg"))
@@ -70,7 +79,11 @@ class AllowlistAtomicWriteTest {
         store.approveDirect("com.b", "BBBB")
         store.revoke("com.a")
 
-        val arr = JSONArray(entriesFile.readText())
+        // See `approve writes a valid JSON array` for the envelope shape.
+        val envelope = JSONObject(entriesFile.readText())
+        assertEquals(2, envelope.getInt("version"))
+        assertNotNull("mac field must survive revoke", envelope.optString("mac", null))
+        val arr = envelope.getJSONArray("entries")
         assertEquals(1, arr.length())
         assertEquals("com.b", arr.getJSONObject(0).getString("pkg"))
     }
