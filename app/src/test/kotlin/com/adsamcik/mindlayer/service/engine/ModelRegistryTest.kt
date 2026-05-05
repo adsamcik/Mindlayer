@@ -179,7 +179,10 @@ class ModelRegistryTest {
         // Files copy is SMALL — but it's in a more-trusted origin tier.
         File(context.filesDir, "good.litertlm").writeBytes(ByteArray(100))
 
-        val models = ModelRegistry.discoverModels(context)
+        // This test pins trust-ranking behaviour, not integrity gating —
+        // the test files have no manifest/sidecar so we explicitly opt out
+        // of fail-closed integrity to keep the assertion focused.
+        val models = ModelRegistry.discoverModels(context, requireIntegrity = false)
         // Highest-trust origin first, regardless of size.
         assertEquals("good", models.first().id)
     }
@@ -197,7 +200,8 @@ class ModelRegistryTest {
         File(context.filesDir, "evil model.litertlm").writeBytes(ByteArray(10))
         File(context.filesDir, "good.litertlm").writeBytes(ByteArray(10))
 
-        val models = ModelRegistry.discoverModels(context)
+        // Pins SAFE_NAME_PATTERN — orthogonal to integrity gating.
+        val models = ModelRegistry.discoverModels(context, requireIntegrity = false)
         // Only the safe-named one survives.
         assertEquals(1, models.size)
         assertEquals("good", models.first().id)
