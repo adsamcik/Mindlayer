@@ -23,17 +23,16 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MediumTopAppBar
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -105,7 +104,7 @@ fun SessionDetailScreen(
             MediumTopAppBar(
                 title = {
                     Column {
-                        Text("Session Detail")
+                        Text("Session Timeline")
                         if (state.displayId.isNotBlank()) {
                             Text(
                                 text = state.displayId,
@@ -198,13 +197,7 @@ fun SessionDetailScreen(
                             )
                         }
                         items(state.events) { event ->
-                            if (event.category.equals("INFERENCE", ignoreCase = true) &&
-                                (event.event.equals("User message", ignoreCase = true) ||
-                                 event.event.equals("Model response", ignoreCase = true))) {
-                                MessageEventRow(event)
-                            } else {
-                                EventRow(event)
-                            }
+                            EventRow(event)
                         }
                     }
                 }
@@ -235,11 +228,17 @@ private fun SummaryCard(state: SessionDetailUiState) {
                 )
             }
             Spacer(Modifier.height(8.dp))
+            Text(
+                text = "Session ID",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             SelectionContainer {
                 Text(
                     text = state.sessionId,
                     style = MindlayerType.Mono.BodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(top = 2.dp),
                 )
             }
             Spacer(Modifier.height(8.dp))
@@ -270,60 +269,6 @@ private fun SummaryCard(state: SessionDetailUiState) {
 }
 
 @Composable
-private fun MessageEventRow(event: SessionEventItem) {
-    val isUser = event.event.lowercase().contains("user")
-    val bubbleColor = if (isUser) {
-        MaterialTheme.colorScheme.primaryContainer
-    } else {
-        MaterialTheme.colorScheme.surfaceContainerHigh
-    }
-    val textColor = if (isUser) {
-        MaterialTheme.colorScheme.onPrimaryContainer
-    } else {
-        MaterialTheme.colorScheme.onSurface
-    }
-    val label = if (isUser) "User" else "Model"
-    val alignment = if (isUser) Alignment.End else Alignment.Start
-
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = alignment,
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(
-                text = event.timestampLabel,
-                style = MindlayerType.Mono.LabelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
-            )
-        }
-        Spacer(Modifier.height(4.dp))
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = bubbleColor,
-            modifier = Modifier.fillMaxWidth(0.9f),
-        ) {
-            SelectionContainer {
-                Text(
-                    text = event.detail,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = textColor,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                )
-            }
-        }
-    }
-}
-
-@Composable
 private fun EventRow(event: SessionEventItem) {
     val catColor = categoryColor(event.category)
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
@@ -341,7 +286,7 @@ private fun EventRow(event: SessionEventItem) {
             }
             Spacer(Modifier.height(4.dp))
             Text(
-                text = event.event,
+                text = diagnosticEventLabel(event.event),
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium,
             )
@@ -369,6 +314,12 @@ private fun EventRow(event: SessionEventItem) {
     }
 }
 
+private fun diagnosticEventLabel(eventName: String): String = when {
+    eventName.equals("User message", ignoreCase = true) -> "Client input payload"
+    eventName.equals("Model response", ignoreCase = true) -> "Generated output payload"
+    else -> eventName
+}
+
 @Composable
 private fun CategoryChip(category: String, color: Color) {
     Row(
@@ -383,7 +334,7 @@ private fun CategoryChip(category: String, color: Color) {
     ) {
         Icon(
             imageVector = categoryIcon(category),
-            contentDescription = "$category category",
+            contentDescription = null,
             tint = color,
             modifier = Modifier.size(11.dp),
         )
@@ -440,7 +391,7 @@ private fun DetailStatusPane(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (showProgress) CircularProgressIndicator()
+            if (showProgress) LoadingIndicator()
             icon?.invoke()
             Text(
                 text = title,

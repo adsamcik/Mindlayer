@@ -22,12 +22,12 @@ import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MediumTopAppBar
 import androidx.compose.material3.Scaffold
@@ -73,10 +73,10 @@ fun SessionHistoryScreen(
             MediumTopAppBar(
                 title = {
                     Column {
-                        Text("Session History")
+                        Text("Session Diagnostics")
                         val subtitle = when {
-                            state.isLoading -> "Loading…"
-                            state.errorMessage != null -> "Error"
+                            state.isLoading -> "Loading session index…"
+                            state.errorMessage != null -> "Load failure"
                             else -> "${state.sessions.size} sessions"
                         }
                         Text(
@@ -109,14 +109,14 @@ fun SessionHistoryScreen(
             when {
                 state.isLoading -> {
                     HistoryStatusPane(
-                        title = "Loading session history",
+                        title = "Loading session diagnostics",
                         showProgress = true,
                     )
                 }
 
                 state.errorMessage != null -> {
                     HistoryStatusPane(
-                        title = "Couldn't load session history",
+                        title = "Couldn't load session diagnostics",
                         message = state.errorMessage,
                         icon = {
                             Icon(
@@ -134,7 +134,7 @@ fun SessionHistoryScreen(
                 state.sessions.isEmpty() -> {
                     HistoryStatusPane(
                         title = "No sessions recorded yet",
-                        message = "Run a test inference or wait for a client request.",
+                        message = "Run a test inference or wait for a client request to populate diagnostic sessions.",
                         icon = {
                             Icon(
                                 imageVector = Icons.Filled.Info,
@@ -225,7 +225,7 @@ private fun HistoryLabelValue(icon: ImageVector?, label: String, value: String) 
         if (icon != null) {
             Icon(
                 imageVector = icon,
-                contentDescription = label,
+                contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(14.dp),
             )
@@ -287,7 +287,7 @@ private fun HistoryStatusPane(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (showProgress) CircularProgressIndicator()
+            if (showProgress) LoadingIndicator()
             icon?.invoke()
             Text(
                 text = title,

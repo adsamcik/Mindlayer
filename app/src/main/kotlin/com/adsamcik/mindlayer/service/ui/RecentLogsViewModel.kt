@@ -17,7 +17,7 @@ class RecentLogsViewModel(application: Application) : AndroidViewModel(applicati
     val uiState: StateFlow<RecentLogsUiState> = _uiState.asStateFlow()
 
     fun loadLogs() {
-        _uiState.update { it.copy(isLoading = true) }
+        _uiState.update { it.copy(isLoading = true, errorMessage = null) }
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val entries = dao.getRecent(200)
@@ -30,9 +30,14 @@ class RecentLogsViewModel(application: Application) : AndroidViewModel(applicati
                         detail = buildLogDetail(entry),
                     )
                 }
-                _uiState.update { it.copy(logs = items, isLoading = false) }
-            } catch (_: Exception) {
-                _uiState.update { it.copy(isLoading = false) }
+                _uiState.update { it.copy(logs = items, isLoading = false, errorMessage = null) }
+            } catch (exception: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        errorMessage = buildLoadFailureMessage(exception),
+                    )
+                }
             }
         }
     }
@@ -51,5 +56,13 @@ class RecentLogsViewModel(application: Application) : AndroidViewModel(applicati
             return entry.extraJson.take(200)
         }
         return parts.joinToString(" • ")
+    }
+
+    private fun buildLoadFailureMessage(exception: Exception): String {
+        val detail = exception.localizedMessage
+            ?.takeIf { it.isNotBlank() }
+            ?.let { " $it" }
+            ?: ""
+        return "The diagnostics log database couldn't be queried.$detail"
     }
 }
