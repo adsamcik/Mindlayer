@@ -9,9 +9,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,23 +19,27 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MediumTopAppBar
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerTheme
@@ -44,6 +48,7 @@ import com.adsamcik.mindlayer.service.ui.theme.MindlayerType
 data class RecentLogsUiState(
     val logs: List<LogUiItem> = emptyList(),
     val isLoading: Boolean = true,
+    val errorMessage: String? = null,
 )
 
 @Composable
@@ -70,11 +75,26 @@ private fun logCategoryIcon(category: String): ImageVector = when (category.uppe
 fun RecentLogsScreen(
     state: RecentLogsUiState,
     onBack: () -> Unit = {},
+    onRetry: () -> Unit = {},
 ) {
     Scaffold(
         topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text("Recent Logs") },
+            MediumTopAppBar(
+                title = {
+                    Column {
+                        Text("System Logs")
+                        val subtitle = when {
+                            state.isLoading -> "Loading diagnostics log…"
+                            state.errorMessage != null -> "Load failure"
+                            else -> "${formatWholeNumber(state.logs.size)} log entries"
+                        }
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(
@@ -83,52 +103,55 @@ fun RecentLogsScreen(
                         )
                     }
                 },
+                colors = TopAppBarDefaults.mediumTopAppBarColors(
+                    scrolledContainerColor = MaterialTheme.colorScheme.surface,
+                ),
             )
         },
         containerColor = MaterialTheme.colorScheme.background,
     ) { innerPadding ->
         when {
             state.isLoading -> {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CircularProgressIndicator()
-                }
+                RecentLogsStatusPane(
+                    modifier = Modifier.padding(innerPadding),
+                    title = "Loading system logs",
+                    message = "Reading retained diagnostics entries from the local log database.",
+                    showProgress = true,
+                )
+            }
+
+            state.errorMessage != null -> {
+                RecentLogsStatusPane(
+                    modifier = Modifier.padding(innerPadding),
+                    title = "Couldn't load system logs",
+                    message = state.errorMessage,
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Filled.Warning,
+                            contentDescription = "System logs load error",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(40.dp),
+                        )
+                    },
+                    actionLabel = "Retry",
+                    onAction = onRetry,
+                )
             }
 
             state.logs.isEmpty() -> {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                        .padding(32.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
+                RecentLogsStatusPane(
+                    modifier = Modifier.padding(innerPadding),
+                    title = "No log entries recorded yet",
+                    message = "Run a test inference or wait for a client request to generate diagnostic log entries.",
+                    icon = {
                         Icon(
                             imageVector = Icons.Filled.Info,
                             contentDescription = "No log entries",
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(40.dp),
                         )
-                        Text(
-                            text = "No log entries recorded yet",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text(
-                            text = "Run a test inference or wait for a client request to generate log entries.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                        )
-                    }
-                }
+                    },
+                )
             }
 
             else -> {
@@ -142,6 +165,55 @@ fun RecentLogsScreen(
                     items(state.logs) { log ->
                         LogEntryCard(log)
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecentLogsStatusPane(
+    modifier: Modifier = Modifier,
+    title: String,
+    message: String,
+    showProgress: Boolean = false,
+    icon: (@Composable () -> Unit)? = null,
+    actionLabel: String? = null,
+    onAction: () -> Unit = {},
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(32.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (showProgress) LoadingIndicator()
+            icon?.invoke()
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center,
+            )
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+            actionLabel?.let { label ->
+                FilledTonalButton(onClick = onAction) {
+                    Icon(
+                        imageVector = Icons.Filled.Refresh,
+                        contentDescription = "Retry",
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(text = label)
                 }
             }
         }
@@ -177,7 +249,7 @@ private fun LogEntryCard(log: LogUiItem) {
                 ) {
                     Icon(
                         imageVector = logCategoryIcon(log.category),
-                        contentDescription = "${log.category} category",
+                        contentDescription = null,
                         tint = color,
                         modifier = Modifier.size(11.dp),
                     )

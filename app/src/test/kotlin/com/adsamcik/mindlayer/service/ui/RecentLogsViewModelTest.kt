@@ -13,6 +13,8 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -54,6 +56,7 @@ class RecentLogsViewModelTest {
         val state = awaitLoaded(viewModel) { it.logs.isEmpty() && !it.isLoading }
         assertTrue(state.logs.isEmpty())
         assertFalse(state.isLoading)
+        assertNull(state.errorMessage)
     }
 
     @Test
@@ -117,6 +120,7 @@ class RecentLogsViewModelTest {
         val state = awaitLoaded(viewModel) { it.logs.size == 5 && !it.isLoading }
 
         assertFalse(state.isLoading)
+        assertNull(state.errorMessage)
         assertEquals(5, state.logs.size)
 
         // Newest first: thermal band_change at ts=500
@@ -174,12 +178,13 @@ class RecentLogsViewModelTest {
         val state = awaitLoaded(viewModel) { it.logs.size == 1 && !it.isLoading }
 
         val item = state.logs.single()
+        assertNull(state.errorMessage)
         assertEquals(200, item.detail.length)
         assertEquals(longJson.take(200), item.detail)
     }
 
     @Test
-    fun `closed database produces no crash and stops loading`() = runTest {
+    fun `closed database surfaces an error message and stops loading`() = runTest {
         // Construct VM while DB is open (cached dao reference), then close DB.
         val viewModel = RecentLogsViewModel(application)
         db.close()
@@ -188,5 +193,7 @@ class RecentLogsViewModelTest {
         val state = awaitLoaded(viewModel, timeoutMs = 5_000L) { !it.isLoading }
         assertFalse(state.isLoading)
         assertTrue(state.logs.isEmpty())
+        assertNotNull(state.errorMessage)
+        assertTrue(state.errorMessage!!.isNotBlank())
     }
 }
