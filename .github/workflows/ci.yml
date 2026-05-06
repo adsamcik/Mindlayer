@@ -92,8 +92,8 @@ jobs:
   #
   # API 26 has been observed to pass all instrumented tests and then hang until
   # the job timeout while the emulator tears down. The test script therefore
-  # captures that emulator PID and, for API 26 only, hard-stops it after a short
-  # graceful shutdown window before the action's own cleanup path runs.
+  # captures emulator/qemu PIDs and hard-stops them after a short graceful
+  # shutdown window before the action's own cleanup path runs.
   instrumented-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -170,7 +170,7 @@ jobs:
           disable-animations: true
           script: |
             ./gradlew :app:connectedDebugAndroidTest :sdk:connectedDebugAndroidTest --no-daemon
-            if [ "${{ matrix.api-level }}" = "26" ]; then emulator_pid="$(pgrep -f "${ANDROID_HOME}/emulator/emulator.*-port ${EMULATOR_PORT}" | head -n 1 || true)"; adb -s "${ANDROID_SERIAL}" emu kill || true; if [ -n "${emulator_pid}" ]; then for _ in 1 2 3 4 5; do if ! kill -0 "${emulator_pid}" 2>/dev/null; then break; fi; sleep 1; done; if kill -0 "${emulator_pid}" 2>/dev/null; then kill -9 "${emulator_pid}" || true; fi; fi; fi
+            emulator_pids="$(pgrep -f '(/emulator/emulator|qemu-system-)' | tr '\n' ' ' || true)"; adb -s "${ANDROID_SERIAL}" emu kill || true; if [ -n "${emulator_pids}" ]; then kill ${emulator_pids} 2>/dev/null || true; sleep 5; kill -9 ${emulator_pids} 2>/dev/null || true; fi
 
       - name: Upload instrumented test reports
         if: always()
