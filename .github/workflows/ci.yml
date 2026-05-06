@@ -90,9 +90,10 @@ jobs:
   # If any of these guesses turn out wrong, CI itself will surface it — the
   # action will fail to download the system image and we adjust.
   #
-  # Keep `-no-snapshot` on the test run itself. API 26 has been observed to pass
-  # all tests and then hang until the job timeout while the emulator tears down a
-  # snapshot-backed process; cold-booting the cached AVD keeps cleanup bounded.
+  # API 26 has been observed to pass all instrumented tests and then hang until
+  # the job timeout while the emulator tears down. The test script therefore
+  # captures that emulator PID and, for API 26 only, hard-stops it after a short
+  # graceful shutdown window before the action's own cleanup path runs.
   instrumented-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -167,7 +168,24 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-snapshot -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: ./gradlew :app:connectedDebugAndroidTest :sdk:connectedDebugAndroidTest --no-daemon
+          script: |
+            ./gradlew :app:connectedDebugAndroidTest :sdk:connectedDebugAndroidTest --no-daemon
+
+            if [ "${{ matrix.api-level }}" = "26" ]; then
+              emulator_pid="$(pgrep -f "${ANDROID_HOME}/emulator/emulator.*-port ${EMULATOR_PORT}" | head -n 1 || true)"
+              adb -s "${ANDROID_SERIAL}" emu kill || true
+              if [ -n "${emulator_pid}" ]; then
+                for _ in 1 2 3 4 5; do
+                  if ! kill -0 "${emulator_pid}" 2>/dev/null; then
+                    break
+                  fi
+                  sleep 1
+                done
+                if kill -0 "${emulator_pid}" 2>/dev/null; then
+                  kill -9 "${emulator_pid}" || true
+                fi
+              fi
+            fi
 
       - name: Upload instrumented test reports
         if: always()
