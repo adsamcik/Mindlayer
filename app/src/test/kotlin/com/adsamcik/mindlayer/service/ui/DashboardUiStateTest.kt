@@ -87,6 +87,115 @@ class DashboardUiStateTest {
     }
 
     @Test
+    fun `runtime readiness summary gives one primary healthy answer`() {
+        val nowMs = 20_000L
+        val state = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+            isEngineLoaded = true,
+            backend = "GPU",
+        )
+
+        val readiness = state.runtimeReadiness(nowMs)
+
+        assertEquals("Ready to test", readiness.headline)
+        assertEquals("Runtime is connected, model loaded, and GPU backend is active.", readiness.detail)
+        assertEquals("READY", readiness.pillLabel)
+        assertEquals(DashboardMessageTone.SUCCESS, readiness.tone)
+    }
+
+    @Test
+    fun `runtime readiness summary explains blocked states in plain language`() {
+        val nowMs = 20_000L
+
+        val disconnected = DashboardUiState(
+            connectionState = DashboardConnectionState.DISCONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+        ).runtimeReadiness(nowMs)
+        assertEquals("Reconnect required", disconnected.headline)
+        assertEquals(
+            "Refresh status to restore the service connection. Last good status sample 1s ago.",
+            disconnected.detail,
+        )
+        assertEquals("RECONNECT", disconnected.pillLabel)
+        assertEquals(DashboardMessageTone.ERROR, disconnected.tone)
+
+        val stale = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 7_000,
+            isEngineLoaded = true,
+            backend = "GPU",
+        ).runtimeReadiness(nowMs)
+        assertEquals("Status stale — refresh required", stale.headline)
+        assertEquals(
+            "Refresh status before trusting runtime values or running a test. Last successful sample 7s ago.",
+            stale.detail,
+        )
+        assertEquals("STALE", stale.pillLabel)
+        assertEquals(DashboardMessageTone.WARNING, stale.tone)
+
+        val pollingFailed = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+            statusErrorMessage = "Status polling failed: timeout",
+        ).runtimeReadiness(nowMs)
+        assertEquals("Status polling failed", pollingFailed.headline)
+        assertEquals(
+            "Refresh status. If polling keeps failing, open System Logs.",
+            pollingFailed.detail,
+        )
+        assertEquals("CHECK LOGS", pollingFailed.pillLabel)
+        assertEquals(DashboardMessageTone.ERROR, pollingFailed.tone)
+
+        val modelLoading = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+            isEngineLoaded = false,
+            backend = "GPU",
+        ).runtimeReadiness(nowMs)
+        assertEquals("Waiting for model load", modelLoading.headline)
+        assertEquals(
+            "Connected, but the model is not loaded yet. Wait for runtime initialization to finish.",
+            modelLoading.detail,
+        )
+        assertEquals("WAITING", modelLoading.pillLabel)
+        assertEquals(DashboardMessageTone.WARNING, modelLoading.tone)
+    }
+
+    @Test
+    fun `runtime readiness summary separates degraded runtime from ready state`() {
+        val nowMs = 20_000L
+        val degraded = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+            isEngineLoaded = true,
+            backend = "GPU",
+            thermalBand = "HOT",
+        ).runtimeReadiness(nowMs)
+        val guarded = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+            isEngineLoaded = true,
+            backend = "GPU",
+            memoryPressure = "EMERGENCY",
+        ).runtimeReadiness(nowMs)
+
+        assertEquals("Runtime degraded", degraded.headline)
+        assertEquals("DEGRADED", degraded.pillLabel)
+        assertEquals(DashboardMessageTone.WARNING, degraded.tone)
+        assertEquals("Runtime guard active", guarded.headline)
+        assertEquals("ATTENTION", guarded.pillLabel)
+        assertEquals(DashboardMessageTone.ERROR, guarded.tone)
+    }
+
+    @Test
     fun `successful test result is flagged when runtime is no longer ready`() {
         val nowMs = 20_000L
         val state = DashboardUiState(
@@ -115,6 +224,140 @@ class DashboardUiStateTest {
         )
 
         assertFalse(state.shouldHighlightTestResult(nowMs))
+    }
+
+    @Test
+    fun `test inference readiness allows healthy fresh runtime`() {
+        val nowMs = 20_000L
+        val state = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+            isEngineLoaded = true,
+            backend = "GPU",
+        )
+
+        assertNull(state.testReadinessIssue(nowMs))
+        assertTrue(state.canRunTestInference(nowMs))
+    }
+
+    @Test
+    fun `test inference readiness blocks disconnected and loading states`() {
+        val nowMs = 20_000L
+        val disconnected = DashboardUiState(
+            connectionState = DashboardConnectionState.DISCONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+            isEngineLoaded = true,
+            backend = "GPU",
+        )
+        val loading = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = true,
+            lastStatusUpdateMs = nowMs - 1_000,
+            isEngineLoaded = true,
+            backend = "GPU",
+        )
+
+        assertEquals(
+            "Reconnect the service before running a test.",
+            disconnected.testReadinessIssue(nowMs),
+        )
+        assertFalse(disconnected.canRunTestInference(nowMs))
+        assertEquals(
+            "Runtime status is still loading. Wait for the first live sample before testing.",
+            loading.testReadinessIssue(nowMs),
+        )
+        assertFalse(loading.canRunTestInference(nowMs))
+    }
+
+    @Test
+    fun `test inference readiness blocks unknown and stale status samples`() {
+        val nowMs = 20_000L
+        val pollingFailed = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+            statusErrorMessage = "Status polling failed: timeout",
+            isEngineLoaded = true,
+            backend = "GPU",
+        )
+        val unknown = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = null,
+            isEngineLoaded = true,
+            backend = "GPU",
+        )
+        val stale = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 7_000,
+            isEngineLoaded = true,
+            backend = "GPU",
+        )
+
+        assertEquals(
+            "Status polling failed. Refresh status before running a test.",
+            pollingFailed.testReadinessIssue(nowMs),
+        )
+        assertFalse(pollingFailed.canRunTestInference(nowMs))
+        assertEquals(
+            "No live runtime status yet. Refresh status and wait for readiness.",
+            unknown.testReadinessIssue(nowMs),
+        )
+        assertFalse(unknown.canRunTestInference(nowMs))
+        assertEquals(
+            "Status is stale. Refresh before running a test.",
+            stale.testReadinessIssue(nowMs),
+        )
+        assertFalse(stale.canRunTestInference(nowMs))
+    }
+
+    @Test
+    fun `test inference readiness blocks unloaded engine and missing backend`() {
+        val nowMs = 20_000L
+        val unloaded = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+            isEngineLoaded = false,
+            backend = "GPU",
+        )
+        val noBackend = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+            isEngineLoaded = true,
+            backend = "NONE",
+        )
+
+        assertEquals(
+            "Connected, but the model is not loaded yet.",
+            unloaded.testReadinessIssue(nowMs),
+        )
+        assertFalse(unloaded.canRunTestInference(nowMs))
+        assertEquals(
+            "Connected, but no GPU, CPU, or NPU backend is active yet.",
+            noBackend.testReadinessIssue(nowMs),
+        )
+        assertFalse(noBackend.canRunTestInference(nowMs))
+    }
+
+    @Test
+    fun `test inference readiness blocks while a test is already running`() {
+        val nowMs = 20_000L
+        val state = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+            isEngineLoaded = true,
+            backend = "GPU",
+            isTestRunning = true,
+        )
+
+        assertEquals("A test is already running.", state.testReadinessIssue(nowMs))
+        assertFalse(state.canRunTestInference(nowMs))
     }
 
     @Test

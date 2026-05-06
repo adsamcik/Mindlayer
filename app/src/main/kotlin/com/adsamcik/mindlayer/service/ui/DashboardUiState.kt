@@ -30,6 +30,13 @@ enum class DashboardMessageTone {
     ERROR,
 }
 
+data class RuntimeReadinessSummary(
+    val headline: String,
+    val detail: String,
+    val pillLabel: String,
+    val tone: DashboardMessageTone,
+)
+
 data class DashboardUiState(
     // Diagnostics
     val connectionState: DashboardConnectionState = DashboardConnectionState.CONNECTING,
@@ -116,6 +123,43 @@ data class DashboardUiState(
     fun logsFreshness(nowMs: Long = System.currentTimeMillis()): DashboardFreshness =
         freshnessOf(lastLogsUpdateMs, nowMs, LOGS_STALE_AFTER_MS)
 
+    fun testReadinessIssue(nowMs: Long = System.currentTimeMillis()): String? = when {
+        isTestRunning -> "A test is already running."
+        connectionState == DashboardConnectionState.CONNECTING -> {
+            "Service is connecting. Wait for a live runtime status before testing."
+        }
+
+        connectionState == DashboardConnectionState.DISCONNECTED -> {
+            "Reconnect the service before running a test."
+        }
+
+        isStatusLoading -> {
+            "Runtime status is still loading. Wait for the first live sample before testing."
+        }
+
+        statusErrorMessage != null -> {
+            "Status polling failed. Refresh status before running a test."
+        }
+
+        statusFreshness(nowMs) == DashboardFreshness.UNKNOWN -> {
+            "No live runtime status yet. Refresh status and wait for readiness."
+        }
+
+        statusFreshness(nowMs) == DashboardFreshness.STALE -> {
+            "Status is stale. Refresh before running a test."
+        }
+
+        !isEngineLoaded -> "Connected, but the model is not loaded yet."
+        backend.equals("NONE", ignoreCase = true) -> {
+            "Connected, but no GPU, CPU, or NPU backend is active yet."
+        }
+
+        else -> null
+    }
+
+    fun canRunTestInference(nowMs: Long = System.currentTimeMillis()): Boolean =
+        testReadinessIssue(nowMs) == null
+
     fun serviceHealth(nowMs: Long = System.currentTimeMillis()): DashboardHealthLevel = when {
         connectionState == DashboardConnectionState.CONNECTING || isStatusLoading -> {
             DashboardHealthLevel.CONNECTING
@@ -135,6 +179,119 @@ data class DashboardUiState(
             memoryPressure.equals("CRITICAL", ignoreCase = true) -> DashboardHealthLevel.DEGRADED
 
         else -> DashboardHealthLevel.HEALTHY
+    }
+
+    fun runtimeReadiness(nowMs: Long = System.currentTimeMillis()): RuntimeReadinessSummary {
+        val freshness = statusFreshness(nowMs)
+        return when {
+            connectionState == DashboardConnectionState.DISCONNECTED -> {
+                RuntimeReadinessSummary(
+                    headline = "Reconnect required",
+                    detail = lastStatusUpdateMs?.let {
+                        "Refresh status to restore the service connection. " +
+                            "Last good status sample ${formatRelativeTimestamp(it, nowMs)}."
+                    } ?: "Refresh status to connect to the service before testing.",
+                    pillLabel = "RECONNECT",
+                    tone = DashboardMessageTone.ERROR,
+                )
+            }
+
+            connectionState == DashboardConnectionState.CONNECTING -> {
+                RuntimeReadinessSummary(
+                    headline = "Connecting to service",
+                    detail = "Wait for a live runtime status before testing.",
+                    pillLabel = "CONNECTING",
+                    tone = DashboardMessageTone.INFO,
+                )
+            }
+
+            statusErrorMessage != null -> {
+                RuntimeReadinessSummary(
+                    headline = "Status polling failed",
+                    detail = "Refresh status. If polling keeps failing, open System Logs.",
+                    pillLabel = "CHECK LOGS",
+                    tone = DashboardMessageTone.ERROR,
+                )
+            }
+
+            isStatusLoading -> {
+                RuntimeReadinessSummary(
+                    headline = "Waiting for runtime status",
+                    detail = "Connected, but the first live runtime status sample is still loading.",
+                    pillLabel = "WAITING",
+                    tone = DashboardMessageTone.INFO,
+                )
+            }
+
+            freshness == DashboardFreshness.UNKNOWN -> {
+                RuntimeReadinessSummary(
+                    headline = "Waiting for runtime status",
+                    detail = "Refresh status and wait for a live runtime sample before testing.",
+                    pillLabel = "WAITING",
+                    tone = DashboardMessageTone.INFO,
+                )
+            }
+
+            freshness == DashboardFreshness.STALE -> {
+                RuntimeReadinessSummary(
+                    headline = "Status stale — refresh required",
+                    detail = lastStatusUpdateMs?.let {
+                        "Refresh status before trusting runtime values or running a test. " +
+                            "Last successful sample ${formatRelativeTimestamp(it, nowMs)}."
+                    } ?: "Refresh status before trusting runtime values or running a test.",
+                    pillLabel = "STALE",
+                    tone = DashboardMessageTone.WARNING,
+                )
+            }
+
+            !isEngineLoaded -> {
+                RuntimeReadinessSummary(
+                    headline = "Waiting for model load",
+                    detail = "Connected, but the model is not loaded yet. " +
+                        "Wait for runtime initialization to finish.",
+                    pillLabel = "WAITING",
+                    tone = DashboardMessageTone.WARNING,
+                )
+            }
+
+            backend.equals("NONE", ignoreCase = true) -> {
+                RuntimeReadinessSummary(
+                    headline = "Waiting for backend",
+                    detail = "Connected, but no GPU, CPU, or NPU backend is active yet.",
+                    pillLabel = "WAITING",
+                    tone = DashboardMessageTone.WARNING,
+                )
+            }
+
+            thermalBand.equals("CRITICAL", ignoreCase = true) ||
+                memoryPressure.equals("EMERGENCY", ignoreCase = true) -> {
+                RuntimeReadinessSummary(
+                    headline = "Runtime guard active",
+                    detail = "Runtime is available, but thermal or memory pressure is critical.",
+                    pillLabel = "ATTENTION",
+                    tone = DashboardMessageTone.ERROR,
+                )
+            }
+
+            thermalBand.equals("HOT", ignoreCase = true) ||
+                memoryPressure.equals("CRITICAL", ignoreCase = true) -> {
+                RuntimeReadinessSummary(
+                    headline = "Runtime degraded",
+                    detail = "Runtime is available, but thermal or memory pressure may affect test results.",
+                    pillLabel = "DEGRADED",
+                    tone = DashboardMessageTone.WARNING,
+                )
+            }
+
+            else -> {
+                RuntimeReadinessSummary(
+                    headline = "Ready to test",
+                    detail = "Runtime is connected, model loaded, and ${backend.uppercase()} backend is active.",
+                    pillLabel = "READY",
+                    tone = DashboardMessageTone.SUCCESS,
+                )
+            }
+        }
     }
 
     fun shouldHighlightTestResult(nowMs: Long = System.currentTimeMillis()): Boolean {
