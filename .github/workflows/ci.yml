@@ -170,7 +170,7 @@ jobs:
           disable-animations: true
           script: |
             ./gradlew :app:connectedDebugAndroidTest :sdk:connectedDebugAndroidTest --no-daemon
-            if [ "${{ matrix.api-level }}" = "26" ]; then adb -s "${ANDROID_SERIAL}" emu kill || true; sleep 5; emulator_pids="$(pgrep -f '[/]emulator/emulator|[q]emu-system-' | tr '\n' ' ' || true)"; if [ -n "${emulator_pids}" ]; then kill -9 ${emulator_pids} 2>/dev/null || true; fi; fi
+            if [ "${{ matrix.api-level }}" = "26" ]; then timeout 5s adb -s "${ANDROID_SERIAL}" emu kill || true; sleep 2; pkill -9 -f '[/]emulator/emulator|[q]emu-system-' || true; fi
 
       - name: Upload instrumented test reports
         if: always()
