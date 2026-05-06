@@ -87,6 +87,9 @@ class Mindlayer private constructor(
             "Tool calls are not supported in one-shot mode. " +
             "Use the streaming chat() API with a ToolCall handler instead."
 
+        private const val DEFAULT_CREATE_SESSION_INIT_RETRY_TIMEOUT_MS = 10_000L
+        private val DEFAULT_CREATE_SESSION_INIT_RETRY_BACKOFF_MS = listOf(50L, 200L, 800L)
+
         /**
          * Per-instance buffer for [evictionNotices]. 64 entries is enough to
          * absorb a device-wide memory-pressure storm (which evicts every
@@ -132,6 +135,14 @@ class Mindlayer private constructor(
     /** Observable connection state. */
     val connectionState: StateFlow<ConnectionState>
         get() = connection.state
+
+    internal var createSessionInitRetryTimeoutMs: Long =
+        DEFAULT_CREATE_SESSION_INIT_RETRY_TIMEOUT_MS
+
+    internal var createSessionInitRetryBackoffMs: List<Long> =
+        DEFAULT_CREATE_SESSION_INIT_RETRY_BACKOFF_MS
+
+    internal var createSessionInitRetryClockMs: () -> Long = { System.currentTimeMillis() }
 
     /** Suspend until the service binder is available. */
     suspend fun awaitConnected() {
@@ -485,11 +496,14 @@ class Mindlayer private constructor(
     }
 
     private suspend fun createSessionWithInitRetry(configWithId: SessionConfig): String {
-        // Backoff schedule: 50ms → 200ms → 800ms (caps total wait ≈ 10 s
-        // when combined with the underlying engine init time).
-        val backoffMs = longArrayOf(50L, 200L, 800L)
+        // Backoff schedule: 50ms → 200ms → 800ms → 800ms ... until the
+        // documented cold-start retry window expires.
+        val retryBackoffMs = createSessionInitRetryBackoffMs.ifEmpty {
+            DEFAULT_CREATE_SESSION_INIT_RETRY_BACKOFF_MS
+        }
         var attempt = 0
-        val deadline = System.currentTimeMillis() + 10_000L
+        val deadline = createSessionInitRetryClockMs() +
+            createSessionInitRetryTimeoutMs.coerceAtLeast(0L)
         while (true) {
             try {
                 return connection.awaitConnected().createSession(configWithId)
@@ -498,13 +512,18 @@ class Mindlayer private constructor(
                     e,
                     sessionId = configWithId.sessionId,
                 ) ?: throw e
-                if (typed.code == com.adsamcik.mindlayer.shared.MindlayerErrorCode.ENGINE_INITIALIZING &&
-                    attempt < backoffMs.size &&
-                    System.currentTimeMillis() < deadline
+                if (typed.code ==
+                    com.adsamcik.mindlayer.shared.MindlayerErrorCode.ENGINE_INITIALIZING
                 ) {
-                    kotlinx.coroutines.delay(backoffMs[attempt])
-                    attempt++
-                    continue
+                    val remainingMs = deadline - createSessionInitRetryClockMs()
+                    if (remainingMs > 0L) {
+                        val backoffMs = retryBackoffMs[
+                            attempt.coerceAtMost(retryBackoffMs.lastIndex)
+                        ].coerceAtLeast(1L)
+                        delay(backoffMs.coerceAtMost(remainingMs))
+                        attempt++
+                        continue
+                    }
                 }
                 throw typed
             }

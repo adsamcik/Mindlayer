@@ -43,6 +43,7 @@ class MindlayerCreateSessionRetryTest {
     private lateinit var mockService: IMindlayerService
     private lateinit var mockConnection: ConnectionManager
     private lateinit var mindlayer: Mindlayer
+    private var fakeNowMs: Long = 0L
 
     @Before
     fun setUp() {
@@ -72,6 +73,10 @@ class MindlayerCreateSessionRetryTest {
         }
 
         mindlayer = buildMindlayer(mockConnection, null)
+        fakeNowMs = 0L
+        mindlayer.createSessionInitRetryClockMs = { fakeNowMs }
+        mindlayer.createSessionInitRetryBackoffMs = listOf(1L, 2L, 3L)
+        mindlayer.createSessionInitRetryTimeoutMs = 100L
     }
 
     @After
@@ -106,11 +111,12 @@ class MindlayerCreateSessionRetryTest {
     }
 
     @Test
-    fun `retries multiple times then succeeds within window`() = runTest {
+    fun `retries after initial backoff schedule then succeeds within window`() = runTest {
         var attempts = 0
         every { mockService.createSession(any()) } answers {
             attempts++
-            if (attempts <= 3) {
+            fakeNowMs += 1L
+            if (attempts <= 5) {
                 throw codedException(
                     MindlayerErrorCode.ENGINE_INITIALIZING,
                     "engine_initializing",
@@ -122,7 +128,7 @@ class MindlayerCreateSessionRetryTest {
 
         val id = mindlayer.createSession { backend("CPU") }
         assertEquals("session-after-3", id)
-        assertEquals(4, attempts)
+        assertEquals(6, attempts)
     }
 
     @Test
@@ -174,8 +180,10 @@ class MindlayerCreateSessionRetryTest {
     }
 
     @Test
-    fun `gives up after backoff schedule exhausted`() = runTest {
+    fun `gives up after retry window expires`() = runTest {
+        mindlayer.createSessionInitRetryTimeoutMs = 10L
         every { mockService.createSession(any()) } answers {
+            fakeNowMs += 5L
             throw codedException(
                 MindlayerErrorCode.ENGINE_INITIALIZING,
                 "engine_initializing",
@@ -193,7 +201,6 @@ class MindlayerCreateSessionRetryTest {
         )
         val mle = thrown as MindlayerException
         assertEquals(MindlayerErrorCode.ENGINE_INITIALIZING, mle.code)
-        // backoff schedule is 50/200/800 ms → 4 attempts total
         verify(atLeast = 1) { mockService.createSession(any()) }
     }
 
