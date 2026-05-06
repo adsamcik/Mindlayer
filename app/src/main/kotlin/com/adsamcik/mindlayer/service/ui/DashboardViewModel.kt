@@ -345,6 +345,11 @@ class DashboardViewModel : ViewModel() {
 
     // ---- Test inference --------------------------------------------------------
 
+    private companion object {
+        const val TEST_INFERENCE_PREWARM_BACKEND = "GPU"
+        const val TEST_INFERENCE_PREWARM_TIMEOUT_MS = 30_000L
+    }
+
     private val testJson = Json { ignoreUnknownKeys = true }
 
     /**
@@ -376,14 +381,31 @@ class DashboardViewModel : ViewModel() {
                             isTestRunning = false,
                             testStatus = "Service is not connected",
                             testStatusTone = DashboardMessageTone.ERROR,
-                            lastTestCompletedAtMs = System.currentTimeMillis(),
                         )
                     }
                     return@launch
                 }
                 testService = svc
 
-                _uiState.update { it.copy(testStatus = "Creating test session") }
+                _uiState.update {
+                    it.copy(testStatus = "Warming engine for test inference")
+                }
+                val activeBackend = withContext(Dispatchers.IO) {
+                    svc.prewarmAndAwait(
+                        TEST_INFERENCE_PREWARM_BACKEND,
+                        TEST_INFERENCE_PREWARM_TIMEOUT_MS,
+                    )
+                }
+                if (activeBackend.equals("NONE", ignoreCase = true)) {
+                    throw IllegalStateException(
+                        "Engine did not become ready within " +
+                            "${TEST_INFERENCE_PREWARM_TIMEOUT_MS / 1_000}s",
+                    )
+                }
+
+                _uiState.update {
+                    it.copy(testStatus = "Engine ready on $activeBackend • creating test session")
+                }
                 sessionId = withContext(Dispatchers.IO) {
                     svc.createSession(SessionConfig(
                         systemPrompt = "You are a helpful assistant. Be concise.",
