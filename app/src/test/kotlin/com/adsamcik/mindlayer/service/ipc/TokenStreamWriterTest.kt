@@ -271,7 +271,7 @@ class TokenStreamWriterTest {
 
         val event = json.decodeFromString<StreamEvent>(frames[0])
         assertEquals(StreamEventType.ERROR, event.type)
-        assertEquals("internal_error", event.payload["code"]?.jsonPrimitive?.contentOrNull)
+        assertEquals("INTERNAL", event.payload["code"]?.jsonPrimitive?.contentOrNull)
         assertEquals("Something broke", event.payload["message"]?.jsonPrimitive?.contentOrNull)
     }
 

@@ -220,6 +220,19 @@ class IpcInputValidatorTest {
     }
 
     @Test
+    fun `validateAudioTransfer rejects payloadBytes over media cap`() {
+        val xfer = AudioTransfer(
+            requestId = "abc",
+            mimeType = "audio/wav",
+            source = pfd(),
+            payloadBytes = 101,
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            IpcInputValidator.validateAudioTransfer(xfer, maxMediaBytes = 100)
+        }
+    }
+
+    @Test
     fun `validateAudioTransfer accepts valid wav`() {
         val xfer = AudioTransfer(
             requestId = "abc",
