@@ -1,7 +1,6 @@
 package com.adsamcik.mindlayer.service.engine
 
 import android.content.Context
-import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
@@ -37,7 +36,6 @@ class ThermalBandTest {
     fun setUp() {
         mockkStatic(SystemClock::class)
         mockkStatic(Log::class)
-        mockkStatic(Build.VERSION::class)
 
         every { SystemClock.uptimeMillis() } returns 100_000L
         every { Log.d(any(), any()) } returns 0
