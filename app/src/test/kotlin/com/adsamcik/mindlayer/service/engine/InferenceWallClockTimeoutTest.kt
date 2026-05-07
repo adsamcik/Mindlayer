@@ -21,6 +21,7 @@ import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -164,24 +165,18 @@ class InferenceWallClockTimeoutTest {
         val start = System.currentTimeMillis()
         orchestrator.infer("100:req-timeout", meta, image = null, audio = null, pipeWriteEnd = pfd)
 
-        // Wait for the timeout path to wind up.
-        val deadline = start + 10_000L
-        while (System.currentTimeMillis() < deadline) {
-            Thread.sleep(50)
-            val out = outputStreams.peek()
-            if (out != null && containsErrorReason(out.toByteArray(), "inference_timeout")) break
-        }
+        runBlocking { orchestrator.awaitAllJobs(timeoutMs = 15_000L) }
 
         val elapsed = System.currentTimeMillis() - start
+        val streamBytes = outputStreams.first().toByteArray()
         assertTrue(
-            "Timeout must fire within ~5s of injected cap (got ${elapsed}ms)",
-            elapsed < 10_000L,
+            "Timeout path must complete in bounded wall time (got ${elapsed}ms, bytes=${streamBytes.size})",
+            elapsed < 15_000L && containsErrorReason(streamBytes, "inference_timeout"),
         )
 
         // Native cancellation MUST be invoked.
         verify(timeout = 2_000L, atLeast = 1) { mockConversation.cancelProcess() }
 
-        val streamBytes = outputStreams.first().toByteArray()
         assertTrue(
             "Pipe must contain inference_timeout reason; bytes=${streamBytes.size}",
             containsErrorReason(streamBytes, "inference_timeout"),

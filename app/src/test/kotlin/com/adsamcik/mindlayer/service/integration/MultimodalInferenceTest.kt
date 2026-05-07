@@ -159,7 +159,8 @@ class MultimodalInferenceTest {
         sharedMemoryPool = mockk(relaxed = true) {
             every { cleanup(any()) } returns Unit
             every { cleanupAll() } returns Unit
-            every { stageImage(any(), any()) } answers {
+            every { precheckBounds(any(), any(), any()) } returns null
+            coEvery { stageImageWithTimeout(any(), any()) } answers {
                 val key = firstArg<String>()
                 val transfer = secondArg<ImageTransfer>()
                 StagedMedia(
@@ -310,7 +311,7 @@ class MultimodalInferenceTest {
         val events = inferAndCollect(sessionId, "Hello world")
 
         // Verify SharedMemoryPool was NOT called for staging
-        verify(exactly = 0) { sharedMemoryPool.stageImage(any(), any()) }
+        coVerify(exactly = 0) { sharedMemoryPool.stageImageWithTimeout(any(), any()) }
         coVerify(exactly = 0) { sharedMemoryPool.stageAudioWithTimeout(any(), any()) }
 
         // Verify the Content parts contain only Text
@@ -336,7 +337,7 @@ class MultimodalInferenceTest {
         val events = inferAndCollect(sessionId, null, requestId = requestId, image = image)
 
         // Verify stageImage was called with the transfer
-        verify(exactly = 1) { sharedMemoryPool.stageImage(any(), image) }
+        coVerify(exactly = 1) { sharedMemoryPool.stageImageWithTimeout(any(), image) }
         coVerify(exactly = 0) { sharedMemoryPool.stageAudioWithTimeout(any(), any()) }
 
         // Verify Content parts: ImageFile only (no text was provided)
@@ -362,7 +363,7 @@ class MultimodalInferenceTest {
             sessionId, "Describe this image", requestId = requestId, image = image,
         )
 
-        verify(exactly = 1) { sharedMemoryPool.stageImage(any(), image) }
+        coVerify(exactly = 1) { sharedMemoryPool.stageImageWithTimeout(any(), image) }
 
         // Verify Content parts: Text then ImageFile (order matches orchestrator)
         val parts = lastCapturedParts()
@@ -387,7 +388,7 @@ class MultimodalInferenceTest {
 
         val events = inferAndCollect(sessionId, null, requestId = requestId, audio = audio)
 
-        verify(exactly = 0) { sharedMemoryPool.stageImage(any(), any()) }
+        coVerify(exactly = 0) { sharedMemoryPool.stageImageWithTimeout(any(), any()) }
         coVerify(exactly = 1) { sharedMemoryPool.stageAudioWithTimeout(any(), audio) }
 
         val parts = lastCapturedParts()
@@ -439,7 +440,7 @@ class MultimodalInferenceTest {
             requestId = requestId, image = image, audio = audio,
         )
 
-        verify(exactly = 1) { sharedMemoryPool.stageImage(any(), image) }
+        coVerify(exactly = 1) { sharedMemoryPool.stageImageWithTimeout(any(), image) }
         coVerify(exactly = 1) { sharedMemoryPool.stageAudioWithTimeout(any(), audio) }
 
         // Verify Content parts order: Text, ImageFile, AudioFile
@@ -460,7 +461,7 @@ class MultimodalInferenceTest {
 
     @Test
     fun imageStaging_failsGracefully() {
-        every { sharedMemoryPool.stageImage(any(), any()) } throws
+        coEvery { sharedMemoryPool.stageImageWithTimeout(any(), any()) } throws
             RuntimeException("Failed to read shared memory")
 
         val requestId = "req-img-fail"
@@ -618,7 +619,7 @@ class MultimodalInferenceTest {
 
         // Let first chunk emit, then cancel
         Thread.sleep(200)
-        orchestrator.cancelInference(requestId)
+        orchestrator.cancelInference("test:" + requestId)
 
         assertTrue("Pipe should close within 30s", latch.await(30, TimeUnit.SECONDS))
 
@@ -645,7 +646,7 @@ class MultimodalInferenceTest {
         }
 
         val imageSlot = slot<ImageTransfer>()
-        every { sharedMemoryPool.stageImage(any(), capture(imageSlot)) } returns StagedMedia(
+        coEvery { sharedMemoryPool.stageImageWithTimeout(any(), capture(imageSlot)) } returns StagedMedia(
             scopedKey = "test:$requestId",
             filePath = "/staged/test.png",
             mimeType = "image/png",
@@ -701,7 +702,7 @@ class MultimodalInferenceTest {
 
     @Test
     fun imageStagingFails_audioNotAttempted() {
-        every { sharedMemoryPool.stageImage(any(), any()) } throws
+        coEvery { sharedMemoryPool.stageImageWithTimeout(any(), any()) } throws
             RuntimeException("Corrupt shared memory")
 
         val requestId = "req-img-fail-first"
@@ -714,7 +715,7 @@ class MultimodalInferenceTest {
         )
 
         // Image staging was attempted
-        verify(exactly = 1) { sharedMemoryPool.stageImage(any(), any()) }
+        coVerify(exactly = 1) { sharedMemoryPool.stageImageWithTimeout(any(), any()) }
         // Audio staging should NOT have been attempted (image failed first in the
         // orchestrator's sequential staging order)
         coVerify(exactly = 0) { sharedMemoryPool.stageAudioWithTimeout(any(), any()) }
@@ -742,7 +743,7 @@ class MultimodalInferenceTest {
         )
 
         // Image staging succeeded
-        verify(exactly = 1) { sharedMemoryPool.stageImage(any(), any()) }
+        coVerify(exactly = 1) { sharedMemoryPool.stageImageWithTimeout(any(), any()) }
         // Audio staging was attempted and failed
         coVerify(exactly = 1) { sharedMemoryPool.stageAudioWithTimeout(any(), any()) }
 
@@ -767,7 +768,7 @@ class MultimodalInferenceTest {
         val sessionId = createSession()
         inferAndCollect(sessionId, "Just text, no media")
 
-        verify(exactly = 0) { sharedMemoryPool.stageImage(any(), any()) }
+        coVerify(exactly = 0) { sharedMemoryPool.stageImageWithTimeout(any(), any()) }
         coVerify(exactly = 0) { sharedMemoryPool.stageAudioWithTimeout(any(), any()) }
         // cleanup IS still called in the finally block (with requestId)
         Thread.sleep(200)

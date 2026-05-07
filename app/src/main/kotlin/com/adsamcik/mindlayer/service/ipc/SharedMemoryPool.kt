@@ -360,7 +360,7 @@ class SharedMemoryPool(cacheDir: File) {
         }
         try {
             try {
-                IpcInputValidator.validateAudioTransfer(transfer)
+                IpcInputValidator.validateAudioTransfer(transfer, MAX_MEDIA_BYTES)
             } catch (t: Throwable) {
                 try { transfer.source.close() } catch (_: Throwable) { /* fine */ }
                 throw t

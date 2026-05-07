@@ -836,7 +836,7 @@ class ServiceBinder(
             try {
                 IpcInputValidator.validateRequestMeta(meta)
                 image?.let { IpcInputValidator.validateImageTransfer(it, MAX_MEDIA_BYTES) }
-                audio?.let { IpcInputValidator.validateAudioTransfer(it) }
+                audio?.let { IpcInputValidator.validateAudioTransfer(it, MAX_MEDIA_BYTES) }
                 // Inbound media transfer requestId must agree with meta.requestId
                 // — defends against staging-cleanup keying mismatches.
                 require(image == null || image.requestId == meta.requestId) {
