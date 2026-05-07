@@ -63,24 +63,23 @@ jobs:
             shared/build/test-results/
           retention-days: 14
 
-  # Instrumented tests run on three API levels:
-  #   - API 26 — minSdk floor; we want to verify the integration path actually
-  #     boots and the `BIND_ML_SERVICE` permission + service binding still works
-  #     on the oldest supported platform.
+  # Instrumented tests run on two API levels:
   #   - API 33 — the contracted "must pass" CI gate. Robolectric also pins to 33.
   #   - API 34 — first OS where FGS `specialUse` property enforcement and the
   #     predictive-back default flip are actually live; we want to catch
   #     regressions there before they ship.
   #
-  # Ramp plan: API 26 and API 34 are NON-BLOCKING (`continue-on-error: true`)
-  # while we observe stability. Flip `continue-on-error` to `false` for an
-  # entry once it has produced 5 consecutive green runs on `main`. API 33 is
-  # the only required entry for now.
+  # Ramp plan: API 34 is NON-BLOCKING (`continue-on-error: true`) while we
+  # observe stability. Flip `continue-on-error` to `false` once it has produced
+  # 5 consecutive green runs on `main`. API 33 is the only required entry for now.
+  #
+  # API 26 is temporarily omitted. It repeatedly passed `:app` and `:sdk`
+  # instrumented tests on CI, then the pinned emulator-runner action hung in
+  # teardown until the job was cancelled. Re-enable API 26 once the runner or
+  # emulator image can exit cleanly after a successful test run.
   #
   # Per-entry arch/target overrides exist because system-image availability
   # differs across API levels:
-  #   - API 26: x86_64 / default — the AOSP image is the simplest match and
-  #     covers the surface our :ml service uses (no Play Services dependency).
   #   - API 33: x86_64 / default — historical CI pin; do not change without a
   #     5-run regression check.
   #   - API 34: x86_64 / google_apis — the AOSP `default` image for API 34 has
@@ -98,11 +97,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        api-level: [26, 33, 34]
+        api-level: [33, 34]
         include:
-          - api-level: 26
-            arch: x86_64
-            target: default
           - api-level: 33
             arch: x86_64
             target: default

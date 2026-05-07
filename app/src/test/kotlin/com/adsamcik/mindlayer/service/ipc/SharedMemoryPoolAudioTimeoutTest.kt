@@ -175,35 +175,29 @@ class SharedMemoryPoolAudioTimeoutTest {
 
     @Test
     fun `stageAudioWithTimeout passes through when fast enough`() = runBlocking {
-        val pipe = ParcelFileDescriptor.createPipe()
-        val readEnd = pipe[0]
-        val writeEnd = pipe[1]
-
         val payload = ByteArray(4096) { (it and 0x7F).toByte() }
-
-        // Producer: write payload then close write-end → reader sees EOF.
-        val producer = launch(Dispatchers.IO) {
-            FileOutputStream(writeEnd.fileDescriptor).use { out ->
-                out.write(payload)
-                out.flush()
-            }
-            writeEnd.close()
+        val sourceFile = File.createTempFile("fast_audio_", ".wav", cacheDir).apply {
+            writeBytes(payload)
         }
+        val source = ParcelFileDescriptor.open(sourceFile, ParcelFileDescriptor.MODE_READ_ONLY)
 
         val transfer = AudioTransfer(
             requestId = "r1",
-            source = readEnd,
+            source = source,
             mimeType = "audio/wav",
             isSharedMemory = false,
         )
 
-        val staged = pool.stageAudioWithTimeout("test-ok", transfer, timeoutMs = 5_000L)
-        producer.join()
+        try {
+            val staged = pool.stageAudioWithTimeout("test-ok", transfer, timeoutMs = 5_000L)
 
-        val file = File(staged.filePath)
-        assertTrue("Staged file must exist", file.exists())
-        assertEquals(payload.size, file.length().toInt())
-        assertTrue(payload.contentEquals(file.readBytes()))
+            val file = File(staged.filePath)
+            assertTrue("Staged file must exist", file.exists())
+            assertEquals(payload.size, file.length().toInt())
+            assertTrue(payload.contentEquals(file.readBytes()))
+        } finally {
+            sourceFile.delete()
+        }
     }
 
     @Test
