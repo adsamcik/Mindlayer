@@ -166,13 +166,14 @@ class SharedMemoryPoolSecurityTest {
 
     @Test
     fun `stageImage rejects unparseable encoded image before native handoff`() {
-        val pfd = createPfdFromBytes(byteArrayOf(1, 2, 3), "png")
+        val truncatedJpegHeader = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte())
+        val pfd = createPfdFromBytes(truncatedJpegHeader, "jpg")
         val xfer = ImageTransfer(
             requestId = "abc",
             width = 0, height = 0,
             pixelFormat = 0, rowStride = 0,
-            payloadBytes = 3,
-            source = pfd, isSharedMemory = false, mimeType = "image/png",
+            payloadBytes = truncatedJpegHeader.size,
+            source = pfd, isSharedMemory = false, mimeType = "image/jpeg",
         )
         assertThrows(IllegalArgumentException::class.java) {
             pool.stageImage("u:abc", xfer)

@@ -696,7 +696,7 @@ class InferencePipelineTest {
         // Let first chunk emit, then destroy the session
         Thread.sleep(200)
         orchestrator.destroySession(sessionId)
-        orchestrator.cancelInference(requestId)
+        orchestrator.cancelInference("test:" + requestId)
 
         assertTrue("Pipe should close within 30s", latch.await(30, TimeUnit.SECONDS))
 
