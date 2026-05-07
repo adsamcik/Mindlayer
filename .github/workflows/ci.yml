@@ -63,24 +63,23 @@ jobs:
             shared/build/test-results/
           retention-days: 14
 
-  # Instrumented tests run on three API levels:
-  #   - API 26 — minSdk floor; we want to verify the integration path actually
-  #     boots and the `BIND_ML_SERVICE` permission + service binding still works
-  #     on the oldest supported platform.
+  # Instrumented tests run on two API levels:
   #   - API 33 — the contracted "must pass" CI gate. Robolectric also pins to 33.
   #   - API 34 — first OS where FGS `specialUse` property enforcement and the
   #     predictive-back default flip are actually live; we want to catch
   #     regressions there before they ship.
   #
-  # Ramp plan: API 26 and API 34 are NON-BLOCKING (`continue-on-error: true`)
-  # while we observe stability. Flip `continue-on-error` to `false` for an
-  # entry once it has produced 5 consecutive green runs on `main`. API 33 is
-  # the only required entry for now.
+  # Ramp plan: API 34 is NON-BLOCKING (`continue-on-error: true`) while we
+  # observe stability. Flip `continue-on-error` to `false` once it has produced
+  # 5 consecutive green runs on `main`. API 33 is the only required entry for now.
+  #
+  # API 26 is temporarily omitted. It repeatedly passed `:app` and `:sdk`
+  # instrumented tests on CI, then the pinned emulator-runner action hung in
+  # teardown until the job was cancelled. Re-enable API 26 once the runner or
+  # emulator image can exit cleanly after a successful test run.
   #
   # Per-entry arch/target overrides exist because system-image availability
   # differs across API levels:
-  #   - API 26: x86_64 / default — the AOSP image is the simplest match and
-  #     covers the surface our :ml service uses (no Play Services dependency).
   #   - API 33: x86_64 / default — historical CI pin; do not change without a
   #     5-run regression check.
   #   - API 34: x86_64 / google_apis — the AOSP `default` image for API 34 has
@@ -89,11 +88,6 @@ jobs:
   #     Play-Services-only behaviour (we don't today).
   # If any of these guesses turn out wrong, CI itself will surface it — the
   # action will fail to download the system image and we adjust.
-  #
-  # API 26 has been observed to pass all instrumented tests and then hang until
-  # the job timeout while the emulator tears down. The test script therefore
-  # schedules a delayed emulator/qemu hard-stop while the action's own cleanup
-  # path runs.
   instrumented-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -103,11 +97,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        api-level: [26, 33, 34]
+        api-level: [33, 34]
         include:
-          - api-level: 26
-            arch: x86_64
-            target: default
           - api-level: 33
             arch: x86_64
             target: default
@@ -159,18 +150,14 @@ jobs:
 
       - name: Run instrumented tests
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2
-        env:
-          ANDROID_EMULATOR_WAIT_TIME_BEFORE_KILL: 5
         with:
           api-level: ${{ matrix.api-level }}
           arch: ${{ matrix.arch }}
           target: ${{ matrix.target }}
           force-avd-creation: false
-          emulator-options: -no-snapshot -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: |
-            ./gradlew :app:connectedDebugAndroidTest :sdk:connectedDebugAndroidTest --no-daemon
-            if [ "${{ matrix.api-level }}" = "26" ]; then nohup sh -c "sleep 3; pkill -9 -f '[/]emulator/emulator|[q]emu-system-' || true" >/dev/null 2>&1 & fi
+          script: ./gradlew :app:connectedDebugAndroidTest :sdk:connectedDebugAndroidTest --no-daemon
 
       - name: Upload instrumented test reports
         if: always()
