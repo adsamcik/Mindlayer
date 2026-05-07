@@ -4,11 +4,15 @@ import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MaterialExpressiveTheme
+import androidx.compose.material3.MotionScheme
+import androidx.compose.material3.ShapeDefaults
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.material3.expressiveLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.ReadOnlyComposable
@@ -119,8 +123,22 @@ private val BrandedLightColorScheme: ColorScheme = lightColorScheme(
 
 // ── Typography ────────────────────────────────────────────────────────────────
 
-// Default M3 typography — no blanket monospace overrides on label slots.
-private val MindlayerTypography = Typography()
+private val BaselineTypography = Typography()
+
+private val MindlayerTypography = Typography(
+    headlineLarge = BaselineTypography.headlineLarge.copy(
+        fontWeight = FontWeight.ExtraBold,
+        fontSize = 34.sp,
+        lineHeight = 40.sp,
+    ),
+    titleLarge = BaselineTypography.titleLarge.copy(fontWeight = FontWeight.Bold),
+    titleMedium = BaselineTypography.titleMedium.copy(fontWeight = FontWeight.Bold),
+    titleSmall = BaselineTypography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+    labelLarge = BaselineTypography.labelLarge.copy(
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 0.15.sp,
+    ),
+)
 
 private val MindlayerMonoFamily = FontFamily.Monospace
 
@@ -158,13 +176,13 @@ object MindlayerType {
 
 // ── Shapes ────────────────────────────────────────────────────────────────────
 
-// Tighten default M3 rounding slightly — panels/cards feel more "technical".
+// Expressive rounding keeps the console approachable while preserving dense data rows.
 private val MindlayerShapes = Shapes(
-    extraSmall = androidx.compose.foundation.shape.RoundedCornerShape(4.dp),
-    small      = androidx.compose.foundation.shape.RoundedCornerShape(6.dp),
-    medium     = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
-    large      = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
-    extraLarge = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+    extraSmall = androidx.compose.foundation.shape.RoundedCornerShape(6.dp),
+    small      = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+    medium     = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+    large      = ShapeDefaults.LargeIncreased,
+    extraLarge = ShapeDefaults.ExtraLargeIncreased,
 )
 
 // ── Semantic color tokens ──────────────────────────────────────────────────────
@@ -247,12 +265,13 @@ fun MindlayerTheme(
             val context = LocalContext.current
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
-        darkTheme -> BrandedDarkColorScheme
-        else      -> BrandedLightColorScheme
+        darkTheme -> darkColorScheme()
+        else      -> expressiveLightColorScheme()
     }
 
-    MaterialTheme(
+    MaterialExpressiveTheme(
         colorScheme = colorScheme,
+        motionScheme = MotionScheme.expressive(),
         typography  = MindlayerTypography,
         shapes      = MindlayerShapes,
         content     = content,

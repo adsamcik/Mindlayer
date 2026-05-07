@@ -650,9 +650,17 @@ class ServiceBinder(
                 e.wireMessage,
             )
         } catch (e: IllegalArgumentException) {
+            // Privacy: orchestrator's IllegalArgumentException can carry
+            // internal detail like "internal: KV cache size 1234 exceeds
+            // tier limit". The wire-stable code (3002 / INVALID_SESSION_CONFIG)
+            // already conveys what the SDK side needs; we deliberately drop
+            // `e.message` so the AIDL boundary message is just the
+            // human-readable label. The orchestrator log line still records
+            // the safe label (class chain only) for diagnostics.
+            MindlayerLog.w(TAG, "createSession rejected: ${e.safeLabel()}")
             throw typedBinderException(
                 MindlayerErrorCode.INVALID_SESSION_CONFIG,
-                "Invalid SessionConfig: ${e.message}",
+                "Invalid SessionConfig",
             )
         } catch (e: IllegalStateException) {
             // Engine-not-ready is the legitimate signal — preserve it.
@@ -704,37 +712,27 @@ class ServiceBinder(
                 require(it.length in 1..MAX_ID_LENGTH && SAFE_ID_REGEX.matches(it)) { "sessionId" }
             }
         } catch (e: IllegalArgumentException) {
+            // Privacy: only the field label (e.g. "maxTokens", "samplerTopK")
+            // crosses the wire — production validators throw with field-name
+            // strings, never values. Wrap in the typed wire format so the
+            // SDK side can decode `INVALID_SESSION_CONFIG` consistently with
+            // the orchestrator-translation path; older raw `SecurityException`
+            // throws were silently dropped by `assertCode` because they had
+            // no MLERR prefix to parse.
             MindlayerLog.w(TAG, "SessionConfig boundary validation failed: ${e.message}")
-            throw SecurityException("Invalid SessionConfig")
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_SESSION_CONFIG,
+                "Invalid SessionConfig",
+            )
         }
     }
 
     /**
-     * Boundary validation for [RequestMeta] (M3). Caps caller-supplied
-     * identifiers and text size; restricts `role` to "user" (the only sane
-     * runtime value) and `priority` to a small range.
+     * Boundary validation for [RequestMeta] is handled by
+     * [IpcInputValidator.validateRequestMeta]; the legacy private copy
+     * was removed when the validator centralised AIDL ingress checks
+     * (b15b656). Priority bound enforcement (-10..10) lives there now.
      */
-    private fun validateRequestMeta(meta: RequestMeta) {
-        try {
-            require(
-                meta.requestId.length in 1..MAX_ID_LENGTH && SAFE_ID_REGEX.matches(meta.requestId)
-            ) { "requestId" }
-            require(
-                meta.sessionId.length in 1..MAX_ID_LENGTH && SAFE_ID_REGEX.matches(meta.sessionId)
-            ) { "sessionId" }
-            // Only allowed roles for an inbound runtime request; "model"
-            // / "tool" / "system" may also appear in tool-result turns.
-            require(meta.role in ALLOWED_ROLES) { "role" }
-            require(meta.priority in -10..10) { "priority" }
-            meta.textContent?.let {
-                require(it.length <= MAX_REQUEST_TEXT_CHARS) { "textContent" }
-            }
-        } catch (e: IllegalArgumentException) {
-            MindlayerLog.w(TAG, "RequestMeta boundary validation failed: ${e.message}")
-            throw SecurityException("Invalid request")
-        }
-    }
-
     private fun validateRequestId(requestId: String) {
         require(requestId.isNotBlank()) { "requestId must not be blank" }
         require(requestId.length <= 256) { "requestId too long" }
@@ -838,7 +836,7 @@ class ServiceBinder(
             try {
                 IpcInputValidator.validateRequestMeta(meta)
                 image?.let { IpcInputValidator.validateImageTransfer(it, MAX_MEDIA_BYTES) }
-                audio?.let { IpcInputValidator.validateAudioTransfer(it) }
+                audio?.let { IpcInputValidator.validateAudioTransfer(it, MAX_MEDIA_BYTES) }
                 // Inbound media transfer requestId must agree with meta.requestId
                 // — defends against staging-cleanup keying mismatches.
                 require(image == null || image.requestId == meta.requestId) {

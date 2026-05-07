@@ -13,7 +13,8 @@ robolectric = "4.14.1"
 turbine = "1.2.0"
 androidxTestCore = "1.6.1"
 androidxTestRunner = "1.6.2"
-composeBom = "2025.04.01"
+composeBom = "2026.04.01"
+material3 = "1.5.0-alpha18"
 activityCompose = "1.10.1"
 lifecycleCompose = "2.10.0"
 composeCompiler = "1.5.15"
@@ -36,7 +37,8 @@ compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeB
 compose-ui = { module = "androidx.compose.ui:ui" }
 compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
 compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
-compose-material3 = { module = "androidx.compose.material3:material3" }
+compose-material3 = { module = "androidx.compose.material3:material3", version.ref = "material3" }
+compose-material-icons-core = { module = "androidx.compose.material:material-icons-core" }
 activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
 lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycleCompose" }
 lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycleCompose" }

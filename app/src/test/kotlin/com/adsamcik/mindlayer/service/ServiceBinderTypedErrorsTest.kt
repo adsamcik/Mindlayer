@@ -51,7 +51,14 @@ class ServiceBinderTypedErrorsTest {
     @Before
     fun setUp() {
         service = mockk(relaxed = true)
-        engineManager = mockk(relaxed = true)
+        engineManager = mockk(relaxed = true) {
+            // Tests in this class verify orchestrator-level translations.
+            // ensureEngineReadyOrStart short-circuits when the engine is
+            // already loaded, so we set isInitialized = true to let calls
+            // reach orchestrator.createSession (which the tests stub to
+            // throw the typed exceptions they're verifying).
+            every { isInitialized } returns true
+        }
         // Explicit method stubs in the constructor lambda — matches the
         // ServiceBinderTest pattern. With just `relaxed = true` the
         // Robolectric+mockk inline-class-mock transformer doesn't reliably
@@ -130,9 +137,13 @@ class ServiceBinderTypedErrorsTest {
 
     @Test
     fun `createSession throws INVALID_SESSION_CONFIG on bad input`() {
-        // maxTokens out of valid range trips IpcInputValidator before orchestrator.
+        // maxTokens=0 is below the boundary validator's 1..32_768 range;
+        // earlier versions of this test used maxTokens=1 which sits at
+        // the lower edge but is *valid* — production correctly accepted
+        // it and never reached the orchestrator stub, so the test
+        // expected-code throw never happened.
         assertCode(MindlayerErrorCode.INVALID_SESSION_CONFIG) {
-            binder.createSession(SessionConfig(maxTokens = 1))
+            binder.createSession(SessionConfig(maxTokens = 0))
         }
     }
 

@@ -10,7 +10,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -89,7 +88,3 @@ internal fun formatRelativeTime(targetMs: Long, nowMs: Long = System.currentTime
         else -> formatSessionTimestamp(targetMs)
     }
 }
-
-internal fun formatWholeNumber(value: Int): String = NumberFormat.getIntegerInstance().format(value)
-
-internal fun formatWholeNumber(value: Long): String = NumberFormat.getIntegerInstance().format(value)

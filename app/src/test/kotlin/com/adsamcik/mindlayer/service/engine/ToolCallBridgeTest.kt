@@ -151,7 +151,12 @@ class ToolCallBridgeTest {
     fun `submitResult for non-existent requestId does not crash and logs warning`() {
         bridge.submitResult("ghost-request", "call-1", "tool", "result")
 
-        verify { Log.w("Mindlayer.ToolCallBridge", match<String> { it.contains("ghost-request") }) }
+        // F-006: requestId is truncated via String.loggable() (`take(8) + "…"`)
+        // before crossing the log boundary, so the message contains the
+        // privacy-trimmed prefix `"ghost-re"`, not the full id. Assertion
+        // updated to match the redacted form. The full id never reaches
+        // logs by design.
+        verify { Log.w("Mindlayer.ToolCallBridge", match<String> { it.contains("ghost-re") }) }
     }
 
     @Test
@@ -307,20 +312,41 @@ class ToolCallBridgeTest {
     }
 
     @Test
-    fun `same-name tool result with wrong callId is ignored`() = runTest {
+    fun `same-name tool result with wrong callId fail-completes pending entries (H3)`() = runTest {
         val calls = bridge.registerPendingToolCalls(
             "req-1",
             listOf("search" to "query1", "search" to "query2"),
         )
 
+        // H3 (post-b15b656 hardening): a submitResult with no matching
+        // (callId, toolName) MUST surface the bug immediately rather than
+        // silently ignoring — the prior ignore-and-block contract caused
+        // awaitResults to hang for the full timeout, masking client bugs.
+        // Production now fail-completes EVERY still-pending entry for that
+        // request with IllegalStateException so awaitResults unblocks fast.
         bridge.submitResult("req-1", "missing-call", "search", "wrong")
-        assertFalse(calls[0].resultDeferred.isCompleted)
-        assertFalse(calls[1].resultDeferred.isCompleted)
+        assertTrue(
+            "H3: pending entries must fail-complete on unmatched submitResult",
+            calls[0].resultDeferred.isCompleted,
+        )
+        assertTrue(
+            "H3: pending entries must fail-complete on unmatched submitResult",
+            calls[1].resultDeferred.isCompleted,
+        )
+        // Both completions are exceptional (not value).
+        assertTrue(calls[0].resultDeferred.isCancelled || calls[0].resultDeferred.getCompletionExceptionOrNull() != null)
+        assertTrue(calls[1].resultDeferred.isCancelled || calls[1].resultDeferred.getCompletionExceptionOrNull() != null)
 
-        bridge.submitResult("req-1", calls[0].callId, "search", "result-for-first")
-        bridge.submitResult("req-1", calls[1].callId, "search", "result-for-second")
-
-        val results = bridge.awaitResults("req-1")
+        // Subsequent correct submissions on a fresh request work normally —
+        // the request map cleanup happens at awaitResults time, but a NEW
+        // request is unaffected.
+        val freshCalls = bridge.registerPendingToolCalls(
+            "req-2",
+            listOf("search" to "query1", "search" to "query2"),
+        )
+        bridge.submitResult("req-2", freshCalls[0].callId, "search", "result-for-first")
+        bridge.submitResult("req-2", freshCalls[1].callId, "search", "result-for-second")
+        val results = bridge.awaitResults("req-2")
         assertEquals(
             listOf("search" to "result-for-first", "search" to "result-for-second"),
             results,
