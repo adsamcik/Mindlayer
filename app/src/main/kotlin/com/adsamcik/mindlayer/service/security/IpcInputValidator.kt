@@ -343,10 +343,15 @@ object IpcInputValidator {
         else -> throw IllegalArgumentException("unsupported pixelFormat: $pixelFormat")
     }
 
-    fun validateAudioTransfer(transfer: AudioTransfer) {
+    fun validateAudioTransfer(transfer: AudioTransfer, maxMediaBytes: Int = Int.MAX_VALUE) {
         validateId(transfer.requestId, "AudioTransfer.requestId")
         require(transfer.mimeType in ALLOWED_AUDIO_MIME) {
             "audio mimeType not supported: ${transfer.mimeType}"
+        }
+        if (transfer.payloadBytes != 0) {
+            require(transfer.payloadBytes in 1..maxMediaBytes) {
+                "payloadBytes out of bounds: ${transfer.payloadBytes}"
+            }
         }
         transfer.durationMs?.let {
             require(it in 0..(60L * 60L * 1000L)) {
