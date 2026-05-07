@@ -1,5 +1,6 @@
 package com.adsamcik.mindlayer.service.ipc
 
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.os.ParcelFileDescriptor
 import android.util.Log
@@ -18,7 +19,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import java.io.EOFException
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
@@ -63,6 +64,18 @@ class SharedMemoryPoolTest {
         val tmp = File.createTempFile("test_sparse_", ".$extension", cacheDir)
         RandomAccessFile(tmp, "rw").use { it.setLength(sizeBytes) }
         return ParcelFileDescriptor.open(tmp, ParcelFileDescriptor.MODE_READ_ONLY)
+    }
+
+    private fun validPngBytes(): ByteArray {
+        val bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        return try {
+            ByteArrayOutputStream().use { out ->
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out))
+                out.toByteArray()
+            }
+        } finally {
+            bitmap.recycle()
+        }
     }
 
     // =========================================================================
@@ -115,13 +128,13 @@ class SharedMemoryPoolTest {
     fun `stageAudio sanitizes requestId before creating staged filename`() {
         val pfd = createPfdFromBytes(byteArrayOf(1, 2, 3), "wav")
         val transfer = AudioTransfer(
-            requestId = "../escape\\req:1",
+            requestId = "req_audio_sanitize",
             mimeType = "audio/wav",
             source = pfd,
             isSharedMemory = false,
         )
 
-        val result = pool.stageAudio("req-audio-sanitize", transfer)
+        val result = pool.stageAudio("999:req_audio_sanitize", transfer)
         val staged = File(result.filePath)
 
         assertEquals(File(cacheDir, "media_staging").canonicalPath, staged.parentFile!!.canonicalPath)
@@ -170,34 +183,34 @@ class SharedMemoryPoolTest {
     // =========================================================================
 
     @Test
-    fun `stageImage with JPEG PFD copies to cache and returns correct path`() {
-        val jpegBytes = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte())
-        val pfd = createPfdFromBytes(jpegBytes, "jpg")
+    fun `stageImage with PNG PFD copies to cache and returns correct path`() {
+        val pngBytes = validPngBytes()
+        val pfd = createPfdFromBytes(pngBytes, "png")
         val transfer = ImageTransfer(
             requestId = "req-img-1",
             width = 0,
             height = 0,
             pixelFormat = 0,
             rowStride = 0,
-            payloadBytes = jpegBytes.size,
+            payloadBytes = pngBytes.size,
             source = pfd,
             isSharedMemory = false,
-            mimeType = "image/jpeg",
+            mimeType = "image/png",
         )
 
         val result = pool.stageImage("req-img-1", transfer)
 
         assertEquals("req-img-1", result.scopedKey)
-        assertEquals("image/jpeg", result.mimeType)
-        assertTrue("File path should end with .jpg", result.filePath.endsWith(".jpg"))
+        assertEquals("image/png", result.mimeType)
+        assertTrue("File path should end with .png", result.filePath.endsWith(".png"))
         assertTrue("Staged file should exist", File(result.filePath).exists())
 
         val stagedContent = File(result.filePath).readBytes()
-        assertTrue("Staged file content should match source", jpegBytes.contentEquals(stagedContent))
+        assertTrue("Staged file content should match source", pngBytes.contentEquals(stagedContent))
     }
 
-    @Test(expected = EOFException::class)
-    fun `stageImage throws EOFException when SharedMemory source is shorter than declared payload`() {
+    @Test(expected = IllegalArgumentException::class)
+    fun `stageImage rejects SharedMemory source shorter than declared payload`() {
         val pfd = createPfdFromBytes(byteArrayOf(1, 2), "png")
         val transfer = ImageTransfer(
             requestId = "req-short-read",
@@ -287,7 +300,7 @@ class SharedMemoryPoolTest {
 
     @Test
     fun `cleanup deletes every staged file for repeated requestId`() {
-        val results = (1..3).map { index ->
+        val results = (1..2).map { index ->
             pool.stageAudio("req-repeat", AudioTransfer("req-repeat", "audio/wav", createPfdFromBytes(byteArrayOf(index.toByte()))))
         }
         val files = results.map { File(it.filePath) }

@@ -290,7 +290,7 @@ class ToolCallPipelineTest {
             bridge.awaitResults(requestId)
             fail("Expected IllegalStateException after timeout cleanup")
         } catch (e: IllegalStateException) {
-            assertTrue(e.message!!.contains(requestId))
+            assertTrue(e.message!!.contains("No pending tool calls"))
         }
     }
 
@@ -334,7 +334,7 @@ class ToolCallPipelineTest {
             bridge.awaitResults(requestId)
             fail("Expected IllegalStateException")
         } catch (e: IllegalStateException) {
-            assertTrue(e.message!!.contains(requestId))
+            assertTrue(e.message!!.contains("No pending tool calls"))
         }
     }
 
