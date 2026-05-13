@@ -55,7 +55,7 @@ class SessionDiagnosticsFormattingTest {
     }
 
     @Test
-    fun `build event detail includes structured diagnostics and json fallback`() {
+    fun `build event detail includes structured diagnostics and rejects arbitrary json`() {
         val entry = LogEntry(
             timestampMs = 1_234L,
             category = "INFERENCE",
@@ -71,7 +71,7 @@ class SessionDiagnosticsFormattingTest {
         )
 
         assertEquals(
-            "1,500ms • 512 tokens • 64.5 tok/s • prefill 88.0 tok/s • GPU • prefill slowed • 4,096MB free • {\"turn\":1}",
+            "1,500ms • 512 tokens • 64.5 tok/s • prefill 88.0 tok/s • GPU • prefill slowed • 4,096MB free",
             buildEventDetail(entry),
         )
     }

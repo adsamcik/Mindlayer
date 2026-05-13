@@ -3,10 +3,25 @@ package com.adsamcik.mindlayer.service.logging
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicLong
+
+internal object LogExtras {
+    fun toolNameMetadata(name: String): JsonObject = buildJsonObject {
+        put("len", name.length)
+        put("reason", "unknown_tool")
+        put("hash8", sha256Hex(name).take(8))
+    }
+
+    private fun sha256Hex(value: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
+        return digest.joinToString("") { byte -> "%02x".format(byte) }
+    }
+}
 
 class LogRepository(
     private val dao: LogDao,
