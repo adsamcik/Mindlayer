@@ -60,6 +60,7 @@ class RevokeAppAidlTest {
     private lateinit var binder: ServiceBinder
 
     private val dirName = "revoke_test_${System.nanoTime()}"
+    private val targetUid = 43_210
 
     private val defaultPolicy = ThermalPolicy(
         band = ThermalBand.COOL,
@@ -92,15 +93,25 @@ class RevokeAppAidlTest {
         every { Log.i(any(), any()) } returns 0
         every { Log.w(any(), any<String>()) } returns 0
         every { Log.e(any(), any()) } returns 0
-        every { SystemClock.elapsedRealtime() } returns 0L
+        val testClockMs = java.util.concurrent.atomic.AtomicLong(200_000L)
+        every { SystemClock.elapsedRealtime() } answers { testClockMs.getAndAdd(1L) }
         every { MindlayerLog.d(any(), any(), any(), any()) } returns Unit
         every { MindlayerLog.i(any(), any(), any(), any()) } returns Unit
         every { MindlayerLog.w(any(), any(), any(), any(), any()) } returns Unit
         every { MindlayerLog.e(any(), any(), any(), any(), any()) } returns Unit
 
-        context = ApplicationProvider.getApplicationContext()
-        File(context.filesDir, dirName).deleteRecursively()
-        allowlistStore = AllowlistStore(context, dirName)
+        val appContext = ApplicationProvider.getApplicationContext<Context>()
+        val packageManager = mockk<PackageManager>(relaxed = true) {
+            every { getPackageUid("com.target.app", 0) } returns targetUid
+        }
+        context = mockk(relaxed = true) {
+            every { applicationContext } returns appContext
+            every { filesDir } returns appContext.filesDir
+            every { packageName } returns appContext.packageName
+            every { getPackageManager() } returns packageManager
+        }
+        File(appContext.filesDir, dirName).deleteRecursively()
+        allowlistStore = AllowlistStore(appContext, dirName)
         // Pre-approve a target package so the revoke has something to remove.
         allowlistStore.approveDirect("com.target.app", "deadbeef", "Target App")
 
@@ -178,41 +189,28 @@ class RevokeAppAidlTest {
     }
 
     @Test
-    fun `revokeApp tears down sessions for the resolved uid`() {
-        // The Robolectric package manager doesn't have com.target.app
-        // installed, so getPackageUid throws NameNotFoundException.
-        // We allow the test to install it for this scenario.
-        val pm = context.packageManager
-        val targetUid = try {
-            pm.getPackageUid("com.target.app", 0)
-        } catch (_: PackageManager.NameNotFoundException) {
-            null
-        }
+    fun `revokeApp tears down sessions for the resolved uid with revoke notices`() {
         binder.revokeApp("com.target.app")
-        if (targetUid != null) {
-            // closeAllOwnedBy is called via onClientDisconnected
-            verify { orchestrator.closeAllOwnedBy(targetUid) }
-        } else {
-            // Package not installed in test env — verify revoke still
-            // removes the allowlist entry and logs with uid=unresolved.
-            verify {
-                logRepository.logSecurityDecision(
-                    action = "revoke",
-                    packageName = "com.target.app",
-                    sigShaPrefix = any(),
-                    extra = match { it?.contains("unresolved") == true },
-                )
-            }
-        }
+
+        verify { orchestrator.closeAllOwnedByUidForRevoke(targetUid) }
     }
 
     @Test
-    fun `revokeApp from external uid is rejected with SecurityException`() {
-        every { Binder.getCallingUid() } returns Process.myUid() + 1
+    fun `revokeApp from external uid is rejected by standard auth gate`() {
+        val externalUid = Process.myUid() + 1
+        every { Binder.getCallingUid() } returns externalUid
+
         assertThrows(SecurityException::class.java) {
             binder.revokeApp("com.target.app")
         }
-        // Allowlist entry must be untouched.
+
+        verify {
+            logRepository.logAllowlistPendingRecorded(
+                uid = externalUid,
+                packageName = "test.caller",
+                sigShaPrefix = any(),
+            )
+        }
         assertTrue(allowlistStore.isAllowed("com.target.app", "deadbeef"))
     }
 

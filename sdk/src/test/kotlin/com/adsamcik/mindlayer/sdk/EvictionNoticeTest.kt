@@ -14,6 +14,7 @@ class EvictionNoticeTest {
         assertEquals("SESSION_EVICTED", EvictionNotice("s1", MindlayerErrorCode.SESSION_EVICTED).codeName)
         assertEquals("SESSION_EXPIRED", EvictionNotice("s1", MindlayerErrorCode.SESSION_EXPIRED).codeName)
         assertEquals("MEMORY_PRESSURE", EvictionNotice("s1", MindlayerErrorCode.MEMORY_PRESSURE).codeName)
+        assertEquals("ALLOWLIST_REVOKED", EvictionNotice("s1", MindlayerErrorCode.ALLOWLIST_REVOKED).codeName)
     }
 
     @Test
@@ -26,5 +27,6 @@ class EvictionNoticeTest {
         assertTrue(EvictionNotice("s1", MindlayerErrorCode.MEMORY_PRESSURE).isMemoryPressure)
         assertFalse(EvictionNotice("s1", MindlayerErrorCode.SESSION_EVICTED).isMemoryPressure)
         assertFalse(EvictionNotice("s1", MindlayerErrorCode.SESSION_EXPIRED).isMemoryPressure)
+        assertFalse(EvictionNotice("s1", MindlayerErrorCode.ALLOWLIST_REVOKED).isMemoryPressure)
     }
 }

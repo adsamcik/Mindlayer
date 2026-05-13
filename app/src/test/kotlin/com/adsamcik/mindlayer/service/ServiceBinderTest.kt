@@ -424,6 +424,36 @@ class ServiceBinderTest {
         )
     }
 
+    @Test
+    fun `inferMulti validation rejection closes event and media descriptors`() {
+        val eventPipe = ParcelFileDescriptor.createPipe()
+        val mediaPipe = ParcelFileDescriptor.createPipe()
+        val meta = RequestMeta(requestId = "r-multi", sessionId = "s1", textContent = "hello")
+        val part = com.adsamcik.mindlayer.MediaPart(
+            requestId = "different-request",
+            kind = com.adsamcik.mindlayer.MediaPart.KIND_IMAGE,
+            mimeType = "image/jpeg",
+            source = mediaPipe[0],
+            isSharedMemory = false,
+            payloadBytes = 1L,
+        )
+
+        try {
+            assertThrows(SecurityException::class.java) {
+                binder.inferMulti(meta, listOf(part), eventPipe[1])
+            }
+
+            assertFalse("event write end must be closed on synchronous reject", eventPipe[1].fileDescriptor.valid())
+            assertFalse("media source must be closed on synchronous reject", mediaPipe[0].fileDescriptor.valid())
+            verify(exactly = 0) { orchestrator.infer(any<String>(), any(), any(), any(), any(), any()) }
+        } finally {
+            try { eventPipe[0].close() } catch (_: Exception) {}
+            try { eventPipe[1].close() } catch (_: Exception) {}
+            try { mediaPipe[0].close() } catch (_: Exception) {}
+            try { mediaPipe[1].close() } catch (_: Exception) {}
+        }
+    }
+
     // ---- Tool results -------------------------------------------------------
 
     @Test
