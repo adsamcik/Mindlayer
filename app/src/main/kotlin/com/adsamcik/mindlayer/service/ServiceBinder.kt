@@ -611,6 +611,23 @@ class ServiceBinder(
         }
     }
 
+    private fun closeAllOwnedByRevokedUid(uid: Int) {
+        val prefix = "$uid:"
+        val activeKeys = activeInferenceUids.keys
+            .filter { it.startsWith(prefix) }
+
+        activeKeys.forEach { key ->
+            MindlayerLog.i(TAG, "Cancelling active inference for revoked uid=$uid")
+            orchestrator.cancelInference(key)
+            activeInferenceOwners.remove(key)
+        }
+
+        val revoked = orchestrator.closeAllOwnedByUidForRevoke(uid)
+        if (revoked.isNotEmpty()) {
+            MindlayerLog.i(TAG, "Revoked ${revoked.size} session(s) for uid=$uid")
+        }
+    }
+
     // ---- Session management ------------------------------------------------
 
     override fun createSession(config: SessionConfig): String {
@@ -1040,116 +1057,131 @@ class ServiceBinder(
         media: List<com.adsamcik.mindlayer.MediaPart>?,
         eventWriteEnd: ParcelFileDescriptor,
     ) {
-        val identity = authorizeCall()
-        val uid = Binder.getCallingUid()
-        val ownerToken = requireRegisteredClient()
-
         val parts = media ?: emptyList()
+        var handedOff = false
         try {
-            IpcInputValidator.validateRequestMeta(meta)
-            IpcInputValidator.validateMediaParts(
-                parts,
-                maxPerPartBytes = MAX_MEDIA_BYTES,
-                maxParts = MAX_MEDIA_PARTS_PER_REQUEST,
-            )
-            for ((i, p) in parts.withIndex()) {
-                require(p.requestId == meta.requestId) {
-                    "media[$i].requestId must equal RequestMeta.requestId"
+            val identity = authorizeCall()
+            val uid = Binder.getCallingUid()
+            val ownerToken = requireRegisteredClient()
+
+            try {
+                IpcInputValidator.validateRequestMeta(meta)
+                IpcInputValidator.validateMediaParts(
+                    parts,
+                    maxPerPartBytes = MAX_MEDIA_BYTES,
+                    maxParts = MAX_MEDIA_PARTS_PER_REQUEST,
+                )
+                for ((i, p) in parts.withIndex()) {
+                    require(p.requestId == meta.requestId) {
+                        "media[$i].requestId must equal RequestMeta.requestId"
+                    }
                 }
+            } catch (e: IllegalArgumentException) {
+                throw typedBinderException(
+                    MindlayerErrorCode.INVALID_REQUEST,
+                    "Invalid request: ${e.message}",
+                )
             }
-        } catch (e: IllegalArgumentException) {
-            throw typedBinderException(
-                MindlayerErrorCode.INVALID_REQUEST,
-                "Invalid request: ${e.message}",
-            )
-        }
 
-        // Caller must own the target session.
-        requireOwnership(meta.sessionId)
+            // Caller must own the target session.
+            requireOwnership(meta.sessionId)
 
-        if (!rateLimiter.beginInference(uid)) {
-            MindlayerLog.w(
+            if (!rateLimiter.beginInference(uid)) {
+                MindlayerLog.w(
+                    TAG,
+                    "Concurrent inference limit exceeded for ${identity.packageName}",
+                )
+                throw typedBinderException(
+                    MindlayerErrorCode.CONCURRENT_LIMIT,
+                    "Concurrent inference limit exceeded for ${identity.packageName}",
+                )
+            }
+
+            MindlayerLog.d(
                 TAG,
-                "Concurrent inference limit exceeded for ${identity.packageName}",
+                "inferMulti request from ${identity.packageName} (parts=${parts.size})",
+                requestId = meta.requestId,
+                sessionId = meta.sessionId,
             )
-            throw typedBinderException(
-                MindlayerErrorCode.CONCURRENT_LIMIT,
-                "Concurrent inference limit exceeded for ${identity.packageName}",
-            )
-        }
 
-        MindlayerLog.d(
-            TAG,
-            "inferMulti request from ${identity.packageName} (parts=${parts.size})",
-            requestId = meta.requestId,
-            sessionId = meta.sessionId,
-        )
+            val scopedKey = inferenceKey(uid, meta.requestId)
+            if (activeInferenceUids.putIfAbsent(scopedKey, uid) != null) {
+                rateLimiter.endInference(uid)
+                throw typedBinderException(
+                    MindlayerErrorCode.DUPLICATE_REQUEST,
+                    "Duplicate requestId: ${meta.requestId}",
+                )
+            }
+            if (ownerToken != null) {
+                activeInferenceOwners[scopedKey] = ownerToken
+            }
 
-        val scopedKey = inferenceKey(uid, meta.requestId)
-        if (activeInferenceUids.putIfAbsent(scopedKey, uid) != null) {
-            rateLimiter.endInference(uid)
-            throw typedBinderException(
-                MindlayerErrorCode.DUPLICATE_REQUEST,
-                "Duplicate requestId: ${meta.requestId}",
-            )
-        }
-        if (ownerToken != null) {
-            activeInferenceOwners[scopedKey] = ownerToken
-        }
+            // Decompose ordered List<MediaPart> into the (image, audio) pair
+            // the orchestrator currently consumes. Validator already enforces
+            // ≤1 of each kind, so firstOrNull is exhaustive. Order between the
+            // two collapses to image-first per legacy behavior; documented in
+            // MediaPart KDoc as a temporary engine constraint.
+            val imagePart = parts.firstOrNull { it.kind == com.adsamcik.mindlayer.MediaPart.KIND_IMAGE }
+            val audioPart = parts.firstOrNull { it.kind == com.adsamcik.mindlayer.MediaPart.KIND_AUDIO }
+            val image: ImageTransfer? = imagePart?.let { mediaPartToImageTransfer(it) }
+            val audio: AudioTransfer? = audioPart?.let { mediaPartToAudioTransfer(it) }
 
-        // Decompose ordered List<MediaPart> into the (image, audio) pair
-        // the orchestrator currently consumes. Validator already enforces
-        // ≤1 of each kind, so firstOrNull is exhaustive. Order between the
-        // two collapses to image-first per legacy behavior; documented in
-        // MediaPart KDoc as a temporary engine constraint.
-        val imagePart = parts.firstOrNull { it.kind == com.adsamcik.mindlayer.MediaPart.KIND_IMAGE }
-        val audioPart = parts.firstOrNull { it.kind == com.adsamcik.mindlayer.MediaPart.KIND_AUDIO }
-        val image: ImageTransfer? = imagePart?.let { mediaPartToImageTransfer(it) }
-        val audio: AudioTransfer? = audioPart?.let { mediaPartToAudioTransfer(it) }
-
-        try {
-            orchestrator.infer(scopedKey, meta, image, audio, eventWriteEnd) {
+            try {
+                orchestrator.infer(scopedKey, meta, image, audio, eventWriteEnd) {
+                    activeInferenceOwners.remove(scopedKey)
+                    if (activeInferenceUids.remove(scopedKey) != null) {
+                        rateLimiter.endInference(uid)
+                    }
+                    markRecentlyCompleted(scopedKey)
+                }
+                handedOff = true
+            } catch (e: com.adsamcik.mindlayer.service.engine.ContextOverflowException) {
+                // F-072: same translation as [infer]. inferMulti shares the
+                // orchestrator dispatch path, so the synchronous gate fires
+                // identically when MediaPart-derived (image,audio) push the
+                // turn over the KV ceiling.
                 activeInferenceOwners.remove(scopedKey)
                 if (activeInferenceUids.remove(scopedKey) != null) {
                     rateLimiter.endInference(uid)
                 }
                 markRecentlyCompleted(scopedKey)
+                throw typedBinderException(
+                    MindlayerErrorCode.INPUT_EXCEEDS_CONTEXT,
+                    e.wireMessage,
+                )
+            } catch (e: com.adsamcik.mindlayer.service.ipc.SharedMemoryPoolExhaustedException) {
+                // F-076: same translation as [infer]. The bounds gate runs
+                // inside the same orchestrator pre-flight regardless of
+                // whether the request arrived via the legacy infer() path
+                // or the v0.4 inferMulti() / MediaPart path.
+                activeInferenceOwners.remove(scopedKey)
+                if (activeInferenceUids.remove(scopedKey) != null) {
+                    rateLimiter.endInference(uid)
+                }
+                markRecentlyCompleted(scopedKey)
+                throw typedBinderException(
+                    MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
+                    "shm_pool_exhausted reason=${e.reason} retryAfterMs=${e.retryAfterMs}",
+                )
+            } catch (t: Throwable) {
+                activeInferenceOwners.remove(scopedKey)
+                if (activeInferenceUids.remove(scopedKey) != null) {
+                    rateLimiter.endInference(uid)
+                }
+                markRecentlyCompleted(scopedKey)
+                throw t
             }
-        } catch (e: com.adsamcik.mindlayer.service.engine.ContextOverflowException) {
-            // F-072: same translation as [infer]. inferMulti shares the
-            // orchestrator dispatch path, so the synchronous gate fires
-            // identically when MediaPart-derived (image,audio) push the
-            // turn over the KV ceiling.
-            activeInferenceOwners.remove(scopedKey)
-            if (activeInferenceUids.remove(scopedKey) != null) {
-                rateLimiter.endInference(uid)
+        } finally {
+            if (!handedOff) {
+                try { eventWriteEnd.close() } catch (_: Exception) {}
+                val sources = java.util.Collections.newSetFromMap(
+                    java.util.IdentityHashMap<ParcelFileDescriptor, Boolean>(),
+                )
+                parts.forEach { sources.add(it.source) }
+                sources.forEach { source ->
+                    try { source.close() } catch (_: Exception) {}
+                }
             }
-            markRecentlyCompleted(scopedKey)
-            throw typedBinderException(
-                MindlayerErrorCode.INPUT_EXCEEDS_CONTEXT,
-                e.wireMessage,
-            )
-        } catch (e: com.adsamcik.mindlayer.service.ipc.SharedMemoryPoolExhaustedException) {
-            // F-076: same translation as [infer]. The bounds gate runs
-            // inside the same orchestrator pre-flight regardless of
-            // whether the request arrived via the legacy infer() path
-            // or the v0.4 inferMulti() / MediaPart path.
-            activeInferenceOwners.remove(scopedKey)
-            if (activeInferenceUids.remove(scopedKey) != null) {
-                rateLimiter.endInference(uid)
-            }
-            markRecentlyCompleted(scopedKey)
-            throw typedBinderException(
-                MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
-                "shm_pool_exhausted reason=${e.reason} retryAfterMs=${e.retryAfterMs}",
-            )
-        } catch (t: Throwable) {
-            activeInferenceOwners.remove(scopedKey)
-            if (activeInferenceUids.remove(scopedKey) != null) {
-                rateLimiter.endInference(uid)
-            }
-            markRecentlyCompleted(scopedKey)
-            throw t
         }
     }
 
@@ -1445,11 +1477,12 @@ class ServiceBinder(
      * UID to scope it to.
      */
     override fun revokeApp(packageName: String) {
+        authorizeCall()
         val callingUid = Binder.getCallingUid()
         if (callingUid != Process.myUid()) {
-            // Don't even leak the existence of the method to external callers.
+            // Preserve anti-enumeration after the standard auth gate has run.
             MindlayerLog.w(TAG, "revokeApp rejected: external uid=$callingUid")
-            throw SecurityException("revokeApp: self-UID only")
+            throw SecurityException("Not authorized")
         }
         // Inline package-name shape check — letters, digits, underscores,
         // dots; max 255 bytes (Android PackageManager limit). Reject empty
@@ -1482,8 +1515,8 @@ class ServiceBinder(
 
         if (targetUid != null) {
             // Cancel inferences and destroy sessions for the revoked UID.
-            // closeAllOwnedBy returns the destroyed session ids for logging.
-            onClientDisconnected(targetUid)
+            // Explicit user revoke is involuntary, so fire eviction notices.
+            closeAllOwnedByRevokedUid(targetUid)
         }
 
         logRepository?.logSecurityDecision(
