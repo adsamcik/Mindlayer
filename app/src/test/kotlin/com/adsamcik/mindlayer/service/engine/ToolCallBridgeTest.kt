@@ -164,7 +164,12 @@ class ToolCallBridgeTest {
         val calls = bridge.registerPendingToolCalls("req-1", listOf("realTool" to "args"))
         bridge.submitResult("req-1", calls[0].callId, "nonexistentTool", "result")
 
-        verify { Log.w("Mindlayer.ToolCallBridge", match<String> { it.contains("nonexistentTool") }) }
+        verify {
+            Log.w(
+                "Mindlayer.ToolCallBridge",
+                match<String> { it.contains("hash8") && !it.contains("nonexistentTool") },
+            )
+        }
     }
 
     @Test

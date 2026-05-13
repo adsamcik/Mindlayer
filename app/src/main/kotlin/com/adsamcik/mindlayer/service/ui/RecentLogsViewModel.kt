@@ -52,9 +52,8 @@ class RecentLogsViewModel(application: Application) : AndroidViewModel(applicati
         entry.backend?.let { parts += it }
         entry.errorMessage?.let { parts += it }
         entry.memoryAvailableMb?.let { parts += "${it}MB free" }
-        if (parts.isEmpty() && !entry.extraJson.isNullOrBlank()) {
-            return entry.extraJson.take(200)
-        }
+        val safeExtra = formatSafeExtraJsonForUi(entry.extraJson)
+        if (safeExtra != null) parts += safeExtra
         return parts.joinToString(" • ")
     }
 

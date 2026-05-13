@@ -11,6 +11,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -137,12 +142,27 @@ internal fun buildEventDetail(entry: LogEntry): String {
         entry.memoryAvailableMb?.let { add("${formatWholeNumber(it)}MB free") }
         entry.memoryUsedMb?.let { add("${formatWholeNumber(it)}MB used") }
     }
+    val safeExtra = formatSafeExtraJsonForUi(entry.extraJson)
     return when {
-        parts.isNotEmpty() && !entry.extraJson.isNullOrBlank() -> {
-            (parts + entry.extraJson).joinToString(" • ")
-        }
+        parts.isNotEmpty() && safeExtra != null -> (parts + safeExtra).joinToString(" • ")
         parts.isNotEmpty() -> parts.joinToString(" • ")
-        !entry.extraJson.isNullOrBlank() -> entry.extraJson
+        safeExtra != null -> safeExtra
         else -> ""
     }
+}
+
+
+internal fun formatSafeExtraJsonForUi(extraJson: String?): String? {
+    if (extraJson.isNullOrBlank()) return null
+    val json = try {
+        kotlinx.serialization.json.Json.parseToJsonElement(extraJson).jsonObject
+    } catch (_: Exception) {
+        return null
+    }
+    val filtered = kotlinx.serialization.json.buildJsonObject {
+        json["len"]?.jsonPrimitive?.intOrNull?.let { put("len", it) }
+        json["reason"]?.jsonPrimitive?.contentOrNull?.let { put("reason", it) }
+        json["hash8"]?.jsonPrimitive?.contentOrNull?.let { put("hash8", it) }
+    }
+    return filtered.takeIf { it.isNotEmpty() }?.toString()
 }

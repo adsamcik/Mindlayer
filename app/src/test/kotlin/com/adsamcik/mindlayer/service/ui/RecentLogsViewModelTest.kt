@@ -162,14 +162,13 @@ class RecentLogsViewModelTest {
     }
 
     @Test
-    fun `extraJson fallback used when no diagnostic fields are present`() = runTest {
-        val longJson = "x".repeat(500)
+    fun `extraJson fallback rejects arbitrary keys`() = runTest {
         db.logDao().insert(
             LogEntry(
                 timestampMs = 1L,
                 category = LogCategory.ENGINE,
                 event = LogEvent.ENGINE_INIT,
-                extraJson = longJson,
+                extraJson = """{"secret":"raw-model-tool-name","len":19}""",
             ),
         )
 
@@ -179,8 +178,9 @@ class RecentLogsViewModelTest {
 
         val item = state.logs.single()
         assertNull(state.errorMessage)
-        assertEquals(200, item.detail.length)
-        assertEquals(longJson.take(200), item.detail)
+        assertEquals("""{"len":19}""", item.detail)
+        assertFalse(item.detail.contains("secret"))
+        assertFalse(item.detail.contains("raw-model-tool-name"))
     }
 
     @Test
