@@ -164,20 +164,29 @@ class AllowlistStore(
      * service restart cannot silently undo that decision.
      */
     fun seedIfEmpty(entries: List<AllowlistEntry>) {
+        seedVerified(entries, requireEmpty = true, action = "seed_first_party")
+    }
+
+    /**
+     * Seed verified installed packages while preserving explicit deny/revoke decisions.
+     */
+    internal fun seedVerified(entries: List<AllowlistEntry>, requireEmpty: Boolean, action: String) {
         if (entries.isEmpty()) return
         withFileLock {
-            if (readEntries().isNotEmpty()) return@withFileLock
+            val current = readEntries()
+            if (requireEmpty && current.isNotEmpty()) return@withFileLock
             val denied = readDeniedIncludingExpired()
             val now = System.currentTimeMillis()
-            val seeded = mutableListOf<AllowlistEntry>()
+            val seeded = current.toMutableList()
+            var changed = false
             for (entry in entries) {
                 if (denied.any { it.packageName == entry.packageName }) {
-                    MindlayerLog.i(TAG, "Skipped first-party allowlist seed for previously denied package ${entry.packageName}")
+                    MindlayerLog.i(TAG, "Skipped allowlist seed for previously denied package ${entry.packageName}")
                     continue
                 }
                 val live = CallerVerifier.identifyByPackage(appContext, entry.packageName)
                 if (live == null || !live.signingCertSha256.equals(entry.signingCertSha256, ignoreCase = true)) {
-                    MindlayerLog.w(TAG, "Rejected first-party allowlist seed for ${entry.packageName}: signer mismatch or package missing")
+                    MindlayerLog.w(TAG, "Rejected allowlist seed for ${entry.packageName}: signer mismatch or package missing")
                     continue
                 }
                 val seededEntry = AllowlistEntry(
@@ -186,14 +195,23 @@ class AllowlistStore(
                     grantedAtMs = now,
                     displayName = CallerVerifier.sanitizeLabel(live.displayName ?: entry.displayName),
                 )
-                seeded += seededEntry
+                val existingIndex = seeded.indexOfFirst { it.packageName == seededEntry.packageName }
+                if (existingIndex >= 0 && seeded[existingIndex].signingCertSha256.equals(seededEntry.signingCertSha256, ignoreCase = true)) {
+                    continue
+                }
+                if (existingIndex >= 0) {
+                    seeded[existingIndex] = seededEntry
+                } else {
+                    seeded += seededEntry
+                }
+                changed = true
                 logRepository?.logSecurityDecision(
-                    action = "seed_first_party",
+                    action = action,
                     packageName = seededEntry.packageName,
                     sigShaPrefix = seededEntry.signingCertSha256.take(8),
                 )
             }
-            if (seeded.isNotEmpty()) {
+            if (changed) {
                 writeEntries(seeded)
                 _entries.value = seeded
             }

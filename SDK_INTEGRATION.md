@@ -54,12 +54,28 @@ dependencies {
 In your client app's `AndroidManifest.xml`:
 
 ```xml
-<!-- Required to bind to Mindlayer service (signature-level) -->
+<!-- Required to bind to Mindlayer service -->
 <uses-permission android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE" />
 ```
 
-> **Important:** Your client app must be signed with the **same signing key** as the
-> Mindlayer service app. This is enforced by the `signature` protection level.
+> **Important:** Cross-app first-party integration requires Android 12 (API 31)
+> or later when the client is signed with a different Play app-signing key than
+> Mindlayer. On older devices, `Mindlayer.connect()` / `awaitConnected()` fails
+> with `MindlayerException` carrying
+> `MindlayerErrorCode.UNSUPPORTED_ANDROID_VERSION`.
+
+### Registering a new first-party app
+
+A new first-party Android app must be registered in Mindlayer in two places in
+the same PR:
+
+1. Add its Play app-signing certificate SHA-256 (lowercase hex, no separators)
+   to `app/src/main/res/values/arrays.xml` under
+   `mindlayer_trusted_client_certs` for the OS `signature|knownSigner` gate.
+2. Add the matching `(packageName, signingCertSha256)` entry to
+   `MindlayerMlService.FIRST_PARTY_ALLOWLIST_SEEDS` for the AIDL allowlist gate.
+
+The app parity test fails if these cert hash lists drift.
 
 ---
 
