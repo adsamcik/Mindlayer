@@ -158,3 +158,11 @@ When changing the AIDL surface:
 5. **Bump `MindlayerErrorCode`** if you're adding a typed error path. Mirror the symbolic name in `nameOf()` + `categoryOf()`.
 
 If this document is wrong, **fix the document in the same PR as the code change**. Don't let the docs drift silently.
+
+## Deferred inference surface (v0.6)
+
+`IMindlayerService` appends `inferDeferred`, `fetchDeferredResult`, `cancelDeferredInference`, and `acknowledgeDeferredResult` after the existing v0.4 callback methods. `IClientCallback` appends `onDeferredInferenceComplete`. Existing transaction codes are preserved because no existing method was reordered or renumbered.
+
+New parcelables: `DeferredHandle` and `DeferredResult`. The AIDL declaration files are mirrored byte-for-byte between `app/src/main/aidl` and `sdk/src/main/aidl`.
+
+Capability flag: `ServiceCapabilities.FEATURE_DEFERRED_INFERENCE`. New SDKs must check it and throw `NOT_SUPPORTED` when connected to an older service.

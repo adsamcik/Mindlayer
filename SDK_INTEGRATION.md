@@ -322,3 +322,22 @@ Bump version in `build.gradle.kts` root `publishVersion` before releasing.
 - **Same signing key** for service and client apps (signature permission)
 - **Android 8.0+** (minSdk 26)
 - **Model file** must be deployed (via Play AI Pack or manual push)
+
+## Deferred async inference (push + pull)
+
+Release criterion #7 is supported through the deferred API. Use `chatDeferred(...)` to submit work, keep the returned `DeferredHandle.requestId`, and either listen to `deferredCompletions()` or poll `fetchDeferredResult(requestId)` later.
+
+```kotlin
+val handle = mindlayer.chatDeferred(sessionId, "Summarize this later")
+mindlayer.deferredCompletions().collect { notice ->
+    if (notice.requestId == handle.requestId) {
+        val result = mindlayer.fetchDeferredResult(notice.requestId)
+        if (result.status == DeferredResult.READY) println(result.text)
+        mindlayer.acknowledgeDeferred(notice.requestId)
+    }
+}
+```
+
+Results are stored by the service until acknowledged or expired. Defaults: 16 in-flight deferred requests per UID, 64 completed/pending-fetch results per UID, 1 MiB accumulated result text per UID, and 24 hour TTL. Prompt text is never persisted in the deferred store; model result text is persisted intentionally for retrieval and is encrypted at rest with SQLCipher.
+
+Failure modes are returned in `DeferredResult.status`: `STILL_RUNNING`, `NOT_FOUND_OR_NOT_OWNED` (also used for cross-UID anti-enumeration), `EXPIRED`, `FAILED`, or `CANCELLED`. New SDKs check `ServiceCapabilities.FEATURE_DEFERRED_INFERENCE`; if an older service does not advertise it, deferred calls throw `MindlayerErrorCode.NOT_SUPPORTED`.

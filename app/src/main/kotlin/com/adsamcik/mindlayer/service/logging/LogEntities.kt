@@ -63,6 +63,11 @@ object LogEvent {
     const val TOOL_CALL_REJECTED = "tool_call_rejected"
     const val USER_MESSAGE = "user_message"
     const val MODEL_RESPONSE = "model_response"
+    const val DEFERRED_SUBMIT = "deferred_submit"
+    const val DEFERRED_COMPLETE = "deferred_complete"
+    const val DEFERRED_FETCH = "deferred_fetch"
+    const val DEFERRED_CANCEL = "deferred_cancel"
+    const val DEFERRED_EXPIRED = "deferred_expired"
     // Thermal
     const val BAND_CHANGE = "band_change"
     const val BACKEND_SWITCH = "backend_switch"

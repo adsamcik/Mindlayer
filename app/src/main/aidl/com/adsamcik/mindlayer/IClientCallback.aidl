@@ -24,4 +24,6 @@ interface IClientCallback {
      * @param reasonCode {@link com.adsamcik.mindlayer.shared.MindlayerErrorCode}.
      */
     oneway void onSessionEvicted(String sessionId, int reasonCode);
+
+    oneway void onDeferredInferenceComplete(String requestId, int statusCode);
 }

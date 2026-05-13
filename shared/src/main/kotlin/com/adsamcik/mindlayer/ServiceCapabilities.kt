@@ -158,6 +158,9 @@ data class ServiceCapabilities(
         /** v0.5: pipe emits `mindlayer.stream.v2` with batched token deltas. */
         const val FEATURE_TOKEN_BATCH: String = "token_batch"
 
+        /** v0.6: durable deferred inference with fetch and completion callback. */
+        const val FEATURE_DEFERRED_INFERENCE: String = "deferred_inference"
+
         /**
          * Baseline capabilities advertised by an old service that predates
          * [IMindlayerService.getCapabilities]. Used by the SDK fallback path
