@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="mindlayer_trusted_client_certs">
+        <!-- Starlit Coffee (com.adsamcik.starlitcoffee) -->
+        <item>5932936267cac21efd4bb7a25200bb9eaf58d890f566fadae4f0daa1a9bbae47</item>
+        <!-- Ledgit (com.adsamcik.expenses) -->
+        <item>027fde453b4fc327e5c4d7ac7d3f54b1fc711503e5a155fd72f31ff3a9a2e9bc</item>
+    </string-array>
+</resources>

@@ -10,7 +10,8 @@
 
     <permission
         android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE"
-        android:protectionLevel="signature" />
+        android:protectionLevel="signature|knownSigner"
+        android:knownCerts="@array/mindlayer_trusted_client_certs" />
 
     <application
         android:label="@string/app_name"
