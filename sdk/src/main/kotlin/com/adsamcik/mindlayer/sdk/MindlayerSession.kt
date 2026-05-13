@@ -29,6 +29,10 @@ class MindlayerSession internal constructor(
     suspend fun chatWithAudio(text: String, audioFile: File): InferenceHandle =
         client.chatWithAudio(sessionId, text, audioFile)
 
+    /** Submit a deferred text message and fetch the result later. */
+    suspend fun chatDeferred(text: String): com.adsamcik.mindlayer.DeferredHandle =
+        client.chatDeferred(sessionId, text)
+
     /** @see Mindlayer.chatOnce */
     suspend fun chatOnce(text: String): String =
         client.chatOnce(sessionId, text)

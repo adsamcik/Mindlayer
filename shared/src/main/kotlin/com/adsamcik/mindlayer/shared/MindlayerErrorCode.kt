@@ -152,6 +152,15 @@ object MindlayerErrorCode {
     /** Caller/session quota exhausted; destroy an existing session before retrying. */
     const val SESSION_QUOTA_EXHAUSTED = 5005
 
+    /** Connected service does not advertise the requested optional capability. */
+    const val NOT_SUPPORTED = 5006
+
+    /** Caller exceeded deferred-inference in-flight or pending-result quota. */
+    const val DEFERRED_QUOTA_EXHAUSTED = 5007
+
+    /** Deferred result expired before it was fetched. */
+    const val DEFERRED_EXPIRED = 5008
+
     // ---- 6xxx auth / allowlist ---------------------------------------------
 
     /** App not on the allowlist; user approval pending in the dashboard. */
@@ -212,7 +221,9 @@ object MindlayerErrorCode {
         INPUT_EXCEEDS_CONTEXT -> Category.VALIDATION
         THERMAL_CRITICAL, MEMORY_PRESSURE, LOW_MEMORY,
         CONCURRENT_LIMIT, RATE_LIMITED, SERVICE_THROTTLED,
-        TRANSIENT_RESOURCE_EXHAUSTED, SESSION_QUOTA_EXHAUSTED -> Category.RESOURCE
+        TRANSIENT_RESOURCE_EXHAUSTED, SESSION_QUOTA_EXHAUSTED,
+        NOT_SUPPORTED, DEFERRED_QUOTA_EXHAUSTED,
+        DEFERRED_EXPIRED -> Category.RESOURCE
         ALLOWLIST_PENDING, ALLOWLIST_REVOKED, IDENTITY_UNKNOWN -> Category.AUTH
         INTERNAL -> Category.UNKNOWN
         else -> Category.UNKNOWN
@@ -248,6 +259,9 @@ object MindlayerErrorCode {
         SERVICE_THROTTLED -> "SERVICE_THROTTLED"
         TRANSIENT_RESOURCE_EXHAUSTED -> "TRANSIENT_RESOURCE_EXHAUSTED"
         SESSION_QUOTA_EXHAUSTED -> "SESSION_QUOTA_EXHAUSTED"
+        NOT_SUPPORTED -> "NOT_SUPPORTED"
+        DEFERRED_QUOTA_EXHAUSTED -> "DEFERRED_QUOTA_EXHAUSTED"
+        DEFERRED_EXPIRED -> "DEFERRED_EXPIRED"
         ALLOWLIST_PENDING -> "ALLOWLIST_PENDING"
         ALLOWLIST_REVOKED -> "ALLOWLIST_REVOKED"
         IDENTITY_UNKNOWN -> "IDENTITY_UNKNOWN"

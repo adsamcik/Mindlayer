@@ -13,6 +13,8 @@ import com.adsamcik.mindlayer.ServiceCapabilities;
 import com.adsamcik.mindlayer.CancelResult;
 import com.adsamcik.mindlayer.ToolSubmitResult;
 import com.adsamcik.mindlayer.DiagnosticsSnapshot;
+import com.adsamcik.mindlayer.DeferredHandle;
+import com.adsamcik.mindlayer.DeferredResult;
 import com.adsamcik.mindlayer.IClientCallback;
 
 interface IMindlayerService {
@@ -91,5 +93,12 @@ interface IMindlayerService {
     // Capability-gated via ServiceCapabilities.FEATURE_EVICTION_CALLBACK.
     void subscribeEvictionNotices(IClientCallback callback);
     void unsubscribeEvictionNotices(IClientCallback callback);
-}
 
+    // v0.6 deferred inference: submit now, fetch result later, and receive
+    // push completion through IClientCallback.onDeferredInferenceComplete.
+    // Capability-gated via ServiceCapabilities.FEATURE_DEFERRED_INFERENCE.
+    DeferredHandle inferDeferred(in RequestMeta meta, in List<MediaPart> media);
+    DeferredResult fetchDeferredResult(String requestId);
+    CancelResult cancelDeferredInference(String requestId);
+    void acknowledgeDeferredResult(String requestId);
+}

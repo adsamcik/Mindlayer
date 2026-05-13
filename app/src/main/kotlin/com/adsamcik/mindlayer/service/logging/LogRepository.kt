@@ -78,6 +78,47 @@ class LogRepository(
     fun droppedLogCount(): Long = droppedCount.get()
 
     // Convenience builders
+    fun logDeferredSubmit(requestId: String, sessionId: String, mediaCount: Int) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.INFERENCE,
+            event = LogEvent.DEFERRED_SUBMIT,
+            requestId = requestId,
+            sessionId = sessionId,
+            extraJson = logExtraJson { put("mediaCount", mediaCount) },
+        ))
+    }
+
+    fun logDeferredComplete(requestId: String, sessionId: String?, statusCode: Int) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.INFERENCE,
+            event = LogEvent.DEFERRED_COMPLETE,
+            requestId = requestId,
+            sessionId = sessionId,
+            extraJson = logExtraJson { put("status", statusCode) },
+        ))
+    }
+
+    fun logDeferredFetch(requestId: String, statusCode: Int) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.INFERENCE,
+            event = LogEvent.DEFERRED_FETCH,
+            requestId = requestId,
+            extraJson = logExtraJson { put("status", statusCode) },
+        ))
+    }
+
+    fun logDeferredCancel(requestId: String, outcome: Int) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.INFERENCE,
+            event = LogEvent.DEFERRED_CANCEL,
+            requestId = requestId,
+            extraJson = logExtraJson { put("outcome", outcome) },
+        ))
+    }
     fun logInferenceStart(requestId: String, sessionId: String, backend: String) {
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
