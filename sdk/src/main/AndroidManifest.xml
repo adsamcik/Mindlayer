@@ -14,6 +14,5 @@
     -->
     <application
         android:dataExtractionRules="@xml/sdk_data_extraction_rules"
-        tools:replace="android:dataExtractionRules"
         tools:targetApi="s" />
 </manifest>

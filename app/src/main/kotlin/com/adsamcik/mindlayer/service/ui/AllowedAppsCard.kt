@@ -124,13 +124,13 @@ fun AllowedAppsCard(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                text = "Allowed apps",
+                text = stringResource(R.string.allowed_apps_title),
                 style = MaterialTheme.typography.titleMedium,
             )
 
             if (pending.isNotEmpty()) {
                 Text(
-                    text = "Pending approvals (${pending.size})",
+                    text = stringResource(R.string.pending_approvals_count, pending.size),
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.tertiary,
                 )
@@ -208,7 +208,7 @@ fun AllowedAppsCard(
 
             if (entries.isEmpty()) {
                 Text(
-                    text = "No apps have been approved yet.",
+                    text = stringResource(R.string.allowed_apps_empty),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -295,13 +295,13 @@ private fun PendingRow(
                 )
                 if (entry.displayName != null) {
                     Text(
-                        text = "claims to be: ${entry.displayName}",
+                        text = stringResource(R.string.allowlist_claims_to_be, entry.displayName),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Text(
-                    text = "Installed from: $installSource",
+                    text = stringResource(R.string.allowlist_installed_from, installSource),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -341,7 +341,7 @@ private fun ApproveDenyButtons(
     // `remember` is keyed to the row's own composition).
     var confirmed by remember(isCertRotation) { mutableStateOf(!isCertRotation) }
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        TextButton(onClick = onDeny) { Text("Deny") }
+        TextButton(onClick = onDeny) { Text(stringResource(R.string.allowlist_deny)) }
         if (isCertRotation && !confirmed) {
             TextButton(onClick = { confirmed = true }) {
                 Text(stringResource(R.string.allowlist_understand_signing_change))
@@ -386,13 +386,13 @@ private fun CertRotationBanner(previousSig: String, newSig: String) {
                 color = MaterialTheme.colorScheme.onErrorContainer,
             )
             Text(
-                text = "was: ${previousSig.uppercase().take(16)}…",
+                text = stringResource(R.string.allowlist_previous_sig, previousSig.uppercase().take(16)),
                 style = MaterialTheme.typography.labelSmall,
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onErrorContainer,
             )
             Text(
-                text = "now: ${newSig.uppercase().take(16)}…",
+                text = stringResource(R.string.allowlist_new_sig, newSig.uppercase().take(16)),
                 style = MaterialTheme.typography.labelSmall,
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onErrorContainer,
@@ -411,16 +411,14 @@ private fun ApproveConfirmDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Approve access?") },
+        title = { Text(stringResource(R.string.allowlist_approve_access_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "⚠\uFE0F App labels can be spoofed. Verify the package name and " +
-                        "signing fingerprint match the developer you trust before approving. " +
-                        "This grants the app on-device LLM access for as long as it's installed.",
+                    text = stringResource(R.string.allowlist_spoof_warning),
                     style = MaterialTheme.typography.bodySmall,
                 )
-                Text(text = "Package:", style = MaterialTheme.typography.labelMedium)
+                Text(text = stringResource(R.string.allowlist_package_label), style = MaterialTheme.typography.labelMedium)
                 SelectionContainer {
                     Text(
                         text = packageName,
@@ -428,7 +426,7 @@ private fun ApproveConfirmDialog(
                         fontSize = 12.sp,
                     )
                 }
-                Text(text = "Signing fingerprint (SHA-256):", style = MaterialTheme.typography.labelMedium)
+                Text(text = stringResource(R.string.allowlist_signing_fingerprint_label), style = MaterialTheme.typography.labelMedium)
                 SelectionContainer {
                     Text(
                         text = formatCertHash(certHash),
@@ -436,11 +434,11 @@ private fun ApproveConfirmDialog(
                         fontSize = 10.sp,
                     )
                 }
-                Text(text = "Install source: $installSource", style = MaterialTheme.typography.bodySmall)
+                Text(text = stringResource(R.string.allowlist_install_source, installSource), style = MaterialTheme.typography.bodySmall)
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
         confirmButton = {
             TextButton(
@@ -449,7 +447,7 @@ private fun ApproveConfirmDialog(
                     contentColor = MaterialTheme.colorScheme.error,
                 ),
             ) {
-                Text("Approve $packageName")
+                Text(stringResource(R.string.allowlist_approve_package, packageName))
             }
         },
     )
@@ -464,14 +462,14 @@ private fun RevokeConfirmDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Revoke access?") },
+        title = { Text(stringResource(R.string.allowlist_revoke_access_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "This will immediately block $packageName from accessing on-device LLM.",
+                    text = stringResource(R.string.allowlist_revoke_body, packageName),
                     style = MaterialTheme.typography.bodySmall,
                 )
-                Text(text = "Package:", style = MaterialTheme.typography.labelMedium)
+                Text(text = stringResource(R.string.allowlist_package_label), style = MaterialTheme.typography.labelMedium)
                 SelectionContainer {
                     Text(
                         text = packageName,
@@ -479,7 +477,7 @@ private fun RevokeConfirmDialog(
                         fontSize = 12.sp,
                     )
                 }
-                Text(text = "Signing fingerprint (SHA-256):", style = MaterialTheme.typography.labelMedium)
+                Text(text = stringResource(R.string.allowlist_signing_fingerprint_label), style = MaterialTheme.typography.labelMedium)
                 SelectionContainer {
                     Text(
                         text = formatCertHash(certHash),
@@ -490,7 +488,7 @@ private fun RevokeConfirmDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
         confirmButton = {
             TextButton(
@@ -499,7 +497,7 @@ private fun RevokeConfirmDialog(
                     contentColor = MaterialTheme.colorScheme.error,
                 ),
             ) {
-                Text("Revoke $packageName")
+                Text(stringResource(R.string.allowlist_revoke_package, packageName))
             }
         },
     )
@@ -538,7 +536,7 @@ private fun EntryRow(
             )
             if (entry.displayName != null) {
                 Text(
-                    text = "claims to be: ${entry.displayName}",
+                    text = stringResource(R.string.allowlist_claims_to_be, entry.displayName),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -552,7 +550,7 @@ private fun EntryRow(
                 )
             }
         }
-        TextButton(onClick = { showDialog = true }) { Text("Revoke") }
+        TextButton(onClick = { showDialog = true }) { Text(stringResource(R.string.allowlist_revoke)) }
     }
 }
 

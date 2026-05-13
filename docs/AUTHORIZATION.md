@@ -289,11 +289,12 @@ don't want them to pollute the dashboard's pending list.
 These are intentional non-goals today; flag them if your threat model
 requires them:
 
-- **No programmatic seeding.** Not even for first-party client apps. If
-  you ship Mindlayer alongside a trusted suite, you'd need to add
-  `AllowlistStore.seedIfEmpty(...)` and call it from
-  `MindlayerMlService.onCreate`. The tradeoff is that you bake the seed
-  into the APK, which makes OTA trust updates harder.
+- **First-party seeding is opt-in and guarded.** `MindlayerMlService.onCreate`
+  calls `AllowlistStore.seedIfEmpty(...)` with the baked-in first-party seed
+  list. The hook only runs when the allowlist is empty, verifies each installed
+  package against its pinned signing-cert hash, skips previously denied/revoked
+  packages, and writes a `security_decision` log row for each insertion. Add new
+  co-signed first-party apps in `MindlayerMlService.FIRST_PARTY_ALLOWLIST_SEEDS`.
 - **No manual "Add app" UI.** See the rationale in
   [Default-deny posture](#default-deny-posture).
 - **No SDK "waiting for approval" coroutine.** Clients see
