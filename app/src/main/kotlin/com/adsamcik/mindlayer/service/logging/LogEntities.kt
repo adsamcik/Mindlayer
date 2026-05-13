@@ -53,6 +53,10 @@ object LogEvent {
     const val REQUEST_ERROR = "request_error"
     const val TOOL_CALL = "tool_call"
     const val TOOL_RESULT = "tool_result"
+    const val TOOL_CALL_EXIT = "tool_call_exit"
+    const val TOOL_CALL_TIMEOUT = "tool_call_timeout"
+    const val STREAM_FRAME_TOO_LARGE = "stream_frame_too_large"
+    const val STREAM_BACKPRESSURE = "stream_backpressure"
     // F-036: model fabricated an unknown tool name OR emitted oversized
     // arguments; the orchestrator dropped/truncated the call. Logged
     // under LogCategory.SECURITY so the dashboard surfaces it.
@@ -66,6 +70,7 @@ object LogEvent {
     const val SESSION_CREATED = "session_created"
     const val SESSION_DESTROYED = "session_destroyed"
     const val SESSION_EVICTED = "session_evicted"
+    const val SESSION_QUOTA_EXCEEDED = "session_quota_exceeded"
     // Memory
     const val PRESSURE_CHANGE = "pressure_change"
     const val EVICTION_TRIGGERED = "eviction_triggered"
@@ -73,6 +78,8 @@ object LogEvent {
     const val ENGINE_INIT = "engine_init"
     const val ENGINE_SHUTDOWN = "engine_shutdown"
     const val ENGINE_FALLBACK = "engine_fallback"
+    const val FGS_PROMOTED = "fgs_promoted"
+    const val FGS_DEMOTED = "fgs_demoted"
     // F-077: typed init-failure category. The variant name lands in
     // `extraJson` under "failureCategory"; the optional safeLabel goes
     // in `errorMessage` (already F-006-clean — class-name-only). The
@@ -83,4 +90,9 @@ object LogEvent {
     const val GENERAL_ERROR = "general_error"
     // Security
     const val SECURITY_DECISION = "security_decision"
+    const val RATE_LIMIT_REJECT = "rate_limit_reject"
+    const val ALLOWLIST_PENDING_RECORDED = "allowlist_pending_recorded"
+    const val BINDER_DEATH_CLIENT = "binder_death_client"
+    const val BINDER_DEATH_SELF = "binder_death_self"
+    const val CRASH_LOOP_THROTTLE = "crash_loop_throttle"
 }

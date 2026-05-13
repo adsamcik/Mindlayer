@@ -314,6 +314,7 @@ class ServiceBinder(
         val healthRecorder = mlHealthRecorder
         if (healthRecorder != null && healthRecorder.shouldThrottleBinds()) {
             val cooldown = healthRecorder.cooldownEndsAt()
+            logRepository?.logCrashLoopThrottle(uid, cooldown)
             MindlayerLog.w(
                 TAG,
                 "Service throttled — refusing bind from uid=$uid (cooldownEndsAt=$cooldown)",
@@ -332,6 +333,7 @@ class ServiceBinder(
                 // can't even produce a valid identity before we waste any more
                 // work on them.
                 if (!rateLimiter.tryAcquireRejected(uid)) {
+                    logRepository?.logRateLimitReject(callerAidlMethodName(), uid, cost)
                     MindlayerLog.w(TAG, "Reject flood from uid=$uid (no identity)")
                     throw SecurityException("Rate limit exceeded")
                 }
@@ -344,6 +346,7 @@ class ServiceBinder(
         //    whether the caller is approved or not. F-064: cost-weighted —
         //    cheap status/info methods pass a fractional cost.
         if (!rateLimiter.tryAcquire(uid, cost)) {
+            logRepository?.logRateLimitReject(callerAidlMethodName(), uid, cost)
             MindlayerLog.w(TAG, "Rate limit exceeded for ${identity.packageName} (uid=$uid)")
             throw SecurityException("Rate limit exceeded for ${identity.packageName}")
         }
@@ -365,6 +368,11 @@ class ServiceBinder(
                         pkg = identity.packageName,
                         sigSha256 = identity.signingCertSha256,
                         displayName = identity.displayName,
+                    )
+                    logRepository?.logAllowlistPendingRecorded(
+                        uid = uid,
+                        packageName = identity.packageName,
+                        sigShaPrefix = identity.signingCertSha256.take(12),
                     )
                     MindlayerLog.w(TAG, "Blocked un-approved caller ${identity.packageName} (uid=$uid)")
                 }
@@ -507,6 +515,7 @@ class ServiceBinder(
         // Build the recipient first so it can capture itself by reference.
         lateinit var recipient: IBinder.DeathRecipient
         recipient = IBinder.DeathRecipient {
+            logRepository?.logBinderDeathClient(uid, registration.registrationId)
             MindlayerLog.w(TAG, "Client uid=$uid registration died; cleaning up owned sessions")
             val cur = clientDeathRecipients[registration]
             if (cur != null && cur.second === recipient) {
@@ -856,6 +865,13 @@ class ServiceBinder(
             requireOwnership(meta.sessionId)
 
             if (!rateLimiter.beginInference(uid)) {
+                logRepository?.logRateLimitReject(
+                    method = "infer",
+                    uid = uid,
+                    cost = 1.0,
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                )
                 MindlayerLog.w(
                     TAG,
                     "Concurrent inference limit exceeded for ${identity.packageName}",
@@ -1673,6 +1689,9 @@ class ServiceBinder(
         val modelSize = currentModel?.sizeBytes
             ?.takeIf { it > 0 }
             ?: 0L
+        val latestThroughput = runBlocking {
+            logRepository?.latestThroughput() ?: (0f to 0f)
+        }
 
         return EngineInfo(
             modelId = modelId,
@@ -1680,8 +1699,8 @@ class ServiceBinder(
             backend = engineManager.currentBackend,
             maxTokens = 4096,
             initTimeSeconds = engineManager.initTimeSeconds,
-            lastPrefillToksPerSec = 0f,
-            lastDecodeToksPerSec = 0f,
+            lastPrefillToksPerSec = latestThroughput.first,
+            lastDecodeToksPerSec = latestThroughput.second,
         )
     }
 
@@ -1752,11 +1771,32 @@ class ServiceBinder(
             engine = getEngineInfo(),
             callerSessionCount = callerSessions,
             recentInferenceCount = recentForCaller,
-            // No log-DB read on this path; populate when the eviction work lands.
-            recentErrorCount = 0,
+            recentErrorCount = runBlocking {
+                logRepository?.recentErrorCount(recentErrorWindowMs()) ?: 0
+            },
             recentlyCompletedTrackedCount = recentlyCompleted.size,
         )
     }
+
+    private fun callerAidlMethodName(): String =
+        Thread.currentThread().stackTrace
+            .firstOrNull { frame ->
+                frame.className == ServiceBinder::class.java.name &&
+                    frame.methodName !in setOf(
+                        "authorizeCall",
+                        "callerAidlMethodName",
+                        "requireOwnership",
+                        "requireRegisteredClient",
+                    )
+            }
+            ?.methodName
+            ?: "unknown"
+
+    private fun recentErrorWindowMs(): Long =
+        System.getProperty("mindlayer.diagnostics.recentErrorWindowMs")
+            ?.toLongOrNull()
+            ?.coerceAtLeast(0L)
+            ?: 60_000L
 
     /**
      * Pluggable caller-verification hook. Production uses [CallerVerifier];

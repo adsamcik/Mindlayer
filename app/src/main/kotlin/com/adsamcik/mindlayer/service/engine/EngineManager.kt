@@ -367,6 +367,10 @@ class EngineManager(
     private fun verifyModelIntegrity(file: File) {
         val expected = expectedModelSha256
         if (expected.isEmpty()) {
+            if (!com.adsamcik.mindlayer.service.BuildConfig.DEBUG) {
+                MindlayerLog.e(TAG, "Release build has empty BuildConfig.MODEL_SHA256; refusing to load model.")
+                throw SecurityException("Model integrity check failed: missing release SHA-256")
+            }
             MindlayerLog.w(
                 TAG,
                 "Model integrity manifest empty — loading without SHA-256 " +
