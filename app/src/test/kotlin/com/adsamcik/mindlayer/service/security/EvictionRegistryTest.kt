@@ -46,6 +46,27 @@ class EvictionRegistryTest {
     }
 
     @Test
+    fun `notifyEviction dispatches allowlist revoked reason to every callback`() {
+        val reg = EvictionRegistry()
+        val cb1 = CountingCallback()
+        val cb2 = CountingCallback()
+        reg.register(uid = 10001, cb1)
+        reg.register(uid = 10001, cb2)
+
+        reg.notifyEviction(
+            uid = 10001,
+            sessionId = "revoked-session",
+            reasonCode = com.adsamcik.mindlayer.shared.MindlayerErrorCode.ALLOWLIST_REVOKED,
+        )
+
+        assertEquals(1, cb1.invocations.get())
+        assertEquals(1, cb2.invocations.get())
+        assertEquals("revoked-session", cb1.lastSessionId)
+        assertEquals(com.adsamcik.mindlayer.shared.MindlayerErrorCode.ALLOWLIST_REVOKED, cb1.lastReasonCode)
+        assertEquals(com.adsamcik.mindlayer.shared.MindlayerErrorCode.ALLOWLIST_REVOKED, cb2.lastReasonCode)
+    }
+
+    @Test
     fun `register is idempotent per binder`() {
         val reg = EvictionRegistry()
         val cb = CountingCallback()

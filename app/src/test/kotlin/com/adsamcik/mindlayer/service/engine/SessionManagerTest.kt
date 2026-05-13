@@ -722,6 +722,31 @@ class SessionManagerTest {
         assertEquals(0, sessionManager.sessionCount)
     }
 
+    @Test
+    fun `closeAllOwnedByUidForRevoke fires allowlist revoked eviction notices`() {
+        val notices = mutableListOf<Triple<String, Int?, Int>>()
+        sessionManager.setEvictionListener { sessionId, ownerUid, reasonCode ->
+            notices += Triple(sessionId, ownerUid, reasonCode)
+        }
+        sessionManager.createSession(SessionConfig(sessionId = "revoked-1"), ownerToken = 1234)
+        sessionManager.createSession(SessionConfig(sessionId = "revoked-2"), ownerToken = 1234)
+        sessionManager.createSession(SessionConfig(sessionId = "other-owner"), ownerToken = 5678)
+
+        val closed = sessionManager.closeAllOwnedByUidForRevoke(1234)
+
+        assertEquals(setOf("revoked-1", "revoked-2"), closed.toSet())
+        assertNull(sessionManager.getSession("revoked-1"))
+        assertNull(sessionManager.getSession("revoked-2"))
+        assertNotNull(sessionManager.getSession("other-owner"))
+        assertEquals(
+            setOf(
+                Triple("revoked-1", 1234, com.adsamcik.mindlayer.shared.MindlayerErrorCode.ALLOWLIST_REVOKED),
+                Triple("revoked-2", 1234, com.adsamcik.mindlayer.shared.MindlayerErrorCode.ALLOWLIST_REVOKED),
+            ),
+            notices.toSet(),
+        )
+    }
+
     // ---- Device tier from MemoryBudget -------------------------------------
 
     @Test

@@ -1441,6 +1441,10 @@ class Mindlayer private constructor(
         val pipe = ParcelFileDescriptor.createReliablePipe()
         val readEnd = pipe[0]
         val writeEnd = pipe[1]
+        val mediaSources = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<ParcelFileDescriptor, Boolean>(),
+        )
+        media.forEach { mediaSources.add(it.source) }
 
         try {
             val service = connection.awaitConnected()
@@ -1461,6 +1465,7 @@ class Mindlayer private constructor(
             throw e
         } finally {
             writeEnd.close()
+            mediaSources.forEach { it.closeQuietly() }
         }
 
         return TokenStreamReader.readStream(readEnd)
