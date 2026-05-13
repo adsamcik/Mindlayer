@@ -273,6 +273,179 @@ class LogRepository(
         ))
     }
 
+
+    fun logRequestCancel(requestId: String, sessionId: String?) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.INFERENCE,
+            event = LogEvent.REQUEST_CANCEL,
+            requestId = requestId,
+            sessionId = sessionId,
+        ))
+    }
+
+    fun logRateLimitReject(method: String, uid: Int, cost: Double, requestId: String? = null, sessionId: String? = null) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.SECURITY,
+            event = LogEvent.RATE_LIMIT_REJECT,
+            requestId = requestId,
+            sessionId = sessionId,
+            extraJson = logExtraJson {
+                put("method", method)
+                put("uid", uid)
+                put("cost", cost)
+            },
+        ))
+    }
+
+    fun logAllowlistPendingRecorded(uid: Int, packageName: String, sigShaPrefix: String) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.SECURITY,
+            event = LogEvent.ALLOWLIST_PENDING_RECORDED,
+            extraJson = logExtraJson {
+                put("uid", uid)
+                put("pkg", packageName)
+                put("sigPrefix", sigShaPrefix)
+            },
+        ))
+    }
+
+    fun logFgsPromoted(activeInferenceCount: Int) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.ENGINE,
+            event = LogEvent.FGS_PROMOTED,
+            extraJson = logExtraJson { put("activeInferenceCount", activeInferenceCount) },
+        ))
+    }
+
+    fun logFgsDemoted(activeInferenceCount: Int) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.ENGINE,
+            event = LogEvent.FGS_DEMOTED,
+            extraJson = logExtraJson { put("activeInferenceCount", activeInferenceCount) },
+        ))
+    }
+
+    fun logBackendSwitch(fromBackend: String, toBackend: String, outcome: String) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.ENGINE,
+            event = LogEvent.BACKEND_SWITCH,
+            backend = toBackend,
+            extraJson = logExtraJson {
+                put("from", fromBackend)
+                put("to", toBackend)
+                put("outcome", outcome)
+            },
+        ))
+    }
+
+    fun logBinderDeathClient(uid: Int, registrationId: String? = null) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.SECURITY,
+            event = LogEvent.BINDER_DEATH_CLIENT,
+            extraJson = logExtraJson {
+                put("uid", uid)
+                registrationId?.let { put("registrationId", it) }
+            },
+        ))
+    }
+
+    fun logBinderDeathSelf(uid: Int) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.SECURITY,
+            event = LogEvent.BINDER_DEATH_SELF,
+            extraJson = logExtraJson { put("uid", uid) },
+        ))
+    }
+
+    fun logCrashLoopThrottle(uid: Int, cooldownEndsAtMs: Long) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.SECURITY,
+            event = LogEvent.CRASH_LOOP_THROTTLE,
+            extraJson = logExtraJson {
+                put("uid", uid)
+                put("cooldownEndsAtMs", cooldownEndsAtMs)
+            },
+        ))
+    }
+
+    fun logStreamFrameTooLarge(frameBytes: Int, maxFrameBytes: Int) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.INFERENCE,
+            event = LogEvent.STREAM_FRAME_TOO_LARGE,
+            extraJson = logExtraJson {
+                put("frameBytes", frameBytes)
+                put("maxFrameBytes", maxFrameBytes)
+            },
+        ))
+    }
+
+    fun logStreamBackpressure(timeoutMs: Long) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.INFERENCE,
+            event = LogEvent.STREAM_BACKPRESSURE,
+            durationMs = timeoutMs,
+        ))
+    }
+
+    fun logSessionQuotaExceeded(sessionId: String?, ownerUid: Int?, ownedNow: Int, cap: Int, tierMaxSessions: Int) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.SESSION,
+            event = LogEvent.SESSION_QUOTA_EXCEEDED,
+            sessionId = sessionId,
+            extraJson = logExtraJson {
+                ownerUid?.let { put("uid", it) }
+                put("ownedNow", ownedNow)
+                put("cap", cap)
+                put("tierMaxSessions", tierMaxSessions)
+            },
+        ))
+    }
+
+    fun logToolCallExit(requestId: String, sessionId: String?, result: String, pendingCount: Int) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.INFERENCE,
+            event = LogEvent.TOOL_CALL_EXIT,
+            requestId = requestId,
+            sessionId = sessionId,
+            extraJson = logExtraJson {
+                put("result", result)
+                put("pendingCount", pendingCount)
+            },
+        ))
+    }
+
+    fun logToolCallTimeout(requestId: String, sessionId: String?, timeoutMs: Long) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.INFERENCE,
+            event = LogEvent.TOOL_CALL_TIMEOUT,
+            requestId = requestId,
+            sessionId = sessionId,
+            durationMs = timeoutMs,
+        ))
+    }
+
+    suspend fun recentErrorCount(windowMs: Long = 60_000L): Int =
+        dao.recentErrorCountSince(System.currentTimeMillis() - windowMs.coerceAtLeast(0L))
+
+    suspend fun latestThroughput(): Pair<Float, Float>? =
+        dao.latestThroughput()?.let { entry ->
+            (entry.prefillTokensPerSec ?: 0f) to (entry.tokensPerSec ?: 0f)
+        }
+
     // Cleanup logs older than N days
     suspend fun cleanup(retentionDays: Int = 7) {
         val cutoff = System.currentTimeMillis() - (retentionDays * 24 * 60 * 60 * 1000L)

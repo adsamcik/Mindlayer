@@ -43,6 +43,12 @@ interface LogDao {
     @Query("SELECT COUNT(*) FROM usage_logs WHERE category = 'ERROR' AND timestampMs > :sinceMs")
     suspend fun errorCountSince(sinceMs: Long): Int
 
+    @Query("SELECT COUNT(*) FROM usage_logs WHERE category = 'ERROR' AND timestampMs > :sinceMs")
+    suspend fun recentErrorCountSince(sinceMs: Long): Int
+
+    @Query("SELECT * FROM usage_logs WHERE event = 'request_complete' AND (tokensPerSec IS NOT NULL OR prefillTokensPerSec IS NOT NULL) ORDER BY timestampMs DESC LIMIT 1")
+    suspend fun latestThroughput(): LogEntry?
+
     // Thermal band distribution
     @Query("SELECT thermalBand, COUNT(*) as count FROM usage_logs WHERE category = 'THERMAL' AND event = 'band_change' GROUP BY thermalBand")
     suspend fun thermalBandDistribution(): List<ThermalBandCount>
