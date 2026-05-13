@@ -167,14 +167,15 @@ class MindlayerException @JvmOverloads constructor(
         fun fromStreamError(
             message: String,
             codeName: String?,
+            codeInt: Int? = null,
             seq: Long? = null,
             tsMs: Long? = null,
             requestId: String? = null,
             sessionId: String? = null,
         ): MindlayerException = MindlayerException(
             message = message,
-            code = MindlayerErrorCode.UNKNOWN,
-            codeName = codeName,
+            code = codeInt ?: MindlayerErrorCode.UNKNOWN,
+            codeName = codeName ?: codeInt?.let { MindlayerErrorCode.nameOf(it) },
             requestId = requestId,
             sessionId = sessionId,
             seq = seq,

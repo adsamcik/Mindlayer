@@ -60,19 +60,19 @@ Every public AIDL Parcelable lives in `:shared` and crosses process boundaries v
 | `ServiceCapabilities` (v0.2) | `schemaVersion: Int = 1` first; 13 numeric/feature fields | First parcelable to follow the schemaVersion convention. |
 | `MediaPart` (v0.4) | `schemaVersion: Int = 1` first; tagged-union kind + image/audio/video/document fields | Carries an ordered list via `inferMulti`. Wire reserves `KIND_VIDEO`/`KIND_DOCUMENT` for engines that aren't here yet. |
 
-### 3. Pipe stream protocol (`mindlayer.stream.v1`)
+### 3. Pipe stream protocol (`mindlayer.stream.v1` / `mindlayer.stream.v2`)
 
 The inference event stream uses length-prefixed JSON frames. Today's contract:
 
 - 4-byte little-endian u32 length + UTF-8 JSON payload (envelope: `StreamEvent`).
-- `StreamHeader` first frame carries `protocol = "mindlayer.stream.v1"`. As of v0.2 the SDK reader **validates** this string and emits `MindlayerEvent.Error("PROTOCOL_MISMATCH")` on a mismatch.
+- `StreamHeader` first frame carries `protocol = "mindlayer.stream.v1"` or `"mindlayer.stream.v2"`. As of v0.5 the SDK reader supports v2 token batching and validates the protocol string, emitting `MindlayerEvent.Error("PROTOCOL_MISMATCH")` on a mismatch.
 - Event types are stringly-keyed (`StreamEventType.*`). Unknown event types on the reader side become `MindlayerEvent.Unknown` so old readers don't crash on new event types.
 
 **Adding event types** is forward-compatible: do it freely. Old readers see `Unknown(type)` and ignore.
 
-**Changing the frame format itself** (e.g. token batching's binary deltas) is wire-breaking. The plan is to negotiate via `getCapabilities().pipeProtocol` once that lands, and ship a `mindlayer.stream.v2` flavor only when the negotiated capability is present.
+**Changing the frame format itself** is wire-breaking. Additive JSON payload fields are compatible. `mindlayer.stream.v2` is currently supported for token batching; callers opt in via session `extraContextJson` and capability checks.
 
-**Stream `ERROR` frames** carry the same code vocabulary as AIDL exceptions: `code` is a `MindlayerErrorCode` symbolic name (string for now; the int code is parallel via `MindlayerErrorCode.codeFromWireMessage` on the AIDL path). See `MindlayerErrorCode.kt`.
+**Stream `ERROR` frames** carry the same code vocabulary as AIDL exceptions: `code` is the symbolic `MindlayerErrorCode` name and v2-capable writers also include `codeInt`, the stable integer code. New SDKs tolerate old writers where `codeInt == null`; old SDKs continue reading the unchanged `code` string.
 
 ### 4. Error code allocation (`MindlayerErrorCode`)
 
@@ -82,9 +82,9 @@ Codes are wire-stable integers. The allocation table:
 |---|---|---|
 | 1xxx | Engine lifecycle | `ENGINE_INITIALIZING`, `ENGINE_LOAD_FAILED` |
 | 2xxx | Session lifecycle | `SESSION_NOT_FOUND_OR_NOT_OWNED` (single anti-enumeration code), `SESSION_EVICTED`, `SESSION_EXPIRED` |
-| 3xxx | Request validation | `INVALID_REQUEST`, `INVALID_SESSION_CONFIG`, `INVALID_TOOL_RESULT`, `DUPLICATE_REQUEST`, `NO_ACTIVE_REQUEST` |
-| 4xxx | Resource exhaustion | `THERMAL_CRITICAL`, `MEMORY_PRESSURE` |
-| 5xxx | Quota / rate limit | `CONCURRENT_LIMIT`, `RATE_LIMITED` |
+| 3xxx | Request validation | `INVALID_REQUEST`, `INVALID_SESSION_CONFIG`, `INVALID_TOOL_RESULT`, `DUPLICATE_REQUEST`, `NO_ACTIVE_REQUEST`, `INPUT_EXCEEDS_CONTEXT` |
+| 4xxx | Resource exhaustion | `THERMAL_CRITICAL`, `MEMORY_PRESSURE`, `LOW_MEMORY` |
+| 5xxx | Quota / rate limit | `CONCURRENT_LIMIT`, `RATE_LIMITED`, `SERVICE_THROTTLED`, `TRANSIENT_RESOURCE_EXHAUSTED` |
 | 6xxx | Auth / allowlist | `ALLOWLIST_PENDING`, `ALLOWLIST_REVOKED`, `IDENTITY_UNKNOWN` |
 | 9999 | `INTERNAL` | Should not appear in healthy operation |
 

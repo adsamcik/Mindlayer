@@ -227,6 +227,10 @@ class OomRecoveryFlowTest {
 
         assertNotNull(result)
         assertEquals("Lost in transit", result!!.pendingUserText)
+        assertEquals("u-pending", result.pendingUserTurnId)
+
+        result.markPendingUserResolved(recovery)
+        assertNull(db.turnDao().firstPendingUserTurn(sessionId))
     }
 
     @Test
