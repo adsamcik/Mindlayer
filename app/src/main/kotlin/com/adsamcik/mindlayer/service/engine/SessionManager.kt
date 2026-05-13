@@ -15,6 +15,7 @@ import com.google.ai.edge.litertlm.tool
 import com.adsamcik.mindlayer.HistoryTurn
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.SessionInfo
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -125,6 +126,9 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     @Volatile
     private var evictionListener: ((sessionId: String, ownerUid: Int?, reasonCode: Int) -> Unit)? = null
 
+    @Volatile
+    private var emergencyStreamCanceller: ((reasonCode: Int) -> Unit)? = null
+
     /**
      * Install an [evictionListener]. Calling this twice replaces the previous
      * listener — the contract assumes a single owner (the [ServiceBinder]).
@@ -133,6 +137,12 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         listener: ((sessionId: String, ownerUid: Int?, reasonCode: Int) -> Unit)?,
     ) {
         evictionListener = listener
+    }
+
+    fun setEmergencyStreamCanceller(
+        canceller: ((reasonCode: Int) -> Unit)?,
+    ) {
+        emergencyStreamCanceller = canceller
     }
 
 
@@ -482,8 +492,46 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             destroySessionInternal(id, com.adsamcik.mindlayer.shared.MindlayerErrorCode.SESSION_EXPIRED)
             return null
         }
+        if (handle.backendInvalidated) {
+            return rewarmBackendInvalidatedSession(id, handle)
+        }
         handle.recordAccess()
         return handle
+    }
+
+    @Synchronized
+    private fun rewarmBackendInvalidatedSession(id: String, expected: SessionHandle): SessionHandle? {
+        val current = sessions[id] ?: return null
+        if (current !== expected || !current.backendInvalidated) {
+            current.recordAccess()
+            return current
+        }
+        val config = current.config.copy(sessionId = id)
+        val ownerToken = current.ownerToken
+        val turnCount = current.turnCount
+        val estimatedTokens = current.estimatedTokens
+        val clientPriorityHint = current.clientPriorityHint
+        try {
+            try {
+                current.conversation.close()
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "Failed to close invalidated conversation: ${t.safeLabel()}", sessionId = id)
+            }
+            sessions.remove(id)
+            createSession(config, ownerToken)
+            val rewarmed = sessions[id] ?: return null
+            rewarmed.turnCount = turnCount
+            rewarmed.estimatedTokens = estimatedTokens
+            rewarmed.clientPriorityHint = clientPriorityHint
+            rewarmed.backendInvalidated = false
+            rewarmed.recordAccess()
+            MindlayerLog.i(TAG, "Re-warmed backend-invalidated session", sessionId = id)
+            return rewarmed
+        } catch (t: Throwable) {
+            sessions[id] = current
+            current.backendInvalidated = true
+            throw t
+        }
     }
 
     /**
@@ -629,6 +677,22 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     fun findSessionByActiveRequest(requestId: String): SessionHandle? =
         sessions.values.find { it.activeRequestId == requestId }
 
+
+    fun hasActiveStreaming(): Boolean =
+        sessions.values.any { it.isStreaming }
+
+    fun invalidateIdleSessionsForBackendSwitch(): Int {
+        var invalidated = 0
+        sessions.values.forEach { handle ->
+            if (handle.isStreaming) {
+                destroySessionInternal(handle.sessionId, MindlayerErrorCode.THERMAL_CRITICAL)
+            } else {
+                handle.backendInvalidated = true
+                invalidated++
+            }
+        }
+        return invalidated
+    }
     fun activeRequestIdForSession(id: String): String? =
         sessions[id]?.activeRequestId
 
@@ -763,11 +827,14 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             }
 
             MemoryPressure.EMERGENCY -> {
-                MindlayerLog.w(TAG, "EMERGENCY pressure — evicting all non-streaming, non-pinned sessions")
+                MindlayerLog.w(TAG, "EMERGENCY pressure — cancelling streams and evicting all non-streaming, non-pinned sessions")
+                if (hasActiveStreaming()) {
+                    emergencyStreamCanceller?.invoke(MindlayerErrorCode.LOW_MEMORY)
+                }
                 val nonStreaming = sessions.values.filter { !it.isStreaming && !it.isPinned }
                 for (handle in nonStreaming) {
                     logRepository?.logSessionEvicted(handle.sessionId, "emergency_pressure")
-                    destroySessionInternal(handle.sessionId, com.adsamcik.mindlayer.shared.MindlayerErrorCode.MEMORY_PRESSURE)
+                    destroySessionInternal(handle.sessionId, MindlayerErrorCode.MEMORY_PRESSURE)
                 }
                 if (nonStreaming.isNotEmpty()) {
                     MindlayerLog.w(
@@ -1040,6 +1107,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         @Volatile var isPinned: Boolean = false
         @Volatile var clientPriorityHint: Int = 0
         @Volatile var activeRequestId: String? = null
+        @Volatile var backendInvalidated: Boolean = false
 
         /** Refresh both wall-clock and elapsed-realtime timestamps. */
         fun recordAccess() {
