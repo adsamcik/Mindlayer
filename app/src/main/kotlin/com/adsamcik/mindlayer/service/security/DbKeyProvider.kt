@@ -12,6 +12,9 @@ import java.io.IOException
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.StandardCopyOption
 import java.security.GeneralSecurityException
 import java.security.KeyStore
 import java.security.SecureRandom
@@ -113,12 +116,21 @@ internal object DbKeyProvider {
         if (!keyFile.exists()) {
             migrateLegacyPrefsIfPresent(context, keyFile)
         }
+        assertRegularFileIfExists(keyFile)
 
         val record = readKeyFile(keyFile)
         if (record != null) {
             try {
                 val key = loadKeystoreKey()
-                    ?: error("Keystore key missing despite wrapped blob present")
+                if (key == null) {
+                    MindlayerLog.w(
+                        TAG,
+                        "Keystore key missing while wrapped DB key exists; regenerating passphrase and wiping $databaseName. " +
+                            "Existing encrypted logs cannot be recovered without the lost Keystore key.",
+                    )
+                    forceReset(context, keyFile, databaseName)
+                    return createAndPersist(keyFile)
+                }
                 val cipher = Cipher.getInstance(AES_GCM_TRANSFORM)
                 cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, record.iv))
                 return cipher.doFinal(record.wrapped)
@@ -318,6 +330,15 @@ internal object DbKeyProvider {
         }
     }
 
+    private fun assertRegularFileIfExists(file: File) {
+        val path = file.toPath()
+        if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) &&
+            !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+        ) {
+            throw IllegalStateException("Refusing to use non-regular DB key file: ${file.absolutePath}")
+        }
+    }
+
     private fun readKeyFile(file: File): KeyRecord? {
         if (!file.exists()) return null
         return try {
@@ -339,19 +360,21 @@ internal object DbKeyProvider {
         val bytes = encodeKeyRecord(record)
         val parent = file.parentFile
         parent?.mkdirs()
+        assertRegularFileIfExists(file)
         val tmp = File(parent, "${file.name}.tmp")
+        assertRegularFileIfExists(tmp)
         try {
             RandomAccessFile(tmp, "rw").use { raf ->
                 raf.setLength(0)
                 raf.write(bytes)
                 try { raf.fd.sync() } catch (_: Throwable) { /* best effort */ }
             }
-            if (file.exists() && !file.delete()) {
-                throw IOException("Could not delete previous key file: ${file.absolutePath}")
-            }
-            if (!tmp.renameTo(file)) {
-                throw IOException("Atomic rename failed: ${tmp.absolutePath} -> ${file.absolutePath}")
-            }
+            Files.move(
+                tmp.toPath(),
+                file.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
         } catch (e: IOException) {
             try { tmp.delete() } catch (_: Throwable) { /* best effort */ }
             throw IllegalStateException("Could not persist wrapped DB key to ${file.absolutePath}", e)

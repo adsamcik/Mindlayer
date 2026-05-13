@@ -2,6 +2,7 @@ package com.adsamcik.mindlayer.service.security
 
 import android.content.Context
 import androidx.annotation.VisibleForTesting
+import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -12,6 +13,8 @@ import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.nio.channels.FileLock
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
@@ -92,8 +95,10 @@ data class DeniedEntry(
 class AllowlistStore(
     context: Context,
     dirName: String = DEFAULT_DIR_NAME,
+    private val logRepository: LogRepository? = null,
 ) {
-    private val baseDir: File = File(context.applicationContext.filesDir, dirName).also {
+    private val appContext: Context = context.applicationContext
+    private val baseDir: File = File(appContext.filesDir, dirName).also {
         it.mkdirs()
     }
     private val entriesFile: File = File(baseDir, "entries.json")
@@ -150,6 +155,50 @@ class AllowlistStore(
     fun list(): List<AllowlistEntry> = readEntries().also { _entries.value = it }
 
     fun listPending(): List<PendingApproval> = readPending().also { _pending.value = it }
+
+    /**
+     * Seeds co-signed first-party callers only when the allowlist is empty.
+     *
+     * Each seed is verified against the currently installed APK signer before
+     * insertion. If a package was previously denied/revoked, it is skipped so a
+     * service restart cannot silently undo that decision.
+     */
+    fun seedIfEmpty(entries: List<AllowlistEntry>) {
+        if (entries.isEmpty()) return
+        withFileLock {
+            if (readEntries().isNotEmpty()) return@withFileLock
+            val denied = readDeniedIncludingExpired()
+            val now = System.currentTimeMillis()
+            val seeded = mutableListOf<AllowlistEntry>()
+            for (entry in entries) {
+                if (denied.any { it.packageName == entry.packageName }) {
+                    MindlayerLog.i(TAG, "Skipped first-party allowlist seed for previously denied package ${entry.packageName}")
+                    continue
+                }
+                val live = CallerVerifier.identifyByPackage(appContext, entry.packageName)
+                if (live == null || !live.signingCertSha256.equals(entry.signingCertSha256, ignoreCase = true)) {
+                    MindlayerLog.w(TAG, "Rejected first-party allowlist seed for ${entry.packageName}: signer mismatch or package missing")
+                    continue
+                }
+                val seededEntry = AllowlistEntry(
+                    packageName = entry.packageName,
+                    signingCertSha256 = live.signingCertSha256,
+                    grantedAtMs = now,
+                    displayName = CallerVerifier.sanitizeLabel(live.displayName ?: entry.displayName),
+                )
+                seeded += seededEntry
+                logRepository?.logSecurityDecision(
+                    action = "seed_first_party",
+                    packageName = seededEntry.packageName,
+                    sigShaPrefix = seededEntry.signingCertSha256.take(8),
+                )
+            }
+            if (seeded.isNotEmpty()) {
+                writeEntries(seeded)
+                _entries.value = seeded
+            }
+        }
+    }
 
     /** Re-read both files and update the StateFlows. Call this in dashboard pollers. */
     fun refresh() {
@@ -358,11 +407,11 @@ class AllowlistStore(
         RandomAccessFile(lockFile, "rw").use { raf ->
             raf.channel.use { ch ->
                 val lock: FileLock = ch.lock()
-                fileLockDepth.set(fileLockDepth.get() + 1)
+                fileLockDepth.set((fileLockDepth.get() ?: 0) + 1)
                 try {
                     return block()
                 } finally {
-                    fileLockDepth.set(fileLockDepth.get() - 1)
+                    fileLockDepth.set(((fileLockDepth.get() ?: 1) - 1).coerceAtLeast(0))
                     try { lock.release() } catch (_: Throwable) { }
                 }
             }
@@ -426,7 +475,9 @@ class AllowlistStore(
      * defending against.
      */
     private fun atomicWrite(target: File, content: String) {
+        assertRegularFileIfExists(target)
         val tmp = File(target.parentFile, target.name + ".tmp")
+        assertRegularFileIfExists(tmp)
         try {
             // Write + fsync the bytes before any rename.
             java.io.FileOutputStream(tmp).use { fos ->
@@ -460,6 +511,23 @@ class AllowlistStore(
         }
     }
 
+    private fun assertRegularFileIfExists(file: File) {
+        val path = file.toPath()
+        if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) &&
+            !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+        ) {
+            throw SecurityException("Refusing to use non-regular allowlist file: ${file.absolutePath}")
+        }
+    }
+
+    private fun isRegularFileForRead(file: File): Boolean {
+        val path = file.toPath()
+        val ok = Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+        if (!ok) {
+            MindlayerLog.w(TAG, "Rejected non-regular allowlist file ${file.name}")
+        }
+        return ok
+    }
     private fun readEntries(): List<AllowlistEntry> {
         val array = readSignedArray(entriesFile, ENTRIES_KEY) ?: return emptyList()
         return try {
@@ -505,6 +573,35 @@ class AllowlistStore(
 
     private data class DedupKey(val pkg: String, val sig: String)
 
+    private fun readDeniedIncludingExpired(): List<DeniedEntry> {
+        if (!deniedFile.exists()) return emptyList()
+        if (!isRegularFileForRead(deniedFile)) return emptyList()
+        val raw = try { deniedFile.readText() } catch (_: IOException) { return emptyList() }
+        return try {
+            val envelope = JSONObject(raw.trim())
+            val version = envelope.optInt("version", -1)
+            val array = envelope.optJSONArray(DENIED_KEY) ?: return emptyList()
+            val mac = envelope.optString(MAC_KEY)
+            if (version !in MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION ||
+                !verifyMac(canonicalPayload(version, DENIED_KEY, array), mac)
+            ) return emptyList()
+            buildList(array.length()) {
+                for (i in 0 until array.length()) {
+                    val o = array.getJSONObject(i)
+                    add(
+                        DeniedEntry(
+                            packageName = o.getString("pkg"),
+                            signingCertSha256 = o.getString("sig"),
+                            deniedAtMs = o.optLong("deniedAtMs", 0L),
+                            expiresAtMs = o.optLong("expiresAtMs", 0L),
+                        )
+                    )
+                }
+            }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
     private fun readDenied(): List<DeniedEntry> {
         val array = readSignedArray(deniedFile, DENIED_KEY) ?: return emptyList()
         val now = System.currentTimeMillis()
@@ -532,6 +629,7 @@ class AllowlistStore(
 
     private fun readSignedArray(file: File, arrayKey: String): JSONArray? {
         if (!file.exists()) return null
+        if (!isRegularFileForRead(file)) return null
         val raw = try { file.readText() } catch (_: IOException) { return null }
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) return null
@@ -570,6 +668,7 @@ class AllowlistStore(
      */
     private fun migrateLegacyArray(file: File, arrayKey: String) {
         if (!file.exists()) return
+        if (!isRegularFileForRead(file)) return
         val raw = try { file.readText() } catch (_: IOException) { return }
         val trimmed = raw.trim()
         if (!trimmed.startsWith("[")) return
@@ -666,11 +765,12 @@ class AllowlistStore(
      * signalling that callers must be re-approved (audit H8 / M15).
      */
     private fun loadOrCreateHmacKey(): ByteArray =
-        if (fileLockDepth.get() > 0) readOrCreateHmacKeyLocked()
+        if ((fileLockDepth.get() ?: 0) > 0) readOrCreateHmacKeyLocked()
         else withFileLock { readOrCreateHmacKeyLocked() }
 
     private fun readOrCreateHmacKeyLocked(): ByteArray {
         if (hmacKeyFile.exists()) {
+            if (!isRegularFileForRead(hmacKeyFile)) return generateAndPersistHmacKey()
             val encoded = try {
                 hmacKeyFile.readText().trim()
             } catch (t: Throwable) {

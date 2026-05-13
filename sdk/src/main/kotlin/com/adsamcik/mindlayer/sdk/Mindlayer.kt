@@ -1392,41 +1392,6 @@ class Mindlayer private constructor(
 
     private fun ParcelFileDescriptor.closeQuietly() = try { close() } catch (_: Exception) {}
 
-    private suspend fun createRemoteSessionWhenReady(
-        service: com.adsamcik.mindlayer.IMindlayerService,
-        config: SessionConfig,
-    ): String {
-        try {
-            return service.createSession(config)
-        } catch (e: android.os.RemoteException) {
-            // RemoteException wraps service-side IllegalStateException; let through to the warming retry below.
-        } catch (e: IllegalStateException) {
-            // Same shape (some platforms surface IllegalStateException directly).
-        }
-
-        val status = service.status
-        if (!status.isEngineLoaded || status.engineWarming) {
-            if (!status.engineWarming) {
-                // Engine not even warming yet — kick it off.
-                service.prewarm(config.backend)
-            }
-            waitForEngineLoaded(service)
-            return service.createSession(config)
-        }
-        // Engine claims loaded but createSession failed for a different reason — retry once
-        // and let the exception propagate if it persists.
-        return service.createSession(config)
-    }
-
-    private suspend fun waitForEngineLoaded(service: com.adsamcik.mindlayer.IMindlayerService) {
-        repeat(60) {
-            val s = service.status
-            if (s.isEngineLoaded && !s.engineWarming) return
-            delay(250)
-        }
-        throw IllegalStateException("Engine did not finish initialization within the expected window")
-    }
-
     /**
      * v0.4 inference setup that uses [IMindlayerService.inferMulti] with an
      * ordered list of media parts. Falls back to the legacy [startInference]

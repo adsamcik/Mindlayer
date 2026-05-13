@@ -40,8 +40,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.adsamcik.mindlayer.service.R
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerTheme
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerType
 
@@ -82,7 +84,7 @@ fun RecentLogsScreen(
             MediumTopAppBar(
                 title = {
                     Column {
-                        Text("System Logs")
+                        Text(stringResource(R.string.recent_logs_title))
                         val subtitle = when {
                             state.isLoading -> "Loading diagnostics log…"
                             state.errorMessage != null -> "Load failure"

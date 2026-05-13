@@ -34,6 +34,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
+import com.adsamcik.mindlayer.service.security.AllowlistEntry
+import com.adsamcik.mindlayer.service.security.AllowlistStore
 
 class MindlayerMlService : Service() {
 
@@ -54,6 +56,12 @@ class MindlayerMlService : Service() {
          * the foreground state.
          */
         const val ACTION_STOP = "com.adsamcik.mindlayer.service.ACTION_STOP"
+
+        /**
+         * First-party clients that should be approved on a fresh install.
+         * Add co-signed package names and pinned current signing-cert SHA-256 hashes here.
+         */
+        private val FIRST_PARTY_ALLOWLIST_SEEDS: List<AllowlistEntry> = emptyList()
     }
 
     lateinit var engineManager: EngineManager
@@ -126,6 +134,8 @@ class MindlayerMlService : Service() {
 
         val logDb = LogDatabase.getInstance(this)
         logRepository = LogRepository(logDb.logDao())
+
+        AllowlistStore(this, logRepository = logRepository).seedIfEmpty(FIRST_PARTY_ALLOWLIST_SEEDS)
 
         engineManager = EngineManager(this, logRepository)
         memoryBudget = MemoryBudget(this, serviceScope, logRepository)

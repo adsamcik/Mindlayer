@@ -75,6 +75,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -84,6 +85,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.adsamcik.mindlayer.service.R
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerColors
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerTheme
@@ -330,7 +332,7 @@ private fun DashboardHero(state: DashboardUiState) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = "Mindlayer",
+                text = stringResource(R.string.dashboard_app_title),
                 style = MaterialTheme.typography.headlineLarge.copy(
                     letterSpacing = 1.2.sp,
                 ),
@@ -565,7 +567,7 @@ private fun StatusSection(state: DashboardUiState) {
                 state.gpuFailureReason?.let { reason ->
                     if (state.backend.equals("CPU", ignoreCase = true)) {
                         Text(
-                            text = "⚠ GPU init failed: $reason",
+                            text = stringResource(R.string.dashboard_gpu_init_failed, reason),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                         )
@@ -666,7 +668,7 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
-                text = "Thermal",
+                text = stringResource(R.string.dashboard_thermal),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontWeight = FontWeight.SemiBold,
@@ -686,7 +688,7 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
             state.headroom?.let {
                 val headroomFraction = it.coerceIn(0f, 1f)
                 Text(
-                    text = "Headroom",
+                    text = stringResource(R.string.dashboard_headroom),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -724,7 +726,7 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
             }
             if (telemetryBlind) {
                 Text(
-                    text = "Conservative policy active",
+                    text = stringResource(R.string.dashboard_conservative_policy_active),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontWeight = FontWeight.Medium,
@@ -732,7 +734,7 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
             }
             if (isHot) {
                 Text(
-                    text = "Throttling active",
+                    text = stringResource(R.string.dashboard_throttling_active),
                     style = MaterialTheme.typography.labelSmall,
                     color = tint,
                     fontWeight = FontWeight.Medium,
@@ -771,13 +773,13 @@ private fun MemoryMiniCard(state: DashboardUiState, modifier: Modifier = Modifie
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "Memory",
+                    text = stringResource(R.string.dashboard_memory),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    text = "Max sessions: ${state.maxSessions}",
+                    text = stringResource(R.string.dashboard_max_sessions, state.maxSessions),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -819,20 +821,20 @@ private fun MemoryMiniCard(state: DashboardUiState, modifier: Modifier = Modifie
                     )
                 }
                 Text(
-                    text = "Available: ${formatWholeNumber(state.availableRamMb)} MB",
+                    text = stringResource(R.string.dashboard_available_mb, formatWholeNumber(state.availableRamMb)),
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
                 Text(
-                    text = "Used: ${formatWholeNumber(usedMb)} MB / ${formatWholeNumber(state.totalRamMb)} MB",
+                    text = stringResource(R.string.dashboard_used_mb, formatWholeNumber(usedMb), formatWholeNumber(state.totalRamMb)),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             if (isElevated) {
                 Text(
-                    text = "Low headroom",
+                    text = stringResource(R.string.dashboard_low_headroom),
                     style = MaterialTheme.typography.labelSmall,
                     color = tint,
                     fontWeight = FontWeight.Medium,
@@ -885,20 +887,20 @@ private fun ActiveSessionsCard(state: DashboardUiState) {
                             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                         )
                         Text(
-                            text = "No active sessions",
+                            text = stringResource(R.string.dashboard_no_active_sessions),
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Medium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
                         )
                         Text(
-                            text = "Sessions will appear here when client apps connect and start inference.",
+                            text = stringResource(R.string.dashboard_no_active_sessions_body),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                             textAlign = TextAlign.Center,
                         )
                         Text(
-                            text = "Last sampled ${formatSampleTime(state.lastStatusUpdateMs, nowMs, "never")}",
+                            text = stringResource(R.string.dashboard_last_sampled, formatSampleTime(state.lastStatusUpdateMs, nowMs, "never")),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                             textAlign = TextAlign.Center,
@@ -973,7 +975,7 @@ private fun SessionRow(session: SessionUiItem) {
                 )
                 if (session.isStreaming) {
                     Spacer(Modifier.width(8.dp))
-                    Badge(text = "LIVE", color = CategoryInference)
+                    Badge(text = stringResource(R.string.dashboard_live), color = CategoryInference)
                 }
             }
             Row(
@@ -991,7 +993,7 @@ private fun SessionRow(session: SessionUiItem) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    text = "${session.tokenCount}/${session.maxTokens} tok",
+                    text = stringResource(R.string.dashboard_token_count, session.tokenCount, session.maxTokens),
                     style = MindlayerType.Mono.LabelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1027,14 +1029,14 @@ private fun ActivityNavigationCard(
             ListItem(
                 headlineContent = {
                     Text(
-                        text = "Session History",
+                        text = stringResource(R.string.dashboard_session_history),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium,
                     )
                 },
                 supportingContent = {
                     Text(
-                        text = "Past sessions and inference activity",
+                        text = stringResource(R.string.dashboard_session_history_body),
                         style = MaterialTheme.typography.bodySmall,
                     )
                 },
@@ -1062,14 +1064,14 @@ private fun ActivityNavigationCard(
             ListItem(
                 headlineContent = {
                     Text(
-                        text = "Recent Logs",
+                        text = stringResource(R.string.dashboard_recent_logs),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium,
                     )
                 },
                 supportingContent = {
                     Text(
-                        text = "Diagnostics and event log entries",
+                        text = stringResource(R.string.dashboard_recent_logs_body),
                         style = MaterialTheme.typography.bodySmall,
                     )
                 },
@@ -1146,7 +1148,7 @@ private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Un
                 DiagnosticCallout(message = state.testStatus, tone = displayTone)
             } else {
                 Text(
-                    text = "Verify AIDL control flow and pipe streaming end to end.",
+                    text = stringResource(R.string.dashboard_test_verify),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1175,7 +1177,7 @@ private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Un
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         Text(
-                            text = "Output",
+                            text = stringResource(R.string.dashboard_output),
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontWeight = FontWeight.SemiBold,

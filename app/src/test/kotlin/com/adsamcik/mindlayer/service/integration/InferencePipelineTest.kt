@@ -327,8 +327,8 @@ class InferencePipelineTest {
         val sessionId = createSession()
         val events = inferAndCollect(sessionId, "Hello")
 
-        // Expect: header + 3 token_deltas + done
-        assertEquals("Should have 5 events", 5, events.size)
+        // Expect: header + 3 token_deltas + metrics + done
+        assertEquals("Should have 6 events", 6, events.size)
 
         assertEquals("header", events[0].kind)
         assertNotNull(events[0].requestId)
@@ -345,9 +345,11 @@ class InferencePipelineTest {
         assertEquals("!", events[3].text)
         assertEquals(3L, events[3].seq)
 
-        assertEquals("done", events[4].kind)
-        assertEquals("stop", events[4].finishReason)
+        assertEquals("metrics", events[4].kind)
         assertEquals(4L, events[4].seq)
+        assertEquals("done", events[5].kind)
+        assertEquals("stop", events[5].finishReason)
+        assertEquals(5L, events[5].seq)
     }
 
     // ========================================================================
@@ -362,11 +364,12 @@ class InferencePipelineTest {
         val sessionId = createSession()
         val events = inferAndCollect(sessionId, "Hello")
 
-        // Expect: header + done (no token_delta since text is empty)
-        assertEquals("Should have 2 events", 2, events.size)
+        // Expect: header + metrics + done (no token_delta since text is empty)
+        assertEquals("Should have 3 events", 3, events.size)
         assertEquals("header", events[0].kind)
-        assertEquals("done", events[1].kind)
-        assertEquals("stop", events[1].finishReason)
+        assertEquals("metrics", events[1].kind)
+        assertEquals("done", events[2].kind)
+        assertEquals("stop", events[2].finishReason)
     }
 
     // ========================================================================
