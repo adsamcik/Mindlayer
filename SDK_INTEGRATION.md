@@ -110,7 +110,7 @@ you ship a restore flow, treat the conversation history as ephemeral.
 val sessionId = mindlayer.createSession {
     systemPrompt("You are a helpful coding assistant")
     maxTokens(4096)      // KV cache budget (input + output)
-    backend("GPU")       // or "CPU", "NPU"
+    // Mindlayer picks the best backend automatically.
     topK(40)
     topP(0.95f)
     temperature(0.7f)
@@ -120,7 +120,8 @@ val sessionId = mindlayer.createSession {
 ### Text chat (streaming)
 
 ```kotlin
-mindlayer.chat(sessionId, "Explain Kotlin coroutines briefly").collect { event ->
+val handle = mindlayer.chat(sessionId, "Explain Kotlin coroutines briefly")
+handle.events.collect { event ->
     when (event) {
         is MindlayerEvent.TextDelta -> print(event.text)        // incremental token
         is MindlayerEvent.Done     -> println("\n[done]")       // generation complete
@@ -136,7 +137,8 @@ mindlayer.chat(sessionId, "Explain Kotlin coroutines briefly").collect { event -
 
 ```kotlin
 val bitmap: Bitmap = // your image
-mindlayer.chatWithImage(sessionId, "What's in this image?", bitmap).collect { event ->
+val handle = mindlayer.chatWithImage(sessionId, "What's in this image?", bitmap)
+handle.events.collect { event ->
     // same event handling as above
 }
 ```
@@ -145,7 +147,8 @@ mindlayer.chatWithImage(sessionId, "What's in this image?", bitmap).collect { ev
 
 ```kotlin
 val audioFile: File = // your WAV/MP3 file
-mindlayer.chatWithAudio(sessionId, "Transcribe this audio", audioFile).collect { event ->
+val handle = mindlayer.chatWithAudio(sessionId, "Transcribe this audio", audioFile)
+handle.events.collect { event ->
     // same event handling as above
 }
 ```
@@ -216,9 +219,66 @@ client with a full schema validator.
 
 ```kotlin
 val session = mindlayer.session(sessionId)
-session.chat("Hello!").collect { ... }
+val handle = session.chat("Hello!")
+handle.events.collect { ... }
 session.delete()
 ```
+
+
+### Capabilities and prewarming
+
+```kotlin
+val caps = mindlayer.getCapabilities()
+if (caps.supports(ServiceCapabilities.FEATURE_PREWARM_AWAIT)) {
+    val backend = mindlayer.prewarmAndAwait(timeoutMs = 15_000)
+}
+```
+
+Use `prewarm()` for fire-and-forget warmup; use `prewarmAndAwait()` when UI needs a ready/failure signal before enabling chat.
+
+### Eviction notices
+
+```kotlin
+mindlayer.evictionNotices().collect { notice ->
+    // Session was evicted or revoked; update UI and recover if appropriate.
+}
+```
+
+### Detailed control responses
+
+`cancelInferenceDetailed(requestId)` and `submitToolResultDetailed(result)` return structured outcomes for callers that need to distinguish success from `NO_ACTIVE_REQUEST` or validation failures. The simpler `cancelInference()` / `submitToolResult()` helpers remain available.
+
+### Multimodal media
+
+For one or more media parts, prefer `chatWithMedia(sessionId, text, mediaParts)` over chaining image/audio-specific calls. Use `chatWithImage` and `chatWithAudio` for simple single-media cases.
+
+### History policy and recovery
+
+The SDK defaults to `HistoryPolicy.METADATA_ONLY` for privacy. Transparent OOM/crash replay requires:
+
+```kotlin
+val mindlayer = Mindlayer.connect(context, historyPolicy = HistoryPolicy.FULL_CONTENT)
+```
+
+`FULL_CONTENT` stores prompts and model outputs in the SQLCipher-backed Room history database so `SessionRecovery` can recreate the service session. Cross-install backup/restore is intentionally unrecoverable because the SQLCipher key is wrapped by Android Keystore and does not move with backups.
+
+If `recoverSession()` returns `pendingUserText`, resolve the returned pending turn before re-sending it:
+
+```kotlin
+val recovered = mindlayer.recovery?.recoverSession(sessionId)
+recovered?.markPendingUserResolved(mindlayer.recovery!!)
+recovered?.pendingUserText?.let { text ->
+    mindlayer.chat(recovered.newSessionId, text)
+}
+```
+
+### Conversation vs MindlayerSession
+
+`Conversation` is the SDK-side convenience type for local lifecycle/history ergonomics. `MindlayerSession` is a lightweight wrapper around a live service `sessionId`. Server-side live sessions can disappear due to eviction or expiration; local history can outlive them.
+
+### One-shot convenience family
+
+Use `chatOnce`, `chatWithImageOnce`, `chatWithAudioOnce`, `generate`, `generateWithImage`, and `generateWithAudio` when you want a single complete `String` instead of streaming events. These methods convert stream `ERROR` frames into typed `MindlayerException`s.
 
 ### Cleanup
 

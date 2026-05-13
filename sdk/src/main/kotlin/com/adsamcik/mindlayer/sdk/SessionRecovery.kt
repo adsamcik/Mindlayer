@@ -109,7 +109,13 @@ class SessionRecovery internal constructor(
             replayedTurnCount = replay.turns.size,
             cleanedTurnCount = cleaned,
             pendingUserText = replay.pendingUserTurn?.textContent,
+            pendingUserTurnId = replay.pendingUserTurn?.turnId,
         )
+    }
+
+    /** Resolve a pending user turn returned by [recoverSession] before re-sending it. */
+    suspend fun markPendingUserResolved(turnId: String) {
+        historyStore.markPendingUserResolved(turnId)
     }
 }
 
@@ -127,4 +133,11 @@ data class RecoveryResult(
     val cleanedTurnCount: Int,
     /** Text of a pending user turn that should be re-sent, if any. */
     val pendingUserText: String?,
-)
+    /** Local turn ID for [pendingUserText]; resolve before replacement send. */
+    val pendingUserTurnId: String? = null,
+) {
+    /** Mark the original pending row completed so it will not resurface on later recovery. */
+    suspend fun markPendingUserResolved(recovery: SessionRecovery) {
+        pendingUserTurnId?.let { recovery.markPendingUserResolved(it) }
+    }
+}

@@ -77,6 +77,20 @@ class MindlayerExceptionCodesTest {
     }
 
     @Test
+    fun `fromStreamError uses numeric codeInt when present`() {
+        val mle = MindlayerException.fromStreamError(
+            message = "retryAfterMs=250",
+            codeName = "TRANSIENT_RESOURCE_EXHAUSTED",
+            codeInt = MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
+        )
+
+        assertEquals(MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED, mle.code)
+        assertEquals("TRANSIENT_RESOURCE_EXHAUSTED", mle.codeName)
+        assertEquals(MindlayerErrorCode.Category.RESOURCE, mle.category)
+        assertEquals(250L, mle.retryAfterMs)
+    }
+
+    @Test
     fun `categoryOf maps every defined code to a non-UNKNOWN bucket`() {
         // Sanity: anything we've named in MindlayerErrorCode.nameOf except
         // INTERNAL/UNKNOWN should land in a real category.

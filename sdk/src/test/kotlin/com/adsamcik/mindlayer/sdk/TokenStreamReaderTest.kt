@@ -18,6 +18,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.floatOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.After
@@ -211,6 +212,7 @@ class TokenStreamReaderTest {
             message = event.payload["message"]?.jsonPrimitive?.contentOrNull ?: "Unknown error",
             code = event.payload["code"]?.jsonPrimitive?.contentOrNull,
             seq = event.seq,
+            codeInt = event.payload["codeInt"]?.jsonPrimitive?.intOrNull,
         )
         StreamEventType.DONE -> MindlayerEvent.Done(
             finishReason = event.payload["finish_reason"]?.jsonPrimitive?.contentOrNull ?: "unknown",
@@ -282,6 +284,21 @@ class TokenStreamReaderTest {
         assertEquals("timeout", result.code)
         assertEquals("Request timed out", result.message)
         assertEquals(4L, result.seq)
+    }
+
+    @Test
+    fun `mapEvent ERROR preserves numeric codeInt`() {
+        val event = StreamEvent(
+            seq = 40, type = StreamEventType.ERROR, tsMs = 0,
+            payload = buildJsonObject {
+                put("code", "LOW_MEMORY")
+                put("codeInt", com.adsamcik.mindlayer.shared.MindlayerErrorCode.LOW_MEMORY)
+                put("message", "memory pressure")
+            },
+        )
+        val result = mapEvent(event) as MindlayerEvent.Error
+        assertEquals("LOW_MEMORY", result.code)
+        assertEquals(com.adsamcik.mindlayer.shared.MindlayerErrorCode.LOW_MEMORY, result.codeInt)
     }
 
     @Test
