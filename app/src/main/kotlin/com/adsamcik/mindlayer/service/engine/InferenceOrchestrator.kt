@@ -145,7 +145,7 @@ class InferenceOrchestrator(
     private val activeJobs = ConcurrentHashMap<String, Job>()
 
     /** Bridge between the streaming coroutine and AIDL submitToolResult(). */
-    val toolCallBridge = ToolCallBridge()
+    val toolCallBridge = ToolCallBridge(logRepository)
 
     // ---- Session management (delegates to SessionManager) ------------------
 
@@ -304,15 +304,10 @@ class InferenceOrchestrator(
         sharedMemoryPool.cleanup(scopedKey)
         toolCallBridge.cancel(scopedKey)
         activeJobs[scopedKey]?.cancel()
-        logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
-            timestampMs = System.currentTimeMillis(),
-            category = com.adsamcik.mindlayer.service.logging.LogCategory.INFERENCE,
-            event = com.adsamcik.mindlayer.service.logging.LogEvent.REQUEST_CANCEL,
-            // Strip the uid namespace prefix so the persisted requestId
-            // matches what the client recognises.
+        logRepository?.logRequestCancel(
             requestId = publicRequestId,
             sessionId = handle?.sessionId,
-        ))
+        )
         MindlayerLog.i(
             TAG,
             "Cancelled inference request",
@@ -670,7 +665,28 @@ class InferenceOrchestrator(
                     accumulatedToolCalls.clear()
 
                     // Suspend until client submits all tool results (or timeout)
-                    val results = toolCallBridge.awaitResults(scopedKey)
+                    val results = try {
+                        toolCallBridge.awaitResults(scopedKey)
+                    } catch (e: TimeoutCancellationException) {
+                        logRepository?.logToolCallTimeout(
+                            requestId = meta.requestId,
+                            sessionId = meta.sessionId,
+                            timeoutMs = ToolCallBridge.DEFAULT_TIMEOUT_MS,
+                        )
+                        logRepository?.logToolCallExit(
+                            requestId = meta.requestId,
+                            sessionId = meta.sessionId,
+                            result = "timeout",
+                            pendingCount = pending.size,
+                        )
+                        throw e
+                    }
+                    logRepository?.logToolCallExit(
+                        requestId = meta.requestId,
+                        sessionId = meta.sessionId,
+                        result = "completed",
+                        pendingCount = pending.size,
+                    )
 
                     // F-035: scrub Gemma turn-tokens and wrap each tool
                     // result in a per-request-nonced envelope. The model's
