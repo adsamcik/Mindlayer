@@ -192,6 +192,11 @@ class HistoryStore internal constructor(
         turnDao.updateState(turnId, TurnState.COMPLETED)
     }
 
+    /** Resolve a recovered pending user turn before re-sending it. */
+    suspend fun markPendingUserResolved(turnId: String) {
+        turnDao.resolvePendingUserTurn(turnId)
+    }
+
     /**
      * Mark an assistant turn as completed with its full text.
      */

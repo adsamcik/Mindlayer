@@ -287,6 +287,15 @@ class MindlayerApiTest {
     }
 
     @Test
+    fun `chat_awaitsConnectionBeforeReturningHandle`() = runTest {
+        val handle = mindlayer.chat("sess-await", "Hello")
+
+        assertNotNull(handle)
+        coVerify(atLeast = 1) { mockConnection.awaitConnected() }
+        verify(exactly = 0) { mockService.infer(any(), any(), any(), any()) }
+    }
+
+    @Test
     fun `chat_passesNullImageAndAudio`() = runTest {
         val imageSlot = slot<ImageTransfer>()
         val audioSlot = slot<AudioTransfer>()

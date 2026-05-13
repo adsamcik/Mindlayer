@@ -78,6 +78,14 @@ abstract class TurnDao {
     )
 
     @Query(
+        "UPDATE turns SET state = 'COMPLETED', completedAtMs = :nowMs WHERE turnId = :turnId AND role = 'USER' AND state = 'PENDING'",
+    )
+    abstract suspend fun resolvePendingUserTurn(
+        turnId: String,
+        nowMs: Long = System.currentTimeMillis(),
+    )
+
+    @Query(
         "UPDATE turns SET state = :state, textContent = :text, tokenEstimate = :tokens, completedAtMs = :nowMs WHERE turnId = :turnId",
     )
     abstract suspend fun completeWithText(

@@ -10,7 +10,7 @@ Mindlayer runs as a headless Android service that loads the Gemma 4 model once a
 - ⚡ **GPU-accelerated** — 3800+ tok/s prefill, 52 tok/s decode on flagship devices
 - 🔌 **Service architecture** — one model instance serves all your apps via AIDL IPC
 - 🌡️ **Thermal-aware** — 4-band controller (COOL/WARM/HOT/CRITICAL) with automatic GPU↔CPU switching
-- 💾 **OOM-resilient** — client-side Room persistence + automatic session replay on crash recovery
+- 💾 **OOM-resilient** — client-side Room persistence + automatic session replay on crash recovery (requires `historyPolicy = FULL_CONTENT`)
 - 🛠️ **Function calling** — manual tool mode with async bridge, structured JSON output
 - 📊 **Dashboard** — Jetpack Compose monitoring UI with live engine/thermal/memory/session status
 - 📝 **Structured logging** — Room-based usage logs + request tracing with timing breakpoints
@@ -44,7 +44,8 @@ val sessionId = mindlayer.createSession {
     systemPrompt("You are a helpful assistant")
 }
 
-mindlayer.chat(sessionId, "Hello!").collect { event ->
+val handle = mindlayer.chat(sessionId, "Hello!")
+handle.events.collect { event ->
     when (event) {
         is MindlayerEvent.TextDelta -> print(event.text)
         is MindlayerEvent.Done -> println()

@@ -38,6 +38,10 @@ object StreamEventType {
     const val TOOL_CALL = "tool_call"
     const val TOOL_RESULT = "tool_result"
     const val METRICS = "metrics"
+    /**
+     * Terminal error. Payload contains `message`, optional symbolic `code`,
+     * and optional stable integer `codeInt` from [MindlayerErrorCode].
+     */
     const val ERROR = "error"
     const val DONE = "done"
 }
@@ -47,7 +51,8 @@ object StreamProtocol {
     const val V1: String = "mindlayer.stream.v1"
 
     /**
-     * v2 pipe protocol — supports [StreamEventType.TOKEN_DELTA_BATCH] in
+     * v2 pipe protocol — supports [StreamEventType.TOKEN_DELTA_BATCH] and
+     * optional `codeInt` on [StreamEventType.ERROR] payloads in
      * addition to v1's events. Negotiated per-stream: writer chooses based
      * on the session's `extraContextJson.token_batch` opt-in;
      * `ServiceCapabilities.FEATURE_TOKEN_BATCH` advertises that the writer

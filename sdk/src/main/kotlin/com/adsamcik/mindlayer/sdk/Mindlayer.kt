@@ -1087,6 +1087,7 @@ class Mindlayer private constructor(
                 is MindlayerEvent.Error -> throw MindlayerException.fromStreamError(
                     message = event.message,
                     codeName = event.code,
+                    codeInt = event.codeInt,
                     seq = event.seq,
                     tsMs = event.tsMs,
                     requestId = handle.requestId,
@@ -1121,6 +1122,7 @@ class Mindlayer private constructor(
                 is MindlayerEvent.Error -> throw MindlayerException.fromStreamError(
                     message = event.message,
                     codeName = event.code,
+                    codeInt = event.codeInt,
                     seq = event.seq,
                     tsMs = event.tsMs,
                     requestId = handle.requestId,
@@ -1347,6 +1349,8 @@ class Mindlayer private constructor(
         imageProvider: suspend () -> com.adsamcik.mindlayer.ImageTransfer?,
         audioProvider: suspend () -> com.adsamcik.mindlayer.AudioTransfer?,
     ): Flow<MindlayerEvent> {
+        // Preserve the public chat* contract: do not return a handle until a binder is available.
+        connection.awaitConnected()
         return flow {
             val readEnd = withContext(Dispatchers.IO) {
                 val image = imageProvider()
@@ -1362,8 +1366,14 @@ class Mindlayer private constructor(
                 val writeEnd = pipe[1]
 
                 try {
-                    val service = connection.requireService()
-                    service.infer(meta, image, audio, writeEnd)
+                    val service = connection.awaitConnected()
+                    withTypedErrorsSync(
+                        service = service,
+                        requestId = meta.requestId,
+                        sessionId = meta.sessionId,
+                    ) { svc ->
+                        svc.infer(meta, image, audio, writeEnd)
+                    }
                     readEnd
                 } catch (e: Exception) {
                     readEnd.close()
