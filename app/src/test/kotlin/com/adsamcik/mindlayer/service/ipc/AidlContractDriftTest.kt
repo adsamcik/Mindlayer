@@ -1,5 +1,6 @@
 package com.adsamcik.mindlayer.service.ipc
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.nio.file.Files
@@ -9,22 +10,30 @@ import java.nio.file.Paths
 class AidlContractDriftTest {
 
     @Test
-    fun `app and sdk service AIDL contracts stay in sync`() {
+    fun `app and sdk AIDL contracts stay in sync`() {
         val root = repoRoot()
-        val appContract = readNormalized(root.resolve(
-            "app/src/main/aidl/com/adsamcik/mindlayer/IMindlayerService.aidl",
-        ))
-        val sdkContract = readNormalized(root.resolve(
-            "sdk/src/main/aidl/com/adsamcik/mindlayer/IMindlayerService.aidl",
-        ))
+        val appDir = root.resolve("app/src/main/aidl/com/adsamcik/mindlayer")
+        val sdkDir = root.resolve("sdk/src/main/aidl/com/adsamcik/mindlayer")
+        val appFiles = Files.list(appDir).use { stream ->
+            stream.filter { it.fileName.toString().endsWith(".aidl") }
+                .map { it.fileName.toString() }
+                .sorted()
+                .toList()
+        }
 
-        assertEquals(appContract, sdkContract)
+        assertEquals("Expected all public AIDL files to be covered", 16, appFiles.size)
+        appFiles.forEach { fileName ->
+            val appBytes = readNormalized(appDir.resolve(fileName))
+            val sdkBytes = readNormalized(sdkDir.resolve(fileName))
+            assertArrayEquals("AIDL drift in $fileName", appBytes, sdkBytes)
+        }
     }
 
-    private fun readNormalized(path: Path): String =
+    private fun readNormalized(path: Path): ByteArray =
         String(Files.readAllBytes(path), Charsets.UTF_8)
             .replace("\r\n", "\n")
             .trim()
+            .toByteArray(Charsets.UTF_8)
 
     private fun repoRoot(): Path {
         var current = Paths.get("").toAbsolutePath()

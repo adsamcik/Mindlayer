@@ -6,6 +6,10 @@ import java.io.File
 
 class ServiceLoggingPolicyTest {
 
+    private val forbiddenAndroidLogRegex = Regex(
+        """(?m)(^\s*import\s+android\.util\.Log\b|\bandroid\.util\.Log\s*\.\s*(?:d|v|i|w|e|wtf)\s*\()""",
+    )
+
     @Test
     fun `service production code logs only through MindlayerLog`() {
         val serviceRoot = repoRoot()
@@ -20,7 +24,7 @@ class ServiceLoggingPolicyTest {
         val violations = serviceRoot.walkTopDown()
             .filter { it.isFile && it.extension == "kt" }
             .filterNot { it.invariantSeparatorsPath.endsWith("/logging/MindlayerLog.kt") }
-            .filter { it.readText().contains("import android.util.Log") }
+            .filter { forbiddenAndroidLogRegex.containsMatchIn(it.readText()) }
             .map { it.relativeTo(serviceRoot).invariantSeparatorsPath }
             .toList()
 

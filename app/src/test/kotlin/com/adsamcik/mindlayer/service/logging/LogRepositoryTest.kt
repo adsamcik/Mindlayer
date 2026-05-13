@@ -1,4 +1,4 @@
-﻿package com.adsamcik.mindlayer.service.logging
+package com.adsamcik.mindlayer.service.logging
 
 import android.content.Context
 import android.util.Log
@@ -410,5 +410,49 @@ class LogRepositoryTest {
 
         blockDrain.countDown()
         testRepo.shutdown()
+    }
+    @Test
+    fun `new observability builders write expected structured events`() = runTest {
+        repo.logRequestCancel("req-cancel", "sess-cancel")
+        repo.logRateLimitReject("infer", uid = 42, cost = 1.5, requestId = "req-rate", sessionId = "sess-rate")
+        repo.logAllowlistPendingRecorded(uid = 43, packageName = "com.example.app", sigShaPrefix = "abcdef123456")
+        repo.logFgsPromoted(activeInferenceCount = 1)
+        repo.logFgsDemoted(activeInferenceCount = 0)
+        repo.logBackendSwitch("GPU", "CPU", "complete")
+        repo.logBinderDeathClient(uid = 44, registrationId = "reg")
+        repo.logBinderDeathSelf(uid = 45)
+        repo.logCrashLoopThrottle(uid = 46, cooldownEndsAtMs = 1234L)
+        repo.logStreamFrameTooLarge(frameBytes = 2_000_000, maxFrameBytes = 1_048_576)
+        repo.logStreamBackpressure(timeoutMs = 5_000L)
+        repo.logSessionQuotaExceeded("sess-quota", ownerUid = 47, ownedNow = 2, cap = 2, tierMaxSessions = 4)
+        repo.logToolCallExit("req-tool", "sess-tool", result = "completed", pendingCount = 1)
+        repo.logToolCallTimeout("req-timeout", "sess-tool", timeoutMs = 30_000L)
+
+        advanceUntilIdle()
+        val byEvent = dao.getRecent(50).associateBy { it.event }
+
+        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.REQUEST_CANCEL).category)
+        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.RATE_LIMIT_REJECT).category)
+        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.ALLOWLIST_PENDING_RECORDED).category)
+        assertEquals(LogCategory.ENGINE, byEvent.getValue(LogEvent.FGS_PROMOTED).category)
+        assertEquals(LogCategory.ENGINE, byEvent.getValue(LogEvent.FGS_DEMOTED).category)
+        assertEquals(LogCategory.ENGINE, byEvent.getValue(LogEvent.BACKEND_SWITCH).category)
+        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.BINDER_DEATH_CLIENT).category)
+        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.BINDER_DEATH_SELF).category)
+        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.CRASH_LOOP_THROTTLE).category)
+        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.STREAM_FRAME_TOO_LARGE).category)
+        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.STREAM_BACKPRESSURE).category)
+        assertEquals(LogCategory.SESSION, byEvent.getValue(LogEvent.SESSION_QUOTA_EXCEEDED).category)
+        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.TOOL_CALL_EXIT).category)
+        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.TOOL_CALL_TIMEOUT).category)
+    }
+    @Test
+    fun `recentErrorCount reflects recent completed error bucket`() = runTest {
+        val now = System.currentTimeMillis()
+        dao.insert(LogEntry(timestampMs = now - 5_000, category = LogCategory.ERROR, event = LogEvent.REQUEST_ERROR))
+        dao.insert(LogEntry(timestampMs = now - 120_000, category = LogCategory.ERROR, event = LogEvent.REQUEST_ERROR))
+        dao.insert(LogEntry(timestampMs = now - 5_000, category = LogCategory.INFERENCE, event = LogEvent.REQUEST_COMPLETE))
+
+        assertEquals(1, repo.recentErrorCount(windowMs = 60_000L))
     }
 }

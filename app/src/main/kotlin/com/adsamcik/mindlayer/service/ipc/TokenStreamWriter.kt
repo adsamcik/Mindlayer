@@ -4,6 +4,7 @@ import android.os.ParcelFileDescriptor
 import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
+import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
@@ -131,6 +132,13 @@ class TokenStreamWriter private constructor(
      * more frames against an already-doomed pipe.
      */
     @Volatile private var closed = false
+
+    @Volatile private var logRepository: LogRepository? = null
+
+    fun attachLogRepository(repository: LogRepository?): TokenStreamWriter {
+        logRepository = repository
+        return this
+    }
 
     /**
      * v0.5 batching state. Set via [enableBatching]; non-batching writers
@@ -376,8 +384,9 @@ class TokenStreamWriter private constructor(
     private suspend fun writeFrame(payload: String) {
         if (closed) return
         val bytes = payload.encodeToByteArray()
-        check(bytes.size <= MAX_FRAME_BYTES) {
-            "Frame too large: ${bytes.size} bytes (max=$MAX_FRAME_BYTES)"
+        if (bytes.size > MAX_FRAME_BYTES) {
+            logRepository?.logStreamFrameTooLarge(bytes.size, MAX_FRAME_BYTES)
+            throw IllegalStateException("Frame too large: ${bytes.size} bytes (max=$MAX_FRAME_BYTES)")
         }
         val header = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
             .putInt(bytes.size)
@@ -392,6 +401,7 @@ class TokenStreamWriter private constructor(
             // F-009: backpressure timeout. Force-close the underlying FD
             // (rubber-duck correction: pfd.close() in addition to OutputStream.close
             // so a stuck native syscall actually returns).
+            logRepository?.logStreamBackpressure(writeTimeoutMs)
             MindlayerLog.w(TAG, "Pipe write timed out after ${writeTimeoutMs}ms; closing", throwable = null)
             closed = true
             try { pfd?.close() } catch (t: Throwable) {

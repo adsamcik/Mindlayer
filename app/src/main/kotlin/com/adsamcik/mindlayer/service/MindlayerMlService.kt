@@ -305,6 +305,7 @@ class MindlayerMlService : Service() {
 
                 MindlayerLog.i(TAG, "Thermal recommends $recommended, currently on $current")
                 pendingBackend = recommended
+                logRepository.logBackendSwitch(current, recommended, "queued")
 
                 if (activeInferenceCount == 0) {
                     applyPendingBackendSwitch()
@@ -345,7 +346,9 @@ class MindlayerMlService : Service() {
             pendingBackend = null
         }
 
+        val fromBackend = engineManager.currentBackend
         MindlayerLog.i(TAG, "Applying backend switch: ${engineManager.currentBackend} → $target")
+        logRepository.logBackendSwitch(fromBackend, target, "started")
 
         serviceScope.launch {
             try {
@@ -355,8 +358,10 @@ class MindlayerMlService : Service() {
                 // Destroy all sessions first — they hold Conversation refs to old engine
                 sessionManager.shutdown()
                 engineManager.switchBackend(target)
+                logRepository.logBackendSwitch(fromBackend, engineManager.currentBackend, "complete")
                 MindlayerLog.i(TAG, "Backend switch complete: now on ${engineManager.currentBackend}")
             } catch (t: Throwable) {
+                logRepository.logBackendSwitch(fromBackend, target, "failed")
                 MindlayerLog.e(TAG, "Backend switch failed: ${t.safeLabel()}")
             }
         }
@@ -382,6 +387,7 @@ class MindlayerMlService : Service() {
                     ServiceCompat.startForeground(
                         this, NOTIFICATION_ID, notification, fgsType
                     )
+                    logRepository.logFgsPromoted(activeInferenceCount)
                     MindlayerLog.i(TAG, "Entered foreground")
                 } catch (e: Exception) {
                     MindlayerLog.e(TAG, "Failed to enter foreground: ${e.safeLabel()}")
@@ -399,6 +405,7 @@ class MindlayerMlService : Service() {
             activeInferenceCount = (activeInferenceCount - 1).coerceAtLeast(0)
             if (activeInferenceCount == 0) {
                 ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                logRepository.logFgsDemoted(activeInferenceCount)
                 MindlayerLog.i(TAG, "Exited foreground")
                 // Apply pending backend switch when idle
                 applyPendingBackendSwitch()

@@ -199,6 +199,13 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
                 // hard-failing — they are the cheapest to lose.
                 val evicted = evictLowestPriorityOwnedByUid(ownerUid)
                 if (!evicted) {
+                    logRepository?.logSessionQuotaExceeded(
+                        sessionId = sessionId,
+                        ownerUid = ownerUid,
+                        ownedNow = ownedNow,
+                        cap = perUidCap,
+                        tierMaxSessions = tier.maxSessions,
+                    )
                     MindlayerLog.w(
                         TAG,
                         "Per-UID session quota exhausted (owned=$ownedNow, " +
@@ -224,6 +231,13 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
                 evictLowestPriority()
             }
             if (!evicted || sessions.size >= tier.maxSessions) {
+                logRepository?.logSessionQuotaExceeded(
+                    sessionId = sessionId,
+                    ownerUid = ownerUid,
+                    ownedNow = sessions.size,
+                    cap = tier.maxSessions,
+                    tierMaxSessions = tier.maxSessions,
+                )
                 throw IllegalStateException(
                     "Session limit reached (${tier.maxSessions}); no evictable session for caller",
                 )

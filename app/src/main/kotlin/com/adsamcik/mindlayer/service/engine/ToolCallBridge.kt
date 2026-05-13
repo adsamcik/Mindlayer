@@ -1,5 +1,6 @@
 package com.adsamcik.mindlayer.service.engine
 
+import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.loggable
 import kotlinx.coroutines.CompletableDeferred
@@ -33,7 +34,9 @@ import java.util.concurrent.ConcurrentHashMap
  * Thread-safety: the [pending] map is a [ConcurrentHashMap]; individual
  * [PendingToolCall.resultDeferred] instances are coroutine-safe by design.
  */
-class ToolCallBridge {
+class ToolCallBridge(
+    private val logRepository: LogRepository? = null,
+) {
 
     companion object {
         private const val TAG = "ToolCallBridge"
@@ -138,10 +141,22 @@ class ToolCallBridge {
                     )
                 }
             }
+            logRepository?.logToolCallExit(
+                requestId = scopedKey.substringAfter(':', scopedKey),
+                sessionId = null,
+                result = "unmatched_submit",
+                pendingCount = calls.size,
+            )
             return false
         }
 
         match.resultDeferred.complete(resultJson)
+        logRepository?.logToolCallExit(
+            requestId = scopedKey.substringAfter(':', scopedKey),
+            sessionId = null,
+            result = "submitted",
+            pendingCount = calls.count { !it.resultDeferred.isCompleted },
+        )
         MindlayerLog.d(
             TAG,
             "Result submitted for call ${callId.loggable()} tool='$toolName' " +
