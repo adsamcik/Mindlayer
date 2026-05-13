@@ -59,6 +59,10 @@ import java.util.concurrent.atomic.AtomicReference
 class EngineNotReadyException(val retryAfterMs: Long) :
     IllegalStateException("engine_initializing")
 
+class SessionQuotaExceededException(message: String) : IllegalStateException(message)
+
+class SessionResourceExhaustedException(message: String) : IllegalStateException(message)
+
 interface SessionOwnerToken {
     val ownerUid: Int
 }
@@ -139,11 +143,10 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     private val initJob = AtomicReference<Job?>(null)
 
     /**
-     * F-071: terminal initialisation failure cached from the most recent
-     * background init job. Today only [LowMemoryException] is stored;
-     * other failures are transient (driver crash, race with foreground
-     * preemption) and the next [createSession] should be allowed to
-     * trigger another init attempt as before. Cleared on successful
+     * F-071/H-4: terminal initialisation failure cached from the most recent
+     * background init job. All init-failure variants are retained so callers
+     * do not loop forever on ENGINE_INITIALIZING after a fatal cold-start
+     * failure. Cleared on successful
      * `engineManager.initialize()` return so a recovered situation
      * (user closes background apps) can re-attempt without service
      * restart.
@@ -211,7 +214,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
                         "Per-UID session quota exhausted (owned=$ownedNow, " +
                             "cap=$perUidCap, tier=${tier.maxSessions})",
                     )
-                    throw IllegalStateException(
+                    throw SessionQuotaExceededException(
                         "Per-caller session quota reached " +
                             "($ownedNow/$perUidCap); destroy an existing session first",
                     )
@@ -238,7 +241,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
                     cap = tier.maxSessions,
                     tierMaxSessions = tier.maxSessions,
                 )
-                throw IllegalStateException(
+                throw SessionQuotaExceededException(
                     "Session limit reached (${tier.maxSessions}); no evictable session for caller",
                 )
             }
@@ -247,7 +250,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         // Under CRITICAL/EMERGENCY pressure, refuse new sessions if any exist
         if (snap.pressure >= MemoryPressure.CRITICAL && sessions.isNotEmpty()) {
             MindlayerLog.w(TAG, "Refusing new session under ${snap.pressure} pressure")
-            throw IllegalStateException(
+            throw SessionResourceExhaustedException(
                 "Memory pressure ${snap.pressure}: cannot create session " +
                     "(avail=${snap.availableMb} MB)"
             )
@@ -269,15 +272,21 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             // LOW_MEMORY wire code; the SDK's createSession retry
             // schedule treats it as non-retryable.
             val cachedError = lastInitError.get()
-            if (cachedError is LowMemoryException) {
+            if (cachedError != null) {
                 throw cachedError
             }
-            // F-018: never block the binder thread on engine init. Kick off
-            // a single coalesced init job and fast-fail with a typed
-            // exception. The caller (SDK) retries with backoff via the
-            // engine_initializing translation in ServiceBinder.
+            // PR-B: kick off a single coalesced init job, then block this
+            // first caller until EngineManager reports Ready or Failed. This
+            // replaces the old fast-fail/retry loop for cold createSession.
             ensureInitStarted(config.backend, effectiveMaxTokens)
-            throw EngineNotReadyException(retryAfterMs = INIT_RETRY_AFTER_MS)
+            when (val state = runBlocking { engineManager.awaitReady() }) {
+                is EngineState.Ready -> Unit
+                is EngineState.Failed -> throw lastInitError.get()
+                    ?: IllegalStateException("Engine init failed: ${state.cause}")
+                EngineState.Idle, EngineState.Initializing -> throw EngineNotReadyException(
+                    retryAfterMs = INIT_RETRY_AFTER_MS,
+                )
+            }
         }
 
         val engine = engineManager.requireEngine()
@@ -852,18 +861,11 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
                 // between attempts) can serve sessions normally.
                 lastInitError.set(null)
             } catch (t: Throwable) {
-                // F-071: cache low-memory failures so subsequent
-                // createSession callers get the typed LOW_MEMORY signal
-                // instead of EngineNotReadyException → engine_initializing
-                // → SDK retry storm. Other failures are not cached: the
-                // backend chain has its own retry semantics inside
-                // initialize() and a transient driver glitch should not
-                // permanently block session creation.
-                if (t is LowMemoryException) {
-                    lastInitError.set(t)
-                } else {
-                    lastInitError.set(null)
-                }
+                // H-4: cache every terminal init failure variant. A successful
+                // later initialize() clears this cache above; until then callers
+                // must receive the deterministic terminal error, not retry on
+                // ENGINE_INITIALIZING forever.
+                lastInitError.set(t)
                 MindlayerLog.w(TAG, "Background engine init failed: ${t.safeLabel()}", throwable = null)
             }
         }

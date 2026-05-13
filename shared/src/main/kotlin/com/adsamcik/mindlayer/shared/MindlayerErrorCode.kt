@@ -46,6 +46,18 @@ object MindlayerErrorCode {
     /** Engine load failed (model missing, integrity check failed, OOM during load). */
     const val ENGINE_LOAD_FAILED = 1002
 
+    /** Engine init failed because no LiteRT-LM model file is installed. */
+    const val MODEL_MISSING = 1003
+
+    /** Engine init failed because model integrity verification failed. */
+    const val INTEGRITY_MISMATCH = 1004
+
+    /** Engine init failed because all configured backends were unavailable. */
+    const val BACKEND_UNAVAILABLE = 1005
+
+    /** Engine init failed inside the native runtime. */
+    const val NATIVE_ERROR = 1006
+
     // ---- 2xxx session lifecycle --------------------------------------------
     /**
      * Session does not exist OR exists but is not owned by the caller.
@@ -137,6 +149,9 @@ object MindlayerErrorCode {
      */
     const val TRANSIENT_RESOURCE_EXHAUSTED = 5004
 
+    /** Caller/session quota exhausted; destroy an existing session before retrying. */
+    const val SESSION_QUOTA_EXHAUSTED = 5005
+
     // ---- 6xxx auth / allowlist ---------------------------------------------
 
     /** App not on the allowlist; user approval pending in the dashboard. */
@@ -189,14 +204,15 @@ object MindlayerErrorCode {
      * Map a wire code to its [Category]. Unknown codes return [Category.UNKNOWN].
      */
     fun categoryOf(code: Int): Category = when (code) {
-        ENGINE_INITIALIZING, ENGINE_LOAD_FAILED -> Category.ENGINE
+        ENGINE_INITIALIZING, ENGINE_LOAD_FAILED, MODEL_MISSING, INTEGRITY_MISMATCH,
+        BACKEND_UNAVAILABLE, NATIVE_ERROR -> Category.ENGINE
         SESSION_NOT_FOUND_OR_NOT_OWNED, SESSION_EVICTED, SESSION_EXPIRED -> Category.SESSION
         INVALID_REQUEST, INVALID_SESSION_CONFIG, INVALID_TOOL_RESULT,
         DUPLICATE_REQUEST, NO_ACTIVE_REQUEST,
         INPUT_EXCEEDS_CONTEXT -> Category.VALIDATION
         THERMAL_CRITICAL, MEMORY_PRESSURE, LOW_MEMORY,
         CONCURRENT_LIMIT, RATE_LIMITED, SERVICE_THROTTLED,
-        TRANSIENT_RESOURCE_EXHAUSTED -> Category.RESOURCE
+        TRANSIENT_RESOURCE_EXHAUSTED, SESSION_QUOTA_EXHAUSTED -> Category.RESOURCE
         ALLOWLIST_PENDING, ALLOWLIST_REVOKED, IDENTITY_UNKNOWN -> Category.AUTH
         INTERNAL -> Category.UNKNOWN
         else -> Category.UNKNOWN
@@ -211,6 +227,10 @@ object MindlayerErrorCode {
         UNKNOWN -> null
         ENGINE_INITIALIZING -> "ENGINE_INITIALIZING"
         ENGINE_LOAD_FAILED -> "ENGINE_LOAD_FAILED"
+        MODEL_MISSING -> "MODEL_MISSING"
+        INTEGRITY_MISMATCH -> "INTEGRITY_MISMATCH"
+        BACKEND_UNAVAILABLE -> "BACKEND_UNAVAILABLE"
+        NATIVE_ERROR -> "NATIVE_ERROR"
         SESSION_NOT_FOUND_OR_NOT_OWNED -> "SESSION_NOT_FOUND_OR_NOT_OWNED"
         SESSION_EVICTED -> "SESSION_EVICTED"
         SESSION_EXPIRED -> "SESSION_EXPIRED"
@@ -227,6 +247,7 @@ object MindlayerErrorCode {
         RATE_LIMITED -> "RATE_LIMITED"
         SERVICE_THROTTLED -> "SERVICE_THROTTLED"
         TRANSIENT_RESOURCE_EXHAUSTED -> "TRANSIENT_RESOURCE_EXHAUSTED"
+        SESSION_QUOTA_EXHAUSTED -> "SESSION_QUOTA_EXHAUSTED"
         ALLOWLIST_PENDING -> "ALLOWLIST_PENDING"
         ALLOWLIST_REVOKED -> "ALLOWLIST_REVOKED"
         IDENTITY_UNKNOWN -> "IDENTITY_UNKNOWN"

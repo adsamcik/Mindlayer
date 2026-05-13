@@ -113,14 +113,18 @@ class SessionManagerLowMemoryTest {
         // Bg init fails fast with LowMemoryException — no delay, so the
         // job completes well before our second poll below.
         coEvery { engineManager.initialize(any(), any()) } throws lowMemException
+        coEvery { engineManager.awaitReady() } coAnswers {
+            delay(100)
+            EngineState.Failed(InitFailure.LowMemory)
+        }
 
-        // First call kicks off the bg init and fast-fails with
-        // EngineNotReadyException per the F-018 contract.
+        // First call now blocks until init reaches terminal failure and surfaces it.
         try {
             sessionManager.createSession(SessionConfig(maxTokens = 2048))
-            fail("Expected EngineNotReadyException on first call")
-        } catch (_: EngineNotReadyException) {
-            // expected
+            fail("Expected LowMemoryException")
+        } catch (e: LowMemoryException) {
+            assertEquals(1024L, e.availMb)
+            assertEquals(2560L, e.requiredMb)
         }
 
         // Wait for the bg init job to fail and cache the LowMemoryException.
@@ -167,14 +171,19 @@ class SessionManagerLowMemoryTest {
         // Transient backend failure — must NOT be cached, otherwise a
         // single driver glitch would brick session creation until the
         // service restarted.
-        coEvery { engineManager.initialize(any(), any()) } throws
-            IllegalStateException("All backends failed: transient driver error")
+        val failure = IllegalStateException("All backends failed: transient driver error")
+        coEvery { engineManager.initialize(any(), any()) } throws failure
+        coEvery { engineManager.awaitReady() } coAnswers {
+            delay(100)
+            EngineState.Failed(InitFailure.BackendUnavailable("CPU", "IllegalStateException"))
+        }
 
-        // First call kicks off the doomed bg init and fast-fails.
         try {
             sessionManager.createSession(SessionConfig(maxTokens = 2048))
-            fail("Expected EngineNotReadyException")
-        } catch (_: EngineNotReadyException) { /* expected */ }
+            fail("Expected cached init failure")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("transient driver error"))
+        }
 
         // Wait for bg init to fail.
         withContext(Dispatchers.IO) {
@@ -190,17 +199,13 @@ class SessionManagerLowMemoryTest {
             delay(50)
         }
 
-        // Second call must STILL be EngineNotReadyException (not the
-        // generic IllegalStateException that the bg job swallowed) — we
-        // do not cache transient errors. This keeps the existing F-018
-        // contract intact.
         try {
             sessionManager.createSession(SessionConfig(maxTokens = 2048))
-            fail("Expected EngineNotReadyException on retry, not the cached failure")
-        } catch (_: EngineNotReadyException) {
-            // expected — fresh init job is allowed to start
-        } catch (e: LowMemoryException) {
-            fail("Transient failure must not have been cached as LowMemoryException")
+            fail("Expected cached init failure on retry")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("transient driver error"))
         }
+
+        coVerify(exactly = 1) { engineManager.initialize(any(), any()) }
     }
 }
