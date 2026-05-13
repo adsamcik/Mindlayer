@@ -39,6 +39,8 @@ import kotlinx.coroutines.launch
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.security.AllowlistEntry
 import com.adsamcik.mindlayer.service.security.AllowlistStore
+import com.adsamcik.mindlayer.service.security.CallerVerifier
+import com.adsamcik.mindlayer.service.security.debugSeedIfApplicable
 
 class MindlayerMlService : Service() {
 
@@ -163,7 +165,10 @@ class MindlayerMlService : Service() {
         val logDb = LogDatabase.getInstance(this)
         logRepository = LogRepository(logDb.logDao())
 
-        AllowlistStore(this, logRepository = logRepository).seedIfEmpty(FIRST_PARTY_ALLOWLIST_SEEDS)
+        val allowlistStore = AllowlistStore(this, logRepository = logRepository)
+        val callerVerifier = CallerVerifier
+        allowlistStore.seedIfEmpty(FIRST_PARTY_ALLOWLIST_SEEDS)
+        debugSeedIfApplicable(this, allowlistStore, callerVerifier, logRepository)
 
         engineManager = EngineManager(this, logRepository)
         memoryBudget = MemoryBudget(this, serviceScope, logRepository)
@@ -178,7 +183,7 @@ class MindlayerMlService : Service() {
         val diagnosticExporter = DiagnosticExporter(
             engineManager, thermalMonitor, memoryBudget, sessionManager, logDb.logDao()
         )
-        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, logRepository = logRepository, mlHealthRecorder = mlHealthRecorder, deferredStore = deferredStore)
+        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, allowlistStore = allowlistStore, logRepository = logRepository, mlHealthRecorder = mlHealthRecorder, deferredStore = deferredStore)
 
         logRepository.log(LogEntry(
             timestampMs = System.currentTimeMillis(),

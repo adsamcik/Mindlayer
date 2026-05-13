@@ -110,26 +110,27 @@ Cancellation: LiteRT-LM `Conversation.cancelProcess()` is **explicit** — Flow 
 
 ## Trust Model
 
-### Today (verified, see `docs/AUTHORIZATION.md`)
+1. **Manifest gate** — `BIND_ML_SERVICE` is `signature|knownSigner`. Same-key
+   callers (including the dashboard/self-UID path) keep the traditional
+   `signature` grant, while Android 12+ grants known first-party certs listed
+   in `R.array.mindlayer_trusted_client_certs`.
+2. **Identity** — `CallerVerifier.identifyCaller(uid)` resolves UID →
+   `(pkg, signingCertSha256)`. Shared-UID rejected.
+3. **Allowlist** — `AllowlistStore.isAllowed(pkg, sig)` checks a JSON file in
+   service `filesDir`. Fresh installs seed known first-party `(pkg, sig)`
+   pairs from `FIRST_PARTY_ALLOWLIST_SEEDS`; unknown callers still become
+   pending dashboard approvals.
+4. **Rate limit** — `RateLimiter` per-UID token bucket (60 RPM) +
+   concurrent-inference cap.
+5. **Ownership** — Session-scoped methods (`infer`, `destroy`, `cancel`,
+   `submitToolResult`) require the calling UID to own the session.
+6. **Self-UID bypass** — When `Binder.getCallingUid() == Process.myUid()` the
+   dashboard's own AIDL traffic skips the allowlist + rate limit; otherwise it
+   would self-deny.
 
-1. **Manifest gate** — `BIND_ML_SERVICE` permission is `signature`. Only apps signed with the same key as the service can even attempt to bind. In a 1P-only deployment this is the primary gate.
-2. **Identity** — `CallerVerifier.identifyCaller(uid)` resolves UID → `(pkg, signingCertSha256)`. Shared-UID rejected.
-3. **Allowlist** — `AllowlistStore.isAllowed(pkg, sig)` against a JSON file in service `filesDir`. Default-deny; **no first-party seeding today**. First call from any caller (including a co-signed first-party app) records a pending entry and throws `SecurityException`. The user must approve in the dashboard.
-4. **Rate limit** — `RateLimiter` per-UID token bucket (60 RPM) + concurrent-inference cap.
-5. **Ownership** — Session-scoped methods (`infer`, `destroy`, `cancel`, `submitToolResult`) require the calling UID to own the session.
-6. **Self-UID bypass** — When `Binder.getCallingUid() == Process.myUid()` the dashboard's own AIDL traffic skips the allowlist + rate limit; otherwise it would self-deny.
-
-### Intended direction (NOT YET IMPLEMENTED — design constraint)
-
-The product intent is that **first-party apps (signed with the same key) should bypass user approval entirely** — being co-signed is itself the authorization. Third-party support must remain *possible* in the future and the existing user-approval flow must stay intact for that path.
-
-The hook is named in the doc: `AllowlistStore.seedIfEmpty(...)` called from `MindlayerMlService.onCreate`, populating the allowlist with known 1P `(pkg, sig)` pairs. When you implement this:
-
-- Keep `CallerVerifier`, `RateLimiter`, ownership and binder-death intact — they are orthogonal to who is approved.
-- Do **not** remove `recordPending` for unknown callers — that is what enables future 3P opt-in.
-- The signature-perm manifest gate is the *first* line; the seeded allowlist is defense-in-depth.
-
-Until that lands, even the project's own first-party clients see `REJECTED_NOT_APPROVED` on first connect and need a one-time dashboard approval per install.
+API 26–30 ignore `knownSigner`, so different-key first-party cross-app binds
+require API 31+. `TrustedClientCertParityTest` enforces manifest-array ↔ seed
+list cert hash parity.
 
 ## Wire Protocol (v1)
 

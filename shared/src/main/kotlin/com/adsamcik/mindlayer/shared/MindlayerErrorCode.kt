@@ -161,6 +161,9 @@ object MindlayerErrorCode {
     /** Deferred result expired before it was fetched. */
     const val DEFERRED_EXPIRED = 5008
 
+    /** SDK-side bind is unsupported for this Android API level. */
+    const val UNSUPPORTED_ANDROID_VERSION = 5009
+
     // ---- 6xxx auth / allowlist ---------------------------------------------
 
     /** App not on the allowlist; user approval pending in the dashboard. */
@@ -223,7 +226,7 @@ object MindlayerErrorCode {
         CONCURRENT_LIMIT, RATE_LIMITED, SERVICE_THROTTLED,
         TRANSIENT_RESOURCE_EXHAUSTED, SESSION_QUOTA_EXHAUSTED,
         NOT_SUPPORTED, DEFERRED_QUOTA_EXHAUSTED,
-        DEFERRED_EXPIRED -> Category.RESOURCE
+        DEFERRED_EXPIRED, UNSUPPORTED_ANDROID_VERSION -> Category.RESOURCE
         ALLOWLIST_PENDING, ALLOWLIST_REVOKED, IDENTITY_UNKNOWN -> Category.AUTH
         INTERNAL -> Category.UNKNOWN
         else -> Category.UNKNOWN
@@ -262,6 +265,7 @@ object MindlayerErrorCode {
         NOT_SUPPORTED -> "NOT_SUPPORTED"
         DEFERRED_QUOTA_EXHAUSTED -> "DEFERRED_QUOTA_EXHAUSTED"
         DEFERRED_EXPIRED -> "DEFERRED_EXPIRED"
+        UNSUPPORTED_ANDROID_VERSION -> "UNSUPPORTED_ANDROID_VERSION"
         ALLOWLIST_PENDING -> "ALLOWLIST_PENDING"
         ALLOWLIST_REVOKED -> "ALLOWLIST_REVOKED"
         IDENTITY_UNKNOWN -> "IDENTITY_UNKNOWN"

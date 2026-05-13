@@ -12,7 +12,9 @@ val generateModelIntegrityManifest by tasks.registering {
     description = "Writes the model_integrity.json asset from -PmodelSha256."
     outputs.file(manifestFile)
     doLast {
-        val releaseRequested = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = false) }
+        val releaseRequested = gradle.startParameter.taskNames.any {
+            it.contains("Release", ignoreCase = false) && !it.contains("UnitTest", ignoreCase = false)
+        }
         if (releaseRequested && !modelSha256Pattern.matches(modelSha256)) {
             throw GradleException("Release AI-pack builds require -PmodelSha256=<64 lowercase hex SHA-256>.")
         }

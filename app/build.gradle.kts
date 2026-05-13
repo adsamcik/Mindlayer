@@ -298,6 +298,10 @@ android {
         }
     }
 
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+
     lint {
         // Treat these as build-breaking on release.
         warningsAsErrors = false
@@ -311,9 +315,15 @@ android {
     }
 }
 
+androidComponents {
+    beforeVariants(selector().withBuildType("release")) { variantBuilder ->
+        (variantBuilder as com.android.build.api.variant.HasUnitTestBuilder).enableUnitTest = true
+    }
+}
+
 tasks.configureEach {
-    val isReleasePackageTask = name.contains("Release") &&
-        (name.startsWith("assemble") || name.startsWith("bundle") || name.startsWith("package"))
+    val isReleasePackageTask = !name.contains("UnitTest") &&
+        (name == "assembleRelease" || name == "bundleRelease" || name == "packageRelease")
     if (isReleasePackageTask) {
         dependsOn(validateReleaseModelSha256)
     }
@@ -350,6 +360,9 @@ tasks.withType<Test> {
         "-XX:+UseParallelGC",
         "-XX:-UseG1GC",
     )
+    if (name == "testReleaseUnitTest") {
+        filter.includeTestsMatching("com.adsamcik.mindlayer.service.security.DebugAllowlistSeederReleaseAbsenceTest")
+    }
 }
 
 dependencies {
