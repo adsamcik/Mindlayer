@@ -9,6 +9,8 @@ import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.service.MindlayerMlService
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.ipc.TokenStreamWriter
+import com.adsamcik.mindlayer.service.testutil.TestPipeHelper
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Conversation
@@ -30,6 +32,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentLinkedQueue
 
@@ -264,6 +267,37 @@ class InferenceOrchestratorCancelTest {
         // and must NOT crash.
         verify(exactly = 0) { mockConversation.cancelProcess() }
     }
+
+    @Test
+    fun `emergency memory pressure cancels active stream with low memory error`() {
+        val sid = sessionManager.createSession(SessionConfig(maxTokens = 2048))
+        val out = ByteArrayOutputStream()
+        outputStreamQueue.add(out)
+        startEndlessInference("100:req-low-memory", sid)
+
+        sessionManager.applyMemoryPressure(MemoryPressure.EMERGENCY)
+
+        verify(timeout = 2_000L, atLeast = 1) { mockConversation.cancelProcess() }
+        val ended = await(2_000L) { jobFor("100:req-low-memory")?.isActive != true }
+        assertTrue("active job must end after EMERGENCY cancellation", ended)
+
+        var events = emptyList<TestPipeHelper.ParsedEvent>()
+        await(2_000L) {
+            events = TestPipeHelper.parseFrames(
+                TestPipeHelper.readFrames(ByteArrayInputStream(out.toByteArray()))
+            )
+            events.any { it.kind == "error" }
+        }
+        assertTrue(
+            "Expected LOW_MEMORY error frame; events=$events",
+            events.any {
+                it.kind == "error" &&
+                    it.errorMessage == "low_memory" &&
+                    it.errorCode == MindlayerErrorCode.nameOf(MindlayerErrorCode.LOW_MEMORY)
+            },
+        )
+    }
+
 
     @Test
     fun `parent-scope coroutine cancel still drives cancelProcess via runInference catch`() {

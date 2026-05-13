@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.ForegroundServiceStartNotAllowedException
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -246,6 +247,31 @@ class MindlayerMlService : Service() {
 
         // Forward to MemoryBudget for immediate re-evaluation and escalation
         memoryBudget.onTrimMemory(level)
+
+        if (memoryBudget.pressure.value == MemoryPressure.EMERGENCY) {
+            val unloadDecision = if (sessionManager.hasActiveStreaming()) {
+                "after_active_streams"
+            } else {
+                "immediate"
+            }
+            logRepository.log(LogEntry(
+                timestampMs = System.currentTimeMillis(),
+                category = LogCategory.MEMORY,
+                event = LogEvent.PRESSURE_CHANGE,
+                extraJson = "{\"trimLevel\":$level,\"engineUnload\":\"$unloadDecision\"}",
+            ))
+            sessionManager.applyMemoryPressure(MemoryPressure.EMERGENCY)
+            serviceScope.launch {
+                if (unloadDecision == "after_active_streams") {
+                    orchestrator.awaitAllJobs(timeoutMs = 5_000)
+                    sessionManager.applyMemoryPressure(MemoryPressure.EMERGENCY)
+                }
+                if (!sessionManager.hasActiveStreaming()) {
+                    sessionManager.invalidateIdleSessionsForBackendSwitch()
+                    engineManager.shutdown()
+                }
+            }
+        }
     }
 
     private fun scheduleLogCleanup() {
@@ -355,8 +381,8 @@ class MindlayerMlService : Service() {
                 // Wait for any coroutine that slipped in before we took the
                 // lock to finish — avoids closing a Conversation mid-inference.
                 orchestrator.awaitAllJobs()
-                // Destroy all sessions first — they hold Conversation refs to old engine
-                sessionManager.shutdown()
+                // Lazy-invalidate idle sessions; they re-warm on next access after the backend changes.
+                sessionManager.invalidateIdleSessionsForBackendSwitch()
                 engineManager.switchBackend(target)
                 logRepository.logBackendSwitch(fromBackend, engineManager.currentBackend, "complete")
                 MindlayerLog.i(TAG, "Backend switch complete: now on ${engineManager.currentBackend}")
@@ -390,7 +416,17 @@ class MindlayerMlService : Service() {
                     logRepository.logFgsPromoted(activeInferenceCount)
                     MindlayerLog.i(TAG, "Entered foreground")
                 } catch (e: Exception) {
-                    MindlayerLog.e(TAG, "Failed to enter foreground: ${e.safeLabel()}")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                        e is ForegroundServiceStartNotAllowedException
+                    ) {
+                        MindlayerLog.e(
+                            TAG,
+                            "Foreground service start not allowed: ${e.safeLabel()}",
+                            throwable = null,
+                        )
+                    } else {
+                        MindlayerLog.e(TAG, "Failed to enter foreground: ${e.safeLabel()}")
+                    }
                 }
             }
         }
