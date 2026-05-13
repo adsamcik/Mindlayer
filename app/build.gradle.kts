@@ -40,12 +40,27 @@ val modelSha256 = project.findProperty("modelSha256")?.toString()?.trim().orEmpt
 val modelSha256Pattern = Regex("^[0-9a-f]{64}$")
 
 val validateReleaseModelSha256 by tasks.registering {
+    dependsOn(":gemma_model:generateModelIntegrityManifest")
     group = "verification"
     description = "Fails release builds unless -PmodelSha256 is a lowercase SHA-256 digest."
     doLast {
         if (!modelSha256Pattern.matches(modelSha256)) {
             throw GradleException(
                 "Release builds require -PmodelSha256=<64 lowercase hex SHA-256 of the bundled .litertlm model>.",
+            )
+        }
+        val manifest = rootProject.file("gemma_model/src/main/assets/model_integrity.json")
+        if (!manifest.isFile) {
+            throw GradleException("Release builds require gemma_model/src/main/assets/model_integrity.json.")
+        }
+        val manifestSha = Regex(""""sha256"\s*:\s*"([0-9a-f]{64})"""")
+            .find(manifest.readText())
+            ?.groupValues
+            ?.get(1)
+            ?: throw GradleException("model_integrity.json must contain a 64-character lowercase sha256 value.")
+        if (manifestSha != modelSha256) {
+            throw GradleException(
+                "BuildConfig.MODEL_SHA256 does not match model_integrity.json sha256.",
             )
         }
     }

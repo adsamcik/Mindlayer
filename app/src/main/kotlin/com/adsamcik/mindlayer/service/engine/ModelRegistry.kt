@@ -252,6 +252,11 @@ object ModelRegistry {
         }
         return try {
             val root = JSONObject(raw)
+            val singleFile = root.optString("modelFile").takeIf { it.endsWith(MODEL_EXTENSION) }
+            val singleSha = root.optString("sha256").lowercase(Locale.ROOT)
+            if (singleFile != null && SHA256_REGEX.matches(singleSha)) {
+                return mapOf(singleFile to IntegrityMetadata(singleSha, sizeBytes = null))
+            }
             val models = root.optJSONArray("models") ?: return emptyMap()
             buildMap {
                 for (i in 0 until models.length()) {
