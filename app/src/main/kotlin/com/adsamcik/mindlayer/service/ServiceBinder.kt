@@ -1,6 +1,20 @@
 package com.adsamcik.mindlayer.service
 
 import android.content.Context
+import android.os.Bundle
+import com.adsamcik.mindlayer.DeferredHandle
+import com.adsamcik.mindlayer.DeferredResult
+import com.adsamcik.mindlayer.service.engine.DeferredStore
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
+import java.io.EOFException
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import android.os.Binder
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
@@ -78,6 +92,7 @@ class ServiceBinder(
     private val rateLimiter: RateLimiter = RateLimiter(),
     private val logRepository: LogRepository? = null,
     private val mlHealthRecorder: MlHealthRecorder? = null,
+    private val deferredStore: DeferredStore? = null,
 ) : IMindlayerService.Stub() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -180,7 +195,7 @@ class ServiceBinder(
          * [submitToolResultV2]; v5 added [getDiagnosticsTyped]; v6 added
          * [subscribeEvictionNotices] + [unsubscribeEvictionNotices].
          */
-        const val CURRENT_API_VERSION = 6
+        const val CURRENT_API_VERSION = 7
 
         /**
          * How long after termination a scoped key remains in
@@ -238,6 +253,7 @@ class ServiceBinder(
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TOKEN_BATCH,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_EVICTION_CALLBACK,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DEFERRED_INFERENCE,
         )
 
         /** Allowed characters for caller-supplied identifiers (sessionId/requestId). */
@@ -443,6 +459,9 @@ class ServiceBinder(
         }
         else -> InitFailure.NativeError(t.safeLabel())
     }
+
+    private fun requireDeferredStore(): DeferredStore =
+        deferredStore ?: throw typedBinderException(MindlayerErrorCode.INTERNAL, "deferred_store_unavailable")
 
     private fun requireRegisteredClient(): ClientRegistration? {
         val uid = Binder.getCallingUid()
@@ -1185,6 +1204,231 @@ class ServiceBinder(
         }
     }
 
+
+    override fun inferDeferred(
+        meta: RequestMeta,
+        media: List<com.adsamcik.mindlayer.MediaPart>?,
+    ): DeferredHandle {
+        val identity = authorizeCall()
+        val uid = Binder.getCallingUid()
+        val ownerToken = requireRegisteredClient()
+        val parts = media ?: emptyList()
+        try {
+            IpcInputValidator.validateRequestMeta(meta)
+            IpcInputValidator.validateMediaParts(
+                parts,
+                maxPerPartBytes = MAX_MEDIA_BYTES,
+                maxParts = MAX_MEDIA_PARTS_PER_REQUEST,
+            )
+        } catch (e: IllegalArgumentException) {
+            throw typedBinderException(MindlayerErrorCode.INVALID_REQUEST, "Invalid request: ${e.message}")
+        }
+        requireOwnership(meta.sessionId)
+
+        if (!rateLimiter.beginInference(uid)) {
+            throw typedBinderException(
+                MindlayerErrorCode.CONCURRENT_LIMIT,
+                "Concurrent inference limit exceeded for ${identity.packageName}",
+            )
+        }
+
+        val requestId = UUID.randomUUID().toString()
+        val deferredMeta = meta.copy(requestId = requestId)
+        val scopedKey = inferenceKey(uid, requestId)
+        val handle = try {
+            runBlocking { requireDeferredStore().create(uid, requestId, deferredMeta, parts.size) }
+                ?: run {
+                    rateLimiter.endInference(uid)
+                    throw typedBinderException(
+                        MindlayerErrorCode.DEFERRED_QUOTA_EXHAUSTED,
+                        "deferred quota exhausted",
+                    )
+                }
+        } catch (t: Throwable) {
+            if (t is SecurityException) throw t
+            rateLimiter.endInference(uid)
+            throw t
+        }
+
+        if (activeInferenceUids.putIfAbsent(scopedKey, uid) != null) {
+            rateLimiter.endInference(uid)
+            throw typedBinderException(MindlayerErrorCode.DUPLICATE_REQUEST, "Duplicate requestId: $requestId")
+        }
+        if (ownerToken != null) activeInferenceOwners[scopedKey] = ownerToken
+
+        val imagePart = parts.firstOrNull { it.kind == com.adsamcik.mindlayer.MediaPart.KIND_IMAGE }
+        val audioPart = parts.firstOrNull { it.kind == com.adsamcik.mindlayer.MediaPart.KIND_AUDIO }
+        val image = imagePart?.let { mediaPartToImageTransfer(it.copy(requestId = requestId)) }
+        val audio = audioPart?.let { mediaPartToAudioTransfer(it.copy(requestId = requestId)) }
+        val pipe = ParcelFileDescriptor.createPipe()
+        val readEnd = pipe[0]
+        val writeEnd = pipe[1]
+        val released = AtomicBoolean(false)
+        fun releaseSlot() {
+            if (released.compareAndSet(false, true)) {
+                activeInferenceOwners.remove(scopedKey)
+                if (activeInferenceUids.remove(scopedKey) != null) {
+                    rateLimiter.endInference(uid)
+                }
+                markRecentlyCompleted(scopedKey)
+            }
+        }
+
+        scope.launch(Dispatchers.IO) {
+            var terminalStatus = DeferredResult.FAILED
+            try {
+                orchestrator.infer(scopedKey, deferredMeta, image, audio, writeEnd) { releaseSlot() }
+                val collected = collectDeferredPipe(readEnd)
+                terminalStatus = collected.status
+                when (collected.status) {
+                    DeferredResult.READY -> requireDeferredStore().completeReady(requestId, uid, collected.text, collected.metrics)
+                    DeferredResult.CANCELLED -> requireDeferredStore().completeCancelled(requestId, uid)
+                    else -> requireDeferredStore().completeFailed(
+                        requestId,
+                        uid,
+                        collected.errorCodeInt.ifBlankCode(),
+                        collected.errorCodeName ?: MindlayerErrorCode.nameOf(collected.errorCodeInt.ifBlankCode()),
+                    )
+                }
+                logRepository?.logDeferredComplete(requestId, meta.sessionId, terminalStatus)
+                mlHealthRecorder?.recordDeferredCompletion()
+            } catch (t: Throwable) {
+                releaseSlot()
+                val label = t.safeLabel()
+                terminalStatus = DeferredResult.FAILED
+                runCatching {
+                    requireDeferredStore().completeFailed(
+                        requestId,
+                        uid,
+                        MindlayerErrorCode.INTERNAL,
+                        MindlayerErrorCode.nameOf(MindlayerErrorCode.INTERNAL) ?: label,
+                    )
+                }
+                logRepository?.logDeferredComplete(requestId, meta.sessionId, terminalStatus)
+            } finally {
+                releaseSlot()
+                try { readEnd.close() } catch (_: Exception) { }
+                evictionRegistry.notifyDeferredComplete(uid, requestId, terminalStatus)
+            }
+        }
+        logRepository?.logDeferredSubmit(requestId, meta.sessionId, parts.size)
+        mlHealthRecorder?.recordDeferredSubmit()
+        return handle
+    }
+
+    override fun fetchDeferredResult(requestId: String): DeferredResult {
+        authorizeCall()
+        try {
+            IpcInputValidator.validateId(requestId, "requestId")
+        } catch (e: IllegalArgumentException) {
+            throw typedBinderException(MindlayerErrorCode.INVALID_REQUEST, "Invalid requestId: ${e.message}")
+        }
+        val uid = Binder.getCallingUid()
+        val result = runBlocking { requireDeferredStore().fetch(uid, requestId) }
+        logRepository?.logDeferredFetch(requestId, result.status)
+        return result
+    }
+
+    override fun cancelDeferredInference(requestId: String): com.adsamcik.mindlayer.CancelResult {
+        authorizeCall()
+        try {
+            IpcInputValidator.validateId(requestId, "requestId")
+        } catch (e: IllegalArgumentException) {
+            throw typedBinderException(MindlayerErrorCode.INVALID_REQUEST, "Invalid requestId: ${e.message}")
+        }
+        val uid = Binder.getCallingUid()
+        val outcome = runBlocking { requireDeferredStore().cancel(uid, requestId) }
+        if (outcome == com.adsamcik.mindlayer.CancelResult.CANCELLED) {
+            orchestrator.cancelInference(inferenceKey(uid, requestId))
+        }
+        logRepository?.logDeferredCancel(requestId, outcome)
+        return com.adsamcik.mindlayer.CancelResult(outcome = outcome)
+    }
+
+    override fun acknowledgeDeferredResult(requestId: String) {
+        authorizeCall()
+        try {
+            IpcInputValidator.validateId(requestId, "requestId")
+        } catch (e: IllegalArgumentException) {
+            throw typedBinderException(MindlayerErrorCode.INVALID_REQUEST, "Invalid requestId: ${e.message}")
+        }
+        runBlocking { requireDeferredStore().acknowledge(Binder.getCallingUid(), requestId) }
+    }
+
+    private data class DeferredCollected(
+        val status: Int,
+        val text: String = "",
+        val metrics: Bundle? = null,
+        val errorCodeInt: Int = MindlayerErrorCode.INTERNAL,
+        val errorCodeName: String? = MindlayerErrorCode.nameOf(MindlayerErrorCode.INTERNAL),
+    )
+
+    private fun Int.ifBlankCode(): Int = if (this == 0) MindlayerErrorCode.INTERNAL else this
+
+    private fun collectDeferredPipe(readEnd: ParcelFileDescriptor): DeferredCollected {
+        val json = Json { ignoreUnknownKeys = true }
+        val text = StringBuilder()
+        var metrics: Bundle? = null
+        ParcelFileDescriptor.AutoCloseInputStream(readEnd).use { input ->
+            while (true) {
+                val header = ByteArray(4)
+                var read = 0
+                while (read < 4) {
+                    val n = input.read(header, read, 4 - read)
+                    if (n < 0) {
+                        if (text.isNotEmpty()) return DeferredCollected(DeferredResult.READY, text.toString(), metrics)
+                        throw EOFException("deferred pipe closed before terminal frame")
+                    }
+                    read += n
+                }
+                val len = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN).int
+                if (len <= 0 || len > 1_048_576) {
+                    return DeferredCollected(DeferredResult.FAILED, errorCodeInt = MindlayerErrorCode.INTERNAL)
+                }
+                val payload = ByteArray(len)
+                var offset = 0
+                while (offset < len) {
+                    val n = input.read(payload, offset, len - offset)
+                    if (n < 0) throw EOFException("deferred pipe closed mid-frame")
+                    offset += n
+                }
+                val obj = json.parseToJsonElement(payload.decodeToString()).jsonObject
+                val type = obj["type"]?.jsonPrimitive?.content ?: continue
+                val eventPayload = obj["payload"] as? JsonObject ?: JsonObject(emptyMap())
+                when (type) {
+                    com.adsamcik.mindlayer.shared.StreamEventType.TOKEN_DELTA -> {
+                        eventPayload["text"]?.jsonPrimitive?.content?.let { text.append(it) }
+                    }
+                    com.adsamcik.mindlayer.shared.StreamEventType.TOKEN_DELTA_BATCH -> {
+                        val values = eventPayload["texts"] as? JsonArray
+                        values?.forEach { text.append(it.jsonPrimitive.content) }
+                    }
+                    com.adsamcik.mindlayer.shared.StreamEventType.METRICS -> {
+                        metrics = Bundle().apply {
+                            for ((key, value) in eventPayload) {
+                                value.jsonPrimitive.intOrNull?.let { putInt(key, it) }
+                                    ?: value.jsonPrimitive.longOrNull?.let { putLong(key, it) }
+                            }
+                        }
+                    }
+                    com.adsamcik.mindlayer.shared.StreamEventType.ERROR -> {
+                        val codeInt = eventPayload["codeInt"]?.jsonPrimitive?.intOrNull ?: MindlayerErrorCode.INTERNAL
+                        val codeName = eventPayload["code"]?.jsonPrimitive?.content
+                            ?: MindlayerErrorCode.nameOf(codeInt)
+                        return DeferredCollected(DeferredResult.FAILED, errorCodeInt = codeInt, errorCodeName = codeName)
+                    }
+                    com.adsamcik.mindlayer.shared.StreamEventType.DONE -> {
+                        val finish = eventPayload["finish_reason"]?.jsonPrimitive?.content
+                        return if (finish == "cancelled") {
+                            DeferredCollected(DeferredResult.CANCELLED)
+                        } else {
+                            DeferredCollected(DeferredResult.READY, text.toString(), metrics)
+                        }
+                    }
+                }
+            }
+        }
+    }
     /**
      * Convert a [com.adsamcik.mindlayer.MediaPart] of [com.adsamcik.mindlayer.MediaPart.KIND_IMAGE]
      * to the legacy [ImageTransfer] shape consumed by the orchestrator. Truncates

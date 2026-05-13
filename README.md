@@ -114,3 +114,7 @@ Mindlayer is licensed under the **GNU Affero General Public License, version 3**
 In short: you are free to use, modify, and distribute this software, including over a network. **If you do, you must release the complete corresponding source of your modifications under the same AGPL-3.0 license, including when the software is used as a network service.** This is a deliberate choice to keep derivative works open; if AGPL-3.0 obligations are incompatible with your use case, please open an issue to discuss alternative licensing.
 
 `SPDX-License-Identifier: AGPL-3.0-only`
+
+### Deferred async inference
+
+Mindlayer supports fire-and-fetch-later flows for long-running work. Submit with `mindlayer.chatDeferred(sessionId, text)`, subscribe to `mindlayer.deferredCompletions()` for push notification, then call `fetchDeferredResult(requestId)`. Results are SQLCipher-encrypted at rest, scoped per UID, quota-limited, and expire after 24 hours by default.

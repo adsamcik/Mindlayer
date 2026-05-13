@@ -12,6 +12,8 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import com.adsamcik.mindlayer.service.engine.DeferredDatabase
+import com.adsamcik.mindlayer.service.engine.DeferredStore
 import com.adsamcik.mindlayer.service.engine.EngineManager
 import com.adsamcik.mindlayer.service.engine.InferenceOrchestrator
 import com.adsamcik.mindlayer.service.engine.MemoryBudget
@@ -76,6 +78,8 @@ class MindlayerMlService : Service() {
     lateinit var thermalMonitor: ThermalMonitor
         private set
     lateinit var mlHealthRecorder: MlHealthRecorder
+        private set
+    lateinit var deferredStore: DeferredStore
         private set
     private lateinit var sharedMemoryPool: SharedMemoryPool
     private lateinit var binder: ServiceBinder
@@ -144,12 +148,14 @@ class MindlayerMlService : Service() {
         sessionManager = SessionManager(this, engineManager, memoryBudget, logRepository)
         sharedMemoryPool = SharedMemoryPool(cacheDir)
         sharedMemoryPool.cleanupAll()
+        deferredStore = DeferredStore(DeferredDatabase.getInstance(this).deferredDao())
+        serviceScope.launch { deferredStore.failRunningOnInit() }
         orchestrator = InferenceOrchestrator(this, sessionManager, sharedMemoryPool, logRepository)
 
         val diagnosticExporter = DiagnosticExporter(
             engineManager, thermalMonitor, memoryBudget, sessionManager, logDb.logDao()
         )
-        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, logRepository = logRepository, mlHealthRecorder = mlHealthRecorder)
+        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, logRepository = logRepository, mlHealthRecorder = mlHealthRecorder, deferredStore = deferredStore)
 
         logRepository.log(LogEntry(
             timestampMs = System.currentTimeMillis(),

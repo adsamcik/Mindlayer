@@ -18,6 +18,7 @@ import java.nio.channels.FileLock
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.nio.file.AtomicMoveNotSupportedException
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * F-074: cross-process crash-loop watchdog for the `:ml` service process.
@@ -96,6 +97,17 @@ class MlHealthRecorder @VisibleForTesting internal constructor(
     private val lockFile: File = File(baseDir, "abnormal_deaths.lock")
 
     private val json = Json { ignoreUnknownKeys = true }
+
+    private val deferredSubmitCount = AtomicLong(0)
+    private val deferredCompletionCount = AtomicLong(0)
+
+    fun recordDeferredSubmit() { deferredSubmitCount.incrementAndGet() }
+
+    fun recordDeferredCompletion() { deferredCompletionCount.incrementAndGet() }
+
+    fun deferredSubmits(): Long = deferredSubmitCount.get()
+
+    fun deferredCompletions(): Long = deferredCompletionCount.get()
 
     init {
         baseDir.mkdirs()
