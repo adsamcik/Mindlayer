@@ -43,8 +43,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.adsamcik.mindlayer.service.R
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerTheme
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerType
 
@@ -104,7 +106,7 @@ fun SessionDetailScreen(
             MediumTopAppBar(
                 title = {
                     Column {
-                        Text("Session Timeline")
+                        Text(stringResource(R.string.session_timeline_title))
                         if (state.displayId.isNotBlank()) {
                             Text(
                                 text = state.displayId,
@@ -191,7 +193,7 @@ fun SessionDetailScreen(
                         item { SummaryCard(state) }
                         item {
                             Text(
-                                text = "${formatWholeNumber(state.eventCount)} log entries · newest first",
+                                text = stringResource(R.string.session_detail_entries_newest, formatWholeNumber(state.eventCount)),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -221,7 +223,7 @@ private fun SummaryCard(state: SessionDetailUiState) {
                     modifier = Modifier.size(16.dp),
                 )
                 Text(
-                    text = "Session summary",
+                    text = stringResource(R.string.session_summary_title),
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onSurface,
                     fontWeight = FontWeight.SemiBold,
@@ -229,7 +231,7 @@ private fun SummaryCard(state: SessionDetailUiState) {
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "Session ID",
+                text = stringResource(R.string.session_id_label),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -294,7 +296,7 @@ private fun EventRow(event: SessionEventItem) {
                 Spacer(Modifier.height(4.dp))
                 SelectionContainer {
                     Text(
-                        text = "Request ${event.requestIdLabel}",
+                        text = stringResource(R.string.session_request_label, event.requestIdLabel),
                         style = MindlayerType.Mono.BodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

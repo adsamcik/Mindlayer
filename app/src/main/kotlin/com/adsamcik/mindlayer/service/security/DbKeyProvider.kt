@@ -12,6 +12,9 @@ import java.io.IOException
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.StandardCopyOption
 import java.security.GeneralSecurityException
 import java.security.KeyStore
 import java.security.SecureRandom
@@ -110,15 +113,37 @@ internal object DbKeyProvider {
     private fun loadOrCreate(context: Context, databaseName: String): ByteArray {
         val keyFile = keyFile(context)
 
+        var justMigrated = false
         if (!keyFile.exists()) {
-            migrateLegacyPrefsIfPresent(context, keyFile)
+            justMigrated = migrateLegacyPrefsIfPresent(context, keyFile)
         }
+        assertRegularFileIfExists(keyFile)
 
         val record = readKeyFile(keyFile)
         if (record != null) {
             try {
                 val key = loadKeystoreKey()
-                    ?: error("Keystore key missing despite wrapped blob present")
+                if (key == null) {
+                    // M-9: missing Keystore alias under a wrapped blob is unrecoverable;
+                    // the steady-state recovery is regen + wipe. But during the one-shot
+                    // legacy-prefs migration window we surface the error instead — silently
+                    // overwriting the freshly-migrated blob on first launch after upgrade
+                    // would destroy any chance of forensic recovery, and the user has not
+                    // yet had an opportunity to react to the upgrade. Subsequent get()
+                    // calls take the steady-state regen path because the file already exists.
+                    if (justMigrated) {
+                        throw IllegalStateException(
+                            "Keystore key missing despite wrapped blob present (post-legacy-migration)",
+                        )
+                    }
+                    MindlayerLog.w(
+                        TAG,
+                        "Keystore key missing while wrapped DB key exists; regenerating passphrase and wiping $databaseName. " +
+                            "Existing encrypted logs cannot be recovered without the lost Keystore key.",
+                    )
+                    forceReset(context, keyFile, databaseName)
+                    return createAndPersist(keyFile)
+                }
                 val cipher = Cipher.getInstance(AES_GCM_TRANSFORM)
                 cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, record.iv))
                 return cipher.doFinal(record.wrapped)
@@ -213,22 +238,24 @@ internal object DbKeyProvider {
         }
     }
 
-    private fun migrateLegacyPrefsIfPresent(context: Context, keyFile: File) {
+    private fun migrateLegacyPrefsIfPresent(context: Context, keyFile: File): Boolean {
         val prefs = context.getSharedPreferences(LEGACY_PREF_FILE, Context.MODE_PRIVATE)
-        val wrappedB64 = prefs.getString(LEGACY_PREF_WRAPPED, null) ?: return
-        val ivB64 = prefs.getString(LEGACY_PREF_IV, null) ?: return
-        try {
+        val wrappedB64 = prefs.getString(LEGACY_PREF_WRAPPED, null) ?: return false
+        val ivB64 = prefs.getString(LEGACY_PREF_IV, null) ?: return false
+        return try {
             val wrapped = Base64.decode(wrappedB64, Base64.NO_WRAP)
             val iv = Base64.decode(ivB64, Base64.NO_WRAP)
             writeKeyFile(keyFile, KeyRecord(iv, wrapped))
             prefs.edit().clear().commit()
             MindlayerLog.i(TAG, "Migrated wrapped DB key from legacy SharedPreferences to ${keyFile.name}.")
+            true
         } catch (e: Exception) {
             MindlayerLog.w(
                 TAG,
                 "Failed to migrate legacy wrapped DB key from prefs; will regenerate.",
                 throwable = e,
             )
+            false
         }
     }
 
@@ -318,6 +345,15 @@ internal object DbKeyProvider {
         }
     }
 
+    private fun assertRegularFileIfExists(file: File) {
+        val path = file.toPath()
+        if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) &&
+            !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+        ) {
+            throw IllegalStateException("Refusing to use non-regular DB key file: ${file.absolutePath}")
+        }
+    }
+
     private fun readKeyFile(file: File): KeyRecord? {
         if (!file.exists()) return null
         return try {
@@ -339,19 +375,21 @@ internal object DbKeyProvider {
         val bytes = encodeKeyRecord(record)
         val parent = file.parentFile
         parent?.mkdirs()
+        assertRegularFileIfExists(file)
         val tmp = File(parent, "${file.name}.tmp")
+        assertRegularFileIfExists(tmp)
         try {
             RandomAccessFile(tmp, "rw").use { raf ->
                 raf.setLength(0)
                 raf.write(bytes)
                 try { raf.fd.sync() } catch (_: Throwable) { /* best effort */ }
             }
-            if (file.exists() && !file.delete()) {
-                throw IOException("Could not delete previous key file: ${file.absolutePath}")
-            }
-            if (!tmp.renameTo(file)) {
-                throw IOException("Atomic rename failed: ${tmp.absolutePath} -> ${file.absolutePath}")
-            }
+            Files.move(
+                tmp.toPath(),
+                file.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
         } catch (e: IOException) {
             try { tmp.delete() } catch (_: Throwable) { /* best effort */ }
             throw IllegalStateException("Could not persist wrapped DB key to ${file.absolutePath}", e)

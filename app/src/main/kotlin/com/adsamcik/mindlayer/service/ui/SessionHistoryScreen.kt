@@ -39,8 +39,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.adsamcik.mindlayer.service.R
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerTheme
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerType
 
@@ -73,7 +75,7 @@ fun SessionHistoryScreen(
             MediumTopAppBar(
                 title = {
                     Column {
-                        Text("Session Diagnostics")
+                        Text(stringResource(R.string.session_diagnostics_title))
                         val subtitle = when {
                             state.isLoading -> "Loading session index…"
                             state.errorMessage != null -> "Load failure"
@@ -205,7 +207,7 @@ private fun SessionCard(item: SessionHistoryItem, onClick: () -> Unit) {
 
             Spacer(modifier = Modifier.height(10.dp))
             Text(
-                text = "${formatWholeNumber(item.inferenceCount)} requests · ${formatWholeNumber(item.totalTokens)} tokens",
+                text = stringResource(R.string.session_history_counts, formatWholeNumber(item.inferenceCount), formatWholeNumber(item.totalTokens)),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.primary,
                 fontWeight = FontWeight.Medium,

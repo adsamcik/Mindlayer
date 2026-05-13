@@ -265,8 +265,8 @@ fun MindlayerTheme(
             val context = LocalContext.current
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
-        darkTheme -> darkColorScheme()
-        else      -> expressiveLightColorScheme()
+        darkTheme -> BrandedDarkColorScheme
+        else      -> BrandedLightColorScheme
     }
 
     MaterialExpressiveTheme(
