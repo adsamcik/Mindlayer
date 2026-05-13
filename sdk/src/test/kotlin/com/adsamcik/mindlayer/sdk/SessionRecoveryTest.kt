@@ -160,6 +160,7 @@ class SessionRecoveryTest {
         assertEquals(2, result.replayedTurnCount)
         assertEquals(1, result.cleanedTurnCount)
         assertEquals("pending question", result.pendingUserText)
+        assertEquals("t3", result.pendingUserTurnId)
     }
 
     // -- Pending user text ----------------------------------------------------
@@ -173,6 +174,7 @@ class SessionRecoveryTest {
 
         val result = recovery.recoverSession(oldSessionId)!!
         assertEquals("unsent message", result.pendingUserText)
+        assertEquals("t-pend", result.pendingUserTurnId)
     }
 
     @Test
@@ -182,6 +184,7 @@ class SessionRecoveryTest {
 
         val result = recovery.recoverSession(oldSessionId)!!
         assertNull(result.pendingUserText)
+        assertNull(result.pendingUserTurnId)
     }
 
     // -- Role mapping ---------------------------------------------------------

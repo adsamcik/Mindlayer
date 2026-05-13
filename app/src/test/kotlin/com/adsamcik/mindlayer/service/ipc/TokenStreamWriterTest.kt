@@ -4,6 +4,7 @@ import android.util.Log
 import com.adsamcik.mindlayer.shared.StreamEvent
 import com.adsamcik.mindlayer.shared.StreamEventType
 import com.adsamcik.mindlayer.shared.StreamHeader
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import io.mockk.every
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
@@ -221,6 +222,23 @@ class TokenStreamWriterTest {
         assertEquals(5L, event.seq)
         assertEquals("rate_limit", event.payload["code"]?.jsonPrimitive?.contentOrNull)
         assertEquals("Too many requests", event.payload["message"]?.jsonPrimitive?.contentOrNull)
+    }
+
+    @Test
+    fun `writeError typed overload preserves symbolic and numeric codes`() = runBlocking {
+        val pipeIn = PipedInputStream()
+        val pipeOut = PipedOutputStream(pipeIn)
+        val writer = TokenStreamWriter.forTesting(pipeOut)
+
+        writer.writeError(seq = 6, code = MindlayerErrorCode.LOW_MEMORY, message = "Memory pressure")
+        writer.close()
+
+        val frames = readAllFrames(pipeIn)
+        assertEquals(1, frames.size)
+        val event = json.decodeFromString<StreamEvent>(frames[0])
+        assertEquals(StreamEventType.ERROR, event.type)
+        assertEquals("LOW_MEMORY", event.payload["code"]?.jsonPrimitive?.contentOrNull)
+        assertEquals(MindlayerErrorCode.LOW_MEMORY, event.payload["codeInt"]?.jsonPrimitive?.content?.toInt())
     }
 
     // =========================================================================

@@ -12,6 +12,7 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.floatOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedInputStream
 import java.io.DataInputStream
@@ -58,6 +59,7 @@ sealed class MindlayerEvent {
         val code: String?,
         val seq: Long,
         val tsMs: Long? = null,
+        val codeInt: Int? = null,
     ) : MindlayerEvent()
 
     /** Terminal event indicating successful completion. [fullText] contains the accumulated response if available. */
@@ -335,6 +337,7 @@ object TokenStreamReader {
             code = event.payload["code"]?.jsonPrimitive?.contentOrNull,
             seq = event.seq,
             tsMs = event.tsMs.takeIf { it > 0 },
+            codeInt = event.payload["codeInt"]?.jsonPrimitive?.intOrNull,
         )
 
         StreamEventType.DONE -> MindlayerEvent.Done(

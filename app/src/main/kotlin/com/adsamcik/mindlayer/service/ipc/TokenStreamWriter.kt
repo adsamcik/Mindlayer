@@ -234,10 +234,11 @@ class TokenStreamWriter private constructor(
         writeEvent(seq, StreamEventType.DONE, buildJsonObject { put("finish_reason", finishReason) })
     }
 
-    suspend fun writeError(seq: Long, code: String, message: String) {
+    suspend fun writeError(seq: Long, code: String, message: String, codeInt: Int? = null) {
         flushTokenBatch()
         writeEvent(seq, StreamEventType.ERROR, buildJsonObject {
             put("code", code)
+            codeInt?.let { put("codeInt", it) }
             put("message", message)
         })
     }
@@ -250,7 +251,7 @@ class TokenStreamWriter private constructor(
      */
     suspend fun writeError(seq: Long, code: Int, message: String) {
         val name = MindlayerErrorCode.nameOf(code) ?: "INTERNAL"
-        writeError(seq, name, message)
+        writeError(seq, name, message, codeInt = code)
     }
 
     fun close() {
