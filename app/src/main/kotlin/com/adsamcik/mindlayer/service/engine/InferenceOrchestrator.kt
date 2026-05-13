@@ -170,6 +170,13 @@ class InferenceOrchestrator(
         return sessionManager.closeAllOwnedByUid(ownerUid)
     }
 
+    fun closeAllOwnedByUidForRevoke(ownerUid: Int): List<String> {
+        sessionManager.activeRequestIdsOwnedByUid(ownerUid).forEach { scopedKey ->
+            cancelInference(scopedKey)
+        }
+        return sessionManager.closeAllOwnedByUidForRevoke(ownerUid)
+    }
+
     fun getSessionOwner(sessionId: String): Int? =
         sessionManager.getSessionOwner(sessionId)
 

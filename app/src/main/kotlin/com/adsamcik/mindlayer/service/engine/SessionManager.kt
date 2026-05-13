@@ -805,11 +805,20 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         return ids
     }
 
-    fun closeAllOwnedByUid(ownerUid: Int): List<String> {
+    fun closeAllOwnedByUid(ownerUid: Int): List<String> =
+        closeAllOwnedByUid(ownerUid, evictionReasonCode = null)
+
+    fun closeAllOwnedByUidForRevoke(ownerUid: Int): List<String> =
+        closeAllOwnedByUid(
+            ownerUid,
+            evictionReasonCode = com.adsamcik.mindlayer.shared.MindlayerErrorCode.ALLOWLIST_REVOKED,
+        )
+
+    private fun closeAllOwnedByUid(ownerUid: Int, evictionReasonCode: Int?): List<String> {
         val ids = sessions.values
             .filter { it.ownerUid == ownerUid }
             .map { it.sessionId }
-        for (id in ids) destroySession(id)
+        for (id in ids) destroySessionInternal(id, evictionReasonCode)
         return ids
     }
 

@@ -420,6 +420,34 @@ class MindlayerApiTest {
     }
 
     // ═════════════════════════════════════════════════════════════════════
+    @Test
+    fun `chatWithMedia closes media descriptors when binder call fails`() = runTest {
+        val mediaPipe = ParcelFileDescriptor.createPipe()
+        every { mockService.inferMulti(any(), any(), any()) } throws RemoteException("Service crashed")
+        val part = com.adsamcik.mindlayer.MediaPart(
+            requestId = "placeholder",
+            kind = com.adsamcik.mindlayer.MediaPart.KIND_AUDIO,
+            mimeType = "audio/wav",
+            source = mediaPipe[0],
+            isSharedMemory = false,
+            payloadBytes = 1L,
+        )
+
+        try {
+            try {
+                mindlayer.chatWithMedia("sess-media", "transcribe", part)
+                fail("Expected RemoteException")
+            } catch (_: RemoteException) {
+                // Expected synchronous binder failure from inferMulti.
+            }
+
+            assertFalse("media source must be closed after binder failure", mediaPipe[0].fileDescriptor.valid())
+        } finally {
+            try { mediaPipe[0].close() } catch (_: Exception) {}
+            try { mediaPipe[1].close() } catch (_: Exception) {}
+        }
+    }
+
     //  Error handling
     // ═════════════════════════════════════════════════════════════════════
 
