@@ -607,7 +607,7 @@ class InferenceOrchestrator(
                         val validated = validateAndMaybeRetry(
                             handle = handle,
                             initialOutput = structuredResult,
-                            config = soConfig!!,
+                            config = soConfig,
                             meta = meta,
                             writer = writer,
                             isToolRouting = true,
@@ -629,7 +629,7 @@ class InferenceOrchestrator(
                     val validated = validateAndMaybeRetry(
                         handle = handle,
                         initialOutput = responseBuffer.toString(),
-                        config = soConfig!!,
+                        config = soConfig,
                         meta = meta,
                         writer = writer,
                         isToolRouting = false,
@@ -681,7 +681,7 @@ class InferenceOrchestrator(
                             val validated = validateAndMaybeRetry(
                                 handle = handle,
                                 initialOutput = structuredResult,
-                                config = soConfig!!,
+                                config = soConfig,
                                 meta = meta,
                                 writer = writer,
                                 isToolRouting = true,
@@ -787,6 +787,20 @@ class InferenceOrchestrator(
                     else -> "stop"
                 }
                 trace.markDecodeEnd(requestTokenCount)
+                val finalMetrics = kotlinx.serialization.json.buildJsonObject {
+                    trace.timeToFirstTokenMs?.takeIf { it > 0 }?.let { ttftMs ->
+                        val inputTokens = (prompt.length / 4).coerceAtLeast(if (prompt.isEmpty()) 0 else 1)
+                        put("prefillToksPerSec", kotlinx.serialization.json.JsonPrimitive(inputTokens * 1000f / ttftMs))
+                    }
+                    trace.tokensPerSec?.let {
+                        put("decodeToksPerSec", kotlinx.serialization.json.JsonPrimitive(it))
+                    }
+                    put("thermalBand", kotlinx.serialization.json.JsonPrimitive(thermalPolicy().band.name))
+                    put("generatedTokens", kotlinx.serialization.json.JsonPrimitive(requestTokenCount))
+                    put("durationMs", kotlinx.serialization.json.JsonPrimitive(trace.totalDurationMs))
+                }
+                writer.writeMetrics(seq, finalMetrics)
+                seq++
                 writer.writeDone(seq, finishReason)
                 trace.markPipeWriteComplete()
                 handle.turnCount++

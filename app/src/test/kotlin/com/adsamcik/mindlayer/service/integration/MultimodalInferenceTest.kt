@@ -684,13 +684,14 @@ class MultimodalInferenceTest {
             sessionId, "What is this?", requestId = requestId, image = image,
         )
 
-        // Verify header + 3 deltas + done
-        assertEquals("Should have 5 events", 5, events.size)
+        // Verify header + 3 deltas + metrics + done
+        assertEquals("Should have 6 events", 6, events.size)
         assertEquals("header", events[0].kind)
         assertEquals("The image", events[1].text)
         assertEquals(" shows a", events[2].text)
         assertEquals(" cat", events[3].text)
-        assertEquals("done", events[4].kind)
+        assertEquals("metrics", events[4].kind)
+        assertEquals("done", events[5].kind)
 
         // Verify event contract (monotonic seq, single terminal)
         TestPipeHelper.assertEventContract(events)
