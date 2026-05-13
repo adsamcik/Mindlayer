@@ -28,13 +28,12 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * F-018: regression coverage for the [SessionManager] init-queue contract.
  *
- *  - Concurrent first-callers must each return within < 50 ms with
- *    `EngineNotReadyException` (binder pool not pinned).
+ *  - Concurrent first-callers suspend until the engine reaches Ready/Failed.
  *  - Underlying `engineManager.initialize` is invoked **exactly once** —
  *    the CAS coalescing in `ensureInitStarted` prevents fan-out.
  *  - Once init completes, subsequent callers proceed normally.
@@ -100,38 +99,35 @@ class EngineInitQueueTest {
 
     @Test
     fun `concurrent first callers all coalesce to a single init`() = runBlocking {
-        every { engineManager.isInitialized } returns false
+        val ready = AtomicBoolean(false)
+        every { engineManager.isInitialized } answers { ready.get() }
         // Make initialize block long enough that all 8 callers see
         // !isInitialized before the slot finishes.
+        coEvery { engineManager.awaitReady() } coAnswers {
+            delay(200)
+            ready.set(true)
+            EngineState.Ready
+        }
         coEvery {
             engineManager.initialize(any(), any())
         } coAnswers {
-            // Ensure mutual-exclusion with a Mutex so we can verify only
-            // a single coroutine ever runs the body.
             initBarrier.withLock { delay(200) }
             mockEngine
         }
 
         val attempts = 8
-        val fastFails = AtomicInteger(0)
         val durations = LongArray(attempts)
         val tasks = (0 until attempts).map { i ->
             async(Dispatchers.IO) {
                 val start = System.nanoTime()
-                try {
-                    sessionManager.createSession(SessionConfig(maxTokens = 2048))
-                } catch (e: EngineNotReadyException) {
-                    fastFails.incrementAndGet()
-                }
+                sessionManager.createSession(SessionConfig(maxTokens = 2048))
                 durations[i] = (System.nanoTime() - start) / 1_000_000L
             }
         }
         tasks.awaitAll()
 
-        assertEquals("All callers must fast-fail", attempts, fastFails.get())
-        // Allow generous slack (100 ms) for Robolectric scheduler overhead.
         for (d in durations) {
-            assertTrue("createSession should fast-fail (<100ms), took ${d}ms", d < 100L)
+            assertTrue("createSession should suspend until init completes, took ${d}ms", d >= 150L)
         }
 
         // Exactly one underlying init invocation (CAS coalescing).
@@ -142,37 +138,14 @@ class EngineInitQueueTest {
 
     @Test
     fun `subsequent call after init succeeds`() = runBlocking {
-        every { engineManager.isInitialized } returns false
-        coEvery { engineManager.initialize(any(), any()) } coAnswers {
+        val ready = AtomicBoolean(false)
+        every { engineManager.isInitialized } answers { ready.get() }
+        coEvery { engineManager.awaitReady() } coAnswers {
             delay(100)
-            mockEngine
+            ready.set(true)
+            EngineState.Ready
         }
-
-        // First call: fast-fails.
-        var threw = false
-        try {
-            sessionManager.createSession(SessionConfig(maxTokens = 2048))
-        } catch (e: EngineNotReadyException) {
-            threw = true
-        }
-        assertTrue("First caller must fast-fail", threw)
-
-        // Wait for background init to flip the flag.
-        withContext(Dispatchers.IO) {
-            val deadline = System.currentTimeMillis() + 5_000
-            while (System.currentTimeMillis() < deadline) {
-                try {
-                    coVerify(exactly = 1) { engineManager.initialize(any(), any()) }
-                    break
-                } catch (_: AssertionError) {
-                    delay(20)
-                }
-            }
-        }
-
-        // Flip the mock now that init "completed" so the second call
-        // proceeds through the regular create-session path.
-        every { engineManager.isInitialized } returns true
+        coEvery { engineManager.initialize(any(), any()) } coAnswers { mockEngine }
 
         val id = sessionManager.createSession(SessionConfig(maxTokens = 2048))
         assertTrue("Second caller should get a session id", id.isNotBlank())
