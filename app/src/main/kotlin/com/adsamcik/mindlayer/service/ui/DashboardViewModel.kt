@@ -17,6 +17,7 @@ import com.adsamcik.mindlayer.service.health.MlHealthRecorder
 import com.adsamcik.mindlayer.service.logging.LogDao
 import com.adsamcik.mindlayer.service.logging.LogDatabase
 import com.adsamcik.mindlayer.service.logging.LogEntry
+import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.adsamcik.mindlayer.shared.StreamEvent
 import com.adsamcik.mindlayer.shared.StreamHeader
 import kotlinx.coroutines.Dispatchers
@@ -360,7 +361,16 @@ class DashboardViewModel : ViewModel() {
      * 4. Reports results (or errors) in the UI
      */
     fun runTestInference(prompt: String = "Hello! What are you?") {
-        if (_uiState.value.isTestRunning) return
+        _uiState.value.testReadinessIssue()?.let { issue ->
+            _uiState.update {
+                it.copy(
+                    isTestRunning = false,
+                    testStatus = issue,
+                    testStatusTone = DashboardMessageTone.WARNING,
+                )
+            }
+            return
+        }
 
         _uiState.update {
             it.copy(
@@ -558,8 +568,8 @@ class DashboardViewModel : ViewModel() {
                 _uiState.update {
                     it.copy(
                         isTestRunning = false,
-                        testStatus = "Test inference failed: ${e.toDashboardMessage()}",
-                        testOutput = e.stackTraceToString().take(800),
+                        testStatus = "Test inference failed: ${e.safeLabel()}",
+                        testOutput = e.safeLabel(),
                         testStatusTone = DashboardMessageTone.ERROR,
                         lastTestCompletedAtMs = System.currentTimeMillis(),
                     )

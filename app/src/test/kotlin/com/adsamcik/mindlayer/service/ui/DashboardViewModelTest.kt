@@ -5,10 +5,12 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import com.adsamcik.mindlayer.IMindlayerService
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -39,6 +41,7 @@ class DashboardViewModelTest {
 
         val viewModel = DashboardViewModel()
         viewModel.setServiceForTest(service)
+        viewModel.markReadyForTest()
 
         viewModel.runTestInference()
 
@@ -50,6 +53,37 @@ class DashboardViewModelTest {
             listOf("prewarmAndAwait:GPU:30000", "createSession", "infer", "destroySession"),
             calls,
         )
+    }
+
+
+    @Test
+    fun `test inference failure renders safe label without LiteRT stack frames`() = runTest {
+        val service = Proxy.newProxyInstance(
+            IMindlayerService::class.java.classLoader,
+            arrayOf(IMindlayerService::class.java),
+        ) { _, method, _ ->
+            when (method.name) {
+                "asBinder" -> Binder()
+                "prewarmAndAwait" -> throw RuntimeException(
+                    "com.google.ai.edge.litertlm.NativeEngine leaked prompt text",
+                )
+                else -> null
+            }
+        } as IMindlayerService
+        val viewModel = DashboardViewModel()
+        viewModel.setServiceForTest(service)
+        viewModel.markReadyForTest()
+
+        viewModel.runTestInference()
+
+        val state = viewModel.uiState.awaitState {
+            shadowOf(Looper.getMainLooper()).idle()
+            !it.isTestRunning && it.testStatus.startsWith("Test inference failed")
+        }
+        val rendered = state.testStatus + "\n" + state.testOutput
+        assertTrue(rendered.contains("RuntimeException"))
+        assertFalse(rendered.contains("com.google.ai.edge.litertlm"))
+        assertFalse(rendered.contains("NativeEngine"))
     }
 
     private fun testService(calls: MutableList<String>): IMindlayerService {
@@ -86,4 +120,19 @@ class DashboardViewModelTest {
         field.isAccessible = true
         field.set(this, service)
     }
+    @Suppress("UNCHECKED_CAST")
+    private fun DashboardViewModel.markReadyForTest() {
+        val field = DashboardViewModel::class.java.getDeclaredField("_uiState")
+        field.isAccessible = true
+        val state = field.get(this) as MutableStateFlow<DashboardUiState>
+        state.value = state.value.copy(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = System.currentTimeMillis(),
+            statusErrorMessage = null,
+            isEngineLoaded = true,
+            backend = "GPU",
+        )
+    }
+
 }

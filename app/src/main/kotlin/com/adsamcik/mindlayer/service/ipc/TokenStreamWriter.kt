@@ -413,7 +413,11 @@ class TokenStreamWriter private constructor(
             }
             throw CancellationException("backpressure_timeout").apply { initCause(e) }
         } catch (e: IOException) {
-            MindlayerLog.w(TAG, "IOException writing frame (client may have disconnected)", throwable = e)
+            MindlayerLog.w(
+                TAG,
+                "IOException writing frame (client may have disconnected): ${e.safeLabel()}",
+                throwable = null,
+            )
             closed = true
             // Re-raise as CancellationException so the enclosing inference
             // coroutine unwinds promptly and native cancelProcess() fires.

@@ -20,6 +20,7 @@ import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import com.adsamcik.mindlayer.service.logging.LogCategory
 import com.adsamcik.mindlayer.service.logging.LogEntry
 import com.adsamcik.mindlayer.service.logging.LogEvent
+import com.adsamcik.mindlayer.service.logging.LogExtras
 import com.google.gson.Gson
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -423,17 +424,19 @@ class InferenceOrchestrator(
             if (handle.preferBatchedDeltas) {
                 writer.enableBatching()
             }
-            service.enterForeground()
+            var foregroundEntered = false
             val inferenceStartNs = System.nanoTime()
-            logRepository?.logInferenceStart(
-                meta.requestId, meta.sessionId, service.engineManager.currentBackend
-            )
-            logRepository?.logUserMessage(
-                meta.requestId,
-                meta.sessionId,
-                tokenCount = ((meta.textContent?.length ?: 0) / 4).coerceAtLeast(if (meta.textContent.isNullOrEmpty()) 0 else 1),
-            )
             try {
+                service.enterForeground()
+                foregroundEntered = true
+                logRepository?.logInferenceStart(
+                    meta.requestId, meta.sessionId, service.engineManager.currentBackend
+                )
+                logRepository?.logUserMessage(
+                    meta.requestId,
+                    meta.sessionId,
+                    tokenCount = ((meta.textContent?.length ?: 0) / 4).coerceAtLeast(if (meta.textContent.isNullOrEmpty()) 0 else 1),
+                )
                 kotlinx.coroutines.withTimeout(maxInferenceMs) {
                 // F-041: thermal duty-cycle gate. CRITICAL band on GPU
                 // means the device is at the edge of throttling; refuse
@@ -509,6 +512,8 @@ class InferenceOrchestrator(
                 // so we can validate + retry before sending to the client)
                 val responseBuffer =
                     if (isPromptValidate) StringBuilder() else null
+                val toolRoutingProseBuffer =
+                    if (isToolRouting) StringBuilder() else null
 
                 // --- First round: stream user message -----------------------
                 trace.markPrefillStart()
@@ -517,6 +522,8 @@ class InferenceOrchestrator(
                     if (!text.isNullOrEmpty()) {
                         if (isPromptValidate) {
                             responseBuffer!!.append(text)
+                        } else if (isToolRouting) {
+                            toolRoutingProseBuffer!!.append(text)
                         } else {
                             writer.writeTokenDelta(seq, text)
                             seq++
@@ -532,6 +539,10 @@ class InferenceOrchestrator(
                 }
 
                 // --- Structured output: TOOL_ROUTING extraction -------------
+                if (isToolRouting && !toolRoutingProseBuffer.isNullOrEmpty()) {
+                    closeStructuredOutputFailClosed(writer, meta)
+                    return@withTimeout
+                }
                 if (isToolRouting && accumulatedToolCalls.isNotEmpty()) {
                     val structuredResult = StructuredOutputHelper.extractStructuredResult(
                         accumulatedToolCalls,
@@ -702,6 +713,10 @@ class InferenceOrchestrator(
                     // Write the model's continuation text
                     val text = response.text()
                     if (!text.isNullOrEmpty()) {
+                        if (isToolRouting) {
+                            closeStructuredOutputFailClosed(writer, meta)
+                            return@withTimeout
+                        }
                         writer.writeTokenDelta(seq, text)
                         seq++
                         handle.estimatedTokens++
@@ -824,13 +839,35 @@ class InferenceOrchestrator(
                 writer.close()
                 handle.activeRequestId = null
                 handle.isStreaming = false
-                service.exitForeground()
+                if (foregroundEntered) service.exitForeground()
                 // Clean up staged media files regardless of outcome — keyed
                 // by scopedKey so a co-signed peer with the same public
                 // requestId cannot trigger early cleanup of our files.
                 sharedMemoryPool.cleanup(scopedKey)
             }
         }
+    }
+
+    private suspend fun closeStructuredOutputFailClosed(
+        writer: TokenStreamWriter,
+        meta: RequestMeta,
+    ) {
+        MindlayerLog.w(
+            TAG,
+            "TOOL_ROUTING emitted prose without a structured tool call; failing closed",
+            requestId = meta.requestId,
+            sessionId = meta.sessionId,
+        )
+        logRepository?.logInferenceError(
+            meta.requestId,
+            meta.sessionId,
+            "structured_output_fail_closed",
+        )
+        writer.closeWithError(
+            0,
+            "structured_output_fail_closed",
+            MindlayerErrorCode.INVALID_REQUEST,
+        )
     }
 
     /**
@@ -848,9 +885,10 @@ class InferenceOrchestrator(
     ) {
         for (tc in toolCalls) {
             if (tc.name !in handle.allowedToolNames) {
+                val toolMetadata = LogExtras.toolNameMetadata(tc.name)
                 MindlayerLog.w(
                     TAG,
-                    "Dropped model-emitted tool call with unknown name '${tc.name.take(64)}'",
+                    "Dropped model-emitted tool call with unknown name metadata=$toolMetadata",
                     requestId = meta.requestId, sessionId = meta.sessionId,
                 )
                 logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
@@ -859,10 +897,7 @@ class InferenceOrchestrator(
                     event = com.adsamcik.mindlayer.service.logging.LogEvent.TOOL_CALL_REJECTED,
                     requestId = meta.requestId,
                     sessionId = meta.sessionId,
-                    extraJson = kotlinx.serialization.json.buildJsonObject {
-                        put("dropped_tool", kotlinx.serialization.json.JsonPrimitive(tc.name.take(64)))
-                        put("reason", kotlinx.serialization.json.JsonPrimitive("unknown_name"))
-                    }.toString(),
+                    extraJson = toolMetadata.toString(),
                 ))
                 continue
             }

@@ -253,4 +253,40 @@ class StructuredOutputFailClosedTest {
             events.any { it.kind == "done" },
         )
     }
+
+    @Test
+    fun `TOOL_ROUTING prose output fails closed without streaming prose`() {
+        every { mockConversation.sendMessageAsync(any<Contents>()) } returns flow {
+            emit(textChunk("this is prose, not a tool call"))
+        }
+        val sid = sessionManager.createSession(
+            SessionConfig(
+                maxTokens = 2048,
+                extraContextJson = """
+                    {"structured_output":{
+                        "schema":{"type":"object","required":["x"]},
+                        "strategy":"tool_routing",
+                        "max_retries":0
+                    }}
+                """.trimIndent(),
+            )
+        )
+        val events = driveAndParse("100:req-tr-prose", sid)
+
+        assertTrue(
+            "TOOL_ROUTING prose must not be streamed; events=$events",
+            events.none { it.kind == "token_delta" && it.text?.contains("this is prose") == true },
+        )
+        val errors = events.filter { it.kind == "error" }
+        assertTrue("Expected a typed error frame; events=$events", errors.isNotEmpty())
+        assertTrue(
+            "Expected structured_output_fail_closed; errors=$errors",
+            errors.any { it.errorMessage == "structured_output_fail_closed" && it.errorCode == "INVALID_REQUEST" },
+        )
+        assertFalse(
+            "No 'done' frame should appear after fail-closed error",
+            events.any { it.kind == "done" },
+        )
+    }
+
 }
