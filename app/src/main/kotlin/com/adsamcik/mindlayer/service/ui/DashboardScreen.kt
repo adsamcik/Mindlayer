@@ -1115,7 +1115,7 @@ private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Un
             ) {
                 FilledTonalButton(
                     onClick = onTestInference,
-                    enabled = !state.isTestRunning,
+                    enabled = state.canRunTestInference(nowMs),
                 ) {
                     if (state.isTestRunning) {
                         CircularProgressIndicator(

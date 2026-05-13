@@ -1,5 +1,6 @@
 package com.adsamcik.mindlayer.service.engine
 
+import com.adsamcik.mindlayer.service.logging.LogExtras
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.loggable
@@ -126,17 +127,18 @@ class ToolCallBridge(
 
         if (match == null) {
             // H3 — surface mismatched submitResult IMMEDIATELY rather than letting awaitResults block.
+            val toolMetadata = LogExtras.toolNameMetadata(toolName)
             MindlayerLog.w(
                 TAG,
                 "submitResult: no pending call for call ${callId.loggable()} " +
-                    "tool='$toolName' request ${requestLabel(scopedKey)} — failing pending entries",
+                    "toolMetadata=$toolMetadata request ${requestLabel(scopedKey)} — failing pending entries",
             )
             // Fail every still-pending entry for this request so awaitResults unblocks fast.
             synchronized(calls) {
                 calls.filter { !it.resultDeferred.isCompleted }.forEach {
                     it.resultDeferred.completeExceptionally(
                         IllegalStateException(
-                            "Client submitted result for unmatched tool call (callId=${callId.loggable()}, tool='$toolName')",
+                            "Client submitted result for unmatched tool call (callId=${callId.loggable()})",
                         ),
                     )
                 }
@@ -159,7 +161,8 @@ class ToolCallBridge(
         )
         MindlayerLog.d(
             TAG,
-            "Result submitted for call ${callId.loggable()} tool='$toolName' " +
+            "Result submitted for call ${callId.loggable()} " +
+                "toolMetadata=${LogExtras.toolNameMetadata(toolName)} " +
                 "request ${requestLabel(scopedKey)}",
         )
         return true

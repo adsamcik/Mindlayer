@@ -176,6 +176,25 @@ class SessionDetailViewModelTest {
         }
     }
 
+
+    @Test
+    fun `buildEventDetail allowlists safe extraJson metadata only`() {
+        val detail = buildEventDetail(
+            LogEntry(
+                timestampMs = 100L,
+                category = LogCategory.SECURITY,
+                event = LogEvent.TOOL_CALL_REJECTED,
+                extraJson = """{"len":17,"reason":"unknown_tool","hash8":"0123abcd","secret":"raw"}""",
+            ),
+        )
+
+        assertTrue(detail.contains("len") && detail.contains("17"))
+        assertTrue(detail.contains("reason") && detail.contains("unknown_tool"))
+        assertTrue(detail.contains("hash8") && detail.contains("0123abcd"))
+        assertFalse(detail.contains("secret"))
+        assertFalse(detail.contains("raw"))
+    }
+
     @Test
     fun `closed database surfaces an error message and stops loading`() = runTest {
         val viewModel = SessionDetailViewModel(application)

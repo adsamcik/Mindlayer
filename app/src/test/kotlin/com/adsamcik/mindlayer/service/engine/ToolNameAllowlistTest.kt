@@ -207,7 +207,11 @@ class ToolNameAllowlistTest {
             rejected.isNotEmpty(),
         )
         assertTrue(
-            "log payload must mention dropped name",
+            "log payload must include safe metadata",
+            rejected.any { it.extraJson?.contains("unknown_tool") == true && it.extraJson.contains("hash8") },
+        )
+        assertFalse(
+            "raw model-emitted tool name must not be persisted",
             rejected.any { it.extraJson?.contains("delete_account") == true },
         )
     }
@@ -269,6 +273,10 @@ class ToolNameAllowlistTest {
         }
         assertTrue(
             "Expected continuation-chunk drop log; logs=$capturedLogs",
+            rejected.any { it.extraJson?.contains("unknown_tool") == true },
+        )
+        assertFalse(
+            "raw model-emitted tool name must not be persisted",
             rejected.any { it.extraJson?.contains("delete_account") == true },
         )
     }
