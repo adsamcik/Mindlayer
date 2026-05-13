@@ -62,9 +62,32 @@ class MindlayerMlService : Service() {
 
         /**
          * First-party clients that should be approved on a fresh install.
-         * Add co-signed package names and pinned current signing-cert SHA-256 hashes here.
+         *
+         * Each entry pins (packageName, signingCertSha256). The hash format is
+         * lowercase hex with no separators (matches `CallerVerifier.sha256Hex`).
+         * For Play-distributed apps, use the Play app signing certificate
+         * SHA-256, not the upload key (Play Console → App integrity → App
+         * signing → "SHA-256 certificate fingerprint").
+         *
+         * `seedIfEmpty` verifies each entry against the currently installed APK
+         * signature before insertion, so multiple entries per package (e.g.
+         * Play hash + debug-keystore hash) are safe — only the matching one
+         * is inserted on a given device.
          */
-        private val FIRST_PARTY_ALLOWLIST_SEEDS: List<AllowlistEntry> = emptyList()
+        internal val FIRST_PARTY_ALLOWLIST_SEEDS: List<AllowlistEntry> = listOf(
+            AllowlistEntry(
+                packageName = "com.adsamcik.starlitcoffee",
+                signingCertSha256 = "5932936267cac21efd4bb7a25200bb9eaf58d890f566fadae4f0daa1a9bbae47",
+                grantedAtMs = 0L,
+                displayName = "Starlit Coffee",
+            ),
+            AllowlistEntry(
+                packageName = "com.adsamcik.expenses",
+                signingCertSha256 = "027fde453b4fc327e5c4d7ac7d3f54b1fc711503e5a155fd72f31ff3a9a2e9bc",
+                grantedAtMs = 0L,
+                displayName = "Ledgit",
+            ),
+        )
     }
 
     lateinit var engineManager: EngineManager
