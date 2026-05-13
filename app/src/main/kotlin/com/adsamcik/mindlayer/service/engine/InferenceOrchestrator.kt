@@ -543,7 +543,7 @@ class InferenceOrchestrator(
                         val validated = validateAndMaybeRetry(
                             handle = handle,
                             initialOutput = structuredResult,
-                            config = soConfig!!,
+                            config = soConfig,
                             meta = meta,
                             writer = writer,
                             isToolRouting = true,
@@ -565,7 +565,7 @@ class InferenceOrchestrator(
                     val validated = validateAndMaybeRetry(
                         handle = handle,
                         initialOutput = responseBuffer.toString(),
-                        config = soConfig!!,
+                        config = soConfig,
                         meta = meta,
                         writer = writer,
                         isToolRouting = false,
@@ -617,7 +617,7 @@ class InferenceOrchestrator(
                             val validated = validateAndMaybeRetry(
                                 handle = handle,
                                 initialOutput = structuredResult,
-                                config = soConfig!!,
+                                config = soConfig,
                                 meta = meta,
                                 writer = writer,
                                 isToolRouting = true,

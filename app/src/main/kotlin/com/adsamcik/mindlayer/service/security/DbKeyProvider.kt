@@ -113,8 +113,9 @@ internal object DbKeyProvider {
     private fun loadOrCreate(context: Context, databaseName: String): ByteArray {
         val keyFile = keyFile(context)
 
+        var justMigrated = false
         if (!keyFile.exists()) {
-            migrateLegacyPrefsIfPresent(context, keyFile)
+            justMigrated = migrateLegacyPrefsIfPresent(context, keyFile)
         }
         assertRegularFileIfExists(keyFile)
 
@@ -123,6 +124,18 @@ internal object DbKeyProvider {
             try {
                 val key = loadKeystoreKey()
                 if (key == null) {
+                    // M-9: missing Keystore alias under a wrapped blob is unrecoverable;
+                    // the steady-state recovery is regen + wipe. But during the one-shot
+                    // legacy-prefs migration window we surface the error instead — silently
+                    // overwriting the freshly-migrated blob on first launch after upgrade
+                    // would destroy any chance of forensic recovery, and the user has not
+                    // yet had an opportunity to react to the upgrade. Subsequent get()
+                    // calls take the steady-state regen path because the file already exists.
+                    if (justMigrated) {
+                        throw IllegalStateException(
+                            "Keystore key missing despite wrapped blob present (post-legacy-migration)",
+                        )
+                    }
                     MindlayerLog.w(
                         TAG,
                         "Keystore key missing while wrapped DB key exists; regenerating passphrase and wiping $databaseName. " +
@@ -225,22 +238,24 @@ internal object DbKeyProvider {
         }
     }
 
-    private fun migrateLegacyPrefsIfPresent(context: Context, keyFile: File) {
+    private fun migrateLegacyPrefsIfPresent(context: Context, keyFile: File): Boolean {
         val prefs = context.getSharedPreferences(LEGACY_PREF_FILE, Context.MODE_PRIVATE)
-        val wrappedB64 = prefs.getString(LEGACY_PREF_WRAPPED, null) ?: return
-        val ivB64 = prefs.getString(LEGACY_PREF_IV, null) ?: return
-        try {
+        val wrappedB64 = prefs.getString(LEGACY_PREF_WRAPPED, null) ?: return false
+        val ivB64 = prefs.getString(LEGACY_PREF_IV, null) ?: return false
+        return try {
             val wrapped = Base64.decode(wrappedB64, Base64.NO_WRAP)
             val iv = Base64.decode(ivB64, Base64.NO_WRAP)
             writeKeyFile(keyFile, KeyRecord(iv, wrapped))
             prefs.edit().clear().commit()
             MindlayerLog.i(TAG, "Migrated wrapped DB key from legacy SharedPreferences to ${keyFile.name}.")
+            true
         } catch (e: Exception) {
             MindlayerLog.w(
                 TAG,
                 "Failed to migrate legacy wrapped DB key from prefs; will regenerate.",
                 throwable = e,
             )
+            false
         }
     }
 
