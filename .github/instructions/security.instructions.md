@@ -39,26 +39,23 @@ authorizeCall(sessionId? = null):
 - Persist the *current* signing cert per `signingCertificateHistory.last()`. Rotated certs invalidate prior approvals on purpose.
 - Serialise allowlist writes with `withFileLock { … }` and atomic-rename via `atomicWrite`.
 
-## First-party seeding (intended, not yet implemented)
+## First-party trust architecture
 
-The product intent is: apps signed with the **same key** as Mindlayer service should be auto-approved without dashboard interaction. The hook is named in `docs/AUTHORIZATION.md`:
+Mindlayer now uses `signature|knownSigner` as the OS-level bind gate and the
+existing allowlist as the AIDL-level gate:
 
-```kotlin
-// FUTURE — call from MindlayerMlService.onCreate before binder is exposed
-allowlistStore.seedIfEmpty(
-    listOf(
-        AllowlistEntry("com.example.firstparty.appA", knownSigSha256, …),
-        // …
-    ),
-)
-```
-
-When you implement this:
-
-- Trigger only on first launch (allowlist empty). Don't re-seed on every onCreate — that would silently re-approve revoked apps.
-- Keep `recordPending` for unknown callers. Third-party support remains gated by user approval.
-- Don't remove the manifest `signature` permission. It is the first line; the seeded allowlist is defense-in-depth.
-- Add an audit log entry to `LogRepository` (`LogCategory.SECURITY`?) so seed events are visible.
+- Keep `R.array.mindlayer_trusted_client_certs` and
+  `MindlayerMlService.FIRST_PARTY_ALLOWLIST_SEEDS` in sync. The former grants
+  the manifest permission on API 31+; the latter pins `(packageName,
+  signingCertSha256)` at the Binder layer.
+- `seedIfEmpty(...)` is intentionally first-launch only for production
+  first-party seeds. Do not re-seed revoked apps.
+- Debug-only same-cert auto-seeding belongs only in `app/src/debug`; release
+  builds must not contain `DebugAllowlistSeeder`.
+- Keep `recordPending` for unknown callers. Third-party / sideload support
+  remains gated by explicit dashboard approval.
+- Do not remove or relax the manifest permission. It is the first line of
+  defense; the AIDL allowlist is still mandatory defense-in-depth.
 
 ## Rate limiting
 

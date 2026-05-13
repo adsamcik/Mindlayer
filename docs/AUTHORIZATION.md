@@ -32,11 +32,28 @@ callers can rely on.
 
 ## Default-deny posture
 
-On a fresh install the allowlist is **empty**. There is no seed data, no
-first-party bypass, and no "add by hand" UI. The only way an app can enter
-the allowlist is:
+Mindlayer uses a two-layer trust model:
 
-1. The app attempts to bind (or make any AIDL call).
+1. **OS-level gate** — `BIND_ML_SERVICE` is declared as
+   `signature|knownSigner` with trusted first-party cert hashes in
+   `R.array.mindlayer_trusted_client_certs`. On Android 12 (API 31+) this
+   lets known first-party apps signed with different Play app-signing keys
+   bind to the service. On API 26–30, `knownSigner` is ignored by the
+   platform and the permission degrades to plain `signature`, so only
+   Mindlayer's own UID / same-signing-key callers can bind.
+2. **AIDL-level gate** — every Binder method still runs identity → allowlist
+   → rate-limit → ownership. First-party callers are seeded as exact
+   `(packageName, signingCertSha256)` pairs in
+   `MindlayerMlService.FIRST_PARTY_ALLOWLIST_SEEDS`.
+
+The manifest cert array and seed list must stay in sync; the
+`TrustedClientCertParityTest` unit test fails CI if they drift.
+
+Unknown callers remain default-deny. The only production path for an
+unrecognized app to enter the allowlist is:
+
+1. The app attempts to bind (or make any AIDL call) and passes the OS-level
+   permission gate.
 2. The service writes a **pending** entry containing its observed
    `(packageName, signingCertSha256, displayName)`.
 3. A human with access to the device opens the dashboard and taps **Approve**
@@ -146,30 +163,32 @@ looks up the session's creator UID in the `InferenceOrchestrator` and
 rejects calls from any other UID. Unknown sessions are also rejected to
 avoid leaking which session IDs exist to arbitrary callers.
 
-### Signature-level manifest permission
+### Signature / known-signer manifest permission
 
 `AndroidManifest.xml` declares:
 
 ```xml
 <permission
     android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE"
-    android:protectionLevel="signature" />
+    android:protectionLevel="signature|knownSigner"
+    android:knownCerts="@array/mindlayer_trusted_client_certs" />
 <service
     android:name=".MindlayerMlService"
     android:permission="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE"
     …/>
 ```
 
-`signature` protection means only apps signed with the **same signing key
-as Mindlayer itself** can hold the permission, and therefore can even
-attempt to bind. In a first-party deployment (Mindlayer + one client app
-signed with the same key) this is the primary gate; the user-approval
-allowlist still runs underneath as defence in depth.
+`signature` preserves the self-UID / same-key path used by the dashboard.
+`knownSigner` (API 31+) additionally grants the permission to callers whose
+signing certificate SHA-256 appears in `mindlayer_trusted_client_certs`.
+The AIDL allowlist still pins exact `(pkg, sig)` pairs underneath, so a
+known cert on the wrong package name is rejected by `authorizeCall()`.
 
-In a multi-vendor deployment where client apps are signed by other
-developers, you would remove or relax the `android:permission` attribute
-so arbitrary apps can reach `authorizeCall()` and be gated purely by the
-user allowlist. Mindlayer ships with the strict variant by default.
+On API 26–30 the platform silently ignores the `knownSigner` flag and
+falls back to `signature`. Cross-app first-party integration with different
+Play app-signing keys is therefore supported only on API 31+. The SDK
+surfaces this as `MindlayerException` with
+`MindlayerErrorCode.UNSUPPORTED_ANDROID_VERSION`.
 
 ### Rate limiter
 
@@ -177,6 +196,28 @@ user allowlist. Mindlayer ships with the strict variant by default.
 concurrent inferences) runs after the allowlist gate, so it never counts
 rejected callers against legitimate traffic and never leaks
 allowlist state via timing.
+
+## Cert rotation runbook
+
+1. Add the new Play app-signing certificate hash to both
+   `R.array.mindlayer_trusted_client_certs` and
+   `FIRST_PARTY_ALLOWLIST_SEEDS` in the same Mindlayer PR.
+2. Ship the updated Mindlayer build. First-party clients can stay on the old
+   cert during the overlap window.
+3. Once telemetry shows the rotated client is the only version in use,
+   remove the old hash from both lists.
+
+## Local sideloading
+
+Production builds remain default-deny for unknown callers: a sideloaded app
+must be observed by the service and approved in the dashboard before it can
+use AIDL methods.
+
+Debug builds add `DebugAllowlistSeeder` from the `src/debug` source set. It
+discovers installed packages signed with the same debug certificate as the
+Mindlayer debug build and seeds them automatically, while preserving revoked
+/ denied packages. Release builds physically do not contain this class (the
+release unit test asserts it is absent).
 
 ## The approval flow
 

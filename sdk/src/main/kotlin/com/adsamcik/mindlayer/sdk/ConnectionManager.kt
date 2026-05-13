@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Binder
+import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import com.adsamcik.mindlayer.IMindlayerService
@@ -107,6 +108,7 @@ class ConnectionManager {
     private var boundContext: Context? = null
     private var currentConnection: ServiceConnection? = null
     private var deathRecipient: IBinder.DeathRecipient? = null
+    private var terminalBindFailure: MindlayerException? = null
 
     /**
      * Stable Binder token passed to [IMindlayerService.registerClient] so the
@@ -138,6 +140,7 @@ class ConnectionManager {
         if (_state.value == ConnectionState.CONNECTED || _state.value == ConnectionState.CONNECTING) return
         if (bindGaveUp) {
             bindGaveUp = false
+            terminalBindFailure = null
             consecutiveFailures = 0
             backoffMs = INITIAL_BACKOFF_MS
         }
@@ -185,6 +188,7 @@ class ConnectionManager {
                 throw SecurityException("Mindlayer rejected this app — user approval required in the Mindlayer dashboard")
             }
             if (_state.value == ConnectionState.BIND_GAVE_UP) {
+                terminalBindFailure?.let { throw it }
                 throw IllegalStateException(
                     "Mindlayer service permanently unavailable after $MAX_RECONNECT_ATTEMPTS attempts; call connect() to retry",
                 )
@@ -317,6 +321,16 @@ class ConnectionManager {
             ctx.bindService(intent, conn, BIND_FLAGS)
         } catch (e: SecurityException) {
             Log.e(TAG, "bindService denied", e)
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                terminalBindFailure = MindlayerException(
+                    message = "Mindlayer first-party cross-app integration requires Android 12 (API 31) or later. This device is running Android ${Build.VERSION.SDK_INT}.",
+                    code = MindlayerErrorCode.UNSUPPORTED_ANDROID_VERSION,
+                    cause = e,
+                )
+                bindGaveUp = true
+                _state.value = ConnectionState.BIND_GAVE_UP
+                return
+            }
             false
         }
 
