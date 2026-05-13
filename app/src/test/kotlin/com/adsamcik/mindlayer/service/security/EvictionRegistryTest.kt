@@ -30,6 +30,8 @@ class EvictionRegistryTest {
             lastSessionId = sessionId
             lastReasonCode = reasonCode
         }
+
+        override fun onDeferredInferenceComplete(requestId: String?, statusCode: Int) = Unit
     }
 
     @Test

@@ -148,6 +148,25 @@ internal class EvictionRegistry {
         }
     }
 
+    fun notifyDeferredComplete(uid: Int, requestId: String, statusCode: Int) {
+        val list = byUid[uid] ?: return
+        for (entry in list) {
+            try {
+                entry.callback.onDeferredInferenceComplete(requestId, statusCode)
+            } catch (t: android.os.RemoteException) {
+                MindlayerLog.w(
+                    TAG,
+                    "deferred callback dispatch failed (uid=$uid): ${t.javaClass.simpleName} — removing",
+                )
+                removeByBinder(uid, entry.binder, attemptUnlink = true)
+            } catch (t: Throwable) {
+                MindlayerLog.w(
+                    TAG,
+                    "deferred callback dispatch threw (uid=$uid): ${t.javaClass.simpleName}",
+                )
+            }
+        }
+    }
     /**
      * Tear down all registrations. Called from
      * [com.adsamcik.mindlayer.service.MindlayerMlService.onDestroy].

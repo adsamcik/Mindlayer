@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.util.UUID
 
@@ -156,6 +157,12 @@ class Mindlayer private constructor(
      * pressure can retire several sessions in quick succession) and
      * drops the oldest if no consumer is reading.
      */
+    private val _deferredCompletionFlow = MutableSharedFlow<DeferredCompletionNotice>(
+        replay = 0,
+        extraBufferCapacity = EVICTION_BUFFER,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
     private val _evictionFlow = MutableSharedFlow<EvictionNotice>(
         replay = 0,
         extraBufferCapacity = EVICTION_BUFFER,
@@ -178,6 +185,11 @@ class Mindlayer private constructor(
             override fun onSessionEvicted(sessionId: String?, reasonCode: Int) {
                 val sid = sessionId ?: return
                 _evictionFlow.tryEmit(EvictionNotice(sid, reasonCode))
+            }
+
+            override fun onDeferredInferenceComplete(requestId: String?, statusCode: Int) {
+                val rid = requestId ?: return
+                _deferredCompletionFlow.tryEmit(DeferredCompletionNotice(rid, statusCode))
             }
         }
     }
@@ -228,6 +240,8 @@ class Mindlayer private constructor(
      * "no eviction notices on this service version" diagnostic.
      */
     fun evictionNotices(): Flow<EvictionNotice> = _evictionFlow.asSharedFlow()
+
+    fun deferredCompletions(): Flow<DeferredCompletionNotice> = _deferredCompletionFlow.asSharedFlow()
 
     /**
      * Best-effort subscribe — invoked on every fresh CONNECTED transition.
@@ -690,6 +704,77 @@ class Mindlayer private constructor(
             media = rebound,
         )
         return buildHandle(requestId, flow)
+    }
+
+
+    private suspend fun requireDeferredCapability() {
+        val caps = getCapabilities()
+        if (!caps.supports(com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DEFERRED_INFERENCE)) {
+            throw MindlayerException(
+                message = "Connected Mindlayer service does not support deferred inference",
+                code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.NOT_SUPPORTED,
+            )
+        }
+    }
+
+    suspend fun chatDeferred(
+        sessionId: String,
+        text: String,
+        media: List<com.adsamcik.mindlayer.MediaPart> = emptyList(),
+    ): com.adsamcik.mindlayer.DeferredHandle {
+        requireDeferredCapability()
+        val requestId = UUID.randomUUID().toString()
+        val rebound = media.map { it.copy(requestId = requestId) }
+        return try {
+            withTypedErrors(requestId = requestId, sessionId = sessionId) {
+                it.inferDeferred(
+                    RequestMeta(requestId = requestId, sessionId = sessionId, textContent = text),
+                    rebound,
+                )
+            }
+        } catch (_: NoSuchMethodError) {
+            throw MindlayerException(
+                message = "Connected Mindlayer service does not implement deferred inference",
+                code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.NOT_SUPPORTED,
+                requestId = requestId,
+                sessionId = sessionId,
+            )
+        } catch (_: AbstractMethodError) {
+            throw MindlayerException(
+                message = "Connected Mindlayer service does not implement deferred inference",
+                code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.NOT_SUPPORTED,
+                requestId = requestId,
+                sessionId = sessionId,
+            )
+        }
+    }
+
+    suspend fun fetchDeferredResult(requestId: String): com.adsamcik.mindlayer.DeferredResult {
+        requireDeferredCapability()
+        return withTypedErrors(requestId = requestId) { it.fetchDeferredResult(requestId) }
+    }
+
+    suspend fun cancelDeferred(requestId: String): com.adsamcik.mindlayer.CancelResult {
+        requireDeferredCapability()
+        return withTypedErrors(requestId = requestId) { it.cancelDeferredInference(requestId) }
+    }
+
+    suspend fun acknowledgeDeferred(requestId: String) {
+        requireDeferredCapability()
+        withTypedErrors(requestId = requestId) { it.acknowledgeDeferredResult(requestId) }
+    }
+
+    suspend fun awaitDeferred(
+        requestId: String,
+        pollIntervalMs: Long = 250,
+        timeoutMs: Long = 60_000,
+    ): com.adsamcik.mindlayer.DeferredResult = withTimeout(timeoutMs) {
+        while (true) {
+            val result = fetchDeferredResult(requestId)
+            if (result.status != com.adsamcik.mindlayer.DeferredResult.STILL_RUNNING) return@withTimeout result
+            delay(pollIntervalMs.coerceAtLeast(1L))
+        }
+        error("unreachable")
     }
 
     // -- Tool calling ---------------------------------------------------------

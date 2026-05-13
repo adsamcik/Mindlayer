@@ -21,7 +21,13 @@ class AidlContractDriftTest {
                 .toList()
         }
 
-        assertEquals("Expected all public AIDL files to be covered", 16, appFiles.size)
+        val sdkFiles = Files.list(sdkDir).use { stream ->
+            stream.filter { it.fileName.toString().endsWith(".aidl") }
+                .map { it.fileName.toString() }
+                .sorted()
+                .toList()
+        }
+        assertEquals("App and SDK AIDL file sets differ", sdkFiles, appFiles)
         appFiles.forEach { fileName ->
             val appBytes = readNormalized(appDir.resolve(fileName))
             val sdkBytes = readNormalized(sdkDir.resolve(fileName))
