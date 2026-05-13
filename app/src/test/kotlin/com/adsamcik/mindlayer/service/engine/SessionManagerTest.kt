@@ -11,6 +11,7 @@ import io.mockk.every
 import io.mockk.coVerify
 import io.mockk.mockk
 import io.mockk.mockkStatic
+import io.mockk.verify
 import io.mockk.unmockkAll
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -1079,5 +1080,22 @@ class SessionManagerTest {
         assertEquals(512, info.currentTokenCount)
         assertEquals(3, info.turnCount)
         assertTrue(info.isStreaming)
+    }
+
+    @Test
+    fun `backend switch lazy-invalidates idle sessions and rewarms on next access`() {
+        val sid = createDefaultSession(sessionId = "thermal-idle")
+        assertEquals(1, sessionManager.sessionCount)
+
+        val invalidated = sessionManager.invalidateIdleSessionsForBackendSwitch()
+
+        assertEquals(1, invalidated)
+        assertEquals("Idle session metadata should survive backend switch", 1, sessionManager.sessionCount)
+        assertNotNull(sessionManager.getSessionInfo(sid))
+
+        sessionManager.getSession(sid)
+
+        assertEquals(1, sessionManager.sessionCount)
+        verify(exactly = 2) { mockEngine.createConversation(any()) }
     }
 }

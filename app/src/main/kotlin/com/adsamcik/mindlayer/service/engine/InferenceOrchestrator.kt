@@ -144,6 +144,19 @@ class InferenceOrchestrator(
      */
     private val activeJobs = ConcurrentHashMap<String, Job>()
 
+    /**
+     * Typed cancellation reasons keyed by scoped request id. Presence means
+     * the CancellationException handler must emit an ERROR frame instead of
+     * the normal user-cancel DONE frame.
+     */
+    private val typedCancellationReasons = ConcurrentHashMap<String, Int>()
+
+    init {
+        sessionManager.setEmergencyStreamCanceller { reason ->
+            cancelAllActiveStreams(reason)
+        }
+    }
+
     /** Bridge between the streaming coroutine and AIDL submitToolResult(). */
     val toolCallBridge = ToolCallBridge(logRepository)
 
@@ -338,6 +351,39 @@ class InferenceOrchestrator(
             } catch (t: Throwable) {
                 MindlayerLog.w(TAG, "cancelAll: cancelInference($scopedKey) raised ${t.safeLabel()}")
             }
+        }
+    }
+
+    /**
+     * Cancel every active stream with a typed resource-pressure error.
+     *
+     * The native worker is stopped before coroutine cancellation via
+     * Conversation.cancelProcess(); Flow cancellation alone is insufficient.
+     */
+    fun cancelAllActiveStreams(reason: Int = MindlayerErrorCode.LOW_MEMORY) {
+        activeJobs.keys.toList().forEach { scopedKey ->
+            val publicRequestId = scopedKey.substringAfter(':', scopedKey)
+            val handle = sessionManager.findSessionByActiveRequest(scopedKey)
+            typedCancellationReasons[scopedKey] = reason
+            if (handle != null) {
+                try {
+                    handle.conversation.cancelProcess()
+                } catch (t: Throwable) {
+                    MindlayerLog.w(
+                        TAG,
+                        "cancelProcess() failed during low-memory cancellation: ${t.safeLabel()}",
+                        requestId = publicRequestId,
+                        sessionId = handle.sessionId,
+                    )
+                }
+                logRepository?.logInferenceError(
+                    publicRequestId,
+                    handle.sessionId,
+                    (MindlayerErrorCode.nameOf(reason) ?: "UNKNOWN").lowercase(),
+                )
+            }
+            toolCallBridge.cancel(scopedKey)
+            activeJobs[scopedKey]?.cancel()
         }
     }
 
@@ -788,19 +834,27 @@ class InferenceOrchestrator(
                 } catch (t: Throwable) {
                     MindlayerLog.w(TAG, "cancelProcess() after CancellationException raised ${t.safeLabel()}", requestId = meta.requestId, sessionId = meta.sessionId)
                 }
-                trace.markError("cancelled")
+                val typedReason = typedCancellationReasons.remove(scopedKey)
+                val terminalReason = typedReason?.let { (MindlayerErrorCode.nameOf(it) ?: "UNKNOWN").lowercase() } ?: "cancelled"
+                trace.markError(terminalReason)
                 MindlayerLog.i(
                     TAG,
                     "Inference cancelled",
                     requestId = meta.requestId,
                     sessionId = meta.sessionId,
                 )
-                // F-009: writer.writeDone() is suspend, but we are in a
+                // F-009: writer terminal writes are suspend, but we are in a
                 // CancellationException catch — coroutine is being torn
                 // down. Wrap with NonCancellable so the terminal frame
                 // can flush before the pipe closes.
                 withContext(NonCancellable) {
-                    try { writer.writeDone(0, "cancelled") } catch (_: Throwable) {
+                    try {
+                        if (typedReason != null) {
+                            writer.closeWithError(0, terminalReason, typedReason)
+                        } else {
+                            writer.writeDone(0, "cancelled")
+                        }
+                    } catch (_: Throwable) {
                         // Best-effort terminal frame; pipe may already be closed.
                     }
                 }
@@ -821,6 +875,7 @@ class InferenceOrchestrator(
                 writer.closeWithError(0, safe, MindlayerErrorCode.INTERNAL)
                 return
             } finally {
+                typedCancellationReasons.remove(scopedKey)
                 writer.close()
                 handle.activeRequestId = null
                 handle.isStreaming = false
