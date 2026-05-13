@@ -12,6 +12,8 @@ import com.adsamcik.mindlayer.SessionInfo
 import com.adsamcik.mindlayer.ToolResult
 import com.adsamcik.mindlayer.service.engine.DeviceTier
 import com.adsamcik.mindlayer.service.engine.EngineManager
+import com.adsamcik.mindlayer.service.engine.EngineState
+import com.adsamcik.mindlayer.service.engine.InitFailure
 import com.adsamcik.mindlayer.service.engine.InferenceOrchestrator
 import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.MemoryPressure
@@ -28,6 +30,7 @@ import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.security.AllowlistStore
 import com.adsamcik.mindlayer.service.security.CallerIdentity
 import com.adsamcik.mindlayer.service.security.RateLimiter
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import io.mockk.CapturingSlot
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -175,8 +178,11 @@ class ServiceBinderTest {
                     displayName = "Test Caller",
                 )
             },
-            // Use a null store so the binder skips the allowlist gate in unit tests.
-            allowlistStore = null,
+            // Use an always-allow store so unit tests bypass the allowlist gate.
+            allowlistStore = mockk<AllowlistStore>(relaxed = true) {
+                every { isDenied(any(), any()) } returns false
+                every { isAllowed(any(), any()) } returns true
+            },
             rateLimiter = rateLimiter,
         )
 
@@ -242,7 +248,7 @@ class ServiceBinderTest {
     }
 
     @Test
-    fun `createSession starts engine warmup asynchronously when engine is not initialized`() {
+    fun `cold createSession surfaces typed init failure after warmup completes`() {
         every { engineManager.isInitialized } returns false
         coEvery {
             engineManager.initialize(
@@ -250,15 +256,14 @@ class ServiceBinderTest {
                 maxTokens = 2048,
             )
         } returns mockk(relaxed = true)
+        coEvery { engineManager.awaitReady() } returns EngineState.Failed(InitFailure.NativeError("IllegalStateException"))
 
         val config = SessionConfig(sessionId = "s1", backend = "CPU", maxTokens = 2048)
 
-        try {
+        val error = assertThrows(SecurityException::class.java) {
             binder.createSession(config)
-            fail("Expected createSession to report that the engine is initializing")
-        } catch (e: IllegalStateException) {
-            assertTrue(e.message.orEmpty().contains("initialization has been started"))
         }
+        assertEquals(MindlayerErrorCode.NATIVE_ERROR, MindlayerErrorCode.codeFromWireMessage(error.message))
 
         verify(exactly = 0) { orchestrator.createSession(any(), any()) }
         coVerify(timeout = 1_000) {

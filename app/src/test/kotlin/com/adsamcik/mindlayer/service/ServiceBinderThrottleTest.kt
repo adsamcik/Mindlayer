@@ -11,6 +11,7 @@ import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
 import com.adsamcik.mindlayer.service.health.MlHealthRecorder
 import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
+import com.adsamcik.mindlayer.service.security.AllowlistStore
 import com.adsamcik.mindlayer.service.security.CallerIdentity
 import com.adsamcik.mindlayer.service.security.RateLimiter
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
@@ -96,7 +97,10 @@ class ServiceBinderThrottleTest {
             memoryBudget = memoryBudget,
             context = mockk(relaxed = true),
             callerVerifier = gate,
-            allowlistStore = null,
+            allowlistStore = mockk<AllowlistStore>(relaxed = true) {
+                every { isDenied(any(), any()) } returns false
+                every { isAllowed(any(), any()) } returns true
+            },
             rateLimiter = RateLimiter(
                 maxRequestsPerMinute = 60_000,
                 maxConcurrent = 1_000,

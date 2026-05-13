@@ -17,6 +17,10 @@ import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.SessionInfo
 import com.adsamcik.mindlayer.ToolResult
 import com.adsamcik.mindlayer.service.engine.EngineManager
+import com.adsamcik.mindlayer.service.engine.EngineState
+import com.adsamcik.mindlayer.service.engine.InitFailure
+import com.adsamcik.mindlayer.service.engine.SessionQuotaExceededException
+import com.adsamcik.mindlayer.service.engine.SessionResourceExhaustedException
 import com.adsamcik.mindlayer.service.engine.InferenceOrchestrator
 import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.SessionManager
@@ -70,7 +74,7 @@ class ServiceBinder(
     private val memoryBudget: MemoryBudget,
     private val context: Context = service,
     private val callerVerifier: CallerVerifierGate = DefaultCallerVerifierGate,
-    private val allowlistStore: AllowlistStore? = AllowlistStore(service),
+    private val allowlistStore: AllowlistStore = AllowlistStore(service),
     private val rateLimiter: RateLimiter = RateLimiter(),
     private val logRepository: LogRepository? = null,
     private val mlHealthRecorder: MlHealthRecorder? = null,
@@ -335,10 +339,11 @@ class ServiceBinder(
                 if (!rateLimiter.tryAcquireRejected(uid)) {
                     logRepository?.logRateLimitReject(callerAidlMethodName(), uid, cost)
                     MindlayerLog.w(TAG, "Reject flood from uid=$uid (no identity)")
-                    throw SecurityException("Rate limit exceeded")
+                    throw typedBinderException(MindlayerErrorCode.RATE_LIMITED, "Rate limit exceeded")
                 }
-                throw SecurityException(
-                    "Caller identity could not be verified (uid=$uid)"
+                throw typedBinderException(
+                    MindlayerErrorCode.IDENTITY_UNKNOWN,
+                    "Caller identity could not be verified",
                 )
             }
 
@@ -348,18 +353,18 @@ class ServiceBinder(
         if (!rateLimiter.tryAcquire(uid, cost)) {
             logRepository?.logRateLimitReject(callerAidlMethodName(), uid, cost)
             MindlayerLog.w(TAG, "Rate limit exceeded for ${identity.packageName} (uid=$uid)")
-            throw SecurityException("Rate limit exceeded for ${identity.packageName}")
+            throw typedBinderException(MindlayerErrorCode.RATE_LIMITED, "Rate limit exceeded")
         }
 
         // 2. Allowlist check. A previously-denied caller is rejected silently.
         val store = allowlistStore
-        if (store != null) {
-            if (store.isDenied(identity.packageName, identity.signingCertSha256)) {
-                throw SecurityException(
-                    "App ${identity.packageName} not authorized — user approval required"
-                )
-            }
-            if (!store.isAllowed(identity.packageName, identity.signingCertSha256)) {
+        if (store.isDenied(identity.packageName, identity.signingCertSha256)) {
+            throw typedBinderException(
+                MindlayerErrorCode.ALLOWLIST_REVOKED,
+                "App not authorized — approval revoked",
+            )
+        }
+        if (!store.isAllowed(identity.packageName, identity.signingCertSha256)) {
                 // Only do the (relatively expensive) recordPending if the
                 // per-UID rejection bucket still has tokens. Otherwise drop
                 // silently — prevents log spam + atomic-write storm.
@@ -376,10 +381,10 @@ class ServiceBinder(
                     )
                     MindlayerLog.w(TAG, "Blocked un-approved caller ${identity.packageName} (uid=$uid)")
                 }
-                throw SecurityException(
-                    "App ${identity.packageName} not authorized — user approval required"
+                throw typedBinderException(
+                    MindlayerErrorCode.ALLOWLIST_PENDING,
+                    "App not authorized — user approval required",
                 )
-            }
         }
 
         return identity
@@ -418,6 +423,25 @@ class ServiceBinder(
 
     private fun typedBinderException(code: Int, message: String): RuntimeException {
         return SecurityException(MindlayerErrorCode.wireMessage(code, message))
+    }
+
+    private fun initFailureBinderException(failure: InitFailure): RuntimeException = when (failure) {
+        InitFailure.LowMemory -> typedBinderException(MindlayerErrorCode.LOW_MEMORY, "Insufficient memory")
+        InitFailure.ModelMissing -> typedBinderException(MindlayerErrorCode.MODEL_MISSING, "Model file missing")
+        InitFailure.IntegrityMismatch -> typedBinderException(MindlayerErrorCode.INTEGRITY_MISMATCH, "Model integrity check failed")
+        is InitFailure.BackendUnavailable -> typedBinderException(MindlayerErrorCode.BACKEND_UNAVAILABLE, "Backend unavailable: ${failure.backend}")
+        is InitFailure.NativeError -> typedBinderException(MindlayerErrorCode.NATIVE_ERROR, "Native engine error")
+    }
+
+    private fun initFailureForThrowable(t: Throwable): InitFailure = when (t) {
+        is com.adsamcik.mindlayer.service.engine.LowMemoryException -> InitFailure.LowMemory
+        is SecurityException -> InitFailure.IntegrityMismatch
+        is IllegalStateException -> if (t.message?.contains("No .litertlm model files", ignoreCase = true) == true) {
+            InitFailure.ModelMissing
+        } else {
+            InitFailure.NativeError(t.safeLabel())
+        }
+        else -> InitFailure.NativeError(t.safeLabel())
     }
 
     private fun requireRegisteredClient(): ClientRegistration? {
@@ -627,7 +651,22 @@ class ServiceBinder(
             config
         }
         MindlayerLog.d(TAG, "createSession from ${identity.packageName}")
-        ensureEngineReadyOrStart(config)
+        if (!engineManager.isInitialized) {
+            runBlocking {
+                startEngineWarmup(
+                    preferredBackend = safeConfig.backend,
+                    maxTokens = safeConfig.maxTokens,
+                )
+                when (val state = engineManager.awaitReady()) {
+                    is EngineState.Ready -> Unit
+                    is EngineState.Failed -> throw initFailureBinderException(state.cause)
+                    EngineState.Idle, EngineState.Initializing -> throw typedBinderException(
+                        MindlayerErrorCode.ENGINE_INITIALIZING,
+                        "engine_initializing",
+                    )
+                }
+            }
+        }
         return try {
             orchestrator.createSession(safeConfig, ownerToken ?: uid)
         } catch (e: com.adsamcik.mindlayer.service.engine.EngineNotReadyException) {
@@ -647,6 +686,16 @@ class ServiceBinder(
             throw typedBinderException(
                 MindlayerErrorCode.LOW_MEMORY,
                 "Insufficient memory: availMb=${e.availMb} requiredMb=${e.requiredMb}",
+            )
+        } catch (e: SessionQuotaExceededException) {
+            throw typedBinderException(
+                MindlayerErrorCode.SESSION_QUOTA_EXHAUSTED,
+                "Session quota exhausted",
+            )
+        } catch (e: SessionResourceExhaustedException) {
+            throw typedBinderException(
+                MindlayerErrorCode.MEMORY_PRESSURE,
+                "Memory pressure: cannot create session",
             )
         } catch (e: com.adsamcik.mindlayer.service.engine.ContextOverflowException) {
             // F-072: service-owned prompt overhead (system prompt + tool
@@ -672,12 +721,15 @@ class ServiceBinder(
                 "Invalid SessionConfig",
             )
         } catch (e: IllegalStateException) {
-            // Engine-not-ready is the legitimate signal — preserve it.
-            // Other ISEs from internal validators get redacted to a
-            // generic SecurityException so they cannot leak engine state.
-            if (e.message?.contains("initialization has been started") == true) throw e
-            MindlayerLog.w(TAG, "createSession rejected: ${e.javaClass.simpleName}")
-            throw SecurityException("Service not ready")
+            val initFailure = engineManager.lastInitFailure
+            if (initFailure != null) {
+                throw initFailureBinderException(initFailure)
+            }
+            if (e.message == "engine_initializing") {
+                throw typedBinderException(MindlayerErrorCode.ENGINE_INITIALIZING, "engine_initializing")
+            }
+            MindlayerLog.w(TAG, "createSession rejected: ${e.safeLabel()}")
+            throw initFailureBinderException(initFailureForThrowable(e))
         }
     }
 
@@ -1586,6 +1638,10 @@ class ServiceBinder(
         // F-064: cheap call — quarter-cost so dashboard polling doesn't
         // dominate the per-UID budget for external callers either.
         authorizeCall(cost = 0.25)
+        return buildStatus()
+    }
+
+    private fun buildStatus(): ServiceStatus {
         val uid = Binder.getCallingUid()
         val isSelfUid = uid == Process.myUid()
         val thermalPolicy = thermalMonitor.currentPolicy.value
@@ -1678,6 +1734,10 @@ class ServiceBinder(
     override fun getEngineInfo(): EngineInfo {
         // F-064: cheap call — quarter-cost.
         authorizeCall(cost = 0.25)
+        return buildEngineInfo()
+    }
+
+    private fun buildEngineInfo(): EngineInfo {
         val currentModel = engineManager.currentModel
         val modelPath = currentModel?.path.orEmpty()
         val modelId = currentModel?.id
@@ -1767,8 +1827,8 @@ class ServiceBinder(
 
         return com.adsamcik.mindlayer.DiagnosticsSnapshot(
             capturedAtMs = System.currentTimeMillis(),
-            service = getStatus(),
-            engine = getEngineInfo(),
+            service = buildStatus(),
+            engine = buildEngineInfo(),
             callerSessionCount = callerSessions,
             recentInferenceCount = recentForCaller,
             recentErrorCount = runBlocking {
