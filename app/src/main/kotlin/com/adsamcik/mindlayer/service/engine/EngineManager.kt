@@ -10,6 +10,10 @@ import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -40,6 +44,13 @@ class LowMemoryException(
 ) : IllegalStateException(
     "Insufficient memory: availMb=$availMb requiredMb=$requiredMb",
 )
+
+sealed class EngineState {
+    object Idle : EngineState()
+    object Initializing : EngineState()
+    object Ready : EngineState()
+    data class Failed(val cause: InitFailure) : EngineState()
+}
 
 /**
  * Manages the LiteRT-LM [Engine] lifecycle: initialization with automatic
@@ -72,6 +83,9 @@ class EngineManager(
     }
 
     private val mutex = Mutex()
+
+    private val _state = MutableStateFlow<EngineState>(EngineState.Idle)
+    val state: StateFlow<EngineState> = _state.asStateFlow()
 
     @Volatile
     private var engine: Engine? = null
@@ -189,6 +203,15 @@ class EngineManager(
         preferredBackend: String? = null,
         maxTokens: Int = 4096,
     ): Engine = mutex.withLock {
+        initializeLocked(preferredBackend, maxTokens)
+    }
+
+    private suspend fun initializeLocked(
+        preferredBackend: String? = null,
+        maxTokens: Int = 4096,
+    ): Engine {
+        _state.value = EngineState.Initializing
+        try {
         val target = try {
             withContext(Dispatchers.IO) { selectedModel }
         } catch (e: IllegalStateException) {
@@ -203,6 +226,7 @@ class EngineManager(
         // Fast-path: the selected device model is already loaded.
         engine?.let { eng ->
             MindlayerLog.i(TAG, "Engine already initialized with model=${target.id}, backend=$currentBackend")
+            _state.value = EngineState.Ready
             return eng
         }
 
@@ -319,6 +343,7 @@ class EngineManager(
                 initTimeSeconds = elapsed
                 isInitialized = true
                 logRepository?.logEngineInit(name, durationMs, path)
+                _state.value = EngineState.Ready
                 return eng
 
             } catch (t: Throwable) {
@@ -350,6 +375,19 @@ class EngineManager(
                 "(tried=[$triedBackends], available RAM: ${availMb}MB, model: ${modelSizeBytes / 1024 / 1024}MB). " +
                 "Try closing other apps to free memory.", lastError
         )
+        } catch (t: Throwable) {
+            val existingFailure = lastInitFailure
+            val failure = existingFailure ?: classifyInitFailure(t)
+            if (existingFailure == null) recordInitFailure(failure)
+            _state.value = EngineState.Failed(failure)
+            throw t
+        }
+    }
+
+    suspend fun awaitReady(): EngineState {
+        val current = _state.value
+        if (current is EngineState.Ready || current is EngineState.Failed) return current
+        return state.first { it is EngineState.Ready || it is EngineState.Failed }
     }
 
     /**
@@ -442,6 +480,17 @@ class EngineManager(
 
     // ---- Private helpers ---------------------------------------------------
 
+    private fun classifyInitFailure(t: Throwable): InitFailure = when (t) {
+        is LowMemoryException -> InitFailure.LowMemory
+        is SecurityException -> InitFailure.IntegrityMismatch
+        is IllegalStateException -> if (t.message?.contains("No .litertlm model files", ignoreCase = true) == true) {
+            InitFailure.ModelMissing
+        } else {
+            InitFailure.NativeError(t.safeLabel())
+        }
+        else -> InitFailure.NativeError(t.safeLabel())
+    }
+
     private fun noModelFoundException(): IllegalStateException =
         IllegalStateException(
             "No .litertlm model files found. Place a model in app filesDir, " +
@@ -461,6 +510,7 @@ class EngineManager(
                 }
             }
             engine = null
+            _state.value = EngineState.Idle
             currentBackend = "NONE"
             currentModel = null
             isInitialized = false

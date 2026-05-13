@@ -11,6 +11,7 @@ import com.adsamcik.mindlayer.service.engine.InferenceOrchestrator
 import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
 import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
+import com.adsamcik.mindlayer.service.security.AllowlistStore
 import com.adsamcik.mindlayer.service.security.CallerIdentity
 import com.adsamcik.mindlayer.service.security.RateLimiter
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
@@ -96,9 +97,11 @@ class ServiceBinderTypedErrorsTest {
             memoryBudget = memoryBudget,
             context = mockk(relaxed = true),
             callerVerifier = gate,
-            // null allowlistStore skips the allowlist gate entirely (matches
-            // the ServiceBinderTest pattern for unit tests).
-            allowlistStore = null,
+            // Always-allow store bypasses the allowlist gate for unit tests.
+            allowlistStore = mockk<AllowlistStore>(relaxed = true) {
+                every { isDenied(any(), any()) } returns false
+                every { isAllowed(any(), any()) } returns true
+            },
             // Provide an auto-advancing timeSource so the per-UID token bucket
             // accumulates ~1 token per virtual second; otherwise Robolectric's
             // frozen SystemClock leaves the bucket at zero forever.

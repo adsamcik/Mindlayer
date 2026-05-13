@@ -8,6 +8,7 @@ import com.google.ai.edge.litertlm.Engine
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.service.security.IpcInputValidator
 import io.mockk.every
+import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -284,19 +285,16 @@ class SessionManagerTest {
         // background init invocation passes through the right backend/token
         // values.
         every { engineManager.isInitialized } returns false
+        coEvery { engineManager.awaitReady() } returns EngineState.Ready
 
-        val ex = org.junit.Assert.assertThrows(
-            com.adsamcik.mindlayer.service.engine.EngineNotReadyException::class.java
-        ) {
-            sessionManager.createSession(
-                SessionConfig(
-                    sessionId = "single-model",
-                    backend = "CPU",
-                    maxTokens = 2048,
-                )
+        val id = sessionManager.createSession(
+            SessionConfig(
+                sessionId = "single-model",
+                backend = "CPU",
+                maxTokens = 2048,
             )
-        }
-        assertTrue("Expected positive retryAfterMs", ex.retryAfterMs > 0L)
+        )
+        assertEquals("single-model", id)
 
         // Background init runs on the limitedParallelism(1) IO slice.
         // Wait briefly for it to schedule + invoke initialize().
