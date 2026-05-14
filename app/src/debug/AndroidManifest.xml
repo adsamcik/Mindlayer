@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <permission
+        android:name="com.adsamcik.mindlayer.test.permission.KNOWN_CERTS_FORMAT_TEST_LOWERCASE_HEX_64"
+        android:knownCerts="@array/knowncerts_format_test_lowercase_hex_64"
+        android:protectionLevel="signature|knownSigner" />
+    <permission
+        android:name="com.adsamcik.mindlayer.test.permission.KNOWN_CERTS_FORMAT_TEST_UPPERCASE"
+        android:knownCerts="@array/knowncerts_format_test_uppercase"
+        android:protectionLevel="signature|knownSigner" />
+    <permission
+        android:name="com.adsamcik.mindlayer.test.permission.KNOWN_CERTS_FORMAT_TEST_COLON_PAIRS"
+        android:knownCerts="@array/knowncerts_format_test_colon_pairs"
+        android:protectionLevel="signature|knownSigner" />
+    <permission
+        android:name="com.adsamcik.mindlayer.test.permission.KNOWN_CERTS_FORMAT_TEST_LEADING_ZEROX"
+        android:knownCerts="@array/knowncerts_format_test_leading_zerox"
+        android:protectionLevel="signature|knownSigner" />
+    <permission
+        android:name="com.adsamcik.mindlayer.test.permission.KNOWN_CERTS_FORMAT_TEST_MISMATCHED"
+        android:knownCerts="@array/knowncerts_format_test_mismatched"
+        android:protectionLevel="signature|knownSigner" />
+    <permission
+        android:name="com.adsamcik.mindlayer.test.permission.KNOWN_CERTS_FORMAT_TEST_EMPTY"
+        android:knownCerts="@array/knowncerts_format_test_empty"
+        android:protectionLevel="signature|knownSigner" />
+
+</manifest>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="knowncerts_format_test_lowercase_hex_64">
+        <item>3bb0a4da57f3230bf5c1d49da62cb320ca960839a93c71dc14c2eef1243f8588</item>
+    </string-array>
+    <string-array name="knowncerts_format_test_uppercase">
+        <item>3BB0A4DA57F3230BF5C1D49DA62CB320CA960839A93C71DC14C2EEF1243F8588</item>
+    </string-array>
+    <string-array name="knowncerts_format_test_colon_pairs">
+        <item>3b:b0:a4:da:57:f3:23:0b:f5:c1:d4:9d:a6:2c:b3:20:ca:96:08:39:a9:3c:71:dc:14:c2:ee:f1:24:3f:85:88</item>
+    </string-array>
+    <string-array name="knowncerts_format_test_leading_zerox">
+        <item>0x3bb0a4da57f3230bf5c1d49da62cb320ca960839a93c71dc14c2eef1243f8588</item>
+    </string-array>
+    <string-array name="knowncerts_format_test_mismatched">
+        <item>0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</item>
+    </string-array>
+    <string-array name="knowncerts_format_test_empty" />
+</resources>
