@@ -223,6 +223,18 @@ android {
     }
 
     signingConfigs {
+        create("knownCertsOwner") {
+            storeFile = rootProject.file("app/keystores/knowncerts-owner.jks")
+            storePassword = "knowncertstest"
+            keyAlias = "knowncerts-owner"
+            keyPassword = "knowncertstest"
+        }
+        create("knownCertsRequester") {
+            storeFile = rootProject.file("app/keystores/knowncerts-requester.jks")
+            storePassword = "knowncertstest"
+            keyAlias = "knowncerts-requester"
+            keyPassword = "knowncertstest"
+        }
         if (hasReleaseKeystore) {
             create("release") {
                 if (hasLocalReleaseKeystore) {
@@ -255,6 +267,7 @@ android {
             val allowLowMem = (project.findProperty("mindlayer.allowLowMem")?.toString() ?: "false")
                 .equals("true", ignoreCase = true)
             buildConfigField("boolean", "ALLOW_LOW_MEM", allowLowMem.toString())
+            signingConfig = signingConfigs.getByName("knownCertsOwner")
         }
         release {
             isMinifyEnabled = true
@@ -318,6 +331,9 @@ android {
 androidComponents {
     beforeVariants(selector().withBuildType("release")) { variantBuilder ->
         (variantBuilder as com.android.build.api.variant.HasUnitTestBuilder).enableUnitTest = true
+    }
+    onVariants(selector().withBuildType("debug")) { variant ->
+        variant.androidTest?.signingConfig?.setConfig(android.signingConfigs.getByName("knownCertsRequester"))
     }
 }
 
