@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="com.adsamcik.mindlayer.test.permission.KNOWN_CERTS_FORMAT_TEST_LOWERCASE_HEX_64" />
+    <uses-permission android:name="com.adsamcik.mindlayer.test.permission.KNOWN_CERTS_FORMAT_TEST_UPPERCASE" />
+    <uses-permission android:name="com.adsamcik.mindlayer.test.permission.KNOWN_CERTS_FORMAT_TEST_COLON_PAIRS" />
+    <uses-permission android:name="com.adsamcik.mindlayer.test.permission.KNOWN_CERTS_FORMAT_TEST_LEADING_ZEROX" />
+    <uses-permission android:name="com.adsamcik.mindlayer.test.permission.KNOWN_CERTS_FORMAT_TEST_MISMATCHED" />
+    <uses-permission android:name="com.adsamcik.mindlayer.test.permission.KNOWN_CERTS_FORMAT_TEST_EMPTY" />
+
+</manifest>
