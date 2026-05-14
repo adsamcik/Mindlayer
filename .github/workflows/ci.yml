@@ -41,6 +41,28 @@ jobs:
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest --no-daemon
 
+      # PR #42 (signature|knownSigner trust architecture) introduced a
+      # release-only Kotlin compile error (`Unresolved reference
+      # 'debugSeedIfApplicable'`) that slipped past CI because the workflow
+      # only ran the debug variant. PR #43 fixed it, and this step ensures
+      # the same class of regression is caught at PR time: the unit-test
+      # task implicitly runs `:app:compileReleaseKotlin` and
+      # `:app:compileReleaseUnitTestKotlin` first, so any release-only
+      # source-set compile error fails the PR.
+      #
+      # We intentionally do NOT run `:app:assembleRelease` /
+      # `:app:bundleRelease` here:
+      #   - they require `-PmodelSha256` (release integrity guard, PR #34)
+      #     which is gated on `vars.MODEL_SHA256` and lives in the
+      #     `build-bundle` job that already runs on `main`;
+      #   - and they prefer a signing keystore that is only present via
+      #     `secrets.ANDROID_KEYSTORE_*`, which fork PRs cannot read.
+      # The unit-test task is exempted from `validateReleaseModelSha256`
+      # in `app/build.gradle.kts` (it excludes any task name containing
+      # "UnitTest"), so it runs on PRs from forks without any secrets.
+      - name: Run release-variant unit tests
+        run: ./gradlew :app:testReleaseUnitTest --no-daemon
+
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
