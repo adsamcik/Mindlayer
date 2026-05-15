@@ -310,9 +310,19 @@ class MindlayerMlService : Service() {
                     orchestrator.awaitAllJobs(timeoutMs = 5_000)
                     sessionManager.applyMemoryPressure(MemoryPressure.EMERGENCY)
                 }
-                if (!sessionManager.hasActiveStreaming()) {
+                // M-E1: close the TOCTOU between "no active streams" check
+                // and the engine teardown by routing through
+                // engineManager.shutdownIfIdle(predicate). The engine
+                // mutex held during the predicate evaluation prevents a
+                // racing request from starting a fresh init under us; any
+                // request that lands AFTER shutdown succeeds will find the
+                // engine in Idle state and rearm via the standard
+                // SessionManager.ensureInitStarted() path.
+                val unloaded = engineManager.shutdownIfIdle {
+                    !sessionManager.hasActiveStreaming()
+                }
+                if (unloaded) {
                     sessionManager.invalidateIdleSessionsForBackendSwitch()
-                    engineManager.shutdown()
                 }
             }
         }
