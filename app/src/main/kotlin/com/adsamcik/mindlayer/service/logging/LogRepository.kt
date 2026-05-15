@@ -119,6 +119,23 @@ class LogRepository(
             extraJson = logExtraJson { put("outcome", outcome) },
         ))
     }
+
+    /**
+     * M-D8: emitted on fetch when the deferred row has crossed `expiresAtMs`
+     * and is being evicted. Distinct from [DEFERRED_COMPLETE] so dashboard
+     * filters can show "completed but never fetched" vs "lapsed without
+     * fetch" separately. Paired with M-D1's `fetch()` returning
+     * `DeferredResult.EXPIRED` (instead of `NOT_FOUND_OR_NOT_OWNED`) for
+     * the same row.
+     */
+    fun logDeferredExpired(requestId: String) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.INFERENCE,
+            event = LogEvent.DEFERRED_EXPIRED,
+            requestId = requestId,
+        ))
+    }
     fun logInferenceStart(requestId: String, sessionId: String, backend: String) {
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),

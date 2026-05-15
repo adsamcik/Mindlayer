@@ -36,6 +36,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.security.AllowlistEntry
 import com.adsamcik.mindlayer.service.security.AllowlistStore
@@ -177,7 +178,14 @@ class MindlayerMlService : Service() {
         sharedMemoryPool = SharedMemoryPool(cacheDir)
         sharedMemoryPool.cleanupAll()
         deferredStore = DeferredStore(DeferredDatabase.getInstance(this).deferredDao())
-        serviceScope.launch { deferredStore.failRunningOnInit() }
+        // M-D5: synchronously fail any STILL_RUNNING rows left over from a
+        // prior process before `binder` is exposed. `serviceScope.launch`
+        // returned before the SQL UPDATE ran, so an `onBind` arriving in
+        // the first ~tens of ms could see stale `STILL_RUNNING` rows. The
+        // call is a single bulk UPDATE on a freshly-opened SQLCipher DB
+        // (one SQL statement, small table), safely runnable on the main
+        // thread per the existing pattern.
+        runBlocking { deferredStore.failRunningOnInit() }
         orchestrator = InferenceOrchestrator(this, sessionManager, sharedMemoryPool, logRepository)
 
         val diagnosticExporter = DiagnosticExporter(
