@@ -17,6 +17,20 @@ internal object LogExtras {
         put("hash8", sha256Hex(name).take(8))
     }
 
+    /**
+     * Metadata for the oversize-tool-args drop path. Mirrors
+     * [toolNameMetadata]'s `{len, reason, hash8}` shape so neither logcat
+     * nor [LogEntry.extraJson] ever carries the raw (model-emitted) tool
+     * name — even when that name passed the allowlist check, it can still
+     * encode prompt fragments and is treated as untrusted in the log path.
+     */
+    fun oversizeArgsMetadata(name: String, argsSize: Int): JsonObject = buildJsonObject {
+        put("len", name.length)
+        put("reason", "oversize_args")
+        put("hash8", sha256Hex(name).take(8))
+        put("size", argsSize)
+    }
+
     private fun sha256Hex(value: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
         return digest.joinToString("") { byte -> "%02x".format(byte) }

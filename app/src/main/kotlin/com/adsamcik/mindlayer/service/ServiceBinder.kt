@@ -1816,10 +1816,6 @@ class ServiceBinder(
             throw SecurityException("Invalid packageName")
         }
         val store = allowlistStore
-        if (store == null) {
-            MindlayerLog.w(TAG, "revokeApp called with no allowlistStore configured")
-            return
-        }
 
         // Look up the live entry (so we can log a sigPrefix even after revoke
         // erases the row) and resolve the UID before mutating state.

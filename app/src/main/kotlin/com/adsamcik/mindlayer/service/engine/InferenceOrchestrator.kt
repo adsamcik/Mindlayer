@@ -1086,9 +1086,10 @@ class InferenceOrchestrator(
             }
             val argsJson = gson.toJson(tc.arguments)
             val cappedArgs = if (argsJson.length > MAX_TOOL_ARGS_LEN) {
+                val toolMetadata = LogExtras.oversizeArgsMetadata(tc.name, argsJson.length)
                 MindlayerLog.w(
                     TAG,
-                    "Truncated tool args for '${tc.name}' from ${argsJson.length} to $MAX_TOOL_ARGS_LEN bytes",
+                    "Truncated oversize tool args metadata=$toolMetadata to $MAX_TOOL_ARGS_LEN bytes",
                     requestId = meta.requestId, sessionId = meta.sessionId,
                 )
                 logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
@@ -1097,11 +1098,7 @@ class InferenceOrchestrator(
                     event = com.adsamcik.mindlayer.service.logging.LogEvent.TOOL_CALL_REJECTED,
                     requestId = meta.requestId,
                     sessionId = meta.sessionId,
-                    extraJson = kotlinx.serialization.json.buildJsonObject {
-                        put("tool", kotlinx.serialization.json.JsonPrimitive(tc.name))
-                        put("reason", kotlinx.serialization.json.JsonPrimitive("oversize_args"))
-                        put("size", kotlinx.serialization.json.JsonPrimitive(argsJson.length))
-                    }.toString(),
+                    extraJson = toolMetadata.toString(),
                 ))
                 // Intentionally produce invalid JSON: the SDK's tool runner
                 // will fail to parse it and surface a tool-error to the

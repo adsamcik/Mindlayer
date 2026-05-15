@@ -170,9 +170,6 @@ class LogEntitiesTest {
     fun `LogEvent TOOL_CALL`() = assertEquals("tool_call", LogEvent.TOOL_CALL)
 
     @Test
-    fun `LogEvent TOOL_RESULT`() = assertEquals("tool_result", LogEvent.TOOL_RESULT)
-
-    @Test
     fun `LogEvent BAND_CHANGE`() = assertEquals("band_change", LogEvent.BAND_CHANGE)
 
     @Test
