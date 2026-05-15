@@ -336,6 +336,22 @@ class ConnectionManager {
 
         if (!bound) {
             Log.e(TAG, "bindService returned false — service not found?")
+            // M-T1: On API < 31, `bindService` can ALSO return false (rather
+            // than throwing SecurityException) when the system refuses the
+            // bind for permission/visibility reasons. Surface the same typed
+            // terminal error as the SecurityException branch above so callers
+            // get a consistent UNSUPPORTED_ANDROID_VERSION signal instead of
+            // a silent DISCONNECTED.
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                terminalBindFailure = MindlayerException(
+                    message = "Mindlayer first-party cross-app integration requires Android 12 (API 31) or later. This device is running Android ${Build.VERSION.SDK_INT}.",
+                    code = MindlayerErrorCode.UNSUPPORTED_ANDROID_VERSION,
+                    cause = null,
+                )
+                bindGaveUp = true
+                _state.value = ConnectionState.BIND_GAVE_UP
+                return
+            }
             _state.value = ConnectionState.DISCONNECTED
         }
     }
