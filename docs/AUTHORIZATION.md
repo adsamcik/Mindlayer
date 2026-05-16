@@ -207,6 +207,15 @@ allowlist state via timing.
 3. Once telemetry shows the rotated client is the only version in use,
    remove the old hash from both lists.
 
+> **Caveat — old installs are not retroactively protected.** Removing a
+> compromised cert from `mindlayer_trusted_client_certs` only takes effect
+> once a user has updated Mindlayer to the build that no longer lists it.
+> Older installed builds keep the old `knownCerts` set baked into their
+> manifest and continue to honour the compromised cert at the OS gate. The
+> user-allowlist layer still requires explicit approval per (pkg, sig), so
+> the practical exposure is bounded, but treat cert removal as "in flight"
+> until update telemetry confirms the rollout.
+
 ## Local sideloading
 
 Production builds remain default-deny for unknown callers: a sideloaded app
@@ -218,6 +227,16 @@ discovers installed packages signed with the same debug certificate as the
 Mindlayer debug build and seeds them automatically, while preserving revoked
 / denied packages. Release builds physically do not contain this class (the
 release unit test asserts it is absent).
+
+> **Caveat — your debug.keystore auto-trusts every app you build.** Android's
+> default debug.keystore is shared by every project built on your machine
+> and is not user-specific. `DebugAllowlistSeeder` matches purely on signing
+> cert, so if you `adb install` any other debug-signed APK (including one
+> built by a third party that happens to use the default Android debug
+> keystore, or a malicious sample you're triaging) it will be auto-seeded
+> on the next Mindlayer debug-build start. Mitigation: only run Mindlayer
+> debug builds in a clean test environment / dedicated emulator profile,
+> and never install untrusted debug-signed APKs alongside it.
 
 ## The approval flow
 
