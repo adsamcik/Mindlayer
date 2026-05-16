@@ -189,9 +189,6 @@ class TokenStreamReaderTest {
 
     /** Mirrors TokenStreamReader.mapEvent. */
     private fun mapEvent(event: StreamEvent): MindlayerEvent = when (event.type) {
-        StreamEventType.START -> MindlayerEvent.Started(
-            requestId = event.payload["requestId"]?.jsonPrimitive?.contentOrNull ?: "",
-        )
         StreamEventType.TOKEN_DELTA -> MindlayerEvent.TextDelta(
             text = event.payload["text"]?.jsonPrimitive?.contentOrNull ?: "",
             seq = event.seq,
@@ -314,13 +311,18 @@ class TokenStreamReaderTest {
     }
 
     @Test
-    fun `mapEvent START returns Started`() {
+    fun `mapEvent legacy start type now falls through to Unknown`() {
+        // StreamEventType.START was retired — wire type "start" is no longer
+        // recognized as a Started event. (Real stream starts arrive as a
+        // StreamHeader frame, decoded in parseFrame, not in mapEvent.) Verify
+        // the reader treats it as a forward-compat Unknown rather than ever
+        // resurrecting the dead branch.
         val event = StreamEvent(
-            seq = 0, type = StreamEventType.START, tsMs = 0,
+            seq = 0, type = "start", tsMs = 0,
             payload = buildJsonObject { put("requestId", "req-99") },
         )
-        val result = mapEvent(event) as MindlayerEvent.Started
-        assertEquals("req-99", result.requestId)
+        val result = mapEvent(event) as MindlayerEvent.Unknown
+        assertEquals("start", result.type)
     }
 
     // =========================================================================
