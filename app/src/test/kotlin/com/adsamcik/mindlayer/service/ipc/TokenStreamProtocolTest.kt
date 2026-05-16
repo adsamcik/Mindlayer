@@ -146,9 +146,6 @@ class TokenStreamProtocolTest {
 
     /** Mirrors TokenStreamReader.mapEvent. */
     private fun mapEvent(event: StreamEvent): MindlayerEvent = when (event.type) {
-        StreamEventType.START -> MindlayerEvent.Started(
-            requestId = event.payload["requestId"]?.jsonPrimitive?.contentOrNull ?: "",
-        )
         StreamEventType.TOKEN_DELTA -> MindlayerEvent.TextDelta(
             text = event.payload["text"]?.jsonPrimitive?.contentOrNull ?: "",
             seq = event.seq,
@@ -376,14 +373,19 @@ class TokenStreamProtocolTest {
     }
 
     @Test
-    fun `START event maps to Started with requestId`() {
+    fun `legacy start wire type no longer maps to Started`() {
+        // StreamEventType.START was retired — real stream starts are
+        // emitted as a StreamHeader frame, decoded in parseFrame, not in
+        // mapEvent. Any "start"-typed wire event must now fall through to
+        // the catch-all (the production reader returns Unknown; this local
+        // test mirror returns an empty TextDelta — verify the catch-all).
         val eventJson = buildStreamEventJson(
             seq = 0,
-            type = StreamEventType.START,
+            type = "start",
             payload = buildJsonObject { put("requestId", "req-abc") },
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.Started
-        assertEquals("req-abc", event.requestId)
+        val event = parseFrame(eventJson) as MindlayerEvent.TextDelta
+        assertEquals("", event.text)
     }
 
     @Test
@@ -471,14 +473,14 @@ class TokenStreamProtocolTest {
     }
 
     @Test
-    fun `START with missing requestId defaults to empty string`() {
+    fun `legacy start wire type with missing requestId still falls through`() {
         val eventJson = buildStreamEventJson(
             seq = 0,
-            type = StreamEventType.START,
+            type = "start",
             payload = JsonObject(emptyMap()),
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.Started
-        assertEquals("", event.requestId)
+        val event = parseFrame(eventJson) as MindlayerEvent.TextDelta
+        assertEquals("", event.text)
     }
 
     @Test
@@ -781,16 +783,6 @@ class TokenStreamProtocolTest {
             // Header
             writeFrame(pipeOut, buildStreamHeaderJson("req-all"))
 
-            // Start
-            writeFrame(
-                pipeOut,
-                buildStreamEventJson(
-                    seq = 0,
-                    type = StreamEventType.START,
-                    payload = buildJsonObject { put("requestId", "req-all") },
-                ),
-            )
-
             // Token delta
             writeFrame(
                 pipeOut,
@@ -862,10 +854,6 @@ class TokenStreamProtocolTest {
             // Header → Started
             val header = awaitItem() as MindlayerEvent.Started
             assertEquals("req-all", header.requestId)
-
-            // Start → Started
-            val start = awaitItem() as MindlayerEvent.Started
-            assertEquals("req-all", start.requestId)
 
             // Token delta
             val td = awaitItem() as MindlayerEvent.TextDelta

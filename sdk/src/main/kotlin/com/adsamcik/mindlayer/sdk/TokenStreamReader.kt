@@ -309,10 +309,6 @@ object TokenStreamReader {
      * keys that match [com.adsamcik.mindlayer.service.ipc.TokenStreamWriter].
      */
     private fun mapEvent(event: StreamEvent): MindlayerEvent = when (event.type) {
-        StreamEventType.START -> MindlayerEvent.Started(
-            requestId = event.payload["requestId"]?.jsonPrimitive?.contentOrNull ?: "",
-        )
-
         StreamEventType.TOKEN_DELTA -> MindlayerEvent.TextDelta(
             text = event.payload["text"]?.jsonPrimitive?.contentOrNull ?: "",
             seq = event.seq,

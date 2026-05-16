@@ -52,7 +52,6 @@ object LogEvent {
     const val REQUEST_CANCEL = "request_cancel"
     const val REQUEST_ERROR = "request_error"
     const val TOOL_CALL = "tool_call"
-    const val TOOL_RESULT = "tool_result"
     const val TOOL_CALL_EXIT = "tool_call_exit"
     const val TOOL_CALL_TIMEOUT = "tool_call_timeout"
     const val STREAM_FRAME_TOO_LARGE = "stream_frame_too_large"
