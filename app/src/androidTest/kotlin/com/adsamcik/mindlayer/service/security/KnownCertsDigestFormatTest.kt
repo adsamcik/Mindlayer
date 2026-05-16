@@ -10,11 +10,28 @@ import java.security.MessageDigest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
+import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 @SdkSuppress(minSdkVersion = Build.VERSION_CODES.S)
+@Ignore(
+    "TODO(knowncerts-format): the original design cross-signed test and target APKs " +
+        "(target with knowncerts-owner, androidTest with knowncerts-requester) so the " +
+        "`signature|knownSigner` permission could only be granted via the knownCerts " +
+        "(knownSigner) branch. Android's instrumentation framework refuses to start a " +
+        "test APK whose signing cert does not match the target APK's, so the cross-sign " +
+        "design was unrunnable in CI (`Permission Denial: ... does NOT have a signature " +
+        "matching the target`). With test and target sharing the same signer, the " +
+        "`signature` branch of `signature|knownSigner` always grants, masking format " +
+        "discrimination of the `knownSigner` branch — so these tests cannot prove what " +
+        "they claim with the current infrastructure. Reviving them requires either an " +
+        "external declarer APK (separately installed and signed with a third identity) " +
+        "or a `knownSigner`-only protectionLevel (which Android does not support without " +
+        "a base level). See PR #44 history and the hotfix PR that introduced this " +
+        "@Ignore for the full reasoning.",
+)
 class KnownCertsDigestFormatTest {
 
     private val appContext = ApplicationProvider.getApplicationContext<android.content.Context>()
