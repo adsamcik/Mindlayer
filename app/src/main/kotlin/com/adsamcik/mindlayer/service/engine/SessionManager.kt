@@ -153,15 +153,33 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     private val initJob = AtomicReference<Job?>(null)
 
     /**
-     * F-071/H-4: terminal initialisation failure cached from the most recent
-     * background init job. All init-failure variants are retained so callers
-     * do not loop forever on ENGINE_INITIALIZING after a fatal cold-start
-     * failure. Cleared on successful
-     * `engineManager.initialize()` return so a recovered situation
-     * (user closes background apps) can re-attempt without service
-     * restart.
+     * F-071/H-4/H-E1: terminal initialisation failure cached from the most
+     * recent background init job, together with the wall-clock at which
+     * it was recorded and a per-variant `retryAfterMs`. All init-failure
+     * variants are retained so callers do not loop forever on
+     * `ENGINE_INITIALIZING` after a fatal cold-start failure.
+     *
+     * The cache is cleared on successful `engineManager.initialize()`
+     * return so a recovered situation (user closes background apps) can
+     * re-attempt without service restart. It is also cleared lazily on
+     * the next [createSession] once `failedAtMs + retryAfterMs` elapses,
+     * giving the service in-process recovery without waiting for a
+     * full restart.
+     *
+     * Per-variant retry policy (see [retryAfterMsFor]):
+     *  - `LowMemory`         → 30 s
+     *  - `BackendUnavailable`→ 60 s
+     *  - `NativeError`       → 60 s
+     *  - `ModelMissing`      → permanent (`Long.MAX_VALUE`)
+     *  - `IntegrityMismatch` → permanent (`Long.MAX_VALUE`)
      */
-    private val lastInitError = AtomicReference<Throwable?>(null)
+    private data class CachedInitError(
+        val throwable: Throwable,
+        val failedAtElapsedMs: Long,
+        val retryAfterMs: Long,
+    )
+
+    private val lastInitError = AtomicReference<CachedInitError?>(null)
 
     val sessionCount: Int get() = sessions.size
 
@@ -233,27 +251,37 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         }
 
         if (sessions.size >= tier.maxSessions) {
-            val evicted = if (ownerUid != null) {
-                MindlayerLog.w(
-                    TAG,
-                    "At session limit (${tier.maxSessions}), evicting caller-owned lowest priority",
-                )
-                evictLowestPriorityOwnedByUid(ownerUid)
+            // H-E5: thermal-invalidated tombstones still occupy a slot in
+            // `sessions` until their owner closes them. Excluding them from
+            // the quota count means a thermal backend switch does not
+            // produce misleading evictions of other callers' warm sessions.
+            val liveCount = sessions.values.count { !it.backendInvalidated }
+            if (liveCount < tier.maxSessions) {
+                // Fall through — quota has room once tombstones are excluded.
             } else {
-                MindlayerLog.w(TAG, "At session limit (${tier.maxSessions}), evicting lowest priority")
-                evictLowestPriority()
-            }
-            if (!evicted || sessions.size >= tier.maxSessions) {
-                logRepository?.logSessionQuotaExceeded(
-                    sessionId = sessionId,
-                    ownerUid = ownerUid,
-                    ownedNow = sessions.size,
-                    cap = tier.maxSessions,
-                    tierMaxSessions = tier.maxSessions,
-                )
-                throw SessionQuotaExceededException(
-                    "Session limit reached (${tier.maxSessions}); no evictable session for caller",
-                )
+                val evicted = if (ownerUid != null) {
+                    MindlayerLog.w(
+                        TAG,
+                        "At session limit (${tier.maxSessions}), evicting caller-owned lowest priority",
+                    )
+                    evictLowestPriorityOwnedByUid(ownerUid)
+                } else {
+                    MindlayerLog.w(TAG, "At session limit (${tier.maxSessions}), evicting lowest priority")
+                    evictLowestPriority()
+                }
+                val liveCountAfter = sessions.values.count { !it.backendInvalidated }
+                if (!evicted || liveCountAfter >= tier.maxSessions) {
+                    logRepository?.logSessionQuotaExceeded(
+                        sessionId = sessionId,
+                        ownerUid = ownerUid,
+                        ownedNow = liveCountAfter,
+                        cap = tier.maxSessions,
+                        tierMaxSessions = tier.maxSessions,
+                    )
+                    throw SessionQuotaExceededException(
+                        "Session limit reached (${tier.maxSessions}); no evictable session for caller",
+                    )
+                }
             }
         }
 
@@ -281,9 +309,21 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             // engine_initializing. ServiceBinder maps this to the
             // LOW_MEMORY wire code; the SDK's createSession retry
             // schedule treats it as non-retryable.
+            // H-E1: a previously-cached terminal failure now expires after
+            // a per-variant retryAfterMs window so transient causes (e.g.
+            // LowMemory while the user has Chrome open) recover in-process.
+            // Permanent variants (ModelMissing / IntegrityMismatch) keep
+            // an effectively-infinite retryAfter so we don't churn.
             val cachedError = lastInitError.get()
             if (cachedError != null) {
-                throw cachedError
+                val ageMs = SystemClock.elapsedRealtime() - cachedError.failedAtElapsedMs
+                if (ageMs < cachedError.retryAfterMs) {
+                    throw cachedError.throwable
+                }
+                // TTL elapsed: discard the cached failure and fall through
+                // to a fresh init attempt. CAS so a concurrent successful
+                // init that already nulled the field is not clobbered.
+                lastInitError.compareAndSet(cachedError, null)
             }
             // PR-B: kick off a single coalesced init job, then block this
             // first caller until EngineManager reports Ready or Failed. This
@@ -291,7 +331,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             ensureInitStarted(config.backend, effectiveMaxTokens)
             when (val state = runBlocking { engineManager.awaitReady() }) {
                 is EngineState.Ready -> Unit
-                is EngineState.Failed -> throw lastInitError.get()
+                is EngineState.Failed -> throw lastInitError.get()?.throwable
                     ?: IllegalStateException("Engine init failed: ${state.cause}")
                 EngineState.Idle, EngineState.Initializing -> throw EngineNotReadyException(
                     retryAfterMs = INIT_RETRY_AFTER_MS,
@@ -797,6 +837,11 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
                 TAG, "Evicted ${toEvict.size} session(s) under pressure " +
                     "(remaining=${sessions.size})"
             )
+            logRepository?.logEvictionTriggered(
+                trigger = "pressure",
+                evictedCount = toEvict.size,
+                remainingCount = sessions.size,
+            )
         }
     }
 
@@ -839,6 +884,11 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
                 if (nonStreaming.isNotEmpty()) {
                     MindlayerLog.w(
                         TAG, "Emergency-evicted ${nonStreaming.size} session(s) (remaining=${sessions.size})"
+                    )
+                    logRepository?.logEvictionTriggered(
+                        trigger = "emergency",
+                        evictedCount = nonStreaming.size,
+                        remainingCount = sessions.size,
                     )
                 }
             }
@@ -918,6 +968,22 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     }
 
     /**
+     * H-E1: per-variant retry policy for a cached init failure. Transient
+     * causes get a finite window so the service recovers in-process;
+     * structural causes (missing model file, integrity mismatch) are
+     * effectively permanent because retrying without operator action
+     * would just churn.
+     */
+    private fun retryAfterMsFor(failure: InitFailure?): Long = when (failure) {
+        is InitFailure.LowMemory -> 30_000L
+        is InitFailure.BackendUnavailable -> 60_000L
+        is InitFailure.NativeError -> 60_000L
+        InitFailure.ModelMissing -> Long.MAX_VALUE
+        InitFailure.IntegrityMismatch -> Long.MAX_VALUE
+        null -> 60_000L
+    }
+
+    /**
      * F-018: idempotently kick off a background engine init. If a job is
      * already in flight, do nothing. The CAS race-handler guarantees that
      * two binder threads hitting this simultaneously only spawn one
@@ -937,12 +1003,24 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
                 // between attempts) can serve sessions normally.
                 lastInitError.set(null)
             } catch (t: Throwable) {
-                // H-4: cache every terminal init failure variant. A successful
-                // later initialize() clears this cache above; until then callers
-                // must receive the deterministic terminal error, not retry on
-                // ENGINE_INITIALIZING forever.
-                lastInitError.set(t)
-                MindlayerLog.w(TAG, "Background engine init failed: ${t.safeLabel()}", throwable = null)
+                // H-4/H-E1: cache every terminal init failure variant with
+                // a per-category TTL so callers see a deterministic typed
+                // error instead of looping on ENGINE_INITIALIZING — and so
+                // a recoverable failure (LowMemory, transient native) gets
+                // retried automatically once the TTL elapses.
+                val retryAfterMs = retryAfterMsFor(engineManager.lastInitFailure)
+                lastInitError.set(
+                    CachedInitError(
+                        throwable = t,
+                        failedAtElapsedMs = SystemClock.elapsedRealtime(),
+                        retryAfterMs = retryAfterMs,
+                    )
+                )
+                MindlayerLog.w(
+                    TAG,
+                    "Background engine init failed (retryAfterMs=$retryAfterMs): ${t.safeLabel()}",
+                    throwable = null,
+                )
             }
         }
         if (initJob.compareAndSet(null, job)) {
