@@ -7,6 +7,8 @@ coroutines = "1.10.1"
 serialization = "1.8.1"
 room = "2.7.1"
 litertlm = "0.11.0"
+# 1.5.1 is not published; 2.1.5 requires a newer test JVM than the repo-standard JDK 21.
+litert = "1.4.2"
 junit = "4.13.2"
 mockk = "1.14.9"
 robolectric = "4.14.1"
@@ -28,6 +30,7 @@ androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx"
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
 litertlm-android = { module = "com.google.ai.edge.litertlm:litertlm-android", version.ref = "litertlm" }
+litert = { module = "com.google.ai.edge.litert:litert", version.ref = "litert" }
 room-runtime = { module = "androidx.room:room-runtime", version.ref = "room" }
 room-ktx = { module = "androidx.room:room-ktx", version.ref = "room" }
 room-compiler = { module = "androidx.room:room-compiler", version.ref = "room" }
