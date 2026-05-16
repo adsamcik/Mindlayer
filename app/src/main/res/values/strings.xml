@@ -3,6 +3,11 @@
     <string name="app_name" translatable="false">Mindlayer</string>
     <string name="fgs_special_use_description" translatable="false">On-device LLM inference for active, user-visible requests initiated from authorized apps on the same device.</string>
 
+    <!-- Custom permission label/description shown in system Settings when an app declares
+         <uses-permission android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE" />. -->
+    <string name="permission_bind_ml_service_label">Bind to Mindlayer LLM service</string>
+    <string name="permission_bind_ml_service_description">Allows the app to bind to the Mindlayer on-device LLM service for inference.</string>
+
     <!-- F-030: claimed (attacker-controlled) label is rendered as secondary, prefixed. -->
     <string name="allowlist_claimed_label">claimed: %1$s</string>
     <!-- F-030: tap-to-copy SHA-256 fingerprint accessibility description. -->

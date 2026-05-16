@@ -283,14 +283,14 @@ class TokenStreamWriter private constructor(
         try {
             runBlockingIo { output.flush() }
         } catch (e: IOException) {
-            MindlayerLog.w(TAG, "IOException flushing pipe (client may have disconnected)", throwable = e)
+            MindlayerLog.w(TAG, "IOException flushing pipe (client may have disconnected): ${e.safeLabel()}")
         } catch (t: Throwable) {
             MindlayerLog.w(TAG, "Non-IOException flushing pipe: ${t.safeLabel()}")
         }
         try {
             runBlockingIo { output.close() }
         } catch (e: IOException) {
-            MindlayerLog.w(TAG, "IOException closing pipe (client may have disconnected)", throwable = e)
+            MindlayerLog.w(TAG, "IOException closing pipe (client may have disconnected): ${e.safeLabel()}")
         } catch (t: Throwable) {
             MindlayerLog.w(TAG, "Non-IOException closing pipe: ${t.safeLabel()}")
         } finally {

@@ -15,8 +15,6 @@ data class StreamEvent(
 )
 
 object StreamEventType {
-    @Deprecated("Start is represented by StreamHeader; kept for wire compatibility until v1.0.")
-    const val START = "start"
     const val TOKEN_DELTA = "token_delta"
 
     /**
@@ -37,8 +35,6 @@ object StreamEventType {
     const val TOKEN_DELTA_BATCH = "token_delta_batch"
 
     const val TOOL_CALL = "tool_call"
-    @Deprecated("Tool results travel over submitToolResult AIDL, not stream frames; kept for wire compatibility until v1.0.")
-    const val TOOL_RESULT = "tool_result"
     const val METRICS = "metrics"
     /**
      * Terminal error. Payload contains `message`, optional symbolic `code`,

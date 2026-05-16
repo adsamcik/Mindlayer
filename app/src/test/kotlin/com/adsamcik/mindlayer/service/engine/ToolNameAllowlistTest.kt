@@ -331,6 +331,77 @@ class ToolNameAllowlistTest {
         assertTrue("Tool call frame never appeared before timeout", asserted)
     }
 
+    /**
+     * Regression for the PR-2A PII fix on the oversize-args branch.
+     *
+     * Even though the tool name passed the allowlist gate (so it was
+     * declared by a trusted client app), it can still encode user/model
+     * context, so the orchestrator must NOT echo the raw name into either
+     * logcat or [LogEntry.extraJson]. The log payload must look exactly
+     * like the unknown-tool path: `{len, reason, hash8, size}` only.
+     */
+    @Test
+    fun `oversize args log path keeps raw tool name out of extraJson`() {
+        // A distinctive, allowed tool name so a substring match would be
+        // unambiguous if regressions slip the raw name back into the log.
+        val sensitiveName = "search_email_for_alice_jane_doe"
+        val giant = "X".repeat(InferenceOrchestrator.MAX_TOOL_ARGS_LEN + 1_024)
+        every { mockConversation.sendMessageAsync(any<Contents>()) } returns flow {
+            emit(chunk(calls = listOf(sensitiveName to mapOf("payload" to giant))))
+        }
+        val sid = sessionManager.createSession(
+            SessionConfig(
+                maxTokens = 2048,
+                toolsJson = """[{"name":"$sensitiveName","description":"d"}]""",
+            )
+        )
+
+        val pfd = mockk<ParcelFileDescriptor>(relaxed = true)
+        val out = ByteArrayOutputStream()
+        outputStreamQueue.add(out)
+        orchestrator.infer(
+            "100:req-oversize-pii",
+            RequestMeta(requestId = "req-oversize-pii", sessionId = sid, textContent = "hi"),
+            image = null, audio = null, pipeWriteEnd = pfd,
+        )
+
+        val deadline = System.currentTimeMillis() + 5_000L
+        var sawRejected = false
+        while (System.currentTimeMillis() < deadline && !sawRejected) {
+            val rejected = capturedLogs.filter {
+                it.category == LogCategory.SECURITY && it.event == LogEvent.TOOL_CALL_REJECTED
+            }
+            if (rejected.any { it.extraJson?.contains("oversize_args") == true }) {
+                sawRejected = true
+                val payloads = rejected.mapNotNull { it.extraJson }
+                assertTrue(
+                    "Expected oversize_args metadata payload",
+                    payloads.any { it.contains("oversize_args") && it.contains("hash8") && it.contains("\"len\"") },
+                )
+                assertFalse(
+                    "Raw tool name must NOT appear in any rejected-log extraJson; payloads=$payloads",
+                    payloads.any { it.contains(sensitiveName) },
+                )
+            } else {
+                Thread.sleep(25)
+            }
+        }
+        orchestrator.cancelInference("100:req-oversize-pii")
+        assertTrue("oversize_args log entry never appeared before timeout", sawRejected)
+
+        // Defense-in-depth: verify the logcat string never carries the raw
+        // tool name either. The `Log.w(...)` mocks throw on unmatched args,
+        // so we capture all `Log.w(tag, msg)` calls and inspect their msg.
+        io.mockk.verify(atLeast = 1) {
+            Log.w(any<String>(), match<String> { msg ->
+                msg.contains("oversize tool args") && !msg.contains(sensitiveName)
+            })
+        }
+        io.mockk.verify(exactly = 0) {
+            Log.w(any<String>(), match<String> { msg -> msg.contains(sensitiveName) })
+        }
+    }
+
     @Test
     fun `known tool name is forwarded`() {
         every { mockConversation.sendMessageAsync(any<Contents>()) } returns flow {

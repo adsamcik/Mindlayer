@@ -16,11 +16,6 @@ class ProtocolTest {
     // ── StreamEventType constants ────────────────────────────────────────
 
     @Test
-    fun `StreamEventType START is correct`() {
-        assertEquals("start", StreamEventType.START)
-    }
-
-    @Test
     fun `StreamEventType TOKEN_DELTA is correct`() {
         assertEquals("token_delta", StreamEventType.TOKEN_DELTA)
     }
@@ -28,11 +23,6 @@ class ProtocolTest {
     @Test
     fun `StreamEventType TOOL_CALL is correct`() {
         assertEquals("tool_call", StreamEventType.TOOL_CALL)
-    }
-
-    @Test
-    fun `StreamEventType TOOL_RESULT is correct`() {
-        assertEquals("tool_result", StreamEventType.TOOL_RESULT)
     }
 
     @Test
@@ -53,10 +43,15 @@ class ProtocolTest {
     // ── StreamEvent serialization roundtrips ─────────────────────────────
 
     @Test
-    fun `StreamEvent roundtrip with START type`() {
+    fun `StreamEvent roundtrip with START-shaped raw type string`() {
+        // Even though StreamEventType.START was retired (real stream starts
+        // travel as a StreamHeader frame, not a wire-typed event), the
+        // generic envelope still round-trips arbitrary type strings; assert
+        // that the literal "start" type continues to encode/decode cleanly
+        // so legacy logs and captures are still parseable.
         val event = StreamEvent(
             seq = 1L,
-            type = StreamEventType.START,
+            type = "start",
             tsMs = 1700000000000L,
             payload = buildJsonObject { put("model", "gemma") },
         )
@@ -95,10 +90,13 @@ class ProtocolTest {
     }
 
     @Test
-    fun `StreamEvent roundtrip with TOOL_RESULT type`() {
+    fun `StreamEvent roundtrip with custom tool_result-shaped type string`() {
+        // StreamEventType.TOOL_RESULT was retired (tool results travel
+        // over the submitToolResult AIDL, not stream frames). The envelope
+        // still round-trips arbitrary type strings.
         val event = StreamEvent(
             seq = 4L,
-            type = StreamEventType.TOOL_RESULT,
+            type = "tool_result",
             tsMs = 1700000000003L,
             payload = buildJsonObject { put("result", "found 3 items") },
         )
