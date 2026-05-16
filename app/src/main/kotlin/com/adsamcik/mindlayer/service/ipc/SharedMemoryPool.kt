@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Parcel
 import android.os.ParcelFileDescriptor
 import android.os.SharedMemory
 import android.system.ErrnoException
@@ -85,6 +86,52 @@ data class StagedMedia(
     val cleanup: () -> Unit,
 )
 
+/**
+ * Generic SharedMemory blob acquired by [SharedMemoryPool].
+ *
+ * The caller writes to [buffer], calls [finishReadOnlyPfd], then must call
+ * [close] once the service-side lifetime is complete. Closing releases the
+ * pool reservation and the service's SharedMemory handle; the duplicated PFD
+ * returned to the client remains independently owned by Binder/consumer.
+ */
+class SharedMemoryBlobAcquisition internal constructor(
+    private val pool: SharedMemoryPool,
+    private val scopedKey: String,
+    private val reservedBytes: Long,
+    private val sharedMemory: SharedMemory,
+    val buffer: ByteBuffer,
+) : AutoCloseable {
+    private var unmapped = false
+    private var closed = false
+
+    fun finishReadOnlyPfd(): ParcelFileDescriptor {
+        check(!closed) { "SharedMemory blob already closed" }
+        if (!unmapped) {
+            SharedMemory.unmap(buffer)
+            unmapped = true
+        }
+        sharedMemory.setProtect(OsConstants.PROT_READ)
+        val parcel = Parcel.obtain()
+        return try {
+            sharedMemory.writeToParcel(parcel, 0)
+            parcel.setDataPosition(0)
+            parcel.readFileDescriptor()
+        } finally {
+            parcel.recycle()
+        }
+    }
+
+    override fun close() {
+        if (closed) return
+        closed = true
+        if (!unmapped) {
+            runCatching { SharedMemory.unmap(buffer) }
+            unmapped = true
+        }
+        runCatching { sharedMemory.close() }
+        pool.releaseReservation(scopedKey, count = 1, bytes = reservedBytes)
+    }
+}
 /**
  * Service-side handler that receives [ImageTransfer] / [AudioTransfer] handles
  * from the client and stages media to cache files for LiteRT-LM.
@@ -227,6 +274,26 @@ class SharedMemoryPool(cacheDir: File) {
 
     // ---- Public API --------------------------------------------------------
 
+    /**
+     * Acquire a generic SharedMemory region for non-media binary blobs.
+     *
+     * This uses the same reservation accounting as media staging but does not
+     * create cache files. It is intentionally generic so embedding vectors can
+     * use real SharedMemory rather than pipe/file-backed PFDs.
+     */
+    fun acquireBlob(scopedKey: String, sizeBytes: Int): SharedMemoryBlobAcquisition {
+        require(sizeBytes > 0) { "sizeBytes must be > 0" }
+        val reservedBytes = sizeBytes.toLong()
+        tryReserve(scopedKey, reservedBytes)
+        try {
+            val shm = SharedMemory.create("mindlayer-${requestLabel(scopedKey)}-${UUID.randomUUID()}", sizeBytes)
+            val buffer = shm.mapReadWrite()
+            return SharedMemoryBlobAcquisition(this, scopedKey, reservedBytes, shm, buffer)
+        } catch (t: Throwable) {
+            releaseReservation(scopedKey, count = 1, bytes = reservedBytes)
+            throw t
+        }
+    }
     /**
      * Stage an image for LiteRT-LM.
      *

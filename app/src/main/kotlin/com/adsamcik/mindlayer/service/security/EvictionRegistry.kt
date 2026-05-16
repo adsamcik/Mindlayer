@@ -29,7 +29,7 @@ import java.util.concurrent.CopyOnWriteArrayList
  *  - A small per-UID cap ([MAX_CALLBACKS_PER_UID]) blocks runaway
  *    registration storms from a single hostile or buggy caller.
  */
-internal class EvictionRegistry {
+class EvictionRegistry {
 
     /** Wraps a callback with its death recipient so we can unlink on removal. */
     private data class Entry(
@@ -171,6 +171,20 @@ internal class EvictionRegistry {
      * Tear down all registrations. Called from
      * [com.adsamcik.mindlayer.service.MindlayerMlService.onDestroy].
      */
+    fun notifyEmbeddingBatchComplete(uid: Int, requestId: String) {
+        val list = byUid[uid] ?: return
+        for (entry in list) {
+            try {
+                entry.callback.onEmbeddingBatchComplete(requestId)
+            } catch (t: android.os.RemoteException) {
+                MindlayerLog.w(TAG, "embedding callback dispatch failed (uid=$uid): ${t.javaClass.simpleName} — removing")
+                removeByBinder(uid, entry.binder, attemptUnlink = true)
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "embedding callback dispatch threw (uid=$uid): ${t.javaClass.simpleName}")
+            }
+        }
+    }
+
     fun clear() {
         for ((_, list) in byUid) {
             for (entry in list) {
@@ -200,3 +214,5 @@ internal class EvictionRegistry {
         const val MAX_CALLBACKS_PER_UID = 8
     }
 }
+
+

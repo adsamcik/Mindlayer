@@ -1,0 +1,113 @@
+package com.adsamcik.mindlayer.service
+
+import android.os.Binder
+import android.os.Process
+import com.adsamcik.mindlayer.EmbeddingBatchResult
+import com.adsamcik.mindlayer.EmbeddingBatchTransfer
+import com.adsamcik.mindlayer.EmbeddingRequest
+import com.adsamcik.mindlayer.EmbeddingResult
+import com.adsamcik.mindlayer.ServiceCapabilities
+import com.adsamcik.mindlayer.VectorBlobHandle
+import com.adsamcik.mindlayer.service.engine.EmbeddingCoordinator
+import com.adsamcik.mindlayer.service.engine.EmbeddingModelInfo
+import com.adsamcik.mindlayer.service.engine.EngineManager
+import com.adsamcik.mindlayer.service.engine.InferenceOrchestrator
+import com.adsamcik.mindlayer.service.engine.MemoryBudget
+import com.adsamcik.mindlayer.service.engine.SessionManager
+import com.adsamcik.mindlayer.service.engine.ThermalMonitor
+import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
+import com.adsamcik.mindlayer.service.security.AllowlistStore
+import com.adsamcik.mindlayer.service.security.CallerIdentity
+import com.adsamcik.mindlayer.service.security.RateLimiter
+import io.mockk.coEvery
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.mockkStatic
+import io.mockk.unmockkAll
+import io.mockk.verify
+import kotlinx.coroutines.flow.MutableStateFlow
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [33])
+class ServiceBinderEmbeddingTest {
+    private lateinit var binder: ServiceBinder
+    private lateinit var rateLimiter: RateLimiter
+    private lateinit var coordinator: EmbeddingCoordinator
+
+    @Before fun setUp() {
+        mockkStatic(Binder::class)
+        every { Binder.getCallingUid() } returns 42
+        val service = mockk<MindlayerMlService>(relaxed = true)
+        every { service.sessionManager } returns mockk<SessionManager>(relaxed = true)
+        every { service.packageName } returns "com.adsamcik.mindlayer.service"
+        rateLimiter = mockk(relaxed = true)
+        every { rateLimiter.tryAcquire(any(), any()) } returns true
+        every { rateLimiter.tryAcquireRejected(any()) } returns true
+        every { rateLimiter.tryAcquireRejection(any()) } returns true
+        val allow = mockk<AllowlistStore>(relaxed = true)
+        every { allow.isDenied(any(), any()) } returns false
+        every { allow.isAllowed(any(), any()) } returns true
+        coordinator = mockk(relaxed = true)
+        val model = EmbeddingModelInfo("m", "M", "/m", "/t", 1, 768, listOf(768, 256), 2048, null)
+        every { coordinator.defaultModelOrNull() } returns model
+        coEvery { coordinator.embed(any(), any(), any()) } returns EmbeddingResult(vector = floatArrayOf(), dim = 0, modelId = "m", tokenCount = 0, truncated = false, backend = "CPU", durationMs = 0)
+        coEvery { coordinator.embedBatch(any(), any(), any()) } returns EmbeddingBatchResult(results = emptyList(), totalDurationMs = 0, backend = "CPU")
+        coEvery { coordinator.embedBatchDeferred(any(), any()) } returns com.adsamcik.mindlayer.DeferredHandle(requestId = "d", expiresAtMs = 1)
+        coEvery { coordinator.fetchEmbeddingBatchResult(any(), any()) } returns VectorBlobHandle(status = 0)
+        coEvery { coordinator.cancelEmbeddingBatch(any(), any()) } returns 0
+        coEvery { coordinator.acknowledgeEmbeddingBatchResult(any(), any()) } returns true
+        every { coordinator.cancelEmbed(any(), any()) } returns 0
+        binder = ServiceBinder(
+            service = service,
+            engineManager = mockk<EngineManager>(relaxed = true),
+            orchestrator = mockk<InferenceOrchestrator>(relaxed = true),
+            diagnosticExporter = mockk<DiagnosticExporter>(relaxed = true),
+            thermalMonitor = mockk<ThermalMonitor>(relaxed = true) { every { currentPolicy } returns MutableStateFlow(mockk(relaxed = true)) },
+            memoryBudget = mockk<MemoryBudget>(relaxed = true),
+            callerVerifier = { _, _ -> CallerIdentity("pkg", "sig", "Pkg") },
+            allowlistStore = allow,
+            rateLimiter = rateLimiter,
+            embeddingCoordinator = coordinator,
+        )
+    }
+
+    @After fun tearDown() = unmockkAll()
+
+    @Test fun `embedding methods charge designed costs`() {
+        binder.embed(EmbeddingRequest(text = "x"))
+        binder.embedBatch(List(4) { EmbeddingRequest(text = "x") })
+        binder.embedBatchDeferred(listOf(EmbeddingRequest(text = "x")))
+        binder.fetchEmbeddingBatchResult("id")
+        binder.cancelEmbeddingBatch("id")
+        binder.acknowledgeEmbeddingBatchResult("id")
+        binder.cancelEmbed("id")
+        verify { rateLimiter.tryAcquire(42, 1.0) }
+        verify { rateLimiter.tryAcquire(42, 2.0) }
+        verify { rateLimiter.tryAcquire(42, 0.5) }
+        verify(exactly = 4) { rateLimiter.tryAcquire(42, 0.1) }
+    }
+
+    @Test fun `self uid bypasses external rate limit`() {
+        every { Binder.getCallingUid() } returns Process.myUid()
+        binder.embed(EmbeddingRequest(text = "x"))
+        verify(exactly = 0) { rateLimiter.tryAcquire(Process.myUid(), any()) }
+    }
+
+    @Test fun `capabilities advertise embeddings only with model`() {
+        val yes = binder.getCapabilities()
+        assertTrue(yes.supports(ServiceCapabilities.FEATURE_EMBEDDINGS))
+        every { coordinator.defaultModelOrNull() } returns null
+        val no = binder.getCapabilities()
+        assertFalse(no.supports(ServiceCapabilities.FEATURE_EMBEDDINGS))
+        assertEquals(0, no.maxEmbeddingBatchInline)
+    }
+}

@@ -15,6 +15,8 @@ import androidx.core.app.ServiceCompat
 import com.adsamcik.mindlayer.service.engine.DeferredDatabase
 import com.adsamcik.mindlayer.service.engine.DeferredStore
 import com.adsamcik.mindlayer.service.engine.EngineManager
+import com.adsamcik.mindlayer.service.engine.EmbeddingCoordinator
+import com.adsamcik.mindlayer.service.engine.EmbeddingEngine
 import com.adsamcik.mindlayer.service.engine.InferenceOrchestrator
 import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.MemoryPressure
@@ -41,6 +43,7 @@ import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.security.AllowlistEntry
 import com.adsamcik.mindlayer.service.security.AllowlistStore
 import com.adsamcik.mindlayer.service.security.CallerVerifier
+import com.adsamcik.mindlayer.service.security.EvictionRegistry
 import com.adsamcik.mindlayer.service.security.debugSeedIfApplicable
 
 class MindlayerMlService : Service() {
@@ -106,6 +109,10 @@ class MindlayerMlService : Service() {
     lateinit var mlHealthRecorder: MlHealthRecorder
         private set
     lateinit var deferredStore: DeferredStore
+        private set
+    lateinit var embeddingEngine: EmbeddingEngine
+        private set
+    lateinit var embeddingCoordinator: EmbeddingCoordinator
         private set
     private lateinit var sharedMemoryPool: SharedMemoryPool
     private lateinit var binder: ServiceBinder
@@ -178,6 +185,7 @@ class MindlayerMlService : Service() {
         sharedMemoryPool = SharedMemoryPool(cacheDir)
         sharedMemoryPool.cleanupAll()
         deferredStore = DeferredStore(DeferredDatabase.getInstance(this).deferredDao())
+        embeddingEngine = EmbeddingEngine(this, logRepository = logRepository)
         // M-D5: synchronously fail any STILL_RUNNING rows left over from a
         // prior process before `binder` is exposed. `serviceScope.launch`
         // returned before the SQL UPDATE ran, so an `onBind` arriving in
@@ -187,11 +195,13 @@ class MindlayerMlService : Service() {
         // thread per the existing pattern.
         runBlocking { deferredStore.failRunningOnInit() }
         orchestrator = InferenceOrchestrator(this, sessionManager, sharedMemoryPool, logRepository)
+        val callbackRegistry = EvictionRegistry()
+        embeddingCoordinator = EmbeddingCoordinator(embeddingEngine, deferredStore, this, serviceScope, callbackRegistry, sharedMemoryPool)
 
         val diagnosticExporter = DiagnosticExporter(
             engineManager, thermalMonitor, memoryBudget, sessionManager, logDb.logDao()
         )
-        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, allowlistStore = allowlistStore, logRepository = logRepository, mlHealthRecorder = mlHealthRecorder, deferredStore = deferredStore)
+        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, allowlistStore = allowlistStore, logRepository = logRepository, mlHealthRecorder = mlHealthRecorder, deferredStore = deferredStore, embeddingCoordinator = embeddingCoordinator, callbackRegistry = callbackRegistry)
 
         logRepository.log(LogEntry(
             timestampMs = System.currentTimeMillis(),
@@ -266,6 +276,9 @@ class MindlayerMlService : Service() {
         // transaction is still cheaper to skip with an empty registry.
         if (::binder.isInitialized) {
             binder.evictionRegistry.clear()
+        }
+        if (::embeddingEngine.isInitialized) {
+            runBlocking { embeddingEngine.shutdown() }
         }
         orchestrator.shutdown()
         logRepository.shutdown()
@@ -364,6 +377,9 @@ class MindlayerMlService : Service() {
             memoryBudget.pressure
                 .collect { pressure ->
                     MindlayerLog.i(TAG, "Memory pressure changed: $pressure")
+                    if (pressure >= MemoryPressure.CRITICAL && ::embeddingEngine.isInitialized) {
+                        embeddingEngine.unloadForMemoryPressure()
+                    }
                     sessionManager.applyMemoryPressure(pressure)
                 }
         }
@@ -577,3 +593,9 @@ class MindlayerMlService : Service() {
         nm.notify(NOTIFICATION_ID, buildNotification(text))
     }
 }
+
+
+
+
+
+
