@@ -15,10 +15,15 @@ import com.adsamcik.mindlayer.ToolSubmitResult;
 import com.adsamcik.mindlayer.DiagnosticsSnapshot;
 import com.adsamcik.mindlayer.DeferredHandle;
 import com.adsamcik.mindlayer.DeferredResult;
+import com.adsamcik.mindlayer.EmbeddingRequest;
+import com.adsamcik.mindlayer.EmbeddingResult;
+import com.adsamcik.mindlayer.EmbeddingBatchResult;
+import com.adsamcik.mindlayer.EmbeddingBatchTransfer;
+import com.adsamcik.mindlayer.VectorBlobHandle;
 import com.adsamcik.mindlayer.IClientCallback;
 
 interface IMindlayerService {
-    // Client liveness — caller passes a Binder token; service linkToDeath's on it
+    // Client liveness ? caller passes a Binder token; service linkToDeath's on it
     // so that if the calling process dies, all sessions it owns are torn down.
     // Idempotent per calling UID; clients should call this once after connect.
     void registerClient(IBinder clientToken);
@@ -29,13 +34,13 @@ interface IMindlayerService {
     SessionInfo getSessionInfo(String sessionId);
     List<SessionInfo> listSessions();
 
-    // Inference — client creates pipe, passes write end to service
+    // Inference ? client creates pipe, passes write end to service
     // Service writes length-prefixed JSON events to the pipe
     void infer(in RequestMeta meta, in ImageTransfer image,
                in AudioTransfer audio, in ParcelFileDescriptor eventWriteEnd);
     void cancelInference(String requestId);
 
-    // Function calling — inject tool results back
+    // Function calling ? inject tool results back
     void submitToolResult(String requestId, in ToolResult result);
 
     // Service status
@@ -57,7 +62,7 @@ interface IMindlayerService {
 
     // Revoke approval for an installed caller package and tear down any
     // sessions it currently owns. Self-UID only (the dashboard process)
-    // — external callers are rejected at the ServiceBinder authz gate.
+    // ? external callers are rejected at the ServiceBinder authz gate.
     void revokeApp(String packageName);
 
     // Capability handshake. SDK calls this once after registerClient and
@@ -67,7 +72,7 @@ interface IMindlayerService {
     ServiceCapabilities getCapabilities();
 
     // v0.4 multimodal: ordered list of media attachments. Successor to
-    // infer() — the legacy method stays for compatibility. Capability-gated
+    // infer() ? the legacy method stays for compatibility. Capability-gated
     // via ServiceCapabilities.FEATURE_MEDIA_LIST.
     void inferMulti(in RequestMeta meta, in List<MediaPart> media,
                     in ParcelFileDescriptor eventWriteEnd);
@@ -101,4 +106,17 @@ interface IMindlayerService {
     DeferredResult fetchDeferredResult(String requestId);
     CancelResult cancelDeferredInference(String requestId);
     void acknowledgeDeferredResult(String requestId);
+
+    // v0.7 embeddings: text-only via EmbeddingGemma-300M.
+    // Capability-gated via ServiceCapabilities.FEATURE_EMBEDDINGS.
+    EmbeddingResult embed(in EmbeddingRequest req);
+    EmbeddingBatchResult embedBatch(in List<EmbeddingRequest> reqs);
+    EmbeddingBatchTransfer embedBatchShm(in List<EmbeddingRequest> reqs);
+    DeferredHandle embedBatchDeferred(in List<EmbeddingRequest> reqs);
+    VectorBlobHandle fetchEmbeddingBatchResult(String requestId);
+    CancelResult cancelEmbeddingBatch(String requestId);
+    void acknowledgeEmbeddingBatchResult(String requestId);
+    CancelResult cancelEmbed(String requestId);
 }
+
+

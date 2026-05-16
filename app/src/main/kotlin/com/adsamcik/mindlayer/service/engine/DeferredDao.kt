@@ -21,10 +21,10 @@ interface DeferredDao {
     @Query("SELECT COUNT(*) FROM deferred_inference WHERE uid = :uid AND statusCode != :running AND fetchedAtMs IS NULL")
     suspend fun pendingCompletedCount(uid: Int, running: Int = DeferredResult.STILL_RUNNING): Int
 
-    @Query("SELECT COALESCE(SUM(LENGTH(resultText)), 0) FROM deferred_inference WHERE uid = :uid AND resultText IS NOT NULL")
+    @Query("SELECT COALESCE(SUM(LENGTH(resultText)), 0) + COALESCE(SUM(blob_bytes), 0) FROM deferred_inference WHERE uid = :uid")
     suspend fun resultBytes(uid: Int): Long
 
-    @Query("SELECT * FROM deferred_inference WHERE uid = :uid AND statusCode != :running AND resultText IS NOT NULL ORDER BY completedAtMs ASC LIMIT 1")
+    @Query("SELECT * FROM deferred_inference WHERE uid = :uid AND statusCode != :running AND (resultText IS NOT NULL OR blob_path IS NOT NULL) ORDER BY completedAtMs ASC LIMIT 1")
     suspend fun oldestCompletedWithText(uid: Int, running: Int = DeferredResult.STILL_RUNNING): DeferredEntity?
 
     @Query("UPDATE deferred_inference SET resultText = NULL WHERE requestId = :requestId")
@@ -36,14 +36,17 @@ interface DeferredDao {
     @Query("DELETE FROM deferred_inference WHERE requestId = :requestId")
     suspend fun deleteAny(requestId: String): Int
 
+    @Query("SELECT * FROM deferred_inference WHERE expiresAtMs <= :nowMs")
+    suspend fun expiredBefore(nowMs: Long): List<DeferredEntity>
+
     @Query("DELETE FROM deferred_inference WHERE expiresAtMs <= :nowMs")
     suspend fun deleteExpired(nowMs: Long): Int
 
     @Query("UPDATE deferred_inference SET fetchedAtMs = :nowMs WHERE requestId = :requestId AND uid = :uid")
     suspend fun markFetched(requestId: String, uid: Int, nowMs: Long): Int
 
-    @Query("UPDATE deferred_inference SET statusCode = :status, resultText = :text, metricsJson = :metricsJson, errorCodeInt = :errorCodeInt, errorCodeName = :errorCodeName, completedAtMs = :completedAtMs, expiresAtMs = :expiresAtMs, truncated = :truncated WHERE requestId = :requestId")
-    suspend fun complete(requestId: String, status: Int, text: String?, metricsJson: String?, errorCodeInt: Int, errorCodeName: String?, completedAtMs: Long, expiresAtMs: Long, truncated: Boolean): Int
+    @Query("UPDATE deferred_inference SET statusCode = :status, resultText = :text, metricsJson = :metricsJson, errorCodeInt = :errorCodeInt, errorCodeName = :errorCodeName, completedAtMs = :completedAtMs, expiresAtMs = :expiresAtMs, truncated = :truncated, blob_path = :blobPath, blob_bytes = :blobBytes, per_item_metadata_json = :perItemMetadataJson WHERE requestId = :requestId")
+    suspend fun complete(requestId: String, status: Int, text: String?, metricsJson: String?, errorCodeInt: Int, errorCodeName: String?, completedAtMs: Long, expiresAtMs: Long, truncated: Boolean, blobPath: String? = null, blobBytes: Long? = null, perItemMetadataJson: String? = null): Int
 
     /**
      * All completed entries (READY/FAILED/CANCELLED) for [uid] that the
@@ -68,3 +71,4 @@ interface DeferredDao {
         return true
     }
 }
+

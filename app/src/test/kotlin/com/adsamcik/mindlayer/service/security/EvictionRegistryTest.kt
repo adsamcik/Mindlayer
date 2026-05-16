@@ -32,6 +32,7 @@ class EvictionRegistryTest {
         }
 
         override fun onDeferredInferenceComplete(requestId: String?, statusCode: Int) = Unit
+        override fun onEmbeddingBatchComplete(requestId: String?) = Unit
     }
 
     @Test
@@ -173,3 +174,6 @@ class EvictionRegistryTest {
         assertEquals(0, cbB.invocations.get())
     }
 }
+
+
+

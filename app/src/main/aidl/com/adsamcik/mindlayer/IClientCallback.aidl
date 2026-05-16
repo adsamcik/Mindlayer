@@ -9,14 +9,14 @@ package com.adsamcik.mindlayer;
  * is a {@link com.adsamcik.mindlayer.shared.MindlayerErrorCode} integer
  * (typically SESSION_EVICTED, SESSION_EXPIRED, or MEMORY_PRESSURE).
  *
- * All methods are {@code oneway} — the service does not block on slow
+ * All methods are {@code oneway} ? the service does not block on slow
  * client-side handlers. The client should marshal the notification to
  * its own coroutine context and return immediately.
  */
 interface IClientCallback {
     /**
      * Called once per session that the service evicted while this callback
-     * was registered. Idempotent on the service side — duplicate callbacks
+     * was registered. Idempotent on the service side ? duplicate callbacks
      * for the same (sessionId, reasonCode) pair are not guaranteed but also
      * not prevented.
      *
@@ -26,4 +26,8 @@ interface IClientCallback {
     oneway void onSessionEvicted(String sessionId, int reasonCode);
 
     oneway void onDeferredInferenceComplete(String requestId, int statusCode);
+
+    // v0.7: deferred-embedding completion notification ? mirrors onDeferredInferenceComplete.
+    oneway void onEmbeddingBatchComplete(String requestId);
 }
+
