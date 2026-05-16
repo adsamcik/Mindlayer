@@ -26,7 +26,20 @@ internal class DebugAllowlistSeeder(
             @Suppress("DEPRECATION")
             PackageManager.GET_SIGNATURES
         }
-        val installed = context.packageManager.getInstalledPackages(flags)
+        val installed = try {
+            context.packageManager.getInstalledPackages(flags)
+        } catch (e: Exception) {
+            // M-T3: getInstalledPackages can throw on misbehaving OEM
+            // PackageManager impls / Robolectric edge cases. The seeder is
+            // debug-only and best-effort; degrade gracefully so the service
+            // can still start.
+            MindlayerLog.w(
+                TAG,
+                "DebugAllowlistSeeder: getInstalledPackages failed: ${e.safeLabel()}",
+                throwable = null,
+            )
+            return
+        }
 
         var seeded = 0
         for (pi in installed) {

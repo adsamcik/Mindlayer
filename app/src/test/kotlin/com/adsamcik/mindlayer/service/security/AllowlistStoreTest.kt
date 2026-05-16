@@ -321,6 +321,90 @@ class AllowlistStoreTest {
         assertTrue(store.list().isEmpty())
     }
 
+    @Test
+    fun `revoke writes a permanent denial tombstone`() {
+        // H-T1: explicit user revoke must persist forever, not just for the
+        // 7-day denyPending cooldown. Otherwise a future seedIfEmpty (after
+        // an app-data clear or DB-corruption re-init) could silently re-admit
+        // the revoked package once the cooldown had expired.
+        store.approveDirect("com.example", "sig123")
+        store.revoke("com.example")
+
+        val deniedFile = File(dir(), "denied.json")
+        val envelope = JSONObject(deniedFile.readText())
+        val arr = envelope.getJSONArray("denied")
+        assertEquals(1, arr.length())
+        val row = arr.getJSONObject(0)
+        assertEquals("com.example", row.getString("pkg"))
+        assertTrue("revoke must mark the row permanent", row.optBoolean("permanent", false))
+        assertEquals(Long.MAX_VALUE, row.getLong("expiresAtMs"))
+    }
+
+    @Test
+    fun `permanent revoke survives subsequent writeDenied prune`() {
+        // H-T1: a later writeDenied (triggered by an unrelated revoke or
+        // denyPending) must not prune permanent tombstones. denyPending
+        // entries still get their 7-day TTL.
+        store.approveDirect("com.foo", "sigFoo")
+        store.revoke("com.foo")
+
+        // Trigger another writeDenied via an unrelated revoke. This is the
+        // call that, pre-fix, would have pruned a time-expired 7-day denial.
+        store.approveDirect("com.bar", "sigBar")
+        store.revoke("com.bar")
+
+        val envelope = JSONObject(File(dir(), "denied.json").readText())
+        val arr = envelope.getJSONArray("denied")
+        val pkgs = (0 until arr.length()).map { arr.getJSONObject(it).getString("pkg") }.toSet()
+        assertTrue("permanent revoke for com.foo must survive", pkgs.contains("com.foo"))
+        assertTrue(pkgs.contains("com.bar"))
+    }
+
+    @Test
+    fun `seedIfEmpty refuses a permanently revoked package even after entries wiped`() {
+        // H-T1: the canonical attack: app-data partial clear (or corruption
+        // re-init) wipes entries.json but the permanent denial in denied.json
+        // remains. seedIfEmpty must still skip the revoked package.
+        store.approveDirect("com.example", "sigOriginal")
+        store.revoke("com.example")
+
+        // Simulate the entries file being wiped while denied.json survives —
+        // e.g. partial backup restore, DB corruption recovery path.
+        File(dir(), "entries.json").delete()
+
+        // Reopen the store to drop in-memory state and force a fresh read.
+        val reopened = AllowlistStore(context, dirName)
+        reopened.seedIfEmpty(
+            listOf(
+                AllowlistEntry(
+                    packageName = "com.example",
+                    signingCertSha256 = "sigOriginal",
+                    grantedAtMs = 0L,
+                    displayName = "Example",
+                ),
+            ),
+        )
+
+        assertFalse(reopened.isAllowed("com.example", "sigOriginal"))
+        assertTrue(reopened.list().isEmpty())
+    }
+
+    @Test
+    fun `denyPending denial still uses the 7-day TTL, not permanent`() {
+        // Behavior-change boundary: only revoke is sticky. denyPending keeps
+        // the original 7-day TTL semantics so a user who taps "deny" by
+        // mistake on a *pending* row isn't permanently locked out.
+        store.recordPending("com.example", "sig1")
+        store.denyPending("com.example")
+
+        val envelope = JSONObject(File(dir(), "denied.json").readText())
+        val arr = envelope.getJSONArray("denied")
+        assertEquals(1, arr.length())
+        val row = arr.getJSONObject(0)
+        assertFalse("denyPending must not mark the row permanent", row.optBoolean("permanent", false))
+        assertTrue(row.getLong("expiresAtMs") < Long.MAX_VALUE)
+    }
+
     private fun String.sanitizedForPath(): String =
         replace(Regex("[^A-Za-z0-9_.-]"), "_")
 }
