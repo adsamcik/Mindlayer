@@ -28,4 +28,5 @@ data class DeferredEntity(
     val completedAtMs: Long?,
     val expiresAtMs: Long,
     val fetchedAtMs: Long?,
+    val truncated: Boolean = false,
 )

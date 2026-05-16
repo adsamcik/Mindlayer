@@ -164,6 +164,14 @@ object MindlayerErrorCode {
     /** SDK-side bind is unsupported for this Android API level. */
     const val UNSUPPORTED_ANDROID_VERSION = 5009
 
+    /**
+     * Deferred inference produced (or would produce) a result exceeding the
+     * per-result byte cap. Truncation is applied at commit time; this code is
+     * surfaced on the [DeferredResult] metrics flag and reserved for any
+     * future submit-time guard.
+     */
+    const val DEFERRED_RESULT_TOO_LARGE = 5010
+
     // ---- 6xxx auth / allowlist ---------------------------------------------
 
     /** App not on the allowlist; user approval pending in the dashboard. */
@@ -226,7 +234,8 @@ object MindlayerErrorCode {
         CONCURRENT_LIMIT, RATE_LIMITED, SERVICE_THROTTLED,
         TRANSIENT_RESOURCE_EXHAUSTED, SESSION_QUOTA_EXHAUSTED,
         NOT_SUPPORTED, DEFERRED_QUOTA_EXHAUSTED,
-        DEFERRED_EXPIRED, UNSUPPORTED_ANDROID_VERSION -> Category.RESOURCE
+        DEFERRED_EXPIRED, UNSUPPORTED_ANDROID_VERSION,
+        DEFERRED_RESULT_TOO_LARGE -> Category.RESOURCE
         ALLOWLIST_PENDING, ALLOWLIST_REVOKED, IDENTITY_UNKNOWN -> Category.AUTH
         INTERNAL -> Category.UNKNOWN
         else -> Category.UNKNOWN
@@ -265,6 +274,7 @@ object MindlayerErrorCode {
         NOT_SUPPORTED -> "NOT_SUPPORTED"
         DEFERRED_QUOTA_EXHAUSTED -> "DEFERRED_QUOTA_EXHAUSTED"
         DEFERRED_EXPIRED -> "DEFERRED_EXPIRED"
+        DEFERRED_RESULT_TOO_LARGE -> "DEFERRED_RESULT_TOO_LARGE"
         UNSUPPORTED_ANDROID_VERSION -> "UNSUPPORTED_ANDROID_VERSION"
         ALLOWLIST_PENDING -> "ALLOWLIST_PENDING"
         ALLOWLIST_REVOKED -> "ALLOWLIST_REVOKED"
