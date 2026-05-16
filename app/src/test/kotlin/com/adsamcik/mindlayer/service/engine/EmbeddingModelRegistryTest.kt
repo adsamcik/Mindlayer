@@ -108,6 +108,7 @@ class EmbeddingModelRegistryTest {
     fun `discoverModels rejects path traversal asset names`() {
         val assetManager = mockk<AssetManager> {
             every { list("") } returns arrayOf("../../etc/passwd.tflite", "sentencepiece.model")
+            every { open("embedding_model_integrity.json") } throws java.io.IOException("no manifest")
             every { open("model_integrity.json") } throws java.io.IOException("no manifest")
         }
         val mocked = contextWithDirs(context.filesDir, null, context.cacheDir, assetManager)
@@ -122,8 +123,10 @@ class EmbeddingModelRegistryTest {
     fun `discoverModels requires valid integrity metadata when requested`() {
         val bytes = "trusted".toByteArray()
         val model = File(context.filesDir, "embedding-trusted.tflite").apply { writeBytes(bytes) }
-        File(context.filesDir, "sentencepiece.model").writeText("tok")
+        val tokenizerBytes = "tok".toByteArray()
+        File(context.filesDir, "sentencepiece.model").writeBytes(tokenizerBytes)
         File(context.filesDir, "embedding-trusted.tflite.sha256").writeText(sha256(bytes))
+        File(context.filesDir, "sentencepiece.model.sha256").writeText(sha256(tokenizerBytes))
         File(context.filesDir, "embedding-untrusted.tflite").writeText("no hash")
 
         val models = EmbeddingModelRegistry.discoverModels(context, requireIntegrity = true)
@@ -138,8 +141,8 @@ class EmbeddingModelRegistryTest {
         val modelBytes = "asset-model".toByteArray()
         val assetManager = mockk<AssetManager> {
             every { list("") } returns arrayOf("embedding-asset.tflite", "sentencepiece.model")
-            every { open("model_integrity.json") } returns ByteArrayInputStream(
-                """{"models":[{"filename":"embedding-asset.tflite","sha256":"${sha256(modelBytes)}"}]}""".toByteArray(),
+            every { open("embedding_model_integrity.json") } returns ByteArrayInputStream(
+                """{"models":[{"filename":"embedding-asset.tflite","sha256":"${sha256(modelBytes)}"},{"filename":"sentencepiece.model","sha256":"${sha256("tok".toByteArray())}"}]}""".toByteArray(),
             )
             every { open("embedding-asset.tflite") } returns ByteArrayInputStream(modelBytes)
             every { open("sentencepiece.model") } returns ByteArrayInputStream("tok".toByteArray())
@@ -151,6 +154,62 @@ class EmbeddingModelRegistryTest {
         assertEquals(listOf("embedding-asset"), models.map { it.id })
         assertTrue(File(context.filesDir, "embedding-asset.tflite").isFile)
         assertTrue(File(context.filesDir, "sentencepiece.model").isFile)
+    }
+
+
+    @Test
+    fun `discoverModels rejects AI pack asset when tokenizer is missing`() {
+        val modelBytes = "asset-model".toByteArray()
+        val assetManager = mockk<AssetManager> {
+            every { list("") } returns arrayOf("embedding-asset.tflite")
+            every { open("embedding_model_integrity.json") } returns ByteArrayInputStream(
+                """{"models":[{"filename":"embedding-asset.tflite","sha256":"${sha256(modelBytes)}"}]}""".toByteArray(),
+            )
+        }
+        val mocked = contextWithDirs(context.filesDir, null, context.cacheDir, assetManager)
+
+        val models = EmbeddingModelRegistry.discoverModels(mocked, requireIntegrity = true)
+
+        assertTrue(models.isEmpty())
+        assertFalse(File(context.filesDir, "embedding-asset.tflite").exists())
+    }
+
+    @Test
+    fun `discoverModels rejects AI pack asset when model sha mismatches`() {
+        val assetManager = mockk<AssetManager> {
+            every { list("") } returns arrayOf("embedding-asset.tflite", "sentencepiece.model")
+            every { open("embedding_model_integrity.json") } returns ByteArrayInputStream(
+                """{"models":[{"filename":"embedding-asset.tflite","sha256":"${"0".repeat(64)}"},{"filename":"sentencepiece.model","sha256":"${sha256("tok".toByteArray())}"}]}""".toByteArray(),
+            )
+            every { open("embedding-asset.tflite") } returns ByteArrayInputStream("tampered".toByteArray())
+            every { open("sentencepiece.model") } returns ByteArrayInputStream("tok".toByteArray())
+        }
+        val mocked = contextWithDirs(context.filesDir, null, context.cacheDir, assetManager)
+
+        val models = EmbeddingModelRegistry.discoverModels(mocked, requireIntegrity = true)
+
+        assertTrue(models.isEmpty())
+        assertFalse(File(context.filesDir, "embedding-asset.tflite").exists())
+    }
+
+    @Test
+    fun `discoverModels rejects AI pack asset when tokenizer sha mismatches`() {
+        val modelBytes = "asset-model".toByteArray()
+        val assetManager = mockk<AssetManager> {
+            every { list("") } returns arrayOf("embedding-asset.tflite", "sentencepiece.model")
+            every { open("embedding_model_integrity.json") } returns ByteArrayInputStream(
+                """{"models":[{"filename":"embedding-asset.tflite","sha256":"${sha256(modelBytes)}"},{"filename":"sentencepiece.model","sha256":"${"0".repeat(64)}"}]}""".toByteArray(),
+            )
+            every { open("embedding-asset.tflite") } returns ByteArrayInputStream(modelBytes)
+            every { open("sentencepiece.model") } returns ByteArrayInputStream("tampered".toByteArray())
+        }
+        val mocked = contextWithDirs(context.filesDir, null, context.cacheDir, assetManager)
+
+        val models = EmbeddingModelRegistry.discoverModels(mocked, requireIntegrity = true)
+
+        assertTrue(models.isEmpty())
+        assertFalse(File(context.filesDir, "embedding-asset.tflite").exists())
+        assertFalse(File(context.filesDir, "sentencepiece.model").exists())
     }
 
     @Test
@@ -192,6 +251,7 @@ class EmbeddingModelRegistryTest {
 
     private fun emptyAssets(): AssetManager = mockk {
         every { list("") } returns emptyArray()
+        every { open("embedding_model_integrity.json") } throws java.io.IOException("no manifest")
         every { open("model_integrity.json") } throws java.io.IOException("no manifest")
     }
 

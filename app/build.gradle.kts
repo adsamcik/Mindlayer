@@ -386,7 +386,7 @@ android {
         buildConfig = true
     }
 
-    assetPacks += listOf(":gemma_model")
+    assetPacks += listOf(":gemma_model", ":embeddinggemma_model")
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

@@ -364,3 +364,130 @@ mindlayer.deferredCompletions().collect { notice ->
 Results are stored by the service until acknowledged or expired. Defaults: 16 in-flight deferred requests per UID, 64 completed/pending-fetch results per UID, 1 MiB accumulated result text per UID, and 24 hour TTL. Prompt text is never persisted in the deferred store; model result text is persisted intentionally for retrieval and is encrypted at rest with SQLCipher.
 
 Failure modes are returned in `DeferredResult.status`: `STILL_RUNNING`, `NOT_FOUND_OR_NOT_OWNED` (also used for cross-UID anti-enumeration), `EXPIRED`, `FAILED`, or `CANCELLED`. New SDKs check `ServiceCapabilities.FEATURE_DEFERRED_INFERENCE`; if an older service does not advertise it, deferred calls throw `MindlayerErrorCode.NOT_SUPPORTED`.
+
+## Embeddings
+
+Mindlayer embeddings compute semantic vectors for short text on-device with EmbeddingGemma-300M. Use them for RAG, semantic search, clustering, and classification when `ServiceCapabilities.FEATURE_EMBEDDINGS` is advertised; clients should degrade gracefully while the install-time Asset Pack is still extracting.
+
+### Capability check
+
+```kotlin
+if (!mindlayer.getCapabilities().supports(ServiceCapabilities.FEATURE_EMBEDDINGS)) {
+    // Show "Indexing unavailable" UI; Asset Pack may still be downloading.
+}
+```
+
+### Quick start
+
+Single embed:
+
+```kotlin
+val vector: FloatArray = mindlayer.embed("the cat sat on the mat")
+```
+
+Inline batch (≤ 64 items):
+
+```kotlin
+val results = mindlayer.embedBatch(
+    listOf(
+        EmbeddingConfig(text = "doc1", tag = "doc1"),
+        EmbeddingConfig(text = "doc2", tag = "doc2"),
+    ),
+)
+```
+
+Deferred batch with push completion:
+
+```kotlin
+val handle = mindlayer.embedBatchDeferred(documents.map { (id, text) ->
+    EmbeddingConfig(text = text, tag = id)
+})
+
+mindlayer.embeddingBatchCompletions().collect { requestId ->
+    if (requestId == handle.requestId) {
+        when (val outcome = mindlayer.fetchEmbeddingBatch(handle)) {
+            is EmbeddingBatchOutcome.Ready -> {
+                // Store outcome.results in your app-owned index.
+                mindlayer.acknowledgeEmbeddingBatch(handle)
+            }
+            else -> Unit
+        }
+    }
+}
+```
+
+### RAG cookbook
+
+```kotlin
+val mindlayer = Mindlayer.connect(context)
+mindlayer.awaitConnected()
+
+val caps = mindlayer.getCapabilities()
+if (!caps.supports(ServiceCapabilities.FEATURE_EMBEDDINGS)) {
+    showIndexingUnavailable()
+    return
+}
+
+val documents = listOf(
+    "doc1" to "the cat sat on the mat",
+    "doc2" to "a small dog slept by the door",
+    "doc3" to "semantic search returns nearby meaning",
+)
+
+val index = InMemoryVectorIndex()
+val embeddedDocs = mindlayer.embedBatch(
+    documents.map { (id, text) ->
+        EmbeddingConfig(
+            text = text,
+            task = EmbeddingTask.RetrievalDocument,
+            tag = id,
+        )
+    },
+)
+
+embeddedDocs.forEach { result ->
+    val id = result.tag ?: return@forEach
+    val source = documents.first { it.first == id }.second
+    index.put(id = id, vector = result.vector, payload = source)
+}
+
+val query = "find notes about cats"
+val queryResult = mindlayer.embed(
+    EmbeddingConfig(
+        text = query,
+        task = EmbeddingTask.RetrievalQuery,
+    ),
+)
+
+val contextText = index.search(queryResult.vector, k = 3)
+    .joinToString("\n") { hit -> "- ${hit.payload as String}" }
+
+val sessionId = mindlayer.createSession {
+    systemPrompt("Answer using only the supplied context when possible.")
+}
+
+mindlayer.chat(
+    sessionId,
+    "Context:\n$contextText\n\nQuestion: $query",
+).events.collect { event ->
+    if (event is MindlayerEvent.TextDelta) print(event.text)
+}
+```
+
+### Threat model
+
+Embeddings are derived from source text and can leak content via inversion or similarity-oracle attacks. Treat vectors as sensitive: never log text inputs or vectors, keep indexes per app/UID, and rely on Mindlayer's per-UID service isolation for cross-caller separation.
+
+### Performance ballpark
+
+S25 Ultra spike measurements for EmbeddingGemma-300M:
+
+| Backend | 256 tokens | 512 tokens |
+|---|---:|---:|
+| NPU | 8-18 ms | 18 ms |
+| GPU | 64-119 ms | 119 ms |
+| CPU | 66-169 ms | 169 ms |
+
+### Asset Pack delivery
+
+The `:embeddinggemma_model` Play AI Pack is install-time delivery and carries both `embedding-gemma-300m-v1.tflite` and `embedding-gemma-300m-v1.spm.model`. The service advertises `FEATURE_EMBEDDINGS` only after extraction and SHA-256 verification succeed.

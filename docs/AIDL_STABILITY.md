@@ -166,3 +166,13 @@ If this document is wrong, **fix the document in the same PR as the code change*
 New parcelables: `DeferredHandle` and `DeferredResult`. The AIDL declaration files are mirrored byte-for-byte between `app/src/main/aidl` and `sdk/src/main/aidl`.
 
 Capability flag: `ServiceCapabilities.FEATURE_DEFERRED_INFERENCE`. New SDKs must check it and throw `NOT_SUPPORTED` when connected to an older service.
+
+## Embeddings surface (v0.7)
+
+Parcelable inventory additions: `EmbeddingRequest` (schemaVersion=1; text, tag, modelId, normalize, outputDim, taskType), `EmbeddingResult` (schemaVersion=1; tag, vector, dim, modelId, tokenCount, truncated, backend, durationMs), `EmbeddingBatchResult` (schemaVersion=1; results, totalDurationMs, backend), `EmbeddingBatchTransfer` (schemaVersion=1; PFD/SharedMemory transfer, count, dim, modelId, perItemMetadata, totalDurationMs, backend), `EmbeddingItemMetadata` (v1 metadata shape; tag, tokenCount, truncated), and `VectorBlobHandle` (schemaVersion=1; status, transfer, errorCodeInt, errorCodeName).
+
+AIDL method inventory additions are appended at the end of `IMindlayerService`: `embed`, `embedBatch`, `embedBatchShm`, `embedBatchDeferred`, `fetchEmbeddingBatchResult`, `cancelEmbeddingBatch`, `acknowledgeEmbeddingBatchResult`, and `cancelEmbed`.
+
+Capability flag registry: `ServiceCapabilities.FEATURE_EMBEDDINGS` (`"embeddings"`) means text embeddings are available and model/tokenizer discovery passed integrity verification. `ServiceCapabilities` schemaVersion moved from 1 to 2 for `maxEmbeddingBatchInline`, `maxEmbeddingBatchShm`, `maxEmbeddingBatchTotal`, `maxEmbeddingInputBytes`, `embeddingModelIds`, and `embeddingDims`; `v1Baseline()` keeps old clients forward-compatible with zero embedding limits.
+
+Error code registry additions: `EMBEDDING_BATCH_TOO_LARGE`, `EMBEDDING_MODEL_UNAVAILABLE`, `EMBEDDING_INPUT_TOO_LONG`, and `EMBEDDING_DISABLED`.
