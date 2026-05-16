@@ -149,8 +149,45 @@ class InferenceOrchestrator(
      * Typed cancellation reasons keyed by scoped request id. Presence means
      * the CancellationException handler must emit an ERROR frame instead of
      * the normal user-cancel DONE frame.
+     *
+     * M-E2: writes go through [primeTypedCancellationReason] so reasons
+     * with higher priority (e.g. [MindlayerErrorCode.ALLOWLIST_REVOKED] —
+     * a user action) cannot be clobbered by a racing lower-priority
+     * reason (e.g. [MindlayerErrorCode.LOW_MEMORY] — resource pressure).
      */
     private val typedCancellationReasons = ConcurrentHashMap<String, Int>()
+
+    /**
+     * M-E2: relative ranking used by [primeTypedCancellationReason] to
+     * resolve concurrent EMERGENCY-vs-revoke races. Higher = harder
+     * priority. ALLOWLIST_REVOKED always wins because it is a deliberate
+     * user/operator action ("this app is no longer permitted to run
+     * inference"); resource-pressure reasons (LOW_MEMORY, MEMORY_PRESSURE,
+     * THERMAL_CRITICAL) are recoverable and lower priority.
+     */
+    private fun cancellationReasonPriority(reason: Int): Int = when (reason) {
+        MindlayerErrorCode.ALLOWLIST_REVOKED -> 100
+        MindlayerErrorCode.SESSION_EVICTED -> 60
+        MindlayerErrorCode.THERMAL_CRITICAL -> 40
+        MindlayerErrorCode.LOW_MEMORY -> 30
+        MindlayerErrorCode.MEMORY_PRESSURE -> 30
+        else -> 10
+    }
+
+    /**
+     * M-E2: install a typed cancellation reason for [scopedKey], keeping
+     * whichever reason has higher priority via [cancellationReasonPriority].
+     * Returns the reason that is actually stored after the merge. Safe to
+     * call concurrently from EMERGENCY and revoke paths.
+     */
+    fun primeTypedCancellationReason(scopedKey: String, reason: Int): Int =
+        typedCancellationReasons.merge(scopedKey, reason) { existing, incoming ->
+            if (cancellationReasonPriority(incoming) > cancellationReasonPriority(existing)) {
+                incoming
+            } else {
+                existing
+            }
+        } ?: reason
 
     init {
         sessionManager.setEmergencyStreamCanceller { reason ->
@@ -185,6 +222,13 @@ class InferenceOrchestrator(
 
     fun closeAllOwnedByUidForRevoke(ownerUid: Int): List<String> {
         sessionManager.activeRequestIdsOwnedByUid(ownerUid).forEach { scopedKey ->
+            // H-E3: prime the typed reason BEFORE cancelInference so the
+            // CancellationException handler emits an
+            // ALLOWLIST_REVOKED error frame instead of the generic
+            // user-cancel DONE frame. Without this, callers see
+            // `cancelled` and cannot distinguish a revoke from a normal
+            // cancel.
+            primeTypedCancellationReason(scopedKey, MindlayerErrorCode.ALLOWLIST_REVOKED)
             cancelInference(scopedKey)
         }
         return sessionManager.closeAllOwnedByUidForRevoke(ownerUid)
@@ -372,7 +416,10 @@ class InferenceOrchestrator(
         activeJobs.keys.toList().forEach { scopedKey ->
             val publicRequestId = scopedKey.substringAfter(':', scopedKey)
             val handle = sessionManager.findSessionByActiveRequest(scopedKey)
-            typedCancellationReasons[scopedKey] = reason
+            // M-E2: merge with the existing reason so a higher-priority
+            // user action (e.g. ALLOWLIST_REVOKED) cannot be overwritten
+            // by a racing resource-pressure cancel.
+            primeTypedCancellationReason(scopedKey, reason)
             if (handle != null) {
                 try {
                     handle.conversation.cancelProcess()
@@ -555,6 +602,13 @@ class InferenceOrchestrator(
                 var requestTokenCount = 0
                 var firstTokenSeen = false
                 val accumulatedToolCalls = mutableListOf<Pair<String, String>>()
+                // H-E4: in TOOL_ROUTING mode the only allowed tool name is
+                // `StructuredOutputHelper.TOOL_NAME`. Any other tool name
+                // the model fabricates is unverifiable output — count it
+                // here and fail-closed with INVALID_REQUEST after the
+                // current collect window so the caller sees a typed error
+                // instead of a silent `done(stop)`.
+                var toolRoutingDisallowedCount = 0
 
                 val soConfig = handle.structuredOutputConfig
                 val isToolRouting =
@@ -588,7 +642,24 @@ class InferenceOrchestrator(
                             firstTokenSeen = true
                         }
                     }
-                    acceptToolCalls(handle, chunk.toolCalls, accumulatedToolCalls, meta)
+                    acceptToolCalls(handle, chunk.toolCalls, accumulatedToolCalls, meta).let {
+                        toolRoutingDisallowedCount += it
+                    }
+                }
+
+                // H-E4: TOOL_ROUTING fail-closed on unknown tool name.
+                // Check BEFORE the prose check so a model that emits ONLY
+                // a disallowed tool (no prose, no valid structured call)
+                // still surfaces as INVALID_REQUEST instead of done(stop).
+                if (isToolRouting && toolRoutingDisallowedCount > 0) {
+                    closeStructuredOutputFailClosed(
+                        writer = writer,
+                        meta = meta,
+                        reason = "tool_routing_disallowed_tool",
+                        logMessage = "TOOL_ROUTING model emitted disallowed tool name " +
+                            "($toolRoutingDisallowedCount dropped); failing closed",
+                    )
+                    return@withTimeout
                 }
 
                 // --- Structured output: TOOL_ROUTING extraction -------------
@@ -777,7 +848,31 @@ class InferenceOrchestrator(
                     }
 
                     // Check whether the model wants more tool calls
-                    acceptToolCalls(handle, response.toolCalls, accumulatedToolCalls, meta)
+                    val droppedRound = acceptToolCalls(handle, response.toolCalls, accumulatedToolCalls, meta)
+                    if (isToolRouting && droppedRound > 0) {
+                        // H-E4: same fail-closed contract for later tool
+                        // rounds. Cancel the running native generation so
+                        // we don't keep decoding past the point we know the
+                        // request is invalid.
+                        try {
+                            handle.conversation.cancelProcess()
+                        } catch (t: Throwable) {
+                            MindlayerLog.w(
+                                TAG,
+                                "cancelProcess() after TOOL_ROUTING fail-closed raised ${t.safeLabel()}",
+                                requestId = meta.requestId,
+                                sessionId = meta.sessionId,
+                            )
+                        }
+                        closeStructuredOutputFailClosed(
+                            writer = writer,
+                            meta = meta,
+                            reason = "tool_routing_disallowed_tool",
+                            logMessage = "TOOL_ROUTING model emitted disallowed tool name in round " +
+                                "$toolCallRound ($droppedRound dropped); failing closed",
+                        )
+                        return@withTimeout
+                    }
                 }
 
                 val finishReason = when {
@@ -927,21 +1022,24 @@ class InferenceOrchestrator(
     private suspend fun closeStructuredOutputFailClosed(
         writer: TokenStreamWriter,
         meta: RequestMeta,
+        reason: String = "structured_output_fail_closed",
+        logMessage: String =
+            "TOOL_ROUTING emitted prose without a structured tool call; failing closed",
     ) {
         MindlayerLog.w(
             TAG,
-            "TOOL_ROUTING emitted prose without a structured tool call; failing closed",
+            logMessage,
             requestId = meta.requestId,
             sessionId = meta.sessionId,
         )
         logRepository?.logInferenceError(
             meta.requestId,
             meta.sessionId,
-            "structured_output_fail_closed",
+            reason,
         )
         writer.closeWithError(
             0,
-            "structured_output_fail_closed",
+            reason,
             MindlayerErrorCode.INVALID_REQUEST,
         )
     }
@@ -952,15 +1050,24 @@ class InferenceOrchestrator(
      * dropped (and logged); known names whose serialised arguments exceed
      * [MAX_TOOL_ARGS_LEN] are truncated (yielding invalid JSON, which the
      * SDK treats as a tool error — fail-closed by design).
+     *
+     * H-E4: returns the number of tool calls that were dropped due to an
+     * unknown name so callers running in TOOL_ROUTING mode can fail-closed
+     * with a typed `INVALID_REQUEST` instead of falling through to a
+     * silent `done(stop)` — a model that fabricates a tool name in
+     * structured-output mode is producing unverifiable output, not a
+     * normal completion.
      */
     private fun acceptToolCalls(
         handle: SessionManager.SessionHandle,
         toolCalls: List<com.google.ai.edge.litertlm.ToolCall>,
         accumulator: MutableList<Pair<String, String>>,
         meta: RequestMeta,
-    ) {
+    ): Int {
+        var dropped = 0
         for (tc in toolCalls) {
             if (tc.name !in handle.allowedToolNames) {
+                dropped++
                 val toolMetadata = LogExtras.toolNameMetadata(tc.name)
                 MindlayerLog.w(
                     TAG,
@@ -1004,6 +1111,7 @@ class InferenceOrchestrator(
             } else argsJson
             accumulator.add(tc.name to cappedArgs)
         }
+        return dropped
     }
 
     /**

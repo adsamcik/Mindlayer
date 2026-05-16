@@ -196,6 +196,30 @@ class LogRepository(
         ))
     }
 
+    /**
+     * M-E3: persist that an eviction sweep fired (memory pressure,
+     * pre-emptive trim). Distinct from per-session [logSessionEvicted]:
+     * this event captures the triggering pressure and how many sessions
+     * were evicted in the batch, so the dashboard can correlate spikes
+     * even when individual session ids are not interesting.
+     */
+    fun logEvictionTriggered(
+        trigger: String,
+        evictedCount: Int,
+        remainingCount: Int,
+    ) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.MEMORY,
+            event = LogEvent.EVICTION_TRIGGERED,
+            extraJson = buildJsonObject {
+                put("trigger", JsonPrimitive(trigger))
+                put("evicted", JsonPrimitive(evictedCount))
+                put("remaining", JsonPrimitive(remainingCount))
+            }.toString(),
+        ))
+    }
+
     fun logMemoryPressure(pressure: String, availableMb: Long, totalMb: Long) {
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
