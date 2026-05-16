@@ -15,15 +15,21 @@ import com.adsamcik.mindlayer.ToolResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.File
@@ -157,8 +163,18 @@ class Mindlayer private constructor(
      * pressure can retire several sessions in quick succession) and
      * drops the oldest if no consumer is reading.
      */
+    /**
+     * Replay buffer for deferred completions.
+     *
+     * `replay = 1` so the documented pattern in `SDK_INTEGRATION.md`
+     * (`chatDeferred(...)` immediately followed by `deferredCompletions()
+     * .collect { ... }`) catches the notice when the inference completes
+     * between submit and collect. Multiple concurrent `awaitDeferred`
+     * collectors filter by `requestId`, so seeing the same replayed last
+     * notice is benign.
+     */
     private val _deferredCompletionFlow = MutableSharedFlow<DeferredCompletionNotice>(
-        replay = 0,
+        replay = 1,
         extraBufferCapacity = EVICTION_BUFFER,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
@@ -725,6 +741,16 @@ class Mindlayer private constructor(
         requireDeferredCapability()
         val requestId = UUID.randomUUID().toString()
         val rebound = media.map { it.copy(requestId = requestId) }
+        // H-D2: deferred submit mirrors `startInferenceMulti`'s FD-cleanup
+        // pattern from PR #37. The service has dup'd the media descriptors
+        // by the time `inferDeferred` returns (success) or throws, so we
+        // always close our copies. Use an IdentityHashMap-backed set so a
+        // caller passing the same source twice (legal — two MediaParts can
+        // share an offset/length view) only gets one close.
+        val mediaSources = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<ParcelFileDescriptor, Boolean>(),
+        )
+        rebound.forEach { mediaSources.add(it.source) }
         return try {
             withTypedErrors(requestId = requestId, sessionId = sessionId) {
                 it.inferDeferred(
@@ -746,6 +772,8 @@ class Mindlayer private constructor(
                 requestId = requestId,
                 sessionId = sessionId,
             )
+        } finally {
+            mediaSources.forEach { it.closeQuietly() }
         }
     }
 
@@ -769,12 +797,51 @@ class Mindlayer private constructor(
         pollIntervalMs: Long = 250,
         timeoutMs: Long = 60_000,
     ): com.adsamcik.mindlayer.DeferredResult = withTimeout(timeoutMs) {
-        while (true) {
-            val result = fetchDeferredResult(requestId)
-            if (result.status != com.adsamcik.mindlayer.DeferredResult.STILL_RUNNING) return@withTimeout result
-            delay(pollIntervalMs.coerceAtLeast(1L))
+        // M-D7: prefer the push notice over busy-polling. Subscribe BEFORE
+        // the first fetch so a completion landing between fetch and
+        // collect is still observed via the `replay = 1` buffer on
+        // `_deferredCompletionFlow`. The poll loop remains as a fallback
+        // for services that don't deliver `onDeferredInferenceComplete`
+        // (older builds, or transient binder death + reconnect where the
+        // pre-reconnect notice was dropped).
+        coroutineScope {
+            val pushSignal = async {
+                deferredCompletions()
+                    .filter { it.requestId == requestId }
+                    .first()
+            }
+            try {
+                // First fetch up front — if the result is already terminal,
+                // skip the wait entirely.
+                val initial = fetchDeferredResult(requestId)
+                if (initial.status != com.adsamcik.mindlayer.DeferredResult.STILL_RUNNING) {
+                    return@coroutineScope initial
+                }
+                // Slow-path fallback poll. Far less aggressive than the
+                // previous busy-poll because the push signal usually races
+                // ahead — see M-D7. Cap minimum to keep one round-trip per
+                // 250ms in the worst case.
+                val pollJob = launch {
+                    while (isActive) {
+                        delay(pollIntervalMs.coerceAtLeast(1L))
+                        val result = fetchDeferredResult(requestId)
+                        if (result.status != com.adsamcik.mindlayer.DeferredResult.STILL_RUNNING) {
+                            return@launch
+                        }
+                    }
+                }
+                // Either the push signal fires (preferred) or the poll
+                // job exits because it observed a terminal status — in
+                // both cases the next fetch returns the terminal result.
+                select<Unit> {
+                    pushSignal.onAwait { }
+                    pollJob.onJoin { }
+                }
+                fetchDeferredResult(requestId)
+            } finally {
+                pushSignal.cancel()
+            }
         }
-        error("unreachable")
     }
 
     // -- Tool calling ---------------------------------------------------------

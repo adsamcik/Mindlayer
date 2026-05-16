@@ -1274,41 +1274,115 @@ class ServiceBinder(
             }
         }
 
-        scope.launch(Dispatchers.IO) {
-            var terminalStatus = DeferredResult.FAILED
+        // H-D1: mirror `inferMulti`'s `handedOff` pattern. The pipe + media
+        // resources are owned by *this* binder thread until the dispatch
+        // coroutine successfully launches via `scope.launch { ... }`; only
+        // after that does the orchestrator coroutine become responsible
+        // for `writeEnd` and the SharedMemory-staged source PFDs. On any
+        // synchronous failure (preflight gate throws, putIfAbsent races,
+        // submission-side OOM before `scope.launch` returns) we clean up
+        // here. The matching SDK-side cleanup of caller-owned source PFDs
+        // lives in `Mindlayer.chatDeferred()` (H-D2).
+        var handedOff = false
+        // M-D2: map known synchronous preflight exceptions to their typed
+        // wire codes. Mirrors the translation `inferMulti` applies at
+        // ServiceBinder.kt:1157-1184 — without this, callers see a
+        // generic `INTERNAL` and lose the retry / truncation hints.
+        try {
             try {
                 orchestrator.infer(scopedKey, deferredMeta, image, audio, writeEnd) { releaseSlot() }
-                val collected = collectDeferredPipe(readEnd)
-                terminalStatus = collected.status
-                when (collected.status) {
-                    DeferredResult.READY -> requireDeferredStore().completeReady(requestId, uid, collected.text, collected.metrics)
-                    DeferredResult.CANCELLED -> requireDeferredStore().completeCancelled(requestId, uid)
-                    else -> requireDeferredStore().completeFailed(
-                        requestId,
-                        uid,
-                        collected.errorCodeInt.ifBlankCode(),
-                        collected.errorCodeName ?: MindlayerErrorCode.nameOf(collected.errorCodeInt.ifBlankCode()),
-                    )
+            } catch (e: com.adsamcik.mindlayer.service.engine.ContextOverflowException) {
+                releaseSlot()
+                runCatching {
+                    runBlocking {
+                        requireDeferredStore().completeFailed(
+                            requestId,
+                            uid,
+                            MindlayerErrorCode.INPUT_EXCEEDS_CONTEXT,
+                            MindlayerErrorCode.nameOf(MindlayerErrorCode.INPUT_EXCEEDS_CONTEXT),
+                        )
+                    }
                 }
-                logRepository?.logDeferredComplete(requestId, meta.sessionId, terminalStatus)
-                mlHealthRecorder?.recordDeferredCompletion()
+                throw typedBinderException(MindlayerErrorCode.INPUT_EXCEEDS_CONTEXT, e.wireMessage)
+            } catch (e: com.adsamcik.mindlayer.service.ipc.SharedMemoryPoolExhaustedException) {
+                releaseSlot()
+                runCatching {
+                    runBlocking {
+                        requireDeferredStore().completeFailed(
+                            requestId,
+                            uid,
+                            MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
+                            MindlayerErrorCode.nameOf(MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED),
+                        )
+                    }
+                }
+                throw typedBinderException(
+                    MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
+                    "shm_pool_exhausted reason=${e.reason} retryAfterMs=${e.retryAfterMs}",
+                )
             } catch (t: Throwable) {
                 releaseSlot()
-                val label = t.safeLabel()
-                terminalStatus = DeferredResult.FAILED
                 runCatching {
-                    requireDeferredStore().completeFailed(
-                        requestId,
-                        uid,
-                        MindlayerErrorCode.INTERNAL,
-                        MindlayerErrorCode.nameOf(MindlayerErrorCode.INTERNAL) ?: label,
-                    )
+                    runBlocking {
+                        requireDeferredStore().completeFailed(
+                            requestId,
+                            uid,
+                            MindlayerErrorCode.INTERNAL,
+                            MindlayerErrorCode.nameOf(MindlayerErrorCode.INTERNAL) ?: t.safeLabel(),
+                        )
+                    }
                 }
-                logRepository?.logDeferredComplete(requestId, meta.sessionId, terminalStatus)
-            } finally {
-                releaseSlot()
-                try { readEnd.close() } catch (_: Exception) { }
-                evictionRegistry.notifyDeferredComplete(uid, requestId, terminalStatus)
+                throw t
+            }
+
+            scope.launch(Dispatchers.IO) {
+                var terminalStatus = DeferredResult.FAILED
+                try {
+                    val collected = collectDeferredPipe(readEnd)
+                    terminalStatus = collected.status
+                    when (collected.status) {
+                        DeferredResult.READY -> requireDeferredStore().completeReady(requestId, uid, collected.text, collected.metrics)
+                        DeferredResult.CANCELLED -> requireDeferredStore().completeCancelled(requestId, uid)
+                        else -> requireDeferredStore().completeFailed(
+                            requestId,
+                            uid,
+                            collected.errorCodeInt.ifBlankCode(),
+                            collected.errorCodeName ?: MindlayerErrorCode.nameOf(collected.errorCodeInt.ifBlankCode()),
+                        )
+                    }
+                    logRepository?.logDeferredComplete(requestId, meta.sessionId, terminalStatus)
+                    mlHealthRecorder?.recordDeferredCompletion()
+                } catch (t: Throwable) {
+                    releaseSlot()
+                    val label = t.safeLabel()
+                    terminalStatus = DeferredResult.FAILED
+                    runCatching {
+                        requireDeferredStore().completeFailed(
+                            requestId,
+                            uid,
+                            MindlayerErrorCode.INTERNAL,
+                            MindlayerErrorCode.nameOf(MindlayerErrorCode.INTERNAL) ?: label,
+                        )
+                    }
+                    logRepository?.logDeferredComplete(requestId, meta.sessionId, terminalStatus)
+                } finally {
+                    releaseSlot()
+                    try { readEnd.close() } catch (_: Exception) { }
+                    evictionRegistry.notifyDeferredComplete(uid, requestId, terminalStatus)
+                }
+            }
+            handedOff = true
+        } finally {
+            if (!handedOff) {
+                try { writeEnd.close() } catch (_: Exception) {}
+                try { readEnd.close() } catch (_: Exception) {}
+                val sources = java.util.Collections.newSetFromMap(
+                    java.util.IdentityHashMap<ParcelFileDescriptor, Boolean>(),
+                )
+                parts.forEach { sources.add(it.source) }
+                sources.forEach { source ->
+                    try { source.close() } catch (_: Exception) {}
+                }
             }
         }
         logRepository?.logDeferredSubmit(requestId, meta.sessionId, parts.size)
@@ -1325,6 +1399,12 @@ class ServiceBinder(
         }
         val uid = Binder.getCallingUid()
         val result = runBlocking { requireDeferredStore().fetch(uid, requestId) }
+        // M-D8: when fetch transitions a row to EXPIRED, emit a distinct
+        // log event so dashboard filters can distinguish "completed and
+        // unfetched" from "never fetched in time".
+        if (result.status == DeferredResult.EXPIRED) {
+            logRepository?.logDeferredExpired(requestId)
+        }
         logRepository?.logDeferredFetch(requestId, result.status)
         return result
     }
@@ -2176,6 +2256,33 @@ class ServiceBinder(
             )
         }
         evictionRegistry.register(uid, callback)
+        // M-D3: replay completions that landed while the caller's binder
+        // was dead. Pre-fix, a `notifyDeferredComplete` fired into a
+        // disconnected binder was lost (`oneway` AIDL on a dead remote
+        // is a silent no-op). On reconnect we re-dispatch every entry the
+        // caller hasn't observed yet (`fetchedAtMs IS NULL` AND status !=
+        // STILL_RUNNING). Matched on the SDK side by `replay = 1` on the
+        // `_deferredCompletionFlow` so a `collect { … }` started just
+        // after `chatDeferred(…)` also sees the latest completion.
+        val store = deferredStore
+        if (store != null) {
+            scope.launch(Dispatchers.IO) {
+                val pending = runCatching { store.completedPendingForUid(uid) }
+                    .getOrDefault(emptyList())
+                for (entry in pending) {
+                    try {
+                        callback.onDeferredInferenceComplete(entry.requestId, entry.statusCode)
+                    } catch (_: android.os.RemoteException) {
+                        // Caller's binder died again; the next subscribe
+                        // will replay these.
+                        return@launch
+                    } catch (_: Throwable) {
+                        // Don't let a misbehaving caller break replay for
+                        // the rest of the queue.
+                    }
+                }
+            }
+        }
     }
 
     /**
