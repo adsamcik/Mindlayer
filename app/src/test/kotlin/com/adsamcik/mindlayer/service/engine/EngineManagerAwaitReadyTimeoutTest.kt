@@ -95,7 +95,7 @@ class EngineManagerAwaitReadyTimeoutTest {
             "Expected typed NativeError cause, got $cause",
             cause is InitFailure.NativeError,
         )
-        assertEquals("init timeout", (cause as InitFailure.NativeError).message)
+        assertEquals("init timeout", (cause as InitFailure.NativeError).safeLabel)
     }
 
     @Test
