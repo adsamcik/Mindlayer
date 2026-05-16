@@ -36,7 +36,8 @@ object EmbeddingModelRegistry {
     private const val MODEL_EXTENSION = ".tflite"
     private const val TOKENIZER_EXTENSION = ".spm.model"
     private const val DEFAULT_TOKENIZER_NAME = "sentencepiece.model"
-    private const val INTEGRITY_MANIFEST = "model_integrity.json"
+    private const val INTEGRITY_MANIFEST = "embedding_model_integrity.json"
+    private const val LEGACY_INTEGRITY_MANIFEST = "model_integrity.json"
     private val SAFE_MODEL_NAME_PATTERN = Regex("^embedding-[A-Za-z0-9_.-]+\\.tflite$")
     private val SHA256_REGEX = Regex("(?i)^[0-9a-f]{64}$")
 
@@ -56,7 +57,7 @@ object EmbeddingModelRegistry {
             dir.listFiles()
                 ?.filter { it.isFile && it.name.endsWith(MODEL_EXTENSION) }
                 ?.forEach { file ->
-                    val info = candidateFromFile(file, dirCanonical, manifest[file.name], requireIntegrity)
+                    val info = candidateFromFile(file, dirCanonical, manifest, requireIntegrity)
                         ?: return@forEach
                     if (file.name in seen) return@forEach
                     seen += file.name
@@ -80,8 +81,9 @@ object EmbeddingModelRegistry {
                     continue
                 }
                 val expected = manifest[name]
-                if (requireIntegrity && expected == null) {
-                    MindlayerLog.w(TAG, "Skipping AI-Pack embedding model without integrity metadata: $name")
+                val tokenizerExpected = manifest[tokenizerName]
+                if (requireIntegrity && (expected == null || tokenizerExpected == null)) {
+                    MindlayerLog.w(TAG, "Skipping AI-Pack embedding pair without integrity metadata: $name")
                     continue
                 }
 
@@ -102,9 +104,11 @@ object EmbeddingModelRegistry {
                 }
 
                 val verification = verifyModelFile(extracted, expected, requireIntegrity)
-                if (!verification.accepted) {
-                    MindlayerLog.w(TAG, "Skipping AI-Pack embedding model with invalid integrity metadata: $name")
+                val tokenizerVerification = verifyModelFile(tokenizer, tokenizerExpected, requireIntegrity)
+                if (!verification.accepted || !tokenizerVerification.accepted) {
+                    MindlayerLog.w(TAG, "Skipping AI-Pack embedding pair with invalid integrity metadata: $name")
                     extracted.delete()
+                    tokenizer.delete()
                     continue
                 }
                 seen += name
@@ -152,7 +156,7 @@ object EmbeddingModelRegistry {
     private fun candidateFromFile(
         file: File,
         dirCanonical: File,
-        manifestEntry: IntegrityMetadata?,
+        manifest: Map<String, IntegrityMetadata>,
         requireIntegrity: Boolean,
     ): EmbeddingModelInfo? {
         if (!SAFE_MODEL_NAME_PATTERN.matches(file.name)) {
@@ -181,9 +185,10 @@ object EmbeddingModelRegistry {
             MindlayerLog.w(TAG, "Skipping tokenizer outside scan dir for embedding model: ${file.name}")
             return null
         }
-        val verification = verifyModelFile(file, manifestEntry, requireIntegrity)
-        if (!verification.accepted) {
-            MindlayerLog.w(TAG, "Skipping embedding model without valid integrity metadata: ${file.name}")
+        val verification = verifyModelFile(file, manifest[file.name], requireIntegrity)
+        val tokenizerVerification = verifyModelFile(tokenizer, manifest[tokenizer.name], requireIntegrity)
+        if (!verification.accepted || !tokenizerVerification.accepted) {
+            MindlayerLog.w(TAG, "Skipping embedding pair without valid integrity metadata: ${file.name}")
             return null
         }
         return buildModelInfo(file, tokenizer, verification.sha256)
@@ -236,11 +241,15 @@ object EmbeddingModelRegistry {
     }
 
     private fun loadIntegrityManifest(context: Context): Map<String, IntegrityMetadata> {
-        val raw = try {
-            context.assets.open(INTEGRITY_MANIFEST).bufferedReader().use { it.readText() }
-        } catch (_: Exception) {
-            return emptyMap()
-        }
+        val raw = listOf(INTEGRITY_MANIFEST, LEGACY_INTEGRITY_MANIFEST)
+            .firstNotNullOfOrNull { manifestName ->
+                try {
+                    context.assets.open(manifestName).bufferedReader().use { it.readText() }
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            ?: return emptyMap()
         return try {
             val root = Json.parseToJsonElement(raw).jsonObject
             val singleFile = root.stringOrNull("modelFile")?.takeIf { it.endsWith(MODEL_EXTENSION) }
@@ -252,8 +261,11 @@ object EmbeddingModelRegistry {
             buildMap {
                 for (element in models) {
                     val model = element as? JsonObject ?: continue
-                    val filename = model.stringOrNull("filename")?.takeIf { it.endsWith(MODEL_EXTENSION) }
-                        ?: continue
+                    val filename = model.stringOrNull("filename")?.takeIf { filename ->
+                        filename.endsWith(MODEL_EXTENSION) ||
+                            filename.endsWith(TOKENIZER_EXTENSION) ||
+                            filename == DEFAULT_TOKENIZER_NAME
+                    } ?: continue
                     val sha256 = model.stringOrNull("sha256")?.lowercase(Locale.ROOT) ?: continue
                     if (!SHA256_REGEX.matches(sha256)) continue
                     val size = model.longOrNull("sizeBytes")?.takeIf { it > 0L }
