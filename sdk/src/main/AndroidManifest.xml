@@ -3,6 +3,17 @@
           xmlns:tools="http://schemas.android.com/tools">
 
     <!--
+        M-T2: declare the signature-level BIND_ML_SERVICE permission here so
+        host apps inherit it automatically via manifest merger and don't have
+        to remember to add it themselves. The permission is declared as
+        `signature|knownSigner` in the Mindlayer service manifest, so an
+        attacker who depends on the SDK gains nothing from this inheritance —
+        the OS still gates the bind on a matching signing cert. See
+        SDK_INTEGRATION.md.
+    -->
+    <uses-permission android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE" />
+
+    <!--
         F-024: SDK manifest hint — keep the encrypted history DB and SDK key
         prefs out of host-app backups. The host app's manifest wins for
         `android:allowBackup` / `android:dataExtractionRules` (the manifest

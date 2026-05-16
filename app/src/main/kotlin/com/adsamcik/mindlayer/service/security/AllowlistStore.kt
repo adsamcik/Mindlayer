@@ -63,13 +63,24 @@ class CertificateMismatchException(
 
 /**
  * A package that was explicitly denied (via [AllowlistStore.denyPending]) or
- * recently revoked. Suppresses re-creation of pending entries until [expiresAtMs].
+ * revoked (via [AllowlistStore.revoke]). Suppresses re-creation of pending
+ * entries and re-seeding by [AllowlistStore.seedIfEmpty] until [expiresAtMs].
+ *
+ * If [permanent] is `true`, the entry is treated as a sticky tombstone of an
+ * explicit user revoke: it is never pruned by expiry and survives [seedIfEmpty]
+ * forever. This closes a re-admission window where the 7-day cooldown on
+ * `revoke()` would otherwise expire and let a future seed silently re-add the
+ * revoked package after an app-data clear or DB-corruption-driven re-init.
+ * For persistence/back-compat, permanent entries set [expiresAtMs] to
+ * [Long.MAX_VALUE] so older readers that ignore the `permanent` field still
+ * treat them as "never expires".
  */
 data class DeniedEntry(
     val packageName: String,
     val signingCertSha256: String,
     val deniedAtMs: Long,
     val expiresAtMs: Long,
+    val permanent: Boolean = false,
 )
 
 /**
@@ -300,10 +311,23 @@ class AllowlistStore(
             writeEntries(updated)
             _entries.value = updated
 
-            // Persist a denial so the revoked package cools down for one TTL.
+            // Persist a *permanent* denial: explicit user revoke is a sticky
+            // decision, not a 7-day cooldown like denyPending. Without this,
+            // a future seedIfEmpty (after app-data clear or DB-corruption
+            // re-init) could silently re-admit the revoked package once the
+            // old DENIAL_TTL_MS had elapsed. permanent=true tells the writer
+            // to skip the expiry-pruning step; we also pin expiresAtMs to
+            // Long.MAX_VALUE so older readers that ignore the `permanent`
+            // field still treat the row as "never expires".
             val now = System.currentTimeMillis()
-            val deniedUpdated = readDenied().filterNot { it.packageName == pkg } +
-                DeniedEntry(pkg, target.signingCertSha256, now, now + DENIAL_TTL_MS)
+            val deniedUpdated = readDeniedIncludingExpired().filterNot { it.packageName == pkg } +
+                DeniedEntry(
+                    packageName = pkg,
+                    signingCertSha256 = target.signingCertSha256,
+                    deniedAtMs = now,
+                    expiresAtMs = Long.MAX_VALUE,
+                    permanent = true,
+                )
             writeDenied(deniedUpdated)
         }
     }
@@ -465,7 +489,10 @@ class AllowlistStore(
 
     private fun writeDenied(list: List<DeniedEntry>) {
         val now = System.currentTimeMillis()
-        val pruned = list.filter { it.expiresAtMs > now }
+        // Permanent rows (set by revoke()) are never pruned by expiry — they
+        // are sticky tombstones of an explicit user decision. Time-bounded
+        // rows from denyPending still expire at expiresAtMs.
+        val pruned = list.filter { it.permanent || it.expiresAtMs > now }
         val array = JSONArray()
         for (e in pruned.sortedBy { it.packageName }) {
             array.put(JSONObject().apply {
@@ -473,6 +500,7 @@ class AllowlistStore(
                 put("sig", e.signingCertSha256)
                 put("deniedAtMs", e.deniedAtMs)
                 put("expiresAtMs", e.expiresAtMs)
+                if (e.permanent) put("permanent", true)
             })
         }
         atomicWrite(deniedFile, signedEnvelope(DENIED_KEY, array).toString())
@@ -612,6 +640,7 @@ class AllowlistStore(
                             signingCertSha256 = o.getString("sig"),
                             deniedAtMs = o.optLong("deniedAtMs", 0L),
                             expiresAtMs = o.optLong("expiresAtMs", 0L),
+                            permanent = o.optBoolean("permanent", false),
                         )
                     )
                 }
@@ -628,13 +657,15 @@ class AllowlistStore(
                 for (i in 0 until array.length()) {
                     val o = array.getJSONObject(i)
                     val expires = o.optLong("expiresAtMs", 0L)
-                    if (expires > now) {
+                    val permanent = o.optBoolean("permanent", false)
+                    if (permanent || expires > now) {
                         add(
                             DeniedEntry(
                                 packageName = o.getString("pkg"),
                                 signingCertSha256 = o.getString("sig"),
                                 deniedAtMs = o.optLong("deniedAtMs", 0L),
                                 expiresAtMs = expires,
+                                permanent = permanent,
                             )
                         )
                     }

@@ -49,14 +49,21 @@ dependencies {
 }
 ```
 
-### 3. Add the service permission
+### 3. Permission
 
-In your client app's `AndroidManifest.xml`:
+The Mindlayer SDK manifest already declares the signature-level service
+permission, so it is inherited automatically by your app through manifest
+merger:
 
 ```xml
-<!-- Required to bind to Mindlayer service -->
+<!-- Automatically inherited from the SDK manifest; you do not need to add this -->
 <uses-permission android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE" />
 ```
+
+The permission is `signature|knownSigner` and only effective when your app is
+signed with one of the trusted first-party certs registered in Mindlayer; an
+unrelated app gaining the `<uses-permission>` line via the SDK gains no actual
+access to the service.
 
 > **Important:** Cross-app first-party integration requires Android 12 (API 31)
 > or later when the client is signed with a different Play app-signing key than
