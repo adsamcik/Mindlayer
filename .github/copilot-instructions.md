@@ -15,7 +15,7 @@ Android service app (`com.adsamcik.mindlayer.service`) that loads a single LLM (
 
 - Kotlin 2.3.0 / JDK 17 / AGP 8.9.3 / `compileSdk 36`, `minSdk 26`
 - Modules: `:app` (service+dashboard), `:sdk` (client SDK), `:shared` (wire types), `:gemma_model` (Play AI Pack), `:embeddinggemma_model` (EmbeddingGemma AI Pack)
-- LiteRT-LM 0.10.0 + base LiteRT 1.4.2 for EmbeddingGemma, Jetpack Compose (BOM 2025.04.01), Room 2.7.1 + SQLCipher 4.6.1
+- LiteRT-LM 0.11.0 + base LiteRT 2.1.5 for EmbeddingGemma, Jetpack Compose (BOM 2025.04.01), Room 2.7.1 + SQLCipher 4.6.1
 - Tests: JUnit 4, MockK, Robolectric (sdk=33), Turbine, kotlinx-coroutines-test
 
 ## Hard rules
