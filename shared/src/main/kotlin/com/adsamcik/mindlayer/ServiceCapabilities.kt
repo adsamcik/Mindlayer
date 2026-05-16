@@ -76,6 +76,12 @@ data class ServiceCapabilities(
     val maxSessionExpirationMs: Long,
     val maxMediaPartsPerRequest: Int,
     val maxTotalMediaBytesPerRequest: Long,
+    val maxEmbeddingBatchInline: Int = 0,
+    val maxEmbeddingBatchShm: Int = 0,
+    val maxEmbeddingBatchTotal: Int = 0,
+    val maxEmbeddingInputBytes: Long = 0L,
+    val embeddingModelIds: List<String> = emptyList(),
+    val embeddingDims: List<Int> = emptyList(),
 ) : Parcelable {
 
     /**
@@ -92,7 +98,7 @@ data class ServiceCapabilities(
          * layout itself changes (which is itself a wire-break — see
          * `docs/AIDL_STABILITY.md`).
          */
-        const val CURRENT_SCHEMA_VERSION: Int = 1
+        const val CURRENT_SCHEMA_VERSION: Int = 2
 
         // ---- Canonical feature flag strings ---------------------------------
         // Append-only registry. Document each new flag in
@@ -161,6 +167,9 @@ data class ServiceCapabilities(
         /** v0.6: durable deferred inference with fetch and completion callback. */
         const val FEATURE_DEFERRED_INFERENCE: String = "deferred_inference"
 
+        /** Service exposes text embedding endpoints (embed, embedBatch, embedBatchShm, deferred). */
+        const val FEATURE_EMBEDDINGS: String = "embeddings"
+
         /**
          * Baseline capabilities advertised by an old service that predates
          * [IMindlayerService.getCapabilities]. Used by the SDK fallback path
@@ -188,6 +197,17 @@ data class ServiceCapabilities(
             maxSessionExpirationMs = 7L * 24 * 60 * 60 * 1000,
             maxMediaPartsPerRequest = 1,
             maxTotalMediaBytesPerRequest = 100L * 1024 * 1024,
+            maxEmbeddingBatchInline = 0,
+            maxEmbeddingBatchShm = 0,
+            maxEmbeddingBatchTotal = 0,
+            maxEmbeddingInputBytes = 0L,
+            embeddingModelIds = emptyList(),
+            embeddingDims = emptyList(),
         )
+
+        /** Baseline for v1 capability parcels before embedding limit fields existed. */
+        @JvmStatic
+        fun v1Baseline(): ServiceCapabilities = v0Baseline().copy(schemaVersion = 1)
     }
 }
+

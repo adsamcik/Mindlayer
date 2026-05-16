@@ -207,6 +207,8 @@ class Mindlayer private constructor(
                 val rid = requestId ?: return
                 _deferredCompletionFlow.tryEmit(DeferredCompletionNotice(rid, statusCode))
             }
+
+            override fun onEmbeddingBatchComplete(requestId: String?) = Unit
         }
     }
 
@@ -1946,3 +1948,5 @@ class SessionConfigBuilder {
         expirationMs = expirationMs,
     )
 }
+
+

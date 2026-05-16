@@ -31,6 +31,7 @@ import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.SessionInfo
 import com.adsamcik.mindlayer.ToolResult
 import com.adsamcik.mindlayer.service.engine.EngineManager
+import com.adsamcik.mindlayer.service.engine.EmbeddingCoordinator
 import com.adsamcik.mindlayer.service.engine.EngineState
 import com.adsamcik.mindlayer.service.engine.InitFailure
 import com.adsamcik.mindlayer.service.engine.SessionQuotaExceededException
@@ -51,6 +52,7 @@ import com.adsamcik.mindlayer.service.security.AllowlistStore
 import com.adsamcik.mindlayer.service.security.CallerIdentity
 import com.adsamcik.mindlayer.service.security.CallerVerifier
 import com.adsamcik.mindlayer.service.security.IpcInputValidator
+import com.adsamcik.mindlayer.service.security.EvictionRegistry
 import com.adsamcik.mindlayer.service.security.RateLimiter
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.CoroutineScope
@@ -93,6 +95,8 @@ class ServiceBinder(
     private val logRepository: LogRepository? = null,
     private val mlHealthRecorder: MlHealthRecorder? = null,
     private val deferredStore: DeferredStore? = null,
+    private val embeddingCoordinator: EmbeddingCoordinator? = null,
+    private val callbackRegistry: EvictionRegistry = EvictionRegistry(),
 ) : IMindlayerService.Stub() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -158,7 +162,7 @@ class ServiceBinder(
      * Internal visibility allows the service to call [EvictionRegistry.clear]
      * during teardown.
      */
-    internal val evictionRegistry = com.adsamcik.mindlayer.service.security.EvictionRegistry()
+    internal val evictionRegistry = callbackRegistry
 
 
     /**
@@ -195,7 +199,7 @@ class ServiceBinder(
          * [submitToolResultV2]; v5 added [getDiagnosticsTyped]; v6 added
          * [subscribeEvictionNotices] + [unsubscribeEvictionNotices].
          */
-        const val CURRENT_API_VERSION = 7
+        const val CURRENT_API_VERSION = 8
 
         /**
          * How long after termination a scoped key remains in
@@ -462,6 +466,9 @@ class ServiceBinder(
 
     private fun requireDeferredStore(): DeferredStore =
         deferredStore ?: throw typedBinderException(MindlayerErrorCode.INTERNAL, "deferred_store_unavailable")
+
+    private fun requireEmbeddingCoordinator(): EmbeddingCoordinator =
+        embeddingCoordinator ?: throw typedBinderException(MindlayerErrorCode.EMBEDDING_DISABLED, "embeddings unavailable")
 
     private fun requireRegisteredClient(): ClientRegistration? {
         val uid = Binder.getCallingUid()
@@ -2123,9 +2130,11 @@ class ServiceBinder(
         // through the standard pending-approval path rather than getting a
         // free fingerprinting endpoint.
         authorizeCall(cost = 0.25)
+        val embeddingModel = embeddingCoordinator?.defaultModelOrNull()
+        val embeddingFeatures = if (embeddingModel != null) SUPPORTED_FEATURES + com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_EMBEDDINGS else SUPPORTED_FEATURES
         return com.adsamcik.mindlayer.ServiceCapabilities(
             apiVersion = CURRENT_API_VERSION,
-            supportedFeatures = SUPPORTED_FEATURES,
+            supportedFeatures = embeddingFeatures,
             pipeProtocol = "mindlayer.stream.v1",
             maxFrameBytes = 1_048_576,
             maxToolRounds = com.adsamcik.mindlayer.service.engine.InferenceOrchestrator.MAX_TOOL_ROUNDS,
@@ -2139,6 +2148,12 @@ class ServiceBinder(
             // #1874 lifts multi-image, this rises with the validator caps.
             maxMediaPartsPerRequest = MAX_MEDIA_PARTS_PER_REQUEST,
             maxTotalMediaBytesPerRequest = IpcInputValidator.MAX_TOTAL_MEDIA_BYTES_PER_REQUEST,
+            maxEmbeddingBatchInline = if (embeddingModel != null) requireEmbeddingCoordinator().maxBatchInline else 0,
+            maxEmbeddingBatchShm = if (embeddingModel != null) requireEmbeddingCoordinator().maxBatchShm else 0,
+            maxEmbeddingBatchTotal = if (embeddingModel != null) requireEmbeddingCoordinator().maxBatchTotal else 0,
+            maxEmbeddingInputBytes = if (embeddingModel != null) requireEmbeddingCoordinator().maxInputBytes else 0L,
+            embeddingModelIds = embeddingModel?.let { listOf(it.id) } ?: emptyList(),
+            embeddingDims = embeddingModel?.supportedDims ?: emptyList(),
         )
     }
 
@@ -2191,6 +2206,51 @@ class ServiceBinder(
         )
     }
 
+
+    override fun embed(req: com.adsamcik.mindlayer.EmbeddingRequest): com.adsamcik.mindlayer.EmbeddingResult {
+        authorizeCall(cost = 1.0)
+        val requestId = "emb-${Binder.getCallingUid()}-${UUID.randomUUID()}"
+        return runBlocking { requireEmbeddingCoordinator().embed(Binder.getCallingUid(), req, requestId) }
+    }
+
+    override fun embedBatch(reqs: List<com.adsamcik.mindlayer.EmbeddingRequest>?): com.adsamcik.mindlayer.EmbeddingBatchResult {
+        authorizeCall(cost = ((reqs?.size ?: 0) * 0.5).coerceAtMost(RateLimiter.MAX_COST))
+        val requestId = "emb-${Binder.getCallingUid()}-${UUID.randomUUID()}"
+        return runBlocking { requireEmbeddingCoordinator().embedBatch(Binder.getCallingUid(), reqs ?: emptyList(), requestId) }
+    }
+
+    override fun embedBatchShm(reqs: List<com.adsamcik.mindlayer.EmbeddingRequest>?): com.adsamcik.mindlayer.EmbeddingBatchTransfer {
+        authorizeCall(cost = ((reqs?.size ?: 0) * 0.5).coerceAtMost(RateLimiter.MAX_COST))
+        val requestId = "emb-${Binder.getCallingUid()}-${UUID.randomUUID()}"
+        return runBlocking { requireEmbeddingCoordinator().embedBatchShm(Binder.getCallingUid(), reqs ?: emptyList(), requestId) }
+    }
+
+    override fun embedBatchDeferred(reqs: List<com.adsamcik.mindlayer.EmbeddingRequest>?): DeferredHandle {
+        authorizeCall(cost = 0.5)
+        return runBlocking { requireEmbeddingCoordinator().embedBatchDeferred(Binder.getCallingUid(), reqs ?: emptyList()) }
+    }
+
+    override fun fetchEmbeddingBatchResult(requestId: String): com.adsamcik.mindlayer.VectorBlobHandle {
+        authorizeCall(cost = 0.1)
+        return runBlocking { requireEmbeddingCoordinator().fetchEmbeddingBatchResult(Binder.getCallingUid(), requestId) }
+    }
+
+    override fun cancelEmbeddingBatch(requestId: String): com.adsamcik.mindlayer.CancelResult {
+        authorizeCall(cost = 0.1)
+        val outcome = runBlocking { requireEmbeddingCoordinator().cancelEmbeddingBatch(Binder.getCallingUid(), requestId) }
+        return com.adsamcik.mindlayer.CancelResult(outcome = outcome)
+    }
+
+    override fun acknowledgeEmbeddingBatchResult(requestId: String) {
+        authorizeCall(cost = 0.1)
+        runBlocking { requireEmbeddingCoordinator().acknowledgeEmbeddingBatchResult(Binder.getCallingUid(), requestId) }
+    }
+
+    override fun cancelEmbed(requestId: String): com.adsamcik.mindlayer.CancelResult {
+        authorizeCall(cost = 0.1)
+        val outcome = requireEmbeddingCoordinator().cancelEmbed(Binder.getCallingUid(), requestId)
+        return com.adsamcik.mindlayer.CancelResult(outcome = outcome)
+    }
     private fun callerAidlMethodName(): String =
         Thread.currentThread().stackTrace
             .firstOrNull { frame ->
@@ -2293,3 +2353,8 @@ class ServiceBinder(
         evictionRegistry.unregister(uid, callback)
     }
 }
+
+
+
+
+

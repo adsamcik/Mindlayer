@@ -172,6 +172,18 @@ object MindlayerErrorCode {
      */
     const val DEFERRED_RESULT_TOO_LARGE = 5010
 
+    /** Caller exceeded embedding batch cap for inline/SHM/deferred transport. */
+    const val EMBEDDING_BATCH_TOO_LARGE = 5011
+
+    /** No embedding model is installed or usable. */
+    const val EMBEDDING_MODEL_UNAVAILABLE = 5012
+
+    /** Embedding input is empty or exceeds the per-call UTF-8 byte budget. */
+    const val EMBEDDING_INPUT_TOO_LONG = 5013
+
+    /** Embeddings are disabled for this caller or not capability-advertised. */
+    const val EMBEDDING_DISABLED = 5014
+
     // ---- 6xxx auth / allowlist ---------------------------------------------
 
     /** App not on the allowlist; user approval pending in the dashboard. */
@@ -235,7 +247,9 @@ object MindlayerErrorCode {
         TRANSIENT_RESOURCE_EXHAUSTED, SESSION_QUOTA_EXHAUSTED,
         NOT_SUPPORTED, DEFERRED_QUOTA_EXHAUSTED,
         DEFERRED_EXPIRED, UNSUPPORTED_ANDROID_VERSION,
-        DEFERRED_RESULT_TOO_LARGE -> Category.RESOURCE
+        DEFERRED_RESULT_TOO_LARGE, EMBEDDING_BATCH_TOO_LARGE,
+        EMBEDDING_MODEL_UNAVAILABLE, EMBEDDING_INPUT_TOO_LONG,
+        EMBEDDING_DISABLED -> Category.RESOURCE
         ALLOWLIST_PENDING, ALLOWLIST_REVOKED, IDENTITY_UNKNOWN -> Category.AUTH
         INTERNAL -> Category.UNKNOWN
         else -> Category.UNKNOWN
@@ -275,6 +289,10 @@ object MindlayerErrorCode {
         DEFERRED_QUOTA_EXHAUSTED -> "DEFERRED_QUOTA_EXHAUSTED"
         DEFERRED_EXPIRED -> "DEFERRED_EXPIRED"
         DEFERRED_RESULT_TOO_LARGE -> "DEFERRED_RESULT_TOO_LARGE"
+        EMBEDDING_BATCH_TOO_LARGE -> "EMBEDDING_BATCH_TOO_LARGE"
+        EMBEDDING_MODEL_UNAVAILABLE -> "EMBEDDING_MODEL_UNAVAILABLE"
+        EMBEDDING_INPUT_TOO_LONG -> "EMBEDDING_INPUT_TOO_LONG"
+        EMBEDDING_DISABLED -> "EMBEDDING_DISABLED"
         UNSUPPORTED_ANDROID_VERSION -> "UNSUPPORTED_ANDROID_VERSION"
         ALLOWLIST_PENDING -> "ALLOWLIST_PENDING"
         ALLOWLIST_REVOKED -> "ALLOWLIST_REVOKED"
@@ -302,3 +320,5 @@ object MindlayerErrorCode {
             .ifEmpty { null }
     }
 }
+
+

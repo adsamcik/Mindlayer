@@ -37,12 +37,11 @@ internal class FakeDeferredDao : DeferredDao {
         rows.values.count { it.uid == uid && it.statusCode != running && it.fetchedAtMs == null }
 
     override suspend fun resultBytes(uid: Int): Long =
-        rows.values.filter { it.uid == uid && it.resultText != null }
-            .sumOf { it.resultText!!.length.toLong() }
+        rows.values.filter { it.uid == uid }.sumOf { (it.resultText?.length?.toLong() ?: 0L) + (it.blobBytes ?: 0L) }
 
     override suspend fun oldestCompletedWithText(uid: Int, running: Int): DeferredEntity? =
         rows.values
-            .filter { it.uid == uid && it.statusCode != running && it.resultText != null }
+            .filter { it.uid == uid && it.statusCode != running && (it.resultText != null || it.blobPath != null) }
             .minByOrNull { it.completedAtMs ?: Long.MAX_VALUE }
 
     override suspend fun clearResultText(requestId: String): Int {
@@ -60,6 +59,8 @@ internal class FakeDeferredDao : DeferredDao {
 
     override suspend fun deleteAny(requestId: String): Int =
         if (rows.remove(requestId) != null) 1 else 0
+
+    override suspend fun expiredBefore(nowMs: Long): List<DeferredEntity> = rows.values.filter { it.expiresAtMs <= nowMs }
 
     override suspend fun deleteExpired(nowMs: Long): Int {
         val victims = rows.values.filter { it.expiresAtMs <= nowMs }.map { it.requestId }
@@ -84,6 +85,9 @@ internal class FakeDeferredDao : DeferredDao {
         completedAtMs: Long,
         expiresAtMs: Long,
         truncated: Boolean,
+        blobPath: String?,
+        blobBytes: Long?,
+        perItemMetadataJson: String?,
     ): Int {
         val r = rows[requestId] ?: return 0
         rows[requestId] = r.copy(
@@ -95,6 +99,9 @@ internal class FakeDeferredDao : DeferredDao {
             completedAtMs = completedAtMs,
             expiresAtMs = expiresAtMs,
             truncated = truncated,
+            blobPath = blobPath,
+            blobBytes = blobBytes,
+            perItemMetadataJson = perItemMetadataJson,
         )
         return 1
     }
@@ -148,3 +155,6 @@ internal class FakeDeferredDao : DeferredDao {
         return flipped
     }
 }
+
+
+

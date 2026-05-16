@@ -3,18 +3,32 @@ package com.adsamcik.mindlayer.service.engine
 import android.os.Bundle
 import com.adsamcik.mindlayer.DeferredHandle
 import com.adsamcik.mindlayer.DeferredResult
+import com.adsamcik.mindlayer.EmbeddingItemMetadata
 import com.adsamcik.mindlayer.RequestMeta
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import java.io.File
+
+sealed class EmbeddingFetchOutcome {
+    object StillRunning : EmbeddingFetchOutcome()
+    data class Ready(val blobPath: String, val blobBytes: Long, val metrics: Bundle?, val metadata: List<EmbeddingItemMetadata>) : EmbeddingFetchOutcome()
+    object Cancelled : EmbeddingFetchOutcome()
+    data class Failed(val errorCodeInt: Int, val errorCodeName: String?) : EmbeddingFetchOutcome()
+    object Expired : EmbeddingFetchOutcome()
+    object NotFoundOrNotOwned : EmbeddingFetchOutcome()
+}
 
 class DeferredStore(
     private val dao: DeferredDao,
@@ -29,12 +43,6 @@ class DeferredStore(
         const val DEFAULT_MAX_RUNNING_PER_UID: Int = 16
         const val DEFAULT_MAX_COMPLETED_PENDING_PER_UID: Int = 64
         const val DEFAULT_MAX_RESULT_BYTES_PER_UID: Long = 1L * 1024L * 1024L
-
-        /**
-         * Per-result hard cap. A single deferred result above this size is
-         * truncated at commit and flagged via the `truncated` metric. Keeps
-         * one fat result from self-evicting under [maxResultBytesPerUid].
-         */
         const val DEFAULT_MAX_RESULT_BYTES_PER_RESULT: Int = 256 * 1024
         const val DEFAULT_TTL_MS: Long = 24L * 60L * 60L * 1000L
         private val json = Json { ignoreUnknownKeys = true }
@@ -59,25 +67,58 @@ class DeferredStore(
             expiresAtMs = now + ttlMs,
             fetchedAtMs = null,
             truncated = false,
+            kind = DeferredEntity.KIND_CHAT,
         )
         return if (dao.createIfWithinQuota(entity, maxRunningPerUid, maxCompletedPendingPerUid)) {
             DeferredHandle(requestId = requestId, expiresAtMs = entity.expiresAtMs)
-        } else {
-            null
-        }
+        } else null
+    }
+
+    suspend fun createEmbeddingBatch(uid: Int, requestId: String, batchSize: Int): DeferredHandle? {
+        pruneExpired()
+        val now = clock()
+        val entity = DeferredEntity(
+            requestId = requestId,
+            uid = uid,
+            sessionId = "",
+            promptChars = batchSize,
+            mediaCount = 0,
+            metricsJson = null,
+            resultText = null,
+            errorCodeInt = 0,
+            errorCodeName = null,
+            statusCode = DeferredResult.STILL_RUNNING,
+            createdAtMs = now,
+            completedAtMs = null,
+            expiresAtMs = now + ttlMs,
+            fetchedAtMs = null,
+            truncated = false,
+            kind = DeferredEntity.KIND_EMBEDDING,
+        )
+        return if (dao.createIfWithinQuota(entity, maxRunningPerUid, maxCompletedPendingPerUid)) {
+            DeferredHandle(requestId = requestId, expiresAtMs = entity.expiresAtMs)
+        } else null
     }
 
     suspend fun completeReady(requestId: String, uid: Int, text: String, metrics: Bundle?) {
         val (capped, truncated) = capResultText(text)
-        complete(requestId, uid, DeferredResult.READY, capped, metrics, 0, null, truncated)
+        complete(requestId, uid, DeferredResult.READY, capped, metrics, 0, null, truncated, null, null)
+    }
+
+    suspend fun completeEmbeddingBatch(requestId: String, uid: Int, blobPath: String, blobBytes: Long, metrics: Bundle?, metadata: List<EmbeddingItemMetadata> = emptyList()) {
+        complete(requestId, uid, DeferredResult.READY, null, metrics, 0, null, false, blobPath, blobBytes, metadataToJson(metadata))
     }
 
     suspend fun completeFailed(requestId: String, uid: Int, errorCode: Int, errorName: String?) {
-        complete(requestId, uid, DeferredResult.FAILED, null, null, errorCode, errorName, false)
+        complete(requestId, uid, DeferredResult.FAILED, null, null, errorCode, errorName, false, null, null)
+    }
+
+    suspend fun failEmbeddingBatch(requestId: String, uid: Int, errorCode: Int, errorName: String?) {
+        completeFailed(requestId, uid, errorCode, errorName)
     }
 
     suspend fun completeCancelled(requestId: String, uid: Int) {
-        complete(requestId, uid, DeferredResult.CANCELLED, null, null, 0, null, false)
+        complete(requestId, uid, DeferredResult.CANCELLED, null, null, 0, null, false, null, null)
     }
 
     private suspend fun complete(
@@ -89,6 +130,9 @@ class DeferredStore(
         errorCode: Int,
         errorName: String?,
         truncated: Boolean,
+        blobPath: String?,
+        blobBytes: Long?,
+        perItemMetadataJson: String? = null,
     ) {
         val now = clock()
         dao.complete(
@@ -101,29 +145,23 @@ class DeferredStore(
             completedAtMs = now,
             expiresAtMs = now + ttlMs,
             truncated = truncated,
+            blobPath = blobPath,
+            blobBytes = blobBytes,
+            perItemMetadataJson = perItemMetadataJson,
         )
         enforceByteQuota(uid)
     }
 
-    /**
-     * Truncate [text] at [maxResultBytesPerResult] UTF-16 code units (the
-     * String length unit Room persists). Returns the (possibly-truncated)
-     * text and a flag indicating whether truncation occurred.
-     */
     private fun capResultText(text: String): Pair<String, Boolean> =
-        if (text.length <= maxResultBytesPerResult) text to false
-        else text.substring(0, maxResultBytesPerResult) to true
+        if (text.length <= maxResultBytesPerResult) text to false else text.substring(0, maxResultBytesPerResult) to true
 
     suspend fun fetch(uid: Int, requestId: String): DeferredResult {
-        // M-D1: lookup BEFORE pruning so we can distinguish EXPIRED from
-        // NOT_FOUND_OR_NOT_OWNED. Background prune is still driven by
-        // create/cancel/acknowledge paths.
-        val entity = dao.byRequestId(requestId)
-            ?: return DeferredResult(status = DeferredResult.NOT_FOUND_OR_NOT_OWNED)
-        if (entity.uid != uid) return DeferredResult(status = DeferredResult.NOT_FOUND_OR_NOT_OWNED)
+        val entity = dao.byRequestId(requestId) ?: return DeferredResult(status = DeferredResult.NOT_FOUND_OR_NOT_OWNED)
+        if (entity.uid != uid || entity.kind != DeferredEntity.KIND_CHAT) return DeferredResult(status = DeferredResult.NOT_FOUND_OR_NOT_OWNED)
         val now = clock()
         if (entity.expiresAtMs <= now) {
             dao.deleteOwned(requestId, uid)
+            deleteBlob(entity)
             return DeferredResult(
                 status = DeferredResult.EXPIRED,
                 errorCodeInt = MindlayerErrorCode.DEFERRED_EXPIRED,
@@ -134,11 +172,7 @@ class DeferredStore(
             DeferredResult.STILL_RUNNING -> DeferredResult(status = DeferredResult.STILL_RUNNING)
             DeferredResult.READY -> {
                 dao.markFetched(requestId, uid, now)
-                DeferredResult(
-                    status = DeferredResult.READY,
-                    text = entity.resultText.orEmpty(),
-                    metrics = jsonToMetrics(entity.metricsJson, entity.truncated),
-                )
+                DeferredResult(status = DeferredResult.READY, text = entity.resultText.orEmpty(), metrics = jsonToMetrics(entity.metricsJson, entity.truncated))
             }
             DeferredResult.CANCELLED -> DeferredResult(status = DeferredResult.CANCELLED)
             DeferredResult.FAILED -> DeferredResult(status = DeferredResult.FAILED, errorCodeInt = entity.errorCodeInt, errorCodeName = entity.errorCodeName)
@@ -146,19 +180,56 @@ class DeferredStore(
         }
     }
 
-    suspend fun cancel(uid: Int, requestId: String): Int {
+    suspend fun fetchEmbeddingBatch(uid: Int, requestId: String): EmbeddingFetchOutcome {
+        val entity = dao.byRequestId(requestId) ?: return EmbeddingFetchOutcome.NotFoundOrNotOwned
+        if (entity.uid != uid || entity.kind != DeferredEntity.KIND_EMBEDDING) return EmbeddingFetchOutcome.NotFoundOrNotOwned
+        val now = clock()
+        if (entity.expiresAtMs <= now) {
+            dao.deleteOwned(requestId, uid)
+            deleteBlob(entity)
+            return EmbeddingFetchOutcome.Expired
+        }
+        return when (entity.statusCode) {
+            DeferredResult.STILL_RUNNING -> EmbeddingFetchOutcome.StillRunning
+            DeferredResult.READY -> {
+                dao.markFetched(requestId, uid, now)
+                val path = entity.blobPath ?: return EmbeddingFetchOutcome.Failed(MindlayerErrorCode.INTERNAL, MindlayerErrorCode.nameOf(MindlayerErrorCode.INTERNAL))
+                EmbeddingFetchOutcome.Ready(path, entity.blobBytes ?: 0L, jsonToMetrics(entity.metricsJson, entity.truncated), metadataFromJson(entity.perItemMetadataJson))
+            }
+            DeferredResult.CANCELLED -> EmbeddingFetchOutcome.Cancelled
+            DeferredResult.FAILED -> EmbeddingFetchOutcome.Failed(entity.errorCodeInt, entity.errorCodeName)
+            else -> EmbeddingFetchOutcome.Failed(entity.errorCodeInt, entity.errorCodeName)
+        }
+    }
+
+    suspend fun cancel(uid: Int, requestId: String): Int = cancelInternal(uid, requestId, DeferredEntity.KIND_CHAT)
+
+    suspend fun cancelEmbeddingBatch(requestId: String, uid: Int): Int = cancelInternal(uid, requestId, DeferredEntity.KIND_EMBEDDING)
+
+    private suspend fun cancelInternal(uid: Int, requestId: String, kind: String): Int {
         pruneExpired()
         val entity = dao.byRequestId(requestId) ?: return com.adsamcik.mindlayer.CancelResult.UNKNOWN
-        if (entity.uid != uid) return com.adsamcik.mindlayer.CancelResult.UNKNOWN
-        if (entity.statusCode != DeferredResult.STILL_RUNNING) return com.adsamcik.mindlayer.CancelResult.ALREADY_FINISHED
+        if (entity.uid != uid || entity.kind != kind) return com.adsamcik.mindlayer.CancelResult.UNKNOWN
+        if (entity.statusCode != DeferredResult.STILL_RUNNING) {
+            if (kind == DeferredEntity.KIND_EMBEDDING && dao.deleteOwned(requestId, uid) > 0) deleteBlob(entity)
+            return com.adsamcik.mindlayer.CancelResult.ALREADY_FINISHED
+        }
         val now = clock()
         dao.cancelRunning(requestId, uid, now, now + ttlMs)
         return com.adsamcik.mindlayer.CancelResult.CANCELLED
     }
 
-    suspend fun acknowledge(uid: Int, requestId: String): Boolean {
+    suspend fun acknowledge(uid: Int, requestId: String): Boolean = acknowledgeInternal(uid, requestId, DeferredEntity.KIND_CHAT)
+
+    suspend fun acknowledgeEmbeddingBatch(uid: Int, requestId: String): Boolean = acknowledgeInternal(uid, requestId, DeferredEntity.KIND_EMBEDDING)
+
+    private suspend fun acknowledgeInternal(uid: Int, requestId: String, kind: String): Boolean {
         pruneExpired()
-        return dao.deleteOwned(requestId, uid) > 0
+        val entity = dao.byRequestId(requestId) ?: return false
+        if (entity.uid != uid || entity.kind != kind) return false
+        val deleted = dao.deleteOwned(requestId, uid) > 0
+        if (deleted) deleteBlob(entity)
+        return deleted
     }
 
     suspend fun failRunningOnInit(): Int {
@@ -172,20 +243,48 @@ class DeferredStore(
         )
     }
 
-    /**
-     * Snapshot of completed entries for [uid] the client has not yet
-     * fetched. Used by the binder to re-fire `onDeferredInferenceComplete`
-     * callbacks after a reconnect — see M-D3.
-     */
-    suspend fun completedPendingForUid(uid: Int): List<DeferredEntity> =
-        dao.completedPendingForUid(uid)
+    suspend fun completedPendingForUid(uid: Int): List<DeferredEntity> = dao.completedPendingForUid(uid)
 
-    suspend fun pruneExpired(): Int = dao.deleteExpired(clock())
+    suspend fun pruneExpired(): Int {
+        val now = clock()
+        dao.expiredBefore(now).forEach { deleteBlob(it) }
+        return dao.deleteExpired(now)
+    }
 
     private suspend fun enforceByteQuota(uid: Int) {
         while (dao.resultBytes(uid) > maxResultBytesPerUid) {
             val oldest = dao.oldestCompletedWithText(uid) ?: return
             dao.deleteAny(oldest.requestId)
+            deleteBlob(oldest)
+        }
+    }
+
+    private fun deleteBlob(entity: DeferredEntity) {
+        val path = entity.blobPath ?: return
+        runCatching { File(path).delete() }
+    }
+
+
+    private fun metadataToJson(metadata: List<EmbeddingItemMetadata>): String? {
+        if (metadata.isEmpty()) return null
+        return JsonArray(metadata.map { item ->
+            buildJsonObject {
+                item.tag?.let { put("tag", it) }
+                put("tokenCount", item.tokenCount)
+                put("truncated", item.truncated)
+            }
+        }).toString()
+    }
+
+    private fun metadataFromJson(raw: String?): List<EmbeddingItemMetadata> {
+        if (raw.isNullOrBlank()) return emptyList()
+        val array = runCatching { json.parseToJsonElement(raw).jsonArray }.getOrNull() ?: return emptyList()
+        return array.mapNotNull { element ->
+            val obj = element as? JsonObject ?: return@mapNotNull null
+            val tag = obj["tag"]?.jsonPrimitive?.contentOrNull
+            val tokenCount = obj["tokenCount"]?.jsonPrimitive?.intOrNull ?: 0
+            val truncated = obj["truncated"]?.jsonPrimitive?.booleanOrNull ?: false
+            EmbeddingItemMetadata(tag = tag, tokenCount = tokenCount, truncated = truncated)
         }
     }
 
@@ -209,9 +308,6 @@ class DeferredStore(
         val bundle = Bundle()
         obj?.forEach { (key, value) ->
             val primitive = value as? JsonPrimitive ?: return@forEach
-            // M-D6: round-trip the same numeric/boolean types the writer
-            // can emit. Prior implementation collapsed everything to Int,
-            // silently dropping Long timestamps and floating-point metrics.
             primitive.booleanOrNull?.let { bundle.putBoolean(key, it); return@forEach }
             primitive.intOrNull?.let { bundle.putInt(key, it); return@forEach }
             primitive.longOrNull?.let { bundle.putLong(key, it); return@forEach }
@@ -221,11 +317,6 @@ class DeferredStore(
         return bundle
     }
 
-    /**
-     * Flag emitted in the [DeferredResult.metrics] bundle when the result
-     * text was truncated to fit [maxResultBytesPerResult]. Surface to
-     * callers so they can warn or refetch via a non-deferred path.
-     */
     object Metrics {
         const val TRUNCATED = METRIC_TRUNCATED
     }
