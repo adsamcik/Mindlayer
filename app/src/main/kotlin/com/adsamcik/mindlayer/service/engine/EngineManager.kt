@@ -10,6 +10,7 @@ import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,6 +18,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.io.File
 
 /**
@@ -70,6 +72,17 @@ class EngineManager(
 
         /** Hint filename used for Play AI Pack extraction fallback. */
         const val DEFAULT_MODEL_FILENAME = "gemma-4-E2B-it.litertlm"
+
+        /**
+         * H-E2: default cap on [awaitReady]. A wedged init (driver hang,
+         * stuck native load) used to pin every queued binder thread
+         * forever. Each waiter now bails after this window with a typed
+         * [InitFailure.NativeError] so the SDK can surface a deterministic
+         * `engine_load_failed` instead of hanging. The init job itself is
+         * **not** cancelled — it keeps running so a slow-but-eventual
+         * success still rearms the engine for later callers.
+         */
+        const val DEFAULT_AWAIT_READY_TIMEOUT_MS: Long = 30_000L
 
         // Qualcomm SoCs with NPU support
         private val QUALCOMM_NPU_SOCS = setOf(
@@ -384,10 +397,31 @@ class EngineManager(
         }
     }
 
-    suspend fun awaitReady(): EngineState {
+    suspend fun awaitReady(): EngineState = awaitReady(DEFAULT_AWAIT_READY_TIMEOUT_MS)
+
+    /**
+     * H-E2: suspend until the engine settles into [EngineState.Ready] or
+     * [EngineState.Failed], or until [timeoutMs] elapses. On timeout the
+     * waiter receives a typed [EngineState.Failed] carrying
+     * [InitFailure.NativeError]; the in-flight init job is left running
+     * so a slow-but-eventual success still rearms the engine. Callers
+     * MUST treat the returned state as authoritative for THIS request
+     * only and re-call [awaitReady] for any later use.
+     */
+    suspend fun awaitReady(timeoutMs: Long): EngineState {
         val current = _state.value
         if (current is EngineState.Ready || current is EngineState.Failed) return current
-        return state.first { it is EngineState.Ready || it is EngineState.Failed }
+        return try {
+            withTimeout(timeoutMs) {
+                state.first { it is EngineState.Ready || it is EngineState.Failed }
+            }
+        } catch (_: TimeoutCancellationException) {
+            MindlayerLog.w(
+                TAG,
+                "awaitReady() timed out after ${timeoutMs}ms while engine state=${_state.value}",
+            )
+            EngineState.Failed(InitFailure.NativeError("init timeout"))
+        }
     }
 
     /**
@@ -460,6 +494,30 @@ class EngineManager(
     /** Shut down the engine and release native resources. */
     suspend fun shutdown() = mutex.withLock {
         shutdownInternal()
+    }
+
+    /**
+     * M-E1: atomically check [predicate] under the engine mutex and only
+     * tear the engine down if it still holds. Used by
+     * [com.adsamcik.mindlayer.service.MindlayerMlService.onTrimMemory]
+     * to close the TOCTOU between "no active streams" check and the
+     * native unload: while the mutex is held, no concurrent
+     * [initialize] / [switchBackend] / [shutdown] can interleave, so a
+     * fresh request that races our pressure-driven unload either:
+     *  - lost the race and now finds the engine Idle (triggering a fresh
+     *    rearm via [SessionManager.ensureInitStarted]), or
+     *  - won the race and we observe its in-flight work via [predicate]
+     *    (returning `false` and skipping the unload).
+     *
+     * Returns `true` if the engine was actually torn down.
+     */
+    suspend fun shutdownIfIdle(predicate: () -> Boolean): Boolean = mutex.withLock {
+        if (!predicate()) {
+            MindlayerLog.i(TAG, "shutdownIfIdle: predicate false, skipping native unload")
+            return@withLock false
+        }
+        shutdownInternal()
+        true
     }
 
     /**
