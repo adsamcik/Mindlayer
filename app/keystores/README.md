@@ -1,26 +1,32 @@
-# knownCerts instrumented-test keystores
+# knownCerts instrumented-test keystore (pinned debug signer)
 
-These are test-only keystores used by `KnownCertsDigestFormatTest`. They are committed so the Android
-PackageManager permission grant test has stable certificate digests on every developer machine and CI runner.
+`knowncerts-owner.jks` is a test-only keystore committed to the repo so the debug variant has a stable
+signing certificate on every developer machine and CI runner. It is wired as the debug build type's
+`signingConfig` in `app/build.gradle.kts`. The androidTest variant inherits this same config, which keeps
+Android's instrumentation framework happy (test APK and target APK must share a signing certificate).
 
-They are not production signing material.
+This is not production signing material.
 
 ## Credentials
 
 - Store password: `knowncertstest`
 - Key password: `knowncertstest`
 - Owner alias: `knowncerts-owner` (`knowncerts-owner.jks`)
-- Requester alias: `knowncerts-requester` (`knowncerts-requester.jks`)
 
-The debug target APK is signed with `knowncerts-owner`; the androidTest APK is signed with
-`knowncerts-requester`. Keeping the signers different prevents the normal `signature` branch from masking
-what `knownSigner` accepts.
-
-Requester certificate SHA-256, in the canonical Android `knownCerts` format, is:
+Certificate SHA-256 (canonical lowercase 64-hex form):
 
 ```text
-3bb0a4da57f3230bf5c1d49da62cb320ca960839a93c71dc14c2eef1243f8588
+664735c79928241a813a556fa41a03762c568189096949c7c2cfb533f26a7f52
 ```
+
+## History
+
+PR #44 also committed a second keystore (`knowncerts-requester.jks`) and configured the androidTest
+variant to sign with it, so a `signature|knownSigner` permission could only be granted via the
+`knownCerts` branch. That design was reverted in the follow-up hotfix because Android's instrumentation
+framework refuses to start a test APK whose signing cert does not match the target APK's — CI broke
+on every PR with `Permission Denial: ... does NOT have a signature matching the target`. The
+`KnownCertsDigestFormatTest` is currently `@Ignore`d pending a redesign (see the test class comment).
 
 ## Regeneration recipe
 
@@ -29,11 +35,8 @@ $keytool = "$env:JAVA_HOME\bin\keytool.exe"
 & $keytool -genkeypair -v -keystore knowncerts-owner.jks -storepass knowncertstest -keypass knowncertstest `
   -alias knowncerts-owner -keyalg RSA -keysize 2048 -validity 10000 `
   -dname "CN=Mindlayer knownCerts test owner,O=Mindlayer,C=US"
-& $keytool -genkeypair -v -keystore knowncerts-requester.jks -storepass knowncertstest -keypass knowncertstest `
-  -alias knowncerts-requester -keyalg RSA -keysize 2048 -validity 10000 `
-  -dname "CN=Mindlayer knownCerts test requester,O=Mindlayer,C=US"
-& $keytool -list -v -keystore knowncerts-requester.jks -storepass knowncertstest -alias knowncerts-requester
+& $keytool -list -v -keystore knowncerts-owner.jks -storepass knowncertstest -alias knowncerts-owner
 ```
 
-Strip colons from the `SHA256:` fingerprint and lowercase it before updating
-`app/src/debug/res/values/knowncerts_format_test.xml`.
+Strip colons from the `SHA256:` fingerprint and lowercase it before updating this README.
+
