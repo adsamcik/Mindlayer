@@ -450,7 +450,14 @@ class InferenceOrchestrator(
      * calls race against teardown.
      */
     suspend fun awaitAllJobs(timeoutMs: Long = 5_000) {
-        val jobs = activeJobs.values.toList()
+        // ConcurrentHashMap's `values` view exposes a weakly-consistent
+        // iterator whose `hasNext()` / `next()` aren't atomic under
+        // concurrent `remove(...)` from completing jobs — calling
+        // `toList()` here races teardown and can surface a benign
+        // `NoSuchElementException`. Snapshot via the documented thread-safe
+        // bulk traversal (`forEach`) instead.
+        val jobs = ArrayList<Job>(activeJobs.size)
+        activeJobs.forEach { _, job -> jobs.add(job) }
         if (jobs.isEmpty()) return
         try {
             withTimeout(timeoutMs) { jobs.joinAll() }
