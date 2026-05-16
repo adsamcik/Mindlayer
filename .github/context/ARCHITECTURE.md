@@ -151,6 +151,6 @@ list cert hash parity.
 ## Embedding runtime addendum
 
 - Module `:embeddinggemma_model` is a Play for On-device AI install-time asset pack for EmbeddingGemma-300M `.tflite` weights plus the SentencePiece tokenizer.
-- LiteRT-LM 0.11.0 handles the generative model (Gemma 4 E2B); base LiteRT 1.4.2 handles the embedding model (EmbeddingGemma-300M).
+- LiteRT-LM 0.11.0 handles the generative model (Gemma 4 E2B); base LiteRT 2.1.5 handles the embedding model (EmbeddingGemma-300M).
 - The two runtimes have separate native handles and lifecycles. GPU/NPU coexistence is unverified on real devices; fallback is a process-wide accelerator mutex serializing both runtimes.
 - Memory pressure unloads the embedding model first.
