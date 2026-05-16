@@ -33,6 +33,8 @@ import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.UUID
 
 /**
@@ -185,6 +187,12 @@ class Mindlayer private constructor(
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
 
+    private val _embeddingBatchCompleteFlow = MutableSharedFlow<String>(
+        replay = 1,
+        extraBufferCapacity = EVICTION_BUFFER,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
     /**
      * Shared callback instance — registered exactly once per Mindlayer
      * lifetime. Service-side idempotency keys on `asBinder()` so
@@ -208,7 +216,10 @@ class Mindlayer private constructor(
                 _deferredCompletionFlow.tryEmit(DeferredCompletionNotice(rid, statusCode))
             }
 
-            override fun onEmbeddingBatchComplete(requestId: String?) = Unit
+            override fun onEmbeddingBatchComplete(requestId: String?) {
+                val rid = requestId ?: return
+                _embeddingBatchCompleteFlow.tryEmit(rid)
+            }
         }
     }
 
@@ -260,6 +271,18 @@ class Mindlayer private constructor(
     fun evictionNotices(): Flow<EvictionNotice> = _evictionFlow.asSharedFlow()
 
     fun deferredCompletions(): Flow<DeferredCompletionNotice> = _deferredCompletionFlow.asSharedFlow()
+
+    /**
+     * Cold flow of deferred embedding batch completion push events.
+     *
+     * Emits each requestId received from IClientCallback.onEmbeddingBatchComplete.
+     * Collection first verifies [ServiceCapabilities.FEATURE_EMBEDDINGS]; old
+     * service binaries throw [MindlayerException] with NOT_SUPPORTED.
+     */
+    fun embeddingBatchCompletions(): Flow<String> = flow {
+        requireEmbeddingCapability()
+        _embeddingBatchCompleteFlow.collect { emit(it) }
+    }
 
     /**
      * Best-effort subscribe — invoked on every fresh CONNECTED transition.
@@ -846,6 +869,301 @@ class Mindlayer private constructor(
         }
     }
 
+    // -- Embeddings -----------------------------------------------------------
+
+    private suspend fun requireEmbeddingCapability(): ServiceCapabilities {
+        val caps = getCapabilities()
+        if (!caps.supports(ServiceCapabilities.FEATURE_EMBEDDINGS)) {
+            throw MindlayerException(
+                message = "Connected Mindlayer service does not support embeddings",
+                code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.NOT_SUPPORTED,
+            )
+        }
+        return caps
+    }
+
+    private fun embeddingNotSupported(requestId: String? = null): MindlayerException = MindlayerException(
+        message = "Connected Mindlayer service does not implement embeddings",
+        code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.NOT_SUPPORTED,
+        requestId = requestId,
+    )
+
+    /**
+     * ```kotlin
+     * val mindlayer = Mindlayer.connect(context); mindlayer.awaitConnected()
+     * if (!mindlayer.getCapabilities().supports(ServiceCapabilities.FEATURE_EMBEDDINGS)) {
+     *     // service doesn't ship embeddings — show a friendly message
+     * }
+     * val vec = mindlayer.embed("the cat sat on the mat")
+     * val index = InMemoryVectorIndex()
+     * index.put("doc1", vec)
+     * val hits = index.search(mindlayer.embed("feline on textile"), k = 5)
+     * ```
+     *
+     * Compute a 768-dim L2-normalized embedding for [text] using the default
+     * embedding model and the RETRIEVAL_DOCUMENT task prefix.
+     *
+     * Blocks until the embedding service is ready or fails. Throws
+     * [MindlayerException] with `NOT_SUPPORTED` if the connected service doesn't
+     * advertise [ServiceCapabilities.FEATURE_EMBEDDINGS] or lacks the Phase-B
+     * AIDL method.
+     *
+     * For non-default config see [embed] ([EmbeddingConfig] overload).
+     */
+    suspend fun embed(text: String): FloatArray = embed(EmbeddingConfig(text = text)).vector
+
+    /**
+     * Typed embedding. See [EmbeddingConfig] for full options.
+     *
+     * Capability-gated by [ServiceCapabilities.FEATURE_EMBEDDINGS]; old service
+     * binaries throw [MindlayerException] with `NOT_SUPPORTED`.
+     */
+    suspend fun embed(config: EmbeddingConfig): com.adsamcik.mindlayer.EmbeddingResult {
+        requireEmbeddingCapability()
+        return try {
+            withContext(Dispatchers.IO) {
+                withTypedErrors { it.embed(config.toAidlRequest()) }
+            }
+        } catch (_: NoSuchMethodError) {
+            throw embeddingNotSupported()
+        } catch (_: AbstractMethodError) {
+            throw embeddingNotSupported()
+        }
+    }
+
+    /**
+     * Compute embeddings for [configs] in one trip. Caps at 64 inputs (inline
+     * binder transport) per the negotiated capabilities. For larger batches use
+     * [embedBatchLarge] (SHM transport, up to 4096) or [embedBatchDeferred]
+     * (durable, push notification, up to 4096).
+     *
+     * Capability-gated by [ServiceCapabilities.FEATURE_EMBEDDINGS]; old service
+     * binaries throw [MindlayerException] with `NOT_SUPPORTED`.
+     */
+    suspend fun embedBatch(configs: List<EmbeddingConfig>): List<com.adsamcik.mindlayer.EmbeddingResult> {
+        val caps = requireEmbeddingCapability()
+        validateEmbeddingBatchSize(configs, caps.maxEmbeddingBatchInline, "inline")
+        return try {
+            withContext(Dispatchers.IO) {
+                withTypedErrors { it.embedBatch(configs.map { config -> config.toAidlRequest() }).results }
+            }
+        } catch (_: NoSuchMethodError) {
+            throw embeddingNotSupported()
+        } catch (_: AbstractMethodError) {
+            throw embeddingNotSupported()
+        }
+    }
+
+    /**
+     * Compute embeddings for up to 4096 inputs via SharedMemory transport.
+     * Service writes the vectors to a SharedMemory region, SDK reads them
+     * directly. Synchronous: blocks until all embeddings are computed.
+     *
+     * Capability-gated by [ServiceCapabilities.FEATURE_EMBEDDINGS]; old service
+     * binaries throw [MindlayerException] with `NOT_SUPPORTED`.
+     */
+    suspend fun embedBatchLarge(configs: List<EmbeddingConfig>): List<com.adsamcik.mindlayer.EmbeddingResult> {
+        val caps = requireEmbeddingCapability()
+        validateEmbeddingBatchSize(configs, caps.maxEmbeddingBatchShm.takeIf { it > 0 } ?: caps.maxEmbeddingBatchTotal, "shared-memory")
+        return try {
+            withContext(Dispatchers.IO) {
+                parseEmbeddingTransfer(withTypedErrors { it.embedBatchShm(configs.map { config -> config.toAidlRequest() }) })
+            }
+        } catch (_: NoSuchMethodError) {
+            throw embeddingNotSupported()
+        } catch (_: AbstractMethodError) {
+            throw embeddingNotSupported()
+        }
+    }
+
+    /**
+     * Submit a large batch for durable async computation. Returns a handle
+     * to fetch results later. Receives push notification when complete via
+     * the existing IClientCallback (no polling needed).
+     *
+     * The service persists this in its DeferredStore — survives client process
+     * death. Results are TTL'd (default 24h) and quota-bound per UID.
+     *
+     * Capability-gated by [ServiceCapabilities.FEATURE_EMBEDDINGS]; old service
+     * binaries throw [MindlayerException] with `NOT_SUPPORTED`.
+     */
+    suspend fun embedBatchDeferred(configs: List<EmbeddingConfig>): EmbeddingBatchHandle {
+        val caps = requireEmbeddingCapability()
+        validateEmbeddingBatchSize(configs, caps.maxEmbeddingBatchTotal, "deferred")
+        return try {
+            withContext(Dispatchers.IO) {
+                val handle = withTypedErrors { it.embedBatchDeferred(configs.map { config -> config.toAidlRequest() }) }
+                EmbeddingBatchHandle(handle.requestId, handle.expiresAtMs)
+            }
+        } catch (_: NoSuchMethodError) {
+            throw embeddingNotSupported()
+        } catch (_: AbstractMethodError) {
+            throw embeddingNotSupported()
+        }
+    }
+
+    /**
+     * Fetch the result of a deferred batch. Returns an [EmbeddingBatchOutcome]
+     * variant for still-running, ready, failed, cancelled, expired, or unknown
+     * requests.
+     *
+     * Capability-gated by [ServiceCapabilities.FEATURE_EMBEDDINGS]; old service
+     * binaries throw [MindlayerException] with `NOT_SUPPORTED`.
+     */
+    suspend fun fetchEmbeddingBatch(handle: EmbeddingBatchHandle): EmbeddingBatchOutcome {
+        requireEmbeddingCapability()
+        return try {
+            withContext(Dispatchers.IO) {
+                mapVectorBlobHandle(withTypedErrors(requestId = handle.requestId) { it.fetchEmbeddingBatchResult(handle.requestId) })
+            }
+        } catch (_: NoSuchMethodError) {
+            throw embeddingNotSupported(handle.requestId)
+        } catch (_: AbstractMethodError) {
+            throw embeddingNotSupported(handle.requestId)
+        }
+    }
+
+    /**
+     * Cancel an in-flight deferred batch. Returns the typed result.
+     *
+     * Capability-gated by [ServiceCapabilities.FEATURE_EMBEDDINGS]; old service
+     * binaries throw [MindlayerException] with `NOT_SUPPORTED`.
+     */
+    suspend fun cancelEmbeddingBatch(handle: EmbeddingBatchHandle): EmbeddingCancelResult {
+        requireEmbeddingCapability()
+        return try {
+            withContext(Dispatchers.IO) {
+                withTypedErrors(requestId = handle.requestId) { it.cancelEmbeddingBatch(handle.requestId) }.toEmbeddingCancelResult()
+            }
+        } catch (_: NoSuchMethodError) {
+            throw embeddingNotSupported(handle.requestId)
+        } catch (_: AbstractMethodError) {
+            throw embeddingNotSupported(handle.requestId)
+        }
+    }
+
+    /**
+     * Tell the service the client has consumed this result and it can be deleted.
+     * Optional — results expire naturally — but explicit ack frees quota faster.
+     *
+     * Capability-gated by [ServiceCapabilities.FEATURE_EMBEDDINGS]; old service
+     * binaries throw [MindlayerException] with `NOT_SUPPORTED`.
+     */
+    suspend fun acknowledgeEmbeddingBatch(handle: EmbeddingBatchHandle) {
+        requireEmbeddingCapability()
+        try {
+            withContext(Dispatchers.IO) {
+                withTypedErrors(requestId = handle.requestId) { it.acknowledgeEmbeddingBatchResult(handle.requestId) }
+            }
+        } catch (_: NoSuchMethodError) {
+            throw embeddingNotSupported(handle.requestId)
+        } catch (_: AbstractMethodError) {
+            throw embeddingNotSupported(handle.requestId)
+        }
+    }
+
+    /**
+     * Cancel an in-flight non-deferred embedding by requestId.
+     *
+     * Capability-gated by [ServiceCapabilities.FEATURE_EMBEDDINGS]; old service
+     * binaries throw [MindlayerException] with `NOT_SUPPORTED`.
+     */
+    suspend fun cancelEmbed(requestId: String): EmbeddingCancelResult {
+        requireEmbeddingCapability()
+        return try {
+            withContext(Dispatchers.IO) {
+                withTypedErrors(requestId = requestId) { it.cancelEmbed(requestId) }.toEmbeddingCancelResult()
+            }
+        } catch (_: NoSuchMethodError) {
+            throw embeddingNotSupported(requestId)
+        } catch (_: AbstractMethodError) {
+            throw embeddingNotSupported(requestId)
+        }
+    }
+
+    private fun validateEmbeddingBatchSize(configs: List<EmbeddingConfig>, max: Int, label: String) {
+        require(configs.isNotEmpty()) { "Embedding $label batch must be non-empty" }
+        if (max > 0) {
+            require(configs.size <= max) { "Embedding $label batch size ${configs.size} exceeds service limit $max" }
+        }
+    }
+
+    private fun mapVectorBlobHandle(handle: com.adsamcik.mindlayer.VectorBlobHandle): EmbeddingBatchOutcome =
+        when (handle.status) {
+            com.adsamcik.mindlayer.DeferredResult.STILL_RUNNING -> EmbeddingBatchOutcome.StillRunning
+            com.adsamcik.mindlayer.DeferredResult.READY -> {
+                val transfer = handle.transfer
+                if (transfer == null) {
+                    EmbeddingBatchOutcome.Failed(
+                        com.adsamcik.mindlayer.shared.MindlayerErrorCode.UNKNOWN,
+                        "missing_transfer",
+                    )
+                } else {
+                    EmbeddingBatchOutcome.Ready(
+                        results = parseEmbeddingTransfer(transfer),
+                        totalDurationMs = transfer.totalDurationMs,
+                        backend = transfer.backend,
+                    )
+                }
+            }
+            com.adsamcik.mindlayer.DeferredResult.FAILED -> EmbeddingBatchOutcome.Failed(handle.errorCodeInt, handle.errorCodeName)
+            com.adsamcik.mindlayer.DeferredResult.CANCELLED -> EmbeddingBatchOutcome.Cancelled
+            com.adsamcik.mindlayer.DeferredResult.EXPIRED -> EmbeddingBatchOutcome.Expired
+            com.adsamcik.mindlayer.DeferredResult.NOT_FOUND_OR_NOT_OWNED -> EmbeddingBatchOutcome.NotFound
+            else -> EmbeddingBatchOutcome.Failed(handle.errorCodeInt, handle.errorCodeName)
+        }
+
+    private fun com.adsamcik.mindlayer.CancelResult.toEmbeddingCancelResult(): EmbeddingCancelResult = when (outcome) {
+        com.adsamcik.mindlayer.CancelResult.CANCELLED -> EmbeddingCancelResult.Cancelled
+        com.adsamcik.mindlayer.CancelResult.ALREADY_FINISHED -> EmbeddingCancelResult.AlreadyFinished
+        else -> EmbeddingCancelResult.Unknown
+    }
+
+    private fun parseEmbeddingTransfer(transfer: com.adsamcik.mindlayer.EmbeddingBatchTransfer): List<com.adsamcik.mindlayer.EmbeddingResult> {
+        val pfd = transfer.pfd
+        return try {
+            val count = transfer.count
+            val dim = transfer.dim
+            require(count >= 0 && dim >= 0) { "Invalid embedding transfer shape count=$count dim=$dim" }
+            val expectedBytesLong = 8L + count.toLong() * dim.toLong() * 4L
+            require(expectedBytesLong <= Int.MAX_VALUE) { "Embedding transfer too large" }
+            val bytes = ByteArray(expectedBytesLong.toInt())
+            ParcelFileDescriptor.AutoCloseInputStream(pfd).use { input ->
+                var offset = 0
+                while (offset < bytes.size) {
+                    val read = input.read(bytes, offset, bytes.size - offset)
+                    if (read < 0) break
+                    offset += read
+                }
+                require(offset == bytes.size) { "Embedding transfer truncated: read $offset of ${bytes.size} bytes" }
+            }
+            val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            val encodedCount = buffer.int
+            val encodedDim = buffer.int
+            require(encodedCount == count && encodedDim == dim) {
+                "Embedding transfer header count=$encodedCount dim=$encodedDim did not match metadata count=$count dim=$dim"
+            }
+            require(transfer.perItemMetadata.size == count) {
+                "Embedding metadata count ${transfer.perItemMetadata.size} did not match vector count $count"
+            }
+            List(count) { index ->
+                val vector = FloatArray(dim) { buffer.float }
+                val metadata = transfer.perItemMetadata[index]
+                com.adsamcik.mindlayer.EmbeddingResult(
+                    tag = metadata.tag,
+                    vector = vector,
+                    dim = dim,
+                    modelId = transfer.modelId,
+                    tokenCount = metadata.tokenCount,
+                    truncated = metadata.truncated,
+                    backend = transfer.backend,
+                    durationMs = 0L,
+                )
+            }
+        } finally {
+            try { pfd.close() } catch (_: Throwable) { }
+        }
+    }
     // -- Tool calling ---------------------------------------------------------
 
     /**
@@ -1948,5 +2266,3 @@ class SessionConfigBuilder {
         expirationMs = expirationMs,
     )
 }
-
-
