@@ -331,8 +331,11 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             ensureInitStarted(config.backend, effectiveMaxTokens)
             when (val state = runBlocking { engineManager.awaitReady() }) {
                 is EngineState.Ready -> Unit
-                is EngineState.Failed -> throw lastInitError.get()?.throwable
-                    ?: IllegalStateException("Engine init failed: ${state.cause}")
+                is EngineState.Failed -> {
+                    runBlocking { initJob.get()?.join() }
+                    throw lastInitError.get()?.throwable
+                        ?: IllegalStateException("Engine init failed: ${state.cause}")
+                }
                 EngineState.Idle, EngineState.Initializing -> throw EngineNotReadyException(
                     retryAfterMs = INIT_RETRY_AFTER_MS,
                 )

@@ -195,6 +195,105 @@ val validateLitertlmAbis by tasks.registering {
     }
 }
 
+val litertAarInspection: Configuration by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+    description = "Resolves the raw base LiteRT AAR for build-time ABI inspection."
+}
+
+run {
+    val dep = libs.litert.get()
+    val coords = "${dep.module.group}:${dep.module.name}:${dep.versionConstraint.requiredVersion}@aar"
+    dependencies.add(litertAarInspection.name, coords)
+}
+
+val validateLitertAbis by tasks.registering {
+    group = "verification"
+    description = "Fails the build if the base LiteRT AAR no longer ships a required native ABI."
+
+    val aarFiles: FileCollection = litertAarInspection
+    inputs.files(aarFiles)
+        .withPropertyName("litertAar")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+
+    val expectedAbis = EXPECTED_LIBRARY_ABIS
+    val allowedMissingAbis = ALLOWED_MISSING_LIBRARY_ABIS
+    val markerFile = layout.buildDirectory.file("litert-abi-check/abis.txt")
+    outputs.file(markerFile)
+
+    doLast {
+        val resolved = aarFiles.files
+        val aar = resolved.singleOrNull {
+            it.name.startsWith("litert-") && it.name.endsWith(".aar")
+        } ?: throw GradleException(
+            "validateLitertAbis: expected exactly one base LiteRT AAR on the inspection " +
+                "configuration; got ${resolved.map { it.name }}",
+        )
+
+        val abiEntryRegex = Regex("^jni/([^/]+)/lib[^/]+\\.so$")
+        val present = sortedSetOf<String>()
+        val nativeLibsByAbi = sortedMapOf<String, MutableList<String>>()
+        ZipFile(aar).use { zip ->
+            zip.entries().asSequence().forEach { entry ->
+                val match = abiEntryRegex.matchEntire(entry.name) ?: return@forEach
+                val abi = match.groupValues[1]
+                present.add(abi)
+                nativeLibsByAbi.getOrPut(abi) { mutableListOf() }.add(
+                    entry.name.substringAfterLast('/'),
+                )
+            }
+        }
+
+        if (present.isEmpty()) {
+            logger.lifecycle("validateLitertAbis: ${aar.name} has no native libraries")
+            markerFile.get().asFile.apply { parentFile.mkdirs() }.writeText("aar=${aar.name}\npresent=\n")
+            return@doLast
+        }
+
+        val missing = (expectedAbis - present).toSortedSet()
+        val missingAndAllowed = (missing intersect allowedMissingAbis).toSortedSet()
+        val missingAndUnallowed = (missing - allowedMissingAbis).toSortedSet()
+        val unexpectedExtras = (present - expectedAbis).toSortedSet()
+
+        logger.lifecycle("validateLitertAbis: ${aar.name}")
+        logger.lifecycle("  present ABIs       : $present")
+        nativeLibsByAbi.forEach { (abi, libs) ->
+            logger.info("    $abi -> ${libs.sorted()}")
+        }
+        logger.lifecycle("  expected ABIs      : ${expectedAbis.toSortedSet()}")
+        if (missingAndAllowed.isNotEmpty()) {
+            logger.lifecycle("  allow-listed missing: $missingAndAllowed")
+        }
+        if (unexpectedExtras.isNotEmpty()) {
+            logger.lifecycle(
+                "  extra ABIs (consider adding to EXPECTED_LIBRARY_ABIS): $unexpectedExtras",
+            )
+        }
+
+        if (missingAndUnallowed.isNotEmpty()) {
+            throw GradleException(
+                buildString {
+                    appendLine("Base LiteRT AAR is missing required ABIs: $missingAndUnallowed")
+                    appendLine("  AAR file        : ${aar.absolutePath}")
+                    appendLine("  Present ABIs    : $present")
+                    appendLine("  Expected ABIs   : ${expectedAbis.toSortedSet()}")
+                    append("  Allowed missing : ${allowedMissingAbis.toSortedSet()}")
+                },
+            )
+        }
+
+        markerFile.get().asFile.apply { parentFile.mkdirs() }.writeText(
+            buildString {
+                appendLine("aar=${aar.name}")
+                appendLine("present=${present.joinToString(",")}")
+                appendLine("expected=${expectedAbis.toSortedSet().joinToString(",")}")
+                appendLine("allowedMissing=${allowedMissingAbis.toSortedSet().joinToString(",")}")
+            },
+        )
+    }
+}
+
 android {
     namespace = "com.adsamcik.mindlayer.service"
     compileSdk = 36
@@ -303,6 +402,12 @@ android {
                 "META-INF/LGPL2.1",
             )
         }
+        jniLibs {
+            // Base LiteRT and LiteRT-LM both ship the core runtime SONAME.
+            // Keep the existing LiteRT-LM packaged copy until Phase A's
+            // coexistence validation determines whether versions can diverge.
+            pickFirsts += setOf("lib/*/libLiteRt*.so")
+        }
     }
 
     testOptions {
@@ -338,7 +443,7 @@ tasks.configureEach {
     // assembleDebug + assembleRelease + bundleRelease are the lifecycle tasks
     // CI invokes; the validator's <200 ms warm cost makes blanket wiring safe.
     if (name == "assembleDebug" || name == "assembleRelease" || name == "bundleRelease") {
-        dependsOn(validateLitertlmAbis)
+        dependsOn(validateLitertlmAbis, validateLitertAbis)
     }
 }
 
@@ -375,6 +480,7 @@ tasks.withType<Test> {
 dependencies {
     implementation(project(":shared"))
     implementation(libs.litertlm.android)
+    implementation(libs.litert)
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
