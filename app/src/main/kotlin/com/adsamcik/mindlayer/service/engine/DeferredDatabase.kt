@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 import com.adsamcik.mindlayer.service.security.DbKeyProvider
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
-@Database(entities = [DeferredEntity::class], version = 1, exportSchema = false)
+@Database(entities = [DeferredEntity::class], version = 2, exportSchema = false)
 abstract class DeferredDatabase : RoomDatabase() {
     abstract fun deferredDao(): DeferredDao
 
