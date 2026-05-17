@@ -32,6 +32,21 @@ Android service app (`com.adsamcik.mindlayer.service`) that loads a single LLM (
 | Mirror AIDL files byte-identical between `app/src/main/aidl/` and `sdk/src/main/aidl/` | Edit only one side — guaranteed `BadParcelableException` |
 | Promote service to FGS `specialUse` only during active inference | Stay foreground when idle |
 | Use `Throwable.safeLabel()` for inference-path exceptions, pass `throwable = null` | Log full stack traces from native LiteRT-LM errors — they can embed prompt text |
+| Keep `:app` + `:sdk` manifests free of `android.permission.INTERNET` | Add network permissions, Play Services deps, telemetry SDKs, or cloud fallback paths |
+| Use Apache-2.0 / MIT / BSD-3-licensed on-device runtimes (PaddleOCR models, LiteRT, LiteRT-LM, ZXing) | Adopt closed-source SDKs whose terms allow vendor telemetry (e.g. ML Kit) |
+| Use LiteRT (already in repo at `libs.litert`) as the single on-device inference runtime | Add a second inference runtime (e.g. ONNX Runtime Android, Paddle Lite) that competes with LiteRT for CPU / GPU / memory in the Mindlayer process |
+
+## Privacy / offline / security — product invariants
+
+Mindlayer is **fully on-device, network-free, and first-party-trust-gated**. These are product-level guarantees; weakening any of them is a release blocker. New features must:
+
+- Add no `INTERNET` / network permission to `:app` or `:sdk` manifests.
+- Add no third-party telemetry, analytics, or cloud-fallback paths.
+- Keep camera frames, recognized text, and structured model output in RAM only — never `filesDir` / `cacheDir` / external storage. Caller may persist via the existing SQLCipher-backed history.
+- Verify model file integrity (pinned SHA-256) at first load.
+- Validate every new parcelable field in `IpcInputValidator` with explicit bounds before the engine sees it.
+
+See `.github/instructions/privacy-offline.instructions.md` for the full ruleset and the 10-item pre-merge checklist.
 
 ## Trust model (read this before touching auth)
 
@@ -162,6 +177,7 @@ Read-only operations (`git status`, `git log`, `git blame`) and zero-file invest
 
 Loaded automatically by Copilot via `applyTo` frontmatter:
 
+- `.github/instructions/privacy-offline.instructions.md` — privacy, offline-first, no-network, license, data-retention invariants (applies repo-wide)
 - `.github/instructions/aidl.instructions.md` — AIDL drift, mirroring, Java syntax
 - `.github/instructions/security.instructions.md` — auth invariants in `service/` + `security/`
 - `.github/instructions/engine.instructions.md` — LiteRT-LM lifecycle, thermal/memory bands
