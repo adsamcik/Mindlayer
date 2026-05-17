@@ -297,6 +297,7 @@ val validateLitertAbis by tasks.registering {
 android {
     namespace = "com.adsamcik.mindlayer.service"
     compileSdk = 36
+    compileSdkMinor = 1
 
     defaultConfig {
         applicationId = "com.adsamcik.mindlayer.service"
@@ -497,9 +498,9 @@ dependencies {
     implementation(libs.navigation.compose)
     debugImplementation(libs.compose.ui.tooling)
 
-    // F-029: BiometricPrompt for sensitive Approve / Revoke actions; FragmentActivity host.
+    // F-029: biometric gate for sensitive Approve / Revoke actions.
     implementation(libs.androidx.biometric)
-    implementation(libs.androidx.fragment.ktx)
+    implementation(libs.androidx.biometric.compose)
 
     // Room (for logging database)
     implementation(libs.room.runtime)
