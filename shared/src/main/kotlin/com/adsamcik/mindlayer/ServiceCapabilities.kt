@@ -170,6 +170,59 @@ data class ServiceCapabilities(
         /** Service exposes text embedding endpoints (embed, embedBatch, embedBatchShm, deferred). */
         const val FEATURE_EMBEDDINGS: String = "embeddings"
 
+        // ---- v0.8 multi-frame OCR capability flags ------------------------
+        // Numeric caps for OCR are advertised via the separate [OcrLimits]
+        // parcelable fetched by [IMindlayerService.getOcrLimits], NOT as new
+        // fields on this parcelable (which is wire-frozen per
+        // docs/AIDL_STABILITY.md).
+
+        /**
+         * v0.8: multi-frame OCR session API (`createOcrSession`, `pushOcrFrame`,
+         * `streamOcrEvents`, `finalizeOcrSession`, `closeOcrSession`,
+         * `getOcrSessionState`, `getOcrLimits`). Pipe protocol
+         * [StreamProtocol.OCR_V1]. Per-field weighted voting fusion.
+         */
+        const val FEATURE_OCR_SESSION: String = "ocr_session"
+
+        /**
+         * v0.8: service runs frame-quality presort (blur, exposure, motion,
+         * dedup, text-density) before engine dispatch. When absent, the SDK
+         * is expected to do its own presort and only push high-quality
+         * frames.
+         */
+        const val FEATURE_OCR_PRESORT_SERVICE_SIDE: String = "ocr_presort_service_side"
+
+        /**
+         * v0.8: ZXing barcode anchor runs alongside the OCR pipeline; GTINs
+         * surfaced in the evidence package's `barcode_anchor` field so
+         * structured extraction can lock product identity early.
+         */
+        const val FEATURE_OCR_BARCODE_ANCHOR: String = "ocr_barcode_anchor"
+
+        /**
+         * v0.8: OCR extraction emits per-region bounding boxes alongside
+         * recognized text in the evidence package (enables layout-aware
+         * downstream consumers).
+         */
+        const val FEATURE_OCR_BOUNDING_BOXES: String = "ocr_bounding_boxes"
+
+        // ---- Future OCR flags (documented but not yet advertised) ---------
+
+        /**
+         * Future: fusion uses LiteRT-LM per-token logprobs instead of
+         * verbalized confidence. Gated on upstream LiteRT-LM Kotlin API
+         * exposing logprobs.
+         */
+        const val FEATURE_OCR_LOGPROB_FUSION: String = "ocr_logprob_fusion"
+
+        /**
+         * Future: service routes N frames as a single multi-image Gemma
+         * prompt (post litert-lm #1874 resolution) rather than N sequential
+         * single-image inferences. Wire surface unchanged; only quality +
+         * latency change.
+         */
+        const val FEATURE_OCR_TRUE_MULTI_IMAGE: String = "ocr_true_multi_image"
+
         /**
          * Baseline capabilities advertised by an old service that predates
          * [IMindlayerService.getCapabilities]. Used by the SDK fallback path
