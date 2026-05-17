@@ -38,11 +38,18 @@ License posture rejects: ML Kit ToS, Surya (GPL-3 + OpenRAIL-M non-commercial), 
 
 | ✅ Do | ❌ Don't |
 |---|---|
-| Pin external dependency versions that are **at least 7 days old** at the time of first commit | Adopt a version released < 7 days ago, even if it's "the latest" |
-| Prefer one minor back if the latest is borderline (e.g. ORT 1.25.x over 1.26.0 when 1.26 is < 14 days old) | Bump a major or minor version without re-running the full test suite + replay harness |
-| Document the released-on date in the PR description for any new dep | Skip the soak window for "urgent fixes" — backport the fix to the older pinned version instead |
+| Pin community-project dependency versions that are **at least 7 days old** at the time of first commit | Adopt a community-project version released < 7 days ago, even if it's "the latest" |
+| Prefer one minor back if a community-project latest is borderline (e.g. < 14 days) | Bump a major or minor version without re-running the full test suite + replay harness |
+| Document the released-on date in the PR description for any new community-project dep | Skip the soak window for "urgent fixes" — backport the fix to the older pinned version instead |
+| Treat Google-published libraries (`com.google.*`, `androidx.*`, `com.android.*`) AND JetBrains/Kotlin libraries (`org.jetbrains.kotlin*`, `org.jetbrains.kotlinx.*`) as **exempt** from the soak rule | Apply the soak rule to first-party Google/Kotlin/JetBrains releases — they have professional release engineering + automated QA across Android versions |
 
-A CI step warns (does not fail) if a PR introduces any dep version < 7 days old; reviewer must explicitly accept the risk in the PR thread. Discontinued artifacts (e.g. `onnxruntime-mobile` after 1.18.0) are tracked in `docs/DEPRECATED_DEPENDENCIES.md`.
+**Exemption rationale**: Google and JetBrains/Kotlin libraries (LiteRT, LiteRT-LM, AndroidX, Jetpack Compose, kotlinx.coroutines, kotlinx.serialization, Kotlin language, etc.) ship through release pipelines with multi-stage CI, alpha/beta/rc rollouts, and professional QA. Community projects with single-maintainer risk, ad-hoc release cadence, or thin CI need the ≥7-day soak window.
+
+A CI step warns (does not fail) if a PR introduces any *community-project* dep version < 7 days old; reviewer must explicitly accept the risk in the PR thread. Discontinued artifacts (e.g. `onnxruntime-mobile` after 1.18.0) are tracked in `docs/DEPRECATED_DEPENDENCIES.md`.
+
+Subject to the rule (examples): PaddleOCR, paddle2onnx, onnx2tf, ZXing, Robolectric, MockK, Turbine, SQLCipher, OpenCV-Android, Apache Commons Text, Halide, ncnn.
+
+Exempt from the rule (examples): LiteRT (`com.google.ai.edge.litert:*`), LiteRT-LM (`com.google.ai.edge.litertlm:*`), Jetpack Compose, AndroidX, Kotlin Standard Library, kotlinx-coroutines, kotlinx-serialization, Android Gradle Plugin.
 
 ## Data retention rules (extend, never relax)
 
