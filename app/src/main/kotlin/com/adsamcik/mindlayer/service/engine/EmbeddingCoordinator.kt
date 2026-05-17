@@ -1,8 +1,10 @@
 package com.adsamcik.mindlayer.service.engine
 
 import android.content.Context
+import android.os.Build
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
+import androidx.annotation.RequiresApi
 import com.adsamcik.mindlayer.CancelResult
 import com.adsamcik.mindlayer.DeferredHandle
 import com.adsamcik.mindlayer.DeferredResult
@@ -87,6 +89,13 @@ class EmbeddingCoordinator(
         )
     }
 
+    /**
+     * SHM-fast-path batch embed. Uses [android.os.SharedMemory] (API 27+).
+     * Callers on API 26 must use [embedBatch] or [embedBatchDeferred]
+     * instead; the AIDL-boundary code in `ServiceBinder.embedBatchShm`
+     * runtime-checks this and surfaces `NOT_SUPPORTED` for older devices.
+     */
+    @RequiresApi(Build.VERSION_CODES.O_MR1)
     suspend fun embedBatchShm(uid: Int, reqs: List<EmbeddingRequest>, requestId: String): EmbeddingBatchTransfer = withTracked(uid, requestId) {
         validateBatch(reqs, maxBatchShm)
         val started = System.nanoTime()
@@ -245,6 +254,7 @@ class EmbeddingCoordinator(
         durationMs = durationMs,
     )
 
+    @RequiresApi(Build.VERSION_CODES.O_MR1)
     private suspend fun writeTransfer(uid: Int, requestId: String, results: List<EmbeddingResult>, totalMs: Long): EmbeddingBatchTransfer =
         withContext(Dispatchers.IO) {
             val count = results.size
