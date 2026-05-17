@@ -43,6 +43,17 @@ google-services.json
 # Large model files — delivered via Play AI Pack, not committed
 *.litertlm
 
+# PaddleOCR PP-OCRv5 mobile artifacts — produced at build time by the
+# .github/workflows/build-paddleocr-models.yml pipeline (paddle2onnx
+# -> onnx2tf) and delivered via Play AI Pack. Never committed. See
+# paddleocr_model/src/main/assets/.gitkeep for details.
+*.tflite
+paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-*.txt
+# Intermediate ONNX conversion artifacts (the workflow's transient
+# output). Also produced by paddle2onnx and never shipped on-device.
+*.onnx
+*.onnx.data
+
 # Bundletool
 bundletool*.jar
 
