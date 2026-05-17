@@ -16,6 +16,7 @@ import java.io.EOFException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import android.os.Binder
+import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.Process
@@ -2221,6 +2222,18 @@ class ServiceBinder(
 
     override fun embedBatchShm(reqs: List<com.adsamcik.mindlayer.EmbeddingRequest>?): com.adsamcik.mindlayer.EmbeddingBatchTransfer {
         authorizeCall(cost = ((reqs?.size ?: 0) * 0.5).coerceAtMost(RateLimiter.MAX_COST))
+        // android.os.SharedMemory (used by EmbeddingCoordinator.embedBatchShm
+        // via SharedMemoryPool.acquireBlob) requires API 27. ServiceCapabilities
+        // advertises maxEmbeddingBatchShm=0 on API 26 so capability-aware SDKs
+        // never reach this path, but we add a runtime gate here as defense in
+        // depth — without it, calling this method on API 26 would crash the
+        // service with NoSuchMethodError on SharedMemory.create().
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) {
+            throw typedBinderException(
+                MindlayerErrorCode.NOT_SUPPORTED,
+                "embedBatchShm requires API 27+ (SharedMemory); use embedBatch or embedBatchDeferred",
+            )
+        }
         val requestId = "emb-${Binder.getCallingUid()}-${UUID.randomUUID()}"
         return runBlocking { requireEmbeddingCoordinator().embedBatchShm(Binder.getCallingUid(), reqs ?: emptyList(), requestId) }
     }
