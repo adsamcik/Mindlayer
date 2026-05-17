@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "version": "0.0.0",
+  "engine": "paddleocr-ppocrv5-mobile",
+  "converted_by": {
+    "paddle2onnx": "2.1.0",
+    "onnx2tf": "2.4.0"
+  },
+  "models": [
+    {
+      "filename": "paddleocr-ppocrv5-mobile-det.tflite",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "role": "detection"
+    },
+    {
+      "filename": "paddleocr-ppocrv5-mobile-rec.tflite",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "role": "recognition"
+    },
+    {
+      "filename": "paddleocr-ppocrv5-mobile-cls.tflite",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "role": "orientation"
+    },
+    {
+      "filename": "paddleocr-ppocrv5-mobile-dict.txt",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "role": "dictionary"
+    }
+  ]
+}

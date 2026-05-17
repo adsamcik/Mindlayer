@@ -1,0 +1,228 @@
+name: Build PaddleOCR PP-OCRv5 mobile .tflite models
+
+# ── Manual conversion pipeline ────────────────────────────────────────────
+#
+# Converts the upstream PaddleOCR PP-OCRv5 mobile artifacts from Paddle
+# format to the TFLite format that the on-device LiteRT runtime consumes:
+#
+#   PaddleOCR PP-OCRv5 mobile (det/rec/cls Paddle params)
+#           v  paddle2onnx 2.1.0
+#   ONNX (intermediate, never shipped)
+#           v  onnx2tf 2.4.0
+#   .tflite x 3  +  dict.txt
+#
+# This workflow is NOT part of the per-PR or per-push CI gate. It is
+# triggered manually whenever a new PP-OCRv5 mobile release lands upstream
+# and produces an artifact bundle a human reviews + uploads to Play
+# Asset Delivery. The SHA-256 values of the four artifacts are written
+# into the GitHub workflow summary and into the artifact ZIP's
+# `expected_shas.txt` so they can be plugged into the `MODEL_SHA256`,
+# `PADDLEOCR_DET_SHA256`, `PADDLEOCR_REC_SHA256`, `PADDLEOCR_CLS_SHA256`,
+# `PADDLEOCR_DICT_SHA256` repository variables.
+#
+# Privacy/security: no network access from the runtime artifacts; this
+# workflow only downloads upstream PaddleOCR sources at conversion time
+# (matches the project's offline + no-runtime-network rules). The output
+# .tflite files are pure model weights with no network behavior.
+#
+# Soak rule: every pinned community tool in this workflow is at least 7
+# days old at the time the workflow was authored:
+#   - PaddleOCR v3.5.0 (released 2026-04-21)
+#   - paddle2onnx v2.1.0 (released 2026-01-12)
+#   - onnx2tf v2.4.0 (released 2026-04-01)
+# Re-confirm soak compliance whenever you bump any of these.
+
+on:
+  workflow_dispatch:
+    inputs:
+      paddleocr_ref:
+        description: "PaddleOCR git ref (tag or sha) to convert from"
+        required: true
+        default: "v3.5.0"
+      paddle2onnx_version:
+        description: "paddle2onnx pip version (must be >=7 days old)"
+        required: true
+        default: "2.1.0"
+      onnx2tf_version:
+        description: "onnx2tf pip version (must be >=7 days old)"
+        required: true
+        default: "2.4.0"
+
+concurrency:
+  group: build-paddleocr-models-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  convert:
+    name: Convert PaddleOCR PP-OCRv5 mobile -> .tflite
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v6
+        with:
+          python-version: '3.11'
+
+      - name: Install conversion tools (pinned)
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "paddle2onnx==${{ inputs.paddle2onnx_version }}" \
+            "onnx2tf==${{ inputs.onnx2tf_version }}" \
+            "tensorflow==2.16.2" \
+            "onnx==1.16.2" \
+            "onnxruntime==1.18.1" \
+            "protobuf==4.25.4" \
+            "numpy==1.26.4"
+          python -c "import paddle2onnx, onnx2tf; print('paddle2onnx=', paddle2onnx.__version__); print('onnx2tf=', onnx2tf.__version__)"
+
+      - name: Fetch PaddleOCR PP-OCRv5 mobile artifacts
+        env:
+          PADDLEOCR_REF: ${{ inputs.paddleocr_ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p paddle-src tflite-out
+          cd paddle-src
+          # PaddleOCR ships the mobile artifacts as downloadable .tar files
+          # under the v3 release assets. The exact URLs change between
+          # releases; treat them as inputs of this workflow (a human picks
+          # the right .tar for the ref and lists them in this step's env).
+          # Refer to: https://github.com/PaddlePaddle/PaddleOCR/releases
+          # For PP-OCRv5 mobile the typical layout is:
+          #   PP-OCRv5_mobile_det_infer.tar
+          #   PP-OCRv5_mobile_rec_infer.tar
+          #   PP-OCRv5_mobile_cls_infer.tar  (optional; ships in some releases)
+          #   ppocrv5_dict.txt
+          #
+          # We download the release tag's source tree to pick up the
+          # canonical dictionary, then download the three model tarballs
+          # from the assets page.
+
+          # Source tree (for dict.txt):
+          curl -fsSL -o paddleocr-src.tar.gz \
+            "https://github.com/PaddlePaddle/PaddleOCR/archive/refs/tags/${PADDLEOCR_REF}.tar.gz"
+          tar -xzf paddleocr-src.tar.gz --strip-components=1 -C .
+
+          # Model tarballs (URLs depend on release; this is the
+          # 'paddleocr-release-models' convention used by v3.x):
+          for kind in det rec cls; do
+            curl -fsSL -o "PP-OCRv5_mobile_${kind}_infer.tar" \
+              "https://paddleocr.bj.bcebos.com/PP-OCRv5/mobile/PP-OCRv5_mobile_${kind}_infer.tar" \
+              || echo "::warning::Failed to fetch ${kind} mobile model; pipeline will only emit available roles."
+            if [ -f "PP-OCRv5_mobile_${kind}_infer.tar" ]; then
+              tar -xf "PP-OCRv5_mobile_${kind}_infer.tar"
+            fi
+          done
+
+          ls -1
+
+      - name: Convert Paddle -> ONNX
+        run: |
+          set -euo pipefail
+          cd paddle-src
+          for kind in det rec cls; do
+            dir="PP-OCRv5_mobile_${kind}_infer"
+            if [ ! -d "$dir" ]; then
+              echo "::warning::Skipping $kind: directory $dir not found."
+              continue
+            fi
+            paddle2onnx \
+              --model_dir "$dir" \
+              --model_filename inference.json \
+              --params_filename inference.pdiparams \
+              --save_file "../tflite-out/paddleocr-ppocrv5-mobile-${kind}.onnx" \
+              --opset_version 17 \
+              --enable_onnx_checker True
+          done
+          ls -1 ../tflite-out
+
+      - name: Convert ONNX -> TFLite (float32, mobile-tuned)
+        run: |
+          set -euo pipefail
+          cd tflite-out
+          for kind in det rec cls; do
+            onnx="paddleocr-ppocrv5-mobile-${kind}.onnx"
+            if [ ! -f "$onnx" ]; then
+              echo "::warning::Skipping $kind: no ONNX file."
+              continue
+            fi
+            onnx2tf \
+              -i "$onnx" \
+              -o "ppocrv5-${kind}-saved" \
+              -osd \
+              -ois \
+              -kt
+            mv "ppocrv5-${kind}-saved/saved_model.tflite" \
+               "paddleocr-ppocrv5-mobile-${kind}.tflite"
+            rm -rf "ppocrv5-${kind}-saved"
+          done
+          ls -1
+
+      - name: Stage character dictionary
+        run: |
+          set -euo pipefail
+          # PaddleOCR ppocr_v5_dict.txt path (subject to small changes
+          # across releases — keep this lookup tolerant).
+          for candidate in \
+            paddle-src/ppocr/utils/dict/ppocr_v5_dict.txt \
+            paddle-src/ppocr/utils/ppocr_keys_v5.txt \
+            paddle-src/ppocr/utils/dict/ppocrv5_dict.txt; do
+            if [ -f "$candidate" ]; then
+              cp "$candidate" tflite-out/paddleocr-ppocrv5-mobile-dict.txt
+              echo "Used dictionary: $candidate"
+              break
+            fi
+          done
+          if [ ! -f tflite-out/paddleocr-ppocrv5-mobile-dict.txt ]; then
+            echo "::error::Could not locate PP-OCRv5 character dictionary in source tree."
+            exit 1
+          fi
+
+      - name: Compute SHA-256 manifest
+        id: shas
+        run: |
+          set -euo pipefail
+          cd tflite-out
+          {
+            echo "# PaddleOCR PP-OCRv5 mobile artifact SHA-256 values"
+            echo "# Generated by .github/workflows/build-paddleocr-models.yml"
+            echo "# Plug into MODEL_SHA256 family of repository variables."
+            echo ""
+            for f in paddleocr-ppocrv5-mobile-det.tflite \
+                     paddleocr-ppocrv5-mobile-rec.tflite \
+                     paddleocr-ppocrv5-mobile-cls.tflite \
+                     paddleocr-ppocrv5-mobile-dict.txt; do
+              if [ -f "$f" ]; then
+                sha=$(sha256sum "$f" | awk '{print $1}')
+                echo "$f  $sha"
+              fi
+            done
+          } | tee expected_shas.txt
+          {
+            echo "## PaddleOCR PP-OCRv5 mobile conversion result"
+            echo ""
+            echo '```'
+            cat expected_shas.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload converted models
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: paddleocr-ppocrv5-mobile-tflite
+          path: |
+            tflite-out/paddleocr-ppocrv5-mobile-det.tflite
+            tflite-out/paddleocr-ppocrv5-mobile-rec.tflite
+            tflite-out/paddleocr-ppocrv5-mobile-cls.tflite
+            tflite-out/paddleocr-ppocrv5-mobile-dict.txt
+            tflite-out/expected_shas.txt
+          retention-days: 30
+          if-no-files-found: error
