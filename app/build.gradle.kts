@@ -39,6 +39,11 @@ val hasReleaseKeystore = hasLocalReleaseKeystore || hasCiReleaseKeystore
 val modelSha256 = project.findProperty("modelSha256")?.toString()?.trim().orEmpty()
 val modelSha256Pattern = Regex("^[0-9a-f]{64}$")
 
+val paddleOcrDetSha256 = project.findProperty("paddleOcrDetSha256")?.toString()?.trim().orEmpty()
+val paddleOcrRecSha256 = project.findProperty("paddleOcrRecSha256")?.toString()?.trim().orEmpty()
+val paddleOcrClsSha256 = project.findProperty("paddleOcrClsSha256")?.toString()?.trim().orEmpty()
+val paddleOcrDictSha256 = project.findProperty("paddleOcrDictSha256")?.toString()?.trim().orEmpty()
+
 val validateReleaseModelSha256 by tasks.registering {
     dependsOn(":gemma_model:generateModelIntegrityManifest")
     group = "verification"
@@ -63,6 +68,59 @@ val validateReleaseModelSha256 by tasks.registering {
                 "BuildConfig.MODEL_SHA256 does not match model_integrity.json sha256.",
             )
         }
+    }
+}
+
+// v0.8 OCR (PR B): mirror the Gemma release SHA guard for the four
+// PaddleOCR PP-OCRv5 mobile artifacts. The :paddleocr_model module's own
+// generatePaddleOcrModelIntegrityManifest task already fails release
+// builds if any -PpaddleOcr*Sha256 is missing/malformed; this validator
+// adds the same defense-in-depth cross-check on the :app side, ensuring
+// the manifest file on disk matches the four properties passed in.
+val validateReleasePaddleOcrSha256 by tasks.registering {
+    dependsOn(":paddleocr_model:generatePaddleOcrModelIntegrityManifest")
+    group = "verification"
+    description = "Fails release builds unless all four -PpaddleOcr*Sha256 properties are lowercase SHA-256 digests matching the manifest."
+    doLast {
+        val missing = buildList {
+            if (!modelSha256Pattern.matches(paddleOcrDetSha256)) add("paddleOcrDetSha256")
+            if (!modelSha256Pattern.matches(paddleOcrRecSha256)) add("paddleOcrRecSha256")
+            if (!modelSha256Pattern.matches(paddleOcrClsSha256)) add("paddleOcrClsSha256")
+            if (!modelSha256Pattern.matches(paddleOcrDictSha256)) add("paddleOcrDictSha256")
+        }
+        if (missing.isNotEmpty()) {
+            throw GradleException(
+                "Release builds require -P${missing.joinToString("=<64 hex> -P")}=<64 hex>",
+            )
+        }
+        val manifest = rootProject.file("paddleocr_model/src/main/assets/paddleocr_model_integrity.json")
+        if (!manifest.isFile) {
+            throw GradleException(
+                "Release builds require paddleocr_model/src/main/assets/paddleocr_model_integrity.json.",
+            )
+        }
+        val text = manifest.readText()
+        val byRole = Regex(
+            """"filename"\s*:\s*"([^"]+)"\s*,\s*"sha256"\s*:\s*"([0-9a-f]{64})"\s*,\s*"role"\s*:\s*"([^"]+)"""",
+        )
+            .findAll(text)
+            .associate { match -> match.groupValues[3] to match.groupValues[2] }
+
+        fun assertRole(role: String, expected: String) {
+            val actual = byRole[role]
+                ?: throw GradleException(
+                    "paddleocr_model_integrity.json missing entry for role '$role'.",
+                )
+            if (actual != expected.lowercase()) {
+                throw GradleException(
+                    "paddleocr_model_integrity.json sha256 for '$role' does not match -PpaddleOcr*Sha256.",
+                )
+            }
+        }
+        assertRole("detection", paddleOcrDetSha256)
+        assertRole("recognition", paddleOcrRecSha256)
+        assertRole("orientation", paddleOcrClsSha256)
+        assertRole("dictionary", paddleOcrDictSha256)
     }
 }
 
@@ -387,7 +445,7 @@ android {
         buildConfig = true
     }
 
-    assetPacks += listOf(":gemma_model", ":embeddinggemma_model")
+    assetPacks += listOf(":gemma_model", ":embeddinggemma_model", ":paddleocr_model")
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -438,7 +496,7 @@ tasks.configureEach {
     val isReleasePackageTask = !name.contains("UnitTest") &&
         (name == "assembleRelease" || name == "bundleRelease" || name == "packageRelease")
     if (isReleasePackageTask) {
-        dependsOn(validateReleaseModelSha256)
+        dependsOn(validateReleaseModelSha256, validateReleasePaddleOcrSha256)
     }
     // F-079: every public APK/AAB packaging task must see the ABI validator.
     // assembleDebug + assembleRelease + bundleRelease are the lifecycle tasks
