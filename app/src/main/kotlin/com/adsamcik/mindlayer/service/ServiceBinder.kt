@@ -2264,6 +2264,90 @@ class ServiceBinder(
         val outcome = requireEmbeddingCoordinator().cancelEmbed(Binder.getCallingUid(), requestId)
         return com.adsamcik.mindlayer.CancelResult(outcome = outcome)
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  v0.8 multi-frame OCR — wire surface only (PR A).
+    //  Real engine lands in PR C. Until then every method throws
+    //  NOT_SUPPORTED so capability-aware SDKs (which see
+    //  FEATURE_OCR_SESSION absent from ServiceCapabilities.SUPPORTED_FEATURES)
+    //  never call us, and capability-blind SDKs get a uniform wire error.
+    // ─────────────────────────────────────────────────────────────────────
+
+    override fun createOcrSession(cfg: com.adsamcik.mindlayer.OcrSessionConfig): String {
+        authorizeCall(cost = 1.0)
+        IpcInputValidator.validateOcrSessionConfig(cfg)
+        throw typedBinderException(
+            MindlayerErrorCode.NOT_SUPPORTED,
+            "OCR session API not yet implemented (Phase 1 wire-only)",
+        )
+    }
+
+    override fun pushOcrFrame(
+        sessionId: String,
+        frame: com.adsamcik.mindlayer.MediaPart,
+        meta: com.adsamcik.mindlayer.OcrFrameMeta,
+    ): com.adsamcik.mindlayer.OcrFrameAck {
+        authorizeCall(cost = 0.15)
+        IpcInputValidator.validateId(sessionId, "sessionId")
+        IpcInputValidator.validateOcrFrameMeta(meta)
+        throw typedBinderException(
+            MindlayerErrorCode.NOT_SUPPORTED,
+            "OCR session API not yet implemented (Phase 1 wire-only)",
+        )
+    }
+
+    override fun streamOcrEvents(
+        sessionId: String,
+        eventWriteEnd: android.os.ParcelFileDescriptor,
+    ) {
+        authorizeCall(cost = 0.25)
+        IpcInputValidator.validateId(sessionId, "sessionId")
+        try {
+            eventWriteEnd.close()
+        } catch (_: java.io.IOException) {
+            // best-effort close; the AIDL transport already dup'd the FD
+        }
+        throw typedBinderException(
+            MindlayerErrorCode.NOT_SUPPORTED,
+            "OCR session API not yet implemented (Phase 1 wire-only)",
+        )
+    }
+
+    override fun getOcrSessionState(sessionId: String): com.adsamcik.mindlayer.OcrSessionState {
+        authorizeCall(cost = 0.1)
+        IpcInputValidator.validateId(sessionId, "sessionId")
+        throw typedBinderException(
+            MindlayerErrorCode.NOT_SUPPORTED,
+            "OCR session API not yet implemented (Phase 1 wire-only)",
+        )
+    }
+
+    override fun finalizeOcrSession(sessionId: String) {
+        authorizeCall(cost = 1.0)
+        IpcInputValidator.validateId(sessionId, "sessionId")
+        throw typedBinderException(
+            MindlayerErrorCode.NOT_SUPPORTED,
+            "OCR session API not yet implemented (Phase 1 wire-only)",
+        )
+    }
+
+    override fun closeOcrSession(sessionId: String) {
+        authorizeCall(cost = 0.1)
+        IpcInputValidator.validateId(sessionId, "sessionId")
+        throw typedBinderException(
+            MindlayerErrorCode.NOT_SUPPORTED,
+            "OCR session API not yet implemented (Phase 1 wire-only)",
+        )
+    }
+
+    override fun getOcrLimits(): com.adsamcik.mindlayer.OcrLimits {
+        // No authorization gate: OcrLimits.zeroBaseline() is the public
+        // "OCR not supported" advertisement, mirroring ServiceCapabilities
+        // discovery (also ungated). Returning a parcelable is cheap and
+        // leaks no caller-specific state.
+        return com.adsamcik.mindlayer.OcrLimits.zeroBaseline()
+    }
+
     private fun callerAidlMethodName(): String =
         Thread.currentThread().stackTrace
             .firstOrNull { frame ->

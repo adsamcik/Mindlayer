@@ -73,6 +73,19 @@ object MindlayerErrorCode {
     /** Session expired past its configured `expirationMs`. */
     const val SESSION_EXPIRED = 2003
 
+    /**
+     * v0.8 OCR: session idle timeout fired (no `pushOcrFrame` for >
+     * `idleTimeoutMs`, default 30 s). Session has been auto-closed.
+     */
+    const val OCR_IDLE_TIMEOUT = 2004
+
+    /**
+     * v0.8 OCR: session hit the hard wall-clock cap
+     * ([OcrLimits.maxOcrSessionDurationMs], default 5 min) regardless of
+     * activity. Session has been auto-closed.
+     */
+    const val OCR_MAX_DURATION = 2005
+
     // ---- 3xxx request / validation -----------------------------------------
 
     /** Generic invalid-request (bad sessionId/requestId/text content). */
@@ -101,6 +114,20 @@ object MindlayerErrorCode {
      * truncate input or shorten history before retrying.
      */
     const val INPUT_EXCEEDS_CONTEXT = 3006
+
+    /**
+     * v0.8 OCR: `OcrSessionConfig.outputSchemaJson` / `optionsJson` /
+     * `OcrFrameMeta.regionJson` malformed, exceeds
+     * [OcrLimits.ocrSchemaJsonMaxLen], references an unknown
+     * [OcrSessionConfig.mode], or non-monotonic [OcrFrameMeta.frameId].
+     */
+    const val OCR_SCHEMA_INVALID = 3007
+
+    /**
+     * v0.8 OCR: caller invoked `pushOcrFrame` (or `finalizeOcrSession`) on
+     * a session that has already finalized. Caller must open a new session.
+     */
+    const val OCR_SESSION_FINALIZED = 3008
 
     // ---- 4xxx resource ------------------------------------------------------
 
@@ -184,6 +211,22 @@ object MindlayerErrorCode {
     /** Embeddings are disabled for this caller or not capability-advertised. */
     const val EMBEDDING_DISABLED = 5014
 
+    /**
+     * v0.8 OCR: service-side intake queue saturated. Mirrors the
+     * [OcrFrameAck.STATUS_DROPPED_BUSY] sync-ack status. Carries
+     * `retryAfterMs=N` in the wire message body. Transient — resource
+     * frees as in-flight inferences drain.
+     */
+    const val FRAME_DROPPED_BUSY = 5015
+
+    /**
+     * v0.8 OCR: service-side presort rejected the frame on quality grounds
+     * (blur / glare / motion / duplicate / low-text-density). Mirrors
+     * [OcrFrameAck.STATUS_REJECTED_QUALITY]. Caller should adjust capture
+     * conditions and resubmit.
+     */
+    const val FRAME_REJECTED_QUALITY = 5016
+
     // ---- 6xxx auth / allowlist ---------------------------------------------
 
     /** App not on the allowlist; user approval pending in the dashboard. */
@@ -238,10 +281,12 @@ object MindlayerErrorCode {
     fun categoryOf(code: Int): Category = when (code) {
         ENGINE_INITIALIZING, ENGINE_LOAD_FAILED, MODEL_MISSING, INTEGRITY_MISMATCH,
         BACKEND_UNAVAILABLE, NATIVE_ERROR -> Category.ENGINE
-        SESSION_NOT_FOUND_OR_NOT_OWNED, SESSION_EVICTED, SESSION_EXPIRED -> Category.SESSION
+        SESSION_NOT_FOUND_OR_NOT_OWNED, SESSION_EVICTED, SESSION_EXPIRED,
+        OCR_IDLE_TIMEOUT, OCR_MAX_DURATION -> Category.SESSION
         INVALID_REQUEST, INVALID_SESSION_CONFIG, INVALID_TOOL_RESULT,
         DUPLICATE_REQUEST, NO_ACTIVE_REQUEST,
-        INPUT_EXCEEDS_CONTEXT -> Category.VALIDATION
+        INPUT_EXCEEDS_CONTEXT,
+        OCR_SCHEMA_INVALID, OCR_SESSION_FINALIZED -> Category.VALIDATION
         THERMAL_CRITICAL, MEMORY_PRESSURE, LOW_MEMORY,
         CONCURRENT_LIMIT, RATE_LIMITED, SERVICE_THROTTLED,
         TRANSIENT_RESOURCE_EXHAUSTED, SESSION_QUOTA_EXHAUSTED,
@@ -249,7 +294,8 @@ object MindlayerErrorCode {
         DEFERRED_EXPIRED, UNSUPPORTED_ANDROID_VERSION,
         DEFERRED_RESULT_TOO_LARGE, EMBEDDING_BATCH_TOO_LARGE,
         EMBEDDING_MODEL_UNAVAILABLE, EMBEDDING_INPUT_TOO_LONG,
-        EMBEDDING_DISABLED -> Category.RESOURCE
+        EMBEDDING_DISABLED,
+        FRAME_DROPPED_BUSY, FRAME_REJECTED_QUALITY -> Category.RESOURCE
         ALLOWLIST_PENDING, ALLOWLIST_REVOKED, IDENTITY_UNKNOWN -> Category.AUTH
         INTERNAL -> Category.UNKNOWN
         else -> Category.UNKNOWN
@@ -293,6 +339,12 @@ object MindlayerErrorCode {
         EMBEDDING_MODEL_UNAVAILABLE -> "EMBEDDING_MODEL_UNAVAILABLE"
         EMBEDDING_INPUT_TOO_LONG -> "EMBEDDING_INPUT_TOO_LONG"
         EMBEDDING_DISABLED -> "EMBEDDING_DISABLED"
+        OCR_IDLE_TIMEOUT -> "OCR_IDLE_TIMEOUT"
+        OCR_MAX_DURATION -> "OCR_MAX_DURATION"
+        OCR_SCHEMA_INVALID -> "OCR_SCHEMA_INVALID"
+        OCR_SESSION_FINALIZED -> "OCR_SESSION_FINALIZED"
+        FRAME_DROPPED_BUSY -> "FRAME_DROPPED_BUSY"
+        FRAME_REJECTED_QUALITY -> "FRAME_REJECTED_QUALITY"
         UNSUPPORTED_ANDROID_VERSION -> "UNSUPPORTED_ANDROID_VERSION"
         ALLOWLIST_PENDING -> "ALLOWLIST_PENDING"
         ALLOWLIST_REVOKED -> "ALLOWLIST_REVOKED"

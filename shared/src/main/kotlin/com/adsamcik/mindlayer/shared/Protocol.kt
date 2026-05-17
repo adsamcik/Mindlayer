@@ -42,6 +42,89 @@ object StreamEventType {
      */
     const val ERROR = "error"
     const val DONE = "done"
+
+    // ---- v0.8 multi-frame OCR events --------------------------------------
+    //
+    // Emitted ONLY on streams whose [StreamHeader.protocol] is
+    // [StreamProtocol.OCR_V1]. Token-stream readers must never see them.
+    // None of these are terminal — `DONE` / `ERROR` still close the stream.
+
+    /**
+     * Service accepted a pushed frame into the engine intake queue.
+     * Payload: `{frameId: Long, queueDepth: Int}`.
+     */
+    const val OCR_FRAME_RECEIVED = "ocr_frame_received"
+
+    /**
+     * Service-side presort rejected the frame on quality grounds. Non-terminal.
+     * Payload: `{frameId: Long, reason: String, score: Float?}` where reason
+     * is one of `blur`, `glare`, `motion`, `duplicate`, `low_text_density`,
+     * `low_contrast`.
+     */
+    const val OCR_FRAME_REJECTED_QUALITY = "ocr_frame_rejected_quality"
+
+    /**
+     * Service intake queue saturated; frame discarded with backpressure hint.
+     * Payload: `{frameId: Long, queueDepth: Int, retryAfterMs: Long}`.
+     */
+    const val OCR_FRAME_DROPPED_BUSY = "ocr_frame_dropped_busy"
+
+    /**
+     * Engine has picked up the frame and started inference.
+     * Payload: `{frameId: Long}`.
+     */
+    const val OCR_FRAME_PROCESSING = "ocr_frame_processing"
+
+    /**
+     * Inference completed for a single frame (non-terminal — the session
+     * continues to accept more frames). Payload:
+     * `{frameId: Long, parseStatus: String, decodeMs: Long, missingFields: String[]?}`
+     * where `parseStatus` is one of `ok`, `malformed_json`, `missing_required_fields`,
+     * `empty`. Malformed-JSON and missing-required-fields are NOT terminal —
+     * `ERROR` is reserved for session-fatal conditions only.
+     */
+    const val OCR_FRAME_PROCESSED = "ocr_frame_processed"
+
+    /**
+     * A single schema field's value or confidence changed in the running
+     * fusion state. Payload:
+     * `{frameId: Long, field: String, value: JsonElement,
+     *   confidence: Float, evidence_cluster_ids: String[]}`.
+     */
+    const val OCR_FIELD_UPDATE = "ocr_field_update"
+
+    /**
+     * A field passed the K-consecutive-same lock criterion and is frozen
+     * for the session (subject to the soft-reopen rule on high-confidence
+     * contradiction). Payload:
+     * `{field: String, value: JsonElement, confidence: Float,
+     *   locked_at_frame_id: Long}`.
+     */
+    const val OCR_FIELD_LOCKED = "ocr_field_locked"
+
+    /**
+     * Current best-effort full result snapshot. Emitted periodically and on
+     * caller demand. Payload: `{snapshot: JsonObject, completeness: Float}`
+     * where `completeness ∈ [0,1]` is the fraction of required schema fields
+     * currently locked.
+     */
+    const val OCR_RESULT_SNAPSHOT = "ocr_result_snapshot"
+
+    /**
+     * Session-level final result. Followed by a terminal [DONE] frame.
+     * Payload: `{result: JsonObject, reason: String, frames_processed: Int,
+     *   elapsed_ms: Long}` where `reason` is one of
+     * `all_required_locked`, `client_finalize`, `no_improvement_timeout`,
+     * `max_frames`, `max_duration`.
+     */
+    const val OCR_RESULT_FINALIZED = "ocr_result_finalized"
+
+    /**
+     * Advisory: client should slow down `pushOcrFrame` calls. Non-terminal.
+     * Payload: `{minIntervalMs: Long, reason: String}` where `reason` is
+     * one of `thermal`, `queue_pressure`, `decode_lag`, `memory_pressure`.
+     */
+    const val OCR_THROTTLE_HINT = "ocr_throttle_hint"
 }
 
 object StreamProtocol {
@@ -58,8 +141,26 @@ object StreamProtocol {
      */
     const val V2: String = "mindlayer.stream.v2"
 
-    /** All protocols this build of the SDK reader can interpret. */
+    /**
+     * v0.8 OCR-session pipe protocol — sibling of [V1] / [V2], NOT an
+     * extension. Carries the `ocr_*` event types defined alongside
+     * [StreamEventType.OCR_FRAME_RECEIVED] et al., plus the standard
+     * terminal [StreamEventType.DONE] / [StreamEventType.ERROR] frames.
+     *
+     * **Disjoint from V1/V2**: OCR streams must never carry [StreamEventType.TOKEN_DELTA]
+     * or [StreamEventType.TOKEN_DELTA_BATCH]; token-stream readers must never
+     * see `ocr_*` events. The split keeps `TokenStreamReader` free of OCR
+     * type discrimination and the OCR reader free of token-batching state.
+     *
+     * Capability-gated via [ServiceCapabilities.FEATURE_OCR_SESSION].
+     */
+    const val OCR_V1: String = "mindlayer.stream.ocr.v1"
+
+    /** All chat-stream protocols this build of the SDK reader can interpret. */
     val SUPPORTED: Set<String> = setOf(V1, V2)
+
+    /** All OCR-stream protocols this build of the SDK reader can interpret. */
+    val OCR_SUPPORTED: Set<String> = setOf(OCR_V1)
 }
 
 @Serializable

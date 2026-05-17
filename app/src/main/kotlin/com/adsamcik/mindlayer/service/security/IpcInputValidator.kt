@@ -3,6 +3,9 @@ package com.adsamcik.mindlayer.service.security
 import com.adsamcik.mindlayer.AudioTransfer
 import com.adsamcik.mindlayer.HistoryTurn
 import com.adsamcik.mindlayer.ImageTransfer
+import com.adsamcik.mindlayer.OcrFrameMeta
+import com.adsamcik.mindlayer.OcrLimits
+import com.adsamcik.mindlayer.OcrSessionConfig
 import com.adsamcik.mindlayer.RequestMeta
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.ToolResult
@@ -509,5 +512,123 @@ object IpcInputValidator {
             "backend must be one of $ALLOWED_BACKENDS (got '$value')"
         }
         return value
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  v0.8 multi-frame OCR validators
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Maximum length (chars) of a caller-supplied JSON schema or options
+     * envelope on the OCR API. Matches [OcrLimits.ocrSchemaJsonMaxLen]
+     * default. Real ceiling is fetched per-service via `getOcrLimits()`;
+     * this is the hard ingress cap (defense-in-depth — even if the live
+     * limit is higher, we never accept payloads above this).
+     */
+    const val MAX_OCR_SCHEMA_JSON_LEN = 16 * 1024
+
+    /** BCP-47 language hint cap: e.g. `"en"`, `"de-DE"`, `"zh-Hans-CN"`. */
+    const val MAX_OCR_LANG_HINT_LEN = 32
+    /** Max BCP-47 hints per session. Far above any realistic need. */
+    const val MAX_OCR_LANG_HINT_COUNT = 16
+    /** Upper bound on caller-requested fps; lower bound is service default. */
+    const val MAX_OCR_FRAME_RATE_LIMIT_FPS = 60
+    /** Upper bound on caller-requested per-session frame cap. */
+    const val MAX_OCR_MAX_FRAMES = 1024
+
+    /** BCP-47-shaped tag (subtag-of-subtags). Cheap regex; not full RFC. */
+    private val BCP47_PATTERN =
+        Regex("^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$")
+
+    /**
+     * Validate a caller-supplied [OcrSessionConfig] before the engine sees
+     * it. Mirrors the pattern of [validateSessionConfig].
+     *
+     * The numeric caps fall back to compile-time ceilings so that the
+     * validator is usable from unit tests without a running service /
+     * `OcrLimits` parcelable in hand.
+     */
+    fun validateOcrSessionConfig(cfg: OcrSessionConfig) {
+        require(cfg.schemaVersion == OcrSessionConfig.CURRENT_SCHEMA_VERSION) {
+            "OcrSessionConfig.schemaVersion=${cfg.schemaVersion} unsupported " +
+                "(expected ${OcrSessionConfig.CURRENT_SCHEMA_VERSION})"
+        }
+        require(cfg.mode in OcrSessionConfig.ALL_MODES) {
+            "OcrSessionConfig.mode=${cfg.mode} not in ${OcrSessionConfig.ALL_MODES}"
+        }
+        require(cfg.outputSchemaJson.isNotEmpty()) {
+            "OcrSessionConfig.outputSchemaJson must not be empty"
+        }
+        require(cfg.outputSchemaJson.length <= MAX_OCR_SCHEMA_JSON_LEN) {
+            "OcrSessionConfig.outputSchemaJson too long " +
+                "(${cfg.outputSchemaJson.length} > $MAX_OCR_SCHEMA_JSON_LEN)"
+        }
+        cfg.optionsJson?.let { opts ->
+            require(opts.length <= MAX_OCR_SCHEMA_JSON_LEN) {
+                "OcrSessionConfig.optionsJson too long " +
+                    "(${opts.length} > $MAX_OCR_SCHEMA_JSON_LEN)"
+            }
+        }
+        require(cfg.languageHints.size <= MAX_OCR_LANG_HINT_COUNT) {
+            "OcrSessionConfig.languageHints has too many entries " +
+                "(${cfg.languageHints.size} > $MAX_OCR_LANG_HINT_COUNT)"
+        }
+        for (hint in cfg.languageHints) {
+            require(hint.length in 1..MAX_OCR_LANG_HINT_LEN) {
+                "OcrSessionConfig.languageHints entry length out of range " +
+                    "(got ${hint.length}, allowed 1..$MAX_OCR_LANG_HINT_LEN)"
+            }
+            require(BCP47_PATTERN.matches(hint)) {
+                "OcrSessionConfig.languageHints entry is not BCP-47 shaped " +
+                    "(<redacted:${hint.length}>)"
+            }
+        }
+        require(cfg.maxFrames in 0..MAX_OCR_MAX_FRAMES) {
+            "OcrSessionConfig.maxFrames=${cfg.maxFrames} out of range " +
+                "(0..$MAX_OCR_MAX_FRAMES)"
+        }
+        require(cfg.frameRateLimitFps in 0..MAX_OCR_FRAME_RATE_LIMIT_FPS) {
+            "OcrSessionConfig.frameRateLimitFps=${cfg.frameRateLimitFps} " +
+                "out of range (0..$MAX_OCR_FRAME_RATE_LIMIT_FPS)"
+        }
+        // featureFlags is a reserved bitfield; we accept any value and ignore
+        // unknown bits, matching the AIDL_STABILITY guidance.
+    }
+
+    /**
+     * Validate per-frame metadata on `pushOcrFrame`. The caller-side
+     * monotonicity of [OcrFrameMeta.frameId] is enforced by the
+     * session manager (which holds the per-session last-seen id); here we
+     * only validate the parcelable's intrinsic well-formedness.
+     */
+    fun validateOcrFrameMeta(meta: OcrFrameMeta) {
+        require(meta.schemaVersion == OcrFrameMeta.CURRENT_SCHEMA_VERSION) {
+            "OcrFrameMeta.schemaVersion=${meta.schemaVersion} unsupported " +
+                "(expected ${OcrFrameMeta.CURRENT_SCHEMA_VERSION})"
+        }
+        require(meta.frameId >= 0L) {
+            "OcrFrameMeta.frameId must be non-negative (got ${meta.frameId})"
+        }
+        require(meta.captureTimeMs >= 0L) {
+            "OcrFrameMeta.captureTimeMs must be non-negative (got ${meta.captureTimeMs})"
+        }
+        require(meta.rotationDegrees in OcrFrameMeta.ALLOWED_ROTATIONS) {
+            "OcrFrameMeta.rotationDegrees=${meta.rotationDegrees} not in " +
+                "${OcrFrameMeta.ALLOWED_ROTATIONS}"
+        }
+        require(meta.qualityHint in OcrFrameMeta.ALL_QUALITY_HINTS) {
+            "OcrFrameMeta.qualityHint=${meta.qualityHint} not in " +
+                "${OcrFrameMeta.ALL_QUALITY_HINTS}"
+        }
+        meta.regionJson?.let { r ->
+            require(r.length <= MAX_OCR_SCHEMA_JSON_LEN) {
+                "OcrFrameMeta.regionJson too long (${r.length} > $MAX_OCR_SCHEMA_JSON_LEN)"
+            }
+        }
+        meta.extraJson?.let { e ->
+            require(e.length <= MAX_OCR_SCHEMA_JSON_LEN) {
+                "OcrFrameMeta.extraJson too long (${e.length} > $MAX_OCR_SCHEMA_JSON_LEN)"
+            }
+        }
     }
 }
