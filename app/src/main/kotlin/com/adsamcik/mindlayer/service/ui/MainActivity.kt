@@ -2,11 +2,11 @@ package com.adsamcik.mindlayer.service.ui
 
 import android.net.Uri
 import android.os.Bundle
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.padding
-import androidx.fragment.app.FragmentActivity
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.CompositionLocalProvider
@@ -24,13 +24,12 @@ import com.adsamcik.mindlayer.service.logging.LogDatabase
 import com.adsamcik.mindlayer.service.logging.LogRepository
 
 /**
- * F-029: extends [FragmentActivity] (not the bare ComponentActivity) because
- * AndroidX [androidx.biometric.BiometricPrompt] requires a FragmentActivity
- * host. FragmentActivity is a superclass of ComponentActivity, so
- * `viewModels()`, `enableEdgeToEdge()`, and `setContent` keep working
- * unchanged — verified by rubber-duck.
+ * F-029: ComponentActivity is sufficient for biometric auth now that AndroidX
+ * Biometric 1.4 scopes registerForAuthenticationResult() to ComponentActivity.
+ * `viewModels()`, `enableEdgeToEdge()`, and `setContent` keep working while we
+ * avoid carrying a fragment host only for the Approve/Revoke gate.
  */
-class MainActivity : FragmentActivity() {
+class MainActivity : ComponentActivity() {
     private val dashboardViewModel: DashboardViewModel by viewModels()
     private val historyViewModel: SessionHistoryViewModel by viewModels()
     private val detailViewModel: SessionDetailViewModel by viewModels()

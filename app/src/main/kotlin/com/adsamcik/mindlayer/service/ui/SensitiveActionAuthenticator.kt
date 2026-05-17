@@ -1,12 +1,16 @@
 package com.adsamcik.mindlayer.service.ui
 
 import android.os.Build
+import androidx.activity.ComponentActivity
 import androidx.annotation.StringRes
+import androidx.biometric.AuthenticationRequest
+import androidx.biometric.AuthenticationRequest.Biometric.Fallback
+import androidx.biometric.AuthenticationRequest.Biometric.Strength
+import androidx.biometric.AuthenticationResult
+import androidx.biometric.AuthenticationResultCallback
 import androidx.biometric.BiometricManager
-import androidx.biometric.BiometricPrompt
+import androidx.biometric.registerForAuthenticationResult
 import androidx.compose.runtime.compositionLocalOf
-import androidx.core.content.ContextCompat
-import androidx.fragment.app.FragmentActivity
 import com.adsamcik.mindlayer.service.R
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 
@@ -17,7 +21,7 @@ import com.adsamcik.mindlayer.service.logging.MindlayerLog
  *
  * The interface exists so the UI layer can be unit-tested with a fake
  * authenticator — production builds construct
- * [BiometricSensitiveActionAuthenticator] in the hosting [FragmentActivity].
+ * [BiometricSensitiveActionAuthenticator] in the hosting [ComponentActivity].
  *
  * Default-deny: if the device has no enrolled biometric AND no screen lock,
  * the action is rejected. The plan's contract is "the user with physical
@@ -66,20 +70,50 @@ val LocalSensitiveAuth = compositionLocalOf<SensitiveActionAuthenticator> {
 }
 
 /**
- * Production [SensitiveActionAuthenticator] backed by AndroidX [BiometricPrompt].
+ * Production [SensitiveActionAuthenticator] backed by AndroidX Biometric's
+ * Activity Result-style authentication launcher.
  *
  * Authenticator selection:
- * - API 30+: `setAllowedAuthenticators(BIOMETRIC_STRONG | DEVICE_CREDENTIAL)`
- * - API 21-29: `setDeviceCredentialAllowed(true)` — biometric library handles
- *   the back-compat plumbing.
+ * - API 30+: `BIOMETRIC_STRONG | DEVICE_CREDENTIAL`
+ * - API 26-29: query biometric capability only; the request still carries
+ *   device-credential fallback and the library handles back-compat plumbing.
  *
- * Rubber-duck note: pinned to androidx.biometric:1.1.0 (stable). 1.2.0-alphaXX
- * is >3 years old without graduating; we accept slightly less ergonomic API
- * shims in exchange for a maintained release line.
+ * Rubber-duck note: pinned to androidx.biometric:1.4.0-alpha07 because the
+ * 1.4.x alpha track is where Google is actively iterating on ComponentActivity,
+ * AuthenticationRequest, and Compose-native APIs. The stable 1.1.0 line has not
+ * moved since 2021.
  */
 class BiometricSensitiveActionAuthenticator(
-    private val activity: FragmentActivity,
+    private val activity: ComponentActivity,
 ) : SensitiveActionAuthenticator {
+    private var pending: ((Boolean, Int?, String?) -> Unit)? = null
+
+    private val launcher = activity.registerForAuthenticationResult(
+        object : AuthenticationResultCallback {
+            override fun onAuthResult(result: AuthenticationResult) {
+                val cb = pending
+                pending = null
+                when (result) {
+                    is AuthenticationResult.Success -> cb?.invoke(true, null, null)
+                    is AuthenticationResult.Error -> cb?.invoke(
+                        false,
+                        result.errorCode,
+                        result.errString.toString(),
+                    )
+                    is AuthenticationResult.CustomFallbackSelected -> cb?.invoke(
+                        false,
+                        null,
+                        "biometric_custom_fallback_selected",
+                    )
+                }
+            }
+
+            override fun onAuthAttemptFailed() {
+                // Failed attempt = wrong fingerprint etc. The prompt stays
+                // visible, so do not terminate the sensitive action here.
+            }
+        },
+    )
 
     override fun authenticate(
         action: SensitiveAction,
@@ -107,47 +141,31 @@ class BiometricSensitiveActionAuthenticator(
             }
         }
 
-        val executor = ContextCompat.getMainExecutor(activity)
-        val callback = object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                onResult(true, null, null)
-            }
-
-            override fun onAuthenticationFailed() {
-                // Failed = wrong fingerprint etc. but the prompt stays visible.
-                // We don't terminate the action here — let the user retry until
-                // the prompt itself is dismissed via onAuthenticationError.
-            }
-
-            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                onResult(false, errorCode, errString.toString())
-            }
+        if (pending != null) {
+            MindlayerLog.w(TAG, "Biometric authentication already pending — denying $action")
+            onResult(false, null, "biometric_in_progress")
+            return
         }
 
-        val prompt = BiometricPrompt(activity, executor, callback)
-        val info = buildPromptInfo(action)
+        pending = onResult
         try {
-            prompt.authenticate(info)
+            launcher.launch(buildRequest(action))
         } catch (t: Throwable) {
-            MindlayerLog.w(TAG, "BiometricPrompt.authenticate threw: ${t.javaClass.simpleName}")
+            pending = null
+            MindlayerLog.w(TAG, "Biometric authentication launch threw: ${t.javaClass.simpleName}")
             onResult(false, null, t.javaClass.simpleName)
         }
     }
 
-    private fun buildPromptInfo(action: SensitiveAction): BiometricPrompt.PromptInfo {
-        val builder = BiometricPrompt.PromptInfo.Builder()
-            .setTitle(activity.getString(action.titleRes))
+    private fun buildRequest(action: SensitiveAction): AuthenticationRequest =
+        AuthenticationRequest.Biometric.Builder(
+            title = activity.getString(action.titleRes),
+            Fallback.DeviceCredential,
+        )
             .setSubtitle(activity.getString(action.subtitleRes))
-            .setConfirmationRequired(true)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            builder.setAllowedAuthenticators(ALLOWED_AUTHENTICATORS)
-        } else {
-            // Legacy API — equivalent to BIOMETRIC_WEAK | DEVICE_CREDENTIAL.
-            @Suppress("DEPRECATION")
-            builder.setDeviceCredentialAllowed(true)
-        }
-        return builder.build()
-    }
+            .setMinStrength(Strength.Class3())
+            .setIsConfirmationRequired(true)
+            .build()
 
     companion object {
         private const val TAG = "BiometricAuth"
@@ -159,13 +177,12 @@ class BiometricSensitiveActionAuthenticator(
                     BiometricManager.Authenticators.DEVICE_CREDENTIAL
             } else {
                 // Below API 30, BIOMETRIC_STRONG | DEVICE_CREDENTIAL is not
-                // a supported combo. The biometric library uses the legacy
-                // setDeviceCredentialAllowed path instead; the authenticator
+                // a supported combo. The biometric library uses its legacy
+                // device-credential fallback path instead; the authenticator
                 // mask we hand to canAuthenticate must not include
                 // DEVICE_CREDENTIAL on these levels (returns
                 // BIOMETRIC_ERROR_UNSUPPORTED). Fall back to BIOMETRIC_WEAK
-                // — we still call setDeviceCredentialAllowed(true) so PIN is
-                // accepted at prompt time.
+                // — the AuthenticationRequest still accepts PIN at prompt time.
                 BiometricManager.Authenticators.BIOMETRIC_WEAK
             }
     }
