@@ -93,7 +93,11 @@ data class StagedMedia(
  * [close] once the service-side lifetime is complete. Closing releases the
  * pool reservation and the service's SharedMemory handle; the duplicated PFD
  * returned to the client remains independently owned by Binder/consumer.
+ *
+ * Backed by [android.os.SharedMemory] (API 27+). Callers on lower API
+ * levels must use the file-backed [StagedMedia] path instead.
  */
+@RequiresApi(Build.VERSION_CODES.O_MR1)
 class SharedMemoryBlobAcquisition internal constructor(
     private val pool: SharedMemoryPool,
     private val scopedKey: String,
@@ -280,7 +284,12 @@ class SharedMemoryPool(cacheDir: File) {
      * This uses the same reservation accounting as media staging but does not
      * create cache files. It is intentionally generic so embedding vectors can
      * use real SharedMemory rather than pipe/file-backed PFDs.
+     *
+     * Requires API 27 ([Build.VERSION_CODES.O_MR1]); callers on API 26 must
+     * use the file-backed [stageImage] / [stageAudio] paths or fall back to
+     * pipe-based transfer.
      */
+    @RequiresApi(Build.VERSION_CODES.O_MR1)
     fun acquireBlob(scopedKey: String, sizeBytes: Int): SharedMemoryBlobAcquisition {
         require(sizeBytes > 0) { "sizeBytes must be > 0" }
         val reservedBytes = sizeBytes.toLong()
