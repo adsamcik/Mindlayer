@@ -24,12 +24,15 @@ A CI lint check fails the build if `android.permission.INTERNET` appears in any 
 
 | ✅ Do | ❌ Don't |
 |---|---|
-| Use Apache-2.0 / MIT / BSD-licensed engines (PaddleOCR, ONNX Runtime Android, ZXing, LiteRT, ncnn) | Adopt ML Kit (closed-source ML Kit ToS allows Google to receive usage metrics) |
+| Use Apache-2.0 / MIT / BSD-licensed engines (PaddleOCR, LiteRT, LiteRT-LM, ZXing, ncnn) | Adopt ML Kit (closed-source ML Kit ToS allows Google to receive usage metrics) |
 | Use ZXing for barcode scanning | Use ML Kit Barcode Scanning |
+| Use LiteRT (already in repo at `libs.litert`) as the single on-device inference runtime | Add a second inference runtime that competes with LiteRT for CPU threads, GPU context, or memory arena (e.g. ONNX Runtime Android) |
 | Confirm new dependencies are Apache-2.0 / MIT / BSD AND fully offline before adding | Add Firebase, Crashlytics, Google Analytics, Sentry, or any analytics SDK |
 | Route logs through `MindlayerLog` + `LogRepository` (SQLCipher, local only) | Add any code path that POSTs telemetry to a remote endpoint |
 
 License posture rejects: ML Kit ToS, Surya (GPL-3 + OpenRAIL-M non-commercial), MNNKit (separate SDK agreement), Google Document AI / Azure / AWS Textract (cloud-only). Apache-2.0 / MIT / BSD-3 are the only acceptable licenses for new on-device runtime dependencies.
+
+**Single-runtime rule**: Mindlayer ships exactly one on-device inference runtime — **LiteRT** (`com.google.ai.edge.litert:litert`) — used by Gemma (via LiteRT-LM), EmbeddingGemma, and the OCR feature. Build-time model conversion may pass through intermediate file formats like ONNX, but no second inference runtime is loaded into the Mindlayer process. ONNX Runtime, Paddle Lite, ncnn, MediaPipe-Tasks-as-runtime are excluded from on-device use — they remain license-acceptable but architecturally rejected.
 
 ## Dependency soak rule
 

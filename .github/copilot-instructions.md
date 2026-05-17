@@ -33,7 +33,8 @@ Android service app (`com.adsamcik.mindlayer.service`) that loads a single LLM (
 | Promote service to FGS `specialUse` only during active inference | Stay foreground when idle |
 | Use `Throwable.safeLabel()` for inference-path exceptions, pass `throwable = null` | Log full stack traces from native LiteRT-LM errors — they can embed prompt text |
 | Keep `:app` + `:sdk` manifests free of `android.permission.INTERNET` | Add network permissions, Play Services deps, telemetry SDKs, or cloud fallback paths |
-| Use Apache-2.0 / MIT / BSD-3-licensed on-device runtimes (PaddleOCR, ONNX Runtime, ZXing, LiteRT, ncnn) | Adopt closed-source SDKs whose terms allow vendor telemetry (e.g. ML Kit) |
+| Use Apache-2.0 / MIT / BSD-3-licensed on-device runtimes (PaddleOCR models, LiteRT, LiteRT-LM, ZXing) | Adopt closed-source SDKs whose terms allow vendor telemetry (e.g. ML Kit) |
+| Use LiteRT (already in repo at `libs.litert`) as the single on-device inference runtime | Add a second inference runtime (e.g. ONNX Runtime Android, Paddle Lite) that competes with LiteRT for CPU / GPU / memory in the Mindlayer process |
 
 ## Privacy / offline / security — product invariants
 
