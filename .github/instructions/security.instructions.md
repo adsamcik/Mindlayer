@@ -9,6 +9,8 @@ description: "Authorization invariants — applies to ServiceBinder, MlService, 
 
 The 4-stage gate runs at the top of every AIDL entry point. **All four stages run for every external caller, every time.** See `docs/AUTHORIZATION.md` for the rationale.
 
+> Privacy/offline/security product invariants (no network, no telemetry, RAM-only media, model integrity, input validation, ordered binder-death teardown) are documented in `.github/instructions/privacy-offline.instructions.md` and apply repo-wide. The rules below are the authorization-specific subset.
+
 ```
 authorizeCall(sessionId? = null):
     uid = Binder.getCallingUid()
