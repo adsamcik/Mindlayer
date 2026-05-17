@@ -24,12 +24,22 @@ A CI lint check fails the build if `android.permission.INTERNET` appears in any 
 
 | ✅ Do | ❌ Don't |
 |---|---|
-| Use Apache-2.0 / MIT / BSD-licensed engines (PaddleOCR, ONNX Runtime Mobile, ZXing, LiteRT, ncnn) | Adopt ML Kit (closed-source ML Kit ToS allows Google to receive usage metrics) |
+| Use Apache-2.0 / MIT / BSD-licensed engines (PaddleOCR, ONNX Runtime Android, ZXing, LiteRT, ncnn) | Adopt ML Kit (closed-source ML Kit ToS allows Google to receive usage metrics) |
 | Use ZXing for barcode scanning | Use ML Kit Barcode Scanning |
 | Confirm new dependencies are Apache-2.0 / MIT / BSD AND fully offline before adding | Add Firebase, Crashlytics, Google Analytics, Sentry, or any analytics SDK |
 | Route logs through `MindlayerLog` + `LogRepository` (SQLCipher, local only) | Add any code path that POSTs telemetry to a remote endpoint |
 
 License posture rejects: ML Kit ToS, Surya (GPL-3 + OpenRAIL-M non-commercial), MNNKit (separate SDK agreement), Google Document AI / Azure / AWS Textract (cloud-only). Apache-2.0 / MIT / BSD-3 are the only acceptable licenses for new on-device runtime dependencies.
+
+## Dependency soak rule
+
+| ✅ Do | ❌ Don't |
+|---|---|
+| Pin external dependency versions that are **at least 7 days old** at the time of first commit | Adopt a version released < 7 days ago, even if it's "the latest" |
+| Prefer one minor back if the latest is borderline (e.g. ORT 1.25.x over 1.26.0 when 1.26 is < 14 days old) | Bump a major or minor version without re-running the full test suite + replay harness |
+| Document the released-on date in the PR description for any new dep | Skip the soak window for "urgent fixes" — backport the fix to the older pinned version instead |
+
+A CI step warns (does not fail) if a PR introduces any dep version < 7 days old; reviewer must explicitly accept the risk in the PR thread. Discontinued artifacts (e.g. `onnxruntime-mobile` after 1.18.0) are tracked in `docs/DEPRECATED_DEPENDENCIES.md`.
 
 ## Data retention rules (extend, never relax)
 
