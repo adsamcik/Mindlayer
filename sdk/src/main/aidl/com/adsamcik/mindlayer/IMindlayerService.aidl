@@ -20,6 +20,11 @@ import com.adsamcik.mindlayer.EmbeddingResult;
 import com.adsamcik.mindlayer.EmbeddingBatchResult;
 import com.adsamcik.mindlayer.EmbeddingBatchTransfer;
 import com.adsamcik.mindlayer.VectorBlobHandle;
+import com.adsamcik.mindlayer.OcrSessionConfig;
+import com.adsamcik.mindlayer.OcrFrameMeta;
+import com.adsamcik.mindlayer.OcrFrameAck;
+import com.adsamcik.mindlayer.OcrSessionState;
+import com.adsamcik.mindlayer.OcrLimits;
 import com.adsamcik.mindlayer.IClientCallback;
 
 interface IMindlayerService {
@@ -117,6 +122,33 @@ interface IMindlayerService {
     CancelResult cancelEmbeddingBatch(String requestId);
     void acknowledgeEmbeddingBatchResult(String requestId);
     CancelResult cancelEmbed(String requestId);
+
+    // v0.8 multi-frame OCR / parsing.
+    //
+    // Long-lived per-caller OCR session that accepts a stream of camera frames
+    // (or any image), runs service-side presort + PaddleOCR (via the same
+    // LiteRT runtime as Gemma) + cross-frame fusion, and emits typed events
+    // on a caller-owned PFD pipe attached via streamOcrEvents(...).
+    //
+    // Architectural notes:
+    //  - Frames reuse MediaPart so SharedMemory zero-copy transfer is in place.
+    //  - Strategy A (reset-per-frame) KV — only viable on LiteRT-LM 0.10.x
+    //    Kotlin (no truncate/logprobs/max_output_tokens in the public API).
+    //  - LiteRT is the single inference runtime; ONNX Runtime is excluded for
+    //    architectural reasons (would compete with LiteRT-LM for CPU/GPU/RAM).
+    //  - The end-of-scan Gemma extraction is async/background — runs only on
+    //    accepted frames after presort convergence, not continuously.
+    //
+    // Capability-gated via ServiceCapabilities.FEATURE_OCR_SESSION.
+    // Numeric caps advertised via getOcrLimits() (separate parcelable; the
+    // ServiceCapabilities parcelable itself is wire-frozen).
+    String createOcrSession(in OcrSessionConfig cfg);
+    OcrFrameAck pushOcrFrame(String sessionId, in MediaPart frame, in OcrFrameMeta meta);
+    void streamOcrEvents(String sessionId, in ParcelFileDescriptor eventWriteEnd);
+    OcrSessionState getOcrSessionState(String sessionId);
+    void finalizeOcrSession(String sessionId);
+    void closeOcrSession(String sessionId);
+    OcrLimits getOcrLimits();
 }
 
 
