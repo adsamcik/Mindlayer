@@ -42,8 +42,11 @@ import java.io.File
  *  - f32 output-tensor copy and optional L2 normalisation post-process.
  *  - SentencePiece tokenizer binding (likely a small JNI wrapper or pure-Kotlin
  *    SentencePiece port — picked at the time the real `.spm.model` is bundled).
- *  - Real-device GPU/NPU coexistence with the LiteRT-LM (Gemma) runtime —
- *    same coexistence story as [LiteRtPaddleOcrBackend].
+ *  - Real-device GPU/NPU coexistence with the LiteRT-LM (Gemma) runtime
+ *    and the newer [LiteRtPaddleOcrBackend]. See
+ *    `docs/LITERT_COEXISTENCE.md` for the validation checklist + the
+ *    public LiteRT/LiteRT-LM issues that make this a real risk
+ *    (LiteRT #5264, LiteRT-LM #2211, LiteRT-LM #2292).
  *
  * Each deferred piece is marked with a `TODO(verifyOnDevice)` so a future
  * PR can grep for them and pick them up.
