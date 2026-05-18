@@ -2017,6 +2017,124 @@ class Mindlayer private constructor(
             }
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  v0.8 multi-frame OCR — SDK DSL (Phase 1 PR D).
+    //
+    //  Wraps the 7 AIDL OCR methods (createOcrSession / pushOcrFrame /
+    //  streamOcrEvents / getOcrSessionState / finalizeOcrSession /
+    //  closeOcrSession / getOcrLimits) behind a Kotlin-idiomatic
+    //  surface. See OcrSession / OcrProfile / OcrEvent.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Live OCR limits the connected service advertises. SDKs should
+     * read these before opening a session and surface ``DROPPED_BUSY``
+     * / ``REJECTED_QUALITY`` backpressure to the user UI.
+     *
+     * Returns [OcrLimits.zeroBaseline()][com.adsamcik.mindlayer.OcrLimits.zeroBaseline]
+     * if the service is too old to support OCR (`getOcrLimits` not
+     * implemented → ``NoSuchMethodError`` / ``AbstractMethodError``).
+     */
+    suspend fun ocrLimits(): com.adsamcik.mindlayer.OcrLimits {
+        val service = connection.awaitConnected()
+        return try {
+            service.ocrLimits
+        } catch (_: NoSuchMethodError) {
+            com.adsamcik.mindlayer.OcrLimits.zeroBaseline()
+        } catch (_: AbstractMethodError) {
+            com.adsamcik.mindlayer.OcrLimits.zeroBaseline()
+        }
+    }
+
+    /**
+     * Open a multi-frame OCR session using a built-in [OcrProfile].
+     *
+     * ```kotlin
+     * mindlayer.ocrSession(OcrProfile.Receipt) {
+     *     languageHints = listOf("en", "de-DE")
+     *     maxFrames = 30
+     * }.use { session ->
+     *     session.pushFrame(meta)
+     *     ...
+     *     session.finalize()
+     * }
+     * ```
+     *
+     * @param profile the OCR profile preset.
+     * @param configure optional builder block to override profile
+     *   defaults (schema, language hints, fps cap, etc.).
+     * @throws SecurityException with wire-prefixed message when the
+     *   service rejects the session (e.g., ``CONCURRENT_LIMIT``).
+     */
+    suspend fun ocrSession(
+        profile: OcrProfile,
+        configure: OcrSessionConfigBuilder.() -> Unit = {},
+    ): OcrSession {
+        val builder = OcrSessionConfigBuilder(profile)
+        builder.configure()
+        return ocrSession(builder.build())
+    }
+
+    /**
+     * Open a multi-frame OCR session with a pre-built [OcrSessionConfig].
+     * Use this when you have a serialized config (e.g. from process
+     * recovery) and don't want the builder DSL.
+     */
+    suspend fun ocrSession(config: com.adsamcik.mindlayer.OcrSessionConfig): OcrSession {
+        val service = connection.awaitConnected()
+        val sessionId = service.createOcrSession(config)
+        return OcrSession(sessionId = sessionId, config = config, mindlayer = this)
+    }
+
+    /** Internal: forward push to the AIDL stub. */
+    internal suspend fun pushOcrFrameMetadataOnly(
+        sessionId: String,
+        meta: com.adsamcik.mindlayer.OcrFrameMeta,
+    ): com.adsamcik.mindlayer.OcrFrameAck {
+        val service = connection.awaitConnected()
+        // The AIDL signature requires a MediaPart; in Phase 1 PR D
+        // we provide a stub MediaPart wrapping an empty pipe so the
+        // service-side metadata-only path accepts the call. A
+        // follow-up wires real Y-plane staging via MediaTransfer.
+        val pipe = ParcelFileDescriptor.createPipe()
+        pipe[1].closeQuietly()
+        val mediaPart = com.adsamcik.mindlayer.MediaPart(
+            requestId = "ocr-frame-${UUID.randomUUID()}",
+            kind = com.adsamcik.mindlayer.MediaPart.KIND_IMAGE,
+            mimeType = "application/octet-stream",
+            source = pipe[0],
+            isSharedMemory = false,
+            payloadBytes = 0L,
+        )
+        return try {
+            service.pushOcrFrame(sessionId, mediaPart, meta)
+        } finally {
+            pipe[0].closeQuietly()
+        }
+    }
+
+    /** Internal: forward state query. */
+    internal suspend fun getOcrSessionState(sessionId: String): com.adsamcik.mindlayer.OcrSessionState {
+        val service = connection.awaitConnected()
+        return service.getOcrSessionState(sessionId)
+    }
+
+    /** Internal: forward finalize call. */
+    internal suspend fun finalizeOcrSession(sessionId: String) {
+        val service = connection.awaitConnected()
+        service.finalizeOcrSession(sessionId)
+    }
+
+    /** Internal: fire-and-forget close; idempotent on the service side. */
+    internal fun closeOcrSessionFireAndForget(sessionId: String) {
+        val service = connection.getService() ?: return
+        try {
+            service.closeOcrSession(sessionId)
+        } catch (_: Throwable) {
+            // best-effort
+        }
+    }
 }
 
 /**
