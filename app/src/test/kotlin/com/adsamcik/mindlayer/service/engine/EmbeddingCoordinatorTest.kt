@@ -1,8 +1,6 @@
 package com.adsamcik.mindlayer.service.engine
 
-import android.os.Parcel
 import android.os.ParcelFileDescriptor
-import android.os.SharedMemory
 import androidx.test.core.app.ApplicationProvider
 import com.adsamcik.mindlayer.DeferredResult
 import com.adsamcik.mindlayer.EmbeddingRequest
@@ -19,14 +17,11 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
-import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -68,26 +63,18 @@ class EmbeddingCoordinatorTest {
         assertEquals(2, batch.results.size)
     }
 
-    @Ignore("Robolectric cannot map real SharedMemory fd; covered by integration/manual device path")
-    @Test fun `shm layout stores count dim and float32 vectors`() = runTest {
-        val transfer = coordinator.embedBatchShm(1, listOf(EmbeddingRequest(text = "a"), EmbeddingRequest(text = "b")), "ok3")
-        val parcel = Parcel.obtain()
-        val buf = try {
-            parcel.writeFileDescriptor(transfer.pfd.fileDescriptor)
-            parcel.writeInt(8 + transfer.count * transfer.dim * 4)
-            parcel.setDataPosition(0)
-            val shm = SharedMemory.CREATOR.createFromParcel(parcel)
-            shm.mapReadOnly().order(ByteOrder.LITTLE_ENDIAN)
-        } finally {
-            parcel.recycle()
-        }
-        assertEquals(2, buf.int)
-        assertEquals(2, buf.int)
-        assertEquals(1f, buf.float)
-        assertEquals(2f, buf.float)
-        assertEquals(1f, buf.float)
-        assertEquals(2f, buf.float)
-    }
+    // The previously @Ignore'd Robolectric SHM layout test has been
+    // removed. Robolectric cannot faithfully simulate
+    // android.os.SharedMemory FD creation, mmap, protection,
+    // parceling, or lifetime — keeping the test under @Ignore created
+    // a coverage mirage. The real SHM layout coverage now lives in
+    // app/src/androidTest/.../EmbeddingShmLayoutInstrumentedTest.kt,
+    // which exercises the production EmbeddingShmLayout.writeLayout
+    // helper against a real SharedMemory mapping on an emulator /
+    // device. JVM-side layout invariants (offsets, endianness,
+    // bounds) are pinned by app/src/test/.../EmbeddingShmLayoutTest.kt
+    // which tests against a plain ByteBuffer — fast, deterministic,
+    // and honest about what it covers.
 
     @Test fun `cancelEmbed unknown is safe and fetch cancelled row round trips`() = runTest {
         assertEquals(com.adsamcik.mindlayer.CancelResult.UNKNOWN, coordinator.cancelEmbed(1, "missing"))
