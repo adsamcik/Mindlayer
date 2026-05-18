@@ -322,21 +322,19 @@ class EmbeddingCoordinator(
         )
     }
 
-    private fun checkedBlobSize(count: Int, dim: Int): Int {
-        val size = 8L + count.toLong() * dim.toLong() * 4L
-        if (count < 0 || dim < 0 || size > Int.MAX_VALUE) throw typed(MindlayerErrorCode.INVALID_REQUEST, "embedding blob too large")
-        return size.toInt()
+    private fun checkedBlobSize(count: Int, dim: Int): Int = try {
+        EmbeddingShmLayout.checkedBlobSize(count, dim)
+    } catch (e: SecurityException) {
+        // Re-throw as the coordinator's typed exception so existing
+        // callers + tests still see the same INVALID_REQUEST wire
+        // code. EmbeddingShmLayout uses the wire-prefixed
+        // SecurityException convention already, so this is just
+        // re-labeling.
+        throw e
     }
 
     private fun writeLayout(buffer: ByteBuffer, results: List<EmbeddingResult>) {
-        val dim = results.firstOrNull()?.dim ?: 0
-        buffer.putInt(results.size)
-        buffer.putInt(dim)
-        for (result in results) {
-            if (result.dim != dim || result.vector.size != dim) throw typed(MindlayerErrorCode.INVALID_REQUEST, "mixed embedding dimensions")
-            result.vector.forEach { buffer.putFloat(it) }
-        }
-        buffer.flip()
+        EmbeddingShmLayout.writeLayout(buffer, results)
     }
     private fun blobDir(uid: Int): File = File(File(context.cacheDir, "embedding-blobs"), uid.toString())
 
