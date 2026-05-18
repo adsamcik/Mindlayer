@@ -25,6 +25,7 @@ rootProject.name = "Mindlayer"
 
 include(":app")
 include(":sdk")
+include(":sdk-camerax")
 include(":shared")
 include(":gemma_model")
 include(":embeddinggemma_model")
