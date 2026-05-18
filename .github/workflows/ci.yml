@@ -71,6 +71,7 @@ jobs:
           path: |
             app/build/reports/tests/
             sdk/build/reports/tests/
+            sdk-camerax/build/reports/tests/
             shared/build/reports/tests/
           retention-days: 14
 
@@ -82,6 +83,7 @@ jobs:
           path: |
             app/build/test-results/
             sdk/build/test-results/
+            sdk-camerax/build/test-results/
             shared/build/test-results/
           retention-days: 14
 
