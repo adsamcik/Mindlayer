@@ -231,7 +231,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [ build-and-test ]
-    if: github.ref == 'refs/heads/main'
+    # Skip cleanly when MODEL_SHA256 is not yet set as a repo variable.
+    # Pre-release main does not have a real .litertlm bundle hash to
+    # publish; running the job anyway just produces chronic red on
+    # every push. Once a real Gemma 4 E2B / EmbeddingGemma artifact is
+    # uploaded and its SHA-256 is registered in repo Settings → Secrets
+    # and variables → Actions → Variables, this gate stops skipping and
+    # the AAB build resumes automatically. Forks and PR builds remain
+    # excluded by the `refs/heads/main` check (release secrets aren't
+    # readable there anyway).
+    if: github.ref == 'refs/heads/main' && vars.MODEL_SHA256 != ''
     permissions:
       contents: read
 
@@ -251,6 +260,11 @@ jobs:
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
 
       - name: Validate model hash input
+        # The job-level `if:` already filters out empty MODEL_SHA256, so
+        # this step is the typo guard: if the variable is set but isn't a
+        # lowercase 64-char hex digest, fail loudly so the misconfigured
+        # release build doesn't silently produce a bundle with the wrong
+        # integrity manifest.
         run: |
           if [[ ! "${MODEL_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::MODEL_SHA256 repository variable must be a lowercase 64-character SHA-256 digest"
