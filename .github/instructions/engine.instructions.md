@@ -71,3 +71,24 @@ EngineConfig → Engine(config) → engine.initialize()
 - Don't read `currentBackend` / `isInitialized` outside the `Mutex` for decisions; they're `@Volatile` for *display*, not coordination.
 - Don't open a new `Engine` per request — there is exactly **one**.
 - Don't hold a session reference across an engine reinit — get it from `SessionManager` each time.
+
+## LiteRT + LiteRT-LM coexistence (unverified)
+
+The service loads **two distinct LiteRT-family runtimes** in the
+same process: `com.google.ai.edge.litertlm:litertlm-android:0.11.0`
+for Gemma, and `com.google.ai.edge.litert:litert:2.1.5` for the
+embedding (`LiteRtEmbeddingBackend`) and OCR
+(`LiteRtPaddleOcrBackend`) paths. No confirmed incompatibility is
+known, but **public LiteRT/LiteRT-LM issues show real failure
+modes** around accelerator resources, native library loading,
+Android linker namespaces, and LiteRT symbol/version resolution:
+
+- [LiteRT #5264](https://github.com/google-ai-edge/LiteRT/issues/5264) — multi-GPU `CompiledModel` instances in same process fail when the first is still active.
+- [LiteRT-LM #2211](https://github.com/google-ai-edge/LiteRT-LM/issues/2211) — GPU samplers `dlopen` fail for AAR consumers due to linker namespace / `libLiteRt.so` resolution.
+- [LiteRT-LM #2292](https://github.com/google-ai-edge/LiteRT-LM/issues/2292) — `Backend.GPU()` initialisation fails on Adreno 750 with OpenCL discovery problems + OpenGL fallback gaps.
+
+Treat same-process coexistence as a **verify-on-device prototype
+risk**, not as safe-by-construction. The full risk note + a
+validation checklist live in [`docs/LITERT_COEXISTENCE.md`](../../docs/LITERT_COEXISTENCE.md).
+Run that checklist before relying on any path that needs all
+three stacks (Gemma + embedding + OCR) loaded simultaneously.
