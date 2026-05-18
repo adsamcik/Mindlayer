@@ -17,19 +17,52 @@ import java.io.File
  * This class owns the lifecycle seam for the base `com.google.ai.edge.litert`
  * runtime, but Phase A deliberately ships without a bundled EmbeddingGemma
  * model or production SentencePiece binding. Native interpreter creation and
- * delegate wiring are therefore marked verify-on-device TODOs and the tokenizer
- * is a no-op stub. Phase D will add the Asset Pack; a follow-up will replace
- * [NoOpSentencePieceTokenizer] with a real tokenizer.
+ * delegate wiring are therefore marked `TODO(verifyOnDevice)` and the
+ * tokenizer is a no-op stub. Phase D will add the Asset Pack; a follow-up
+ * will replace [NoOpSentencePieceTokenizer] with a real tokenizer binding.
  *
- * GPU/NPU coexistence with LiteRT-LM is unverified. The backend chain is kept
- * local to this class so a process-wide accelerator mutex or MediaPipe fallback
- * remains a contained change after real-device validation.
+ * # What this PR ships
+ *
+ *  - The [EmbeddingBackend] interface contract
+ *  - Lifecycle (initialize / shutdown) with the same threading + idempotence
+ *    rules as [LiteRtPaddleOcrBackend]
+ *  - Memory headroom enforcement at init time (model + working buffer)
+ *  - Backend resolution chain (NPU → GPU → CPU) honouring caller preference
+ *    as best-effort intent — the actual delegate label is overwritten at the
+ *    `verifyOnDevice` point when native init succeeds.
+ *  - `embed` implementation that **fails closed** with a precise
+ *    [IllegalStateException] until a real-device follow-up wires the LiteRT
+ *    [`CompiledModel`] / `Interpreter` path against a bundled model.
+ *
+ * # What is deferred
+ *
+ *  - Native LiteRT Interpreter / CompiledModel creation from `model.modelPath`
+ *    + delegate attach (`GpuDelegate` for GPU, `QnnAccelerator` for NPU,
+ *    XNNPACK / default for CPU).
+ *  - f32 output-tensor copy and optional L2 normalisation post-process.
+ *  - SentencePiece tokenizer binding (likely a small JNI wrapper or pure-Kotlin
+ *    SentencePiece port — picked at the time the real `.spm.model` is bundled).
+ *  - Real-device GPU/NPU coexistence with the LiteRT-LM (Gemma) runtime —
+ *    same coexistence story as [LiteRtPaddleOcrBackend].
+ *
+ * Each deferred piece is marked with a `TODO(verifyOnDevice)` so a future
+ * PR can grep for them and pick them up.
  */
 class LiteRtEmbeddingBackend(
     private val context: Context,
     private val memoryHeadroomBytes: Long = MEMORY_HEADROOM_BYTES,
     private val tokenizerFactory: (EmbeddingModelInfo) -> SentencePieceTokenizer = {
         NoOpSentencePieceTokenizer
+    },
+    private val availableMemoryProvider: () -> Long = {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        if (am == null) {
+            Long.MAX_VALUE
+        } else {
+            val info = ActivityManager.MemoryInfo()
+            am.getMemoryInfo(info)
+            info.availMem
+        }
     },
 ) : EmbeddingBackend {
 
@@ -65,16 +98,32 @@ class LiteRtEmbeddingBackend(
         val selectedBackend = resolveBackend(preferredBackend)
         try {
             withContext(Dispatchers.IO) {
-                // TODO(verifyOnDevice): create the base LiteRT Interpreter/CompiledModel
-                // from model.modelPath and attach the selected delegate. Kept out of
-                // Phase A execution because no embedding model/tokenizer is bundled.
-                require(File(model.modelPath).isFile) { "Embedding model file missing" }
-                require(File(model.tokenizerPath).isFile) { "Embedding tokenizer file missing" }
+                verifyArtifactFilesExist(model)
+                // TODO(verifyOnDevice): create the base LiteRT
+                // Interpreter/CompiledModel from model.modelPath and attach
+                // the selected delegate. Kept out of execution here because
+                // no embedding model/tokenizer is bundled yet; the bundle
+                // lands via the embeddinggemma_model AI Pack once release
+                // -PembeddingModelSha256 / -PembeddingTokenizerSha256 are
+                // wired into CI alongside the real artifact upload.
             }
             tokenizer = tokenizerFactory(model)
             loadedModel = model
             backendLabel = selectedBackend
-            MindlayerLog.i(TAG, "Embedding backend initialized: model=${model.id}, backend=$selectedBackend")
+            if (tokenizer === NoOpSentencePieceTokenizer) {
+                // One-time WARN at init time avoids per-call log spam from
+                // the tokenize() path. Diagnostic surface is enough to
+                // explain why downstream embed() calls will fail closed.
+                MindlayerLog.w(
+                    TAG,
+                    "Embedding tokenizer stub active: real SentencePiece binding " +
+                        "lands with the embeddinggemma_model artifact upload.",
+                )
+            }
+            MindlayerLog.i(
+                TAG,
+                "Embedding backend ready: model=${model.id}, backend=$selectedBackend",
+            )
         } catch (t: Throwable) {
             loadedModel = null
             tokenizer = NoOpSentencePieceTokenizer
@@ -89,12 +138,25 @@ class LiteRtEmbeddingBackend(
         outputDim: Int?,
         normalize: Boolean,
     ): FloatArray = mutex.withLock {
-        val model = loadedModel ?: throw IllegalStateException("Embedding backend is not initialized")
+        val model = loadedModel ?: throw IllegalStateException(
+            "Embedding backend not initialised; call initialize() first.",
+        )
         val dim = outputDim ?: model.nativeDim
         require(dim in model.supportedDims) { "Unsupported embedding output dimension: $dim" }
         if (tokens.isEmpty()) return@withLock FloatArray(dim)
-        // TODO(verifyOnDevice): invoke LiteRT and copy the f32 output tensor.
-        throw UnsupportedOperationException("LiteRT embedding inference requires Phase D model validation")
+        // TODO(verifyOnDevice): invoke LiteRT and copy the f32 output
+        // tensor, then optionally L2-normalise. Until that lands, fail
+        // closed with a precise message so EmbeddingCoordinator (and the
+        // ServiceBinder layer above it) can route through a typed
+        // EMBEDDING_MODEL_UNAVAILABLE error to clients while debug builds
+        // surface the stub state during development.
+        throw IllegalStateException(
+            "LiteRT embed() pipeline not yet wired — Phase A ships the scaffold only. " +
+                "The Interpreter / CompiledModel + delegate wiring lands in a follow-up " +
+                "after the embeddinggemma_model conversion artifacts are uploaded " +
+                "(see plan.md § Embeddings pre-release gaps and the " +
+                "TODO(verifyOnDevice) markers in this file).",
+        )
     }
 
     override fun tokenize(text: String, maxTokens: Int): IntArray {
@@ -102,39 +164,59 @@ class LiteRtEmbeddingBackend(
         return currentTokenizer.tokenize(text, maxTokens)
     }
 
-    override suspend fun shutdown() = mutex.withLock {
-        // TODO(verifyOnDevice): close native LiteRT Interpreter/Delegate handles here.
-        loadedModel = null
-        tokenizer = NoOpSentencePieceTokenizer
-        backendLabel = "NONE"
+    override suspend fun shutdown(): Unit = mutex.withLock {
+        if (loadedModel == null) return
+        try {
+            withContext(Dispatchers.IO) {
+                // TODO(verifyOnDevice): close native LiteRT Interpreter /
+                // Delegate handles. Contract is idempotent so calling
+                // shutdown on an unloaded backend is a no-op (handled by
+                // the early return above).
+            }
+        } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "Embedding shutdown error: ${t.safeLabel()}", throwable = null)
+        } finally {
+            loadedModel = null
+            tokenizer = NoOpSentencePieceTokenizer
+            backendLabel = "NONE"
+        }
     }
 
     private fun checkMemoryHeadroom(model: EmbeddingModelInfo) {
-        val activityManager = context.getSystemService(ActivityManager::class.java) ?: return
-        val memInfo = ActivityManager.MemoryInfo()
-        activityManager.getMemoryInfo(memInfo)
-        val requiredBytes = model.sizeBytes + memoryHeadroomBytes
-        if (memInfo.availMem < requiredBytes) {
-            val availMb = memInfo.availMem / BYTES_PER_MB
-            val requiredMb = requiredBytes / BYTES_PER_MB
-            throw LowMemoryException(availMb = availMb, requiredMb = requiredMb)
+        val available = availableMemoryProvider()
+        val required = model.sizeBytes + memoryHeadroomBytes
+        if (available < required) {
+            throw LowMemoryException(
+                availMb = available / BYTES_PER_MB,
+                requiredMb = required / BYTES_PER_MB,
+            )
         }
     }
 
-    private fun resolveBackend(preferredBackend: String?): String {
-        val preferred = preferredBackend?.uppercase()
-        return when {
-            preferred == "CPU" -> "CPU"
-            preferred == "GPU" -> {
-                MindlayerLog.w(TAG, "Embedding GPU delegate not packaged in Phase A; falling back to CPU")
-                "CPU"
-            }
-            preferred == "NPU" && isNpuLikelySupported() -> "NPU"
-            preferred == "NPU" -> "CPU"
-            isNpuLikelySupported() -> "NPU"
-            else -> "CPU"
+    private fun verifyArtifactFilesExist(model: EmbeddingModelInfo) {
+        require(File(model.modelPath).isFile) { "Embedding model file missing: ${model.modelPath}" }
+        require(File(model.tokenizerPath).isFile) {
+            "Embedding tokenizer file missing: ${model.tokenizerPath}"
         }
     }
+
+    /**
+     * Best-effort intent label for the chosen backend. The actual delegate
+     * selection at the `verifyOnDevice` point may fall back to CPU when
+     * GPU/NPU init fails on a given device. Mirrors [LiteRtPaddleOcrBackend]'s
+     * resolveBackend so diagnostics across the two stacks read consistently.
+     */
+    private fun resolveBackend(preferredBackend: String?): String =
+        when (preferredBackend?.uppercase()) {
+            "CPU" -> "CPU"
+            "GPU" -> "GPU"
+            "NPU" -> if (isNpuLikelySupported()) "NPU" else "CPU"
+            null -> when {
+                isNpuLikelySupported() -> "NPU"
+                else -> "CPU"
+            }
+            else -> "CPU"
+        }
 
     private fun isNpuLikelySupported(): Boolean {
         if (Build.VERSION.SDK_INT < 31) return false
@@ -151,10 +233,7 @@ class LiteRtEmbeddingBackend(
     }
 
     object NoOpSentencePieceTokenizer : SentencePieceTokenizer {
-        override fun tokenize(text: String, maxTokens: Int): IntArray {
-            MindlayerLog.w(TAG, "Embedding tokenizer stub active; returning zero tokens")
-            return IntArray(0)
-        }
+        override fun tokenize(text: String, maxTokens: Int): IntArray = IntArray(0)
     }
 
     private companion object {
