@@ -48,7 +48,11 @@ import java.io.File
  *    extraction).
  *  - Recognition CTC decoding using the bundle's character dictionary.
  *  - Verify-on-device GPU/NPU coexistence with the LiteRT-LM (Gemma)
- *    runtime — same coexistence story as [LiteRtEmbeddingBackend].
+ *    runtime and the LiteRT embedding backend — same coexistence story
+ *    as [LiteRtEmbeddingBackend] but newer + untested in the same
+ *    process. See `docs/LITERT_COEXISTENCE.md` for the validation
+ *    checklist + the public LiteRT/LiteRT-LM issues that make this a
+ *    real risk rather than a theoretical concern.
  *
  * Each deferred piece is marked with a ``TODO(verifyOnDevice)`` so a
  * future PR can grep for them and pick them up.
@@ -111,6 +115,13 @@ class LiteRtPaddleOcrBackend(
                 // because the paddleocr_model AI Pack does not yet ship
                 // actual .tflite payloads in tree (intentional — see
                 // .gitignore + .github/workflows/build-paddleocr-models.yml).
+                //
+                // Coexistence risk when this lands: LiteRT 2.1.5 GPU
+                // delegate + LiteRT-LM 0.11.0 GPU + (existing)
+                // LiteRtEmbeddingBackend GPU all in the same process. See
+                // docs/LITERT_COEXISTENCE.md for the validation checklist
+                // and the public issues that make this a real risk
+                // (LiteRT #5264, LiteRT-LM #2211, LiteRT-LM #2292).
             }
             backendLabel = selectedBackend
             loadedBundle = bundle
