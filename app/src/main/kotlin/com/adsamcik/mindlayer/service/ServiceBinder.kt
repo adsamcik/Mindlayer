@@ -33,6 +33,7 @@ import com.adsamcik.mindlayer.SessionInfo
 import com.adsamcik.mindlayer.ToolResult
 import com.adsamcik.mindlayer.service.engine.EngineManager
 import com.adsamcik.mindlayer.service.engine.EmbeddingCoordinator
+import com.adsamcik.mindlayer.service.engine.OcrSessionManager
 import com.adsamcik.mindlayer.service.engine.EngineState
 import com.adsamcik.mindlayer.service.engine.InitFailure
 import com.adsamcik.mindlayer.service.engine.SessionQuotaExceededException
@@ -98,6 +99,7 @@ class ServiceBinder(
     private val deferredStore: DeferredStore? = null,
     private val embeddingCoordinator: EmbeddingCoordinator? = null,
     private val callbackRegistry: EvictionRegistry = EvictionRegistry(),
+    private val ocrSessionManager: OcrSessionManager = OcrSessionManager(),
 ) : IMindlayerService.Stub() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -2266,20 +2268,27 @@ class ServiceBinder(
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  v0.8 multi-frame OCR — wire surface only (PR A).
-    //  Real engine lands in PR C. Until then every method throws
-    //  NOT_SUPPORTED so capability-aware SDKs (which see
-    //  FEATURE_OCR_SESSION absent from ServiceCapabilities.SUPPORTED_FEATURES)
-    //  never call us, and capability-blind SDKs get a uniform wire error.
+    //  v0.8 multi-frame OCR — session lifecycle wired to OcrSessionManager
+    //  (Phase 1 PR C3). recognition-call path is gated on PaddleOcrEngine
+    //  becoming non-scaffold (separate follow-up). FEATURE_OCR_SESSION is
+    //  still NOT in SUPPORTED_FEATURES — flipped when the engine is real.
     // ─────────────────────────────────────────────────────────────────────
 
     override fun createOcrSession(cfg: com.adsamcik.mindlayer.OcrSessionConfig): String {
         authorizeCall(cost = 1.0)
         IpcInputValidator.validateOcrSessionConfig(cfg)
-        throw typedBinderException(
-            MindlayerErrorCode.NOT_SUPPORTED,
-            "OCR session API not yet implemented (Phase 1 wire-only)",
-        )
+        val uid = Binder.getCallingUid()
+        return try {
+            ocrSessionManager.createSession(uid, cfg)
+        } catch (e: IllegalStateException) {
+            val msg = e.message.orEmpty()
+            val code = when {
+                msg.contains("concurrent session limit", ignoreCase = true) ->
+                    MindlayerErrorCode.CONCURRENT_LIMIT
+                else -> MindlayerErrorCode.OCR_SCHEMA_INVALID
+            }
+            throw typedBinderException(code, msg)
+        }
     }
 
     override fun pushOcrFrame(
@@ -2290,10 +2299,18 @@ class ServiceBinder(
         authorizeCall(cost = 0.15)
         IpcInputValidator.validateId(sessionId, "sessionId")
         IpcInputValidator.validateOcrFrameMeta(meta)
-        throw typedBinderException(
-            MindlayerErrorCode.NOT_SUPPORTED,
-            "OCR session API not yet implemented (Phase 1 wire-only)",
-        )
+        val uid = Binder.getCallingUid()
+        if (!ocrSessionManager.isOwner(uid, sessionId)) {
+            throw typedBinderException(
+                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                "Session not found or not owned by caller",
+            )
+        }
+        // PR C3a: metadata-only intake. A follow-up adds Y-plane
+        // extraction from `frame` (via SharedMemoryPool) and switches
+        // to ocrSessionManager.pushFrame(uid, sessionId, meta, yPlane,
+        // width, height) so the service-side presort runs.
+        return ocrSessionManager.pushFrameMetadataOnly(uid, sessionId, meta)
     }
 
     override fun streamOcrEvents(
@@ -2302,50 +2319,87 @@ class ServiceBinder(
     ) {
         authorizeCall(cost = 0.25)
         IpcInputValidator.validateId(sessionId, "sessionId")
+        val uid = Binder.getCallingUid()
+        if (!ocrSessionManager.isOwner(uid, sessionId)) {
+            try {
+                eventWriteEnd.close()
+            } catch (_: java.io.IOException) {
+                // best-effort
+            }
+            throw typedBinderException(
+                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                "Session not found or not owned by caller",
+            )
+        }
+        // PR C3a: pipe-attach is wire-only — we close the FD until the
+        // engine recognition path lands. A follow-up wires the
+        // OCR_V1 stream protocol (TokenStreamWriter sibling) and emits
+        // ocr_frame_received / ocr_frame_rejected_quality /
+        // ocr_field_update / ocr_result_finalized events.
         try {
             eventWriteEnd.close()
         } catch (_: java.io.IOException) {
             // best-effort close; the AIDL transport already dup'd the FD
         }
-        throw typedBinderException(
-            MindlayerErrorCode.NOT_SUPPORTED,
-            "OCR session API not yet implemented (Phase 1 wire-only)",
-        )
     }
 
     override fun getOcrSessionState(sessionId: String): com.adsamcik.mindlayer.OcrSessionState {
         authorizeCall(cost = 0.1)
         IpcInputValidator.validateId(sessionId, "sessionId")
-        throw typedBinderException(
-            MindlayerErrorCode.NOT_SUPPORTED,
-            "OCR session API not yet implemented (Phase 1 wire-only)",
-        )
+        val uid = Binder.getCallingUid()
+        if (!ocrSessionManager.isOwner(uid, sessionId)) {
+            throw typedBinderException(
+                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                "Session not found or not owned by caller",
+            )
+        }
+        return try {
+            ocrSessionManager.stateOf(uid, sessionId)
+        } catch (e: IllegalStateException) {
+            throw typedBinderException(
+                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                "Session not found or not owned by caller",
+            )
+        }
     }
 
     override fun finalizeOcrSession(sessionId: String) {
         authorizeCall(cost = 1.0)
         IpcInputValidator.validateId(sessionId, "sessionId")
-        throw typedBinderException(
-            MindlayerErrorCode.NOT_SUPPORTED,
-            "OCR session API not yet implemented (Phase 1 wire-only)",
-        )
+        val uid = Binder.getCallingUid()
+        if (!ocrSessionManager.isOwner(uid, sessionId)) {
+            throw typedBinderException(
+                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                "Session not found or not owned by caller",
+            )
+        }
+        ocrSessionManager.finalize(uid, sessionId)
     }
 
     override fun closeOcrSession(sessionId: String) {
         authorizeCall(cost = 0.1)
         IpcInputValidator.validateId(sessionId, "sessionId")
-        throw typedBinderException(
-            MindlayerErrorCode.NOT_SUPPORTED,
-            "OCR session API not yet implemented (Phase 1 wire-only)",
-        )
+        val uid = Binder.getCallingUid()
+        // Idempotent: closing a non-owned session is a no-op (mirrors
+        // close-semantics-for-already-closed-streams). We do NOT
+        // anti-enumerate here because close() returning silently for
+        // unowned-sessions is indistinguishable from close()-of-closed.
+        try {
+            ocrSessionManager.close(uid, sessionId)
+        } catch (_: IllegalStateException) {
+            // Session not found or not owned — silently no-op.
+        }
     }
 
     override fun getOcrLimits(): com.adsamcik.mindlayer.OcrLimits {
-        // No authorization gate: OcrLimits.zeroBaseline() is the public
-        // "OCR not supported" advertisement, mirroring ServiceCapabilities
-        // discovery (also ungated). Returning a parcelable is cheap and
-        // leaks no caller-specific state.
-        return com.adsamcik.mindlayer.OcrLimits.zeroBaseline()
+        // No authorization gate: OcrLimits is a public discovery
+        // surface mirroring ServiceCapabilities.
+        // Returns the manager's configured limits (PR C3) instead of
+        // zeroBaseline; FEATURE_OCR_SESSION is still NOT advertised
+        // in SUPPORTED_FEATURES until the engine recognition path
+        // lands, so capability-aware SDKs treat these as advisory
+        // until the flag flips.
+        return ocrSessionManager.getLimits()
     }
 
     private fun callerAidlMethodName(): String =
