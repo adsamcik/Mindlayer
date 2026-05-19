@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import java.io.IOException
 import java.io.OutputStream
 import java.nio.ByteBuffer
@@ -132,24 +133,53 @@ class OcrTokenStreamWriter private constructor(
         })
     }
 
+    /**
+     * @param boundingBox optional quadrilateral in normalised 0..1 frame
+     *   coordinates: `[x1, y1, x2, y2, x3, y3, x4, y4]` clockwise from
+     *   top-left. Eight floats. Encoded as a JSON array under the
+     *   ``bbox`` key only when non-null (so older SDK readers that
+     *   predate the bbox key remain wire-compatible). Mirrors
+     *   [com.adsamcik.mindlayer.service.engine.OcrTextLine.boundingBox].
+     */
     fun writeFieldUpdate(
         fieldName: String,
         topValue: String,
         confidence: String,
         consecutiveAgreement: Int,
+        boundingBox: FloatArray? = null,
     ) {
         writeEvent(StreamEventType.OCR_FIELD_UPDATE, buildJsonObject {
             put("fieldName", fieldName)
             put("topValue", topValue)
             put("confidence", confidence)
             put("consecutiveAgreement", consecutiveAgreement)
+            if (boundingBox != null) {
+                require(boundingBox.size == BBOX_SIZE) {
+                    "boundingBox must have $BBOX_SIZE floats, got ${boundingBox.size}"
+                }
+                putJsonArray(BBOX_KEY) {
+                    boundingBox.forEach { add(JsonPrimitive(it)) }
+                }
+            }
         })
     }
 
-    fun writeFieldLocked(fieldName: String, topValue: String) {
+    fun writeFieldLocked(
+        fieldName: String,
+        topValue: String,
+        boundingBox: FloatArray? = null,
+    ) {
         writeEvent(StreamEventType.OCR_FIELD_LOCKED, buildJsonObject {
             put("fieldName", fieldName)
             put("topValue", topValue)
+            if (boundingBox != null) {
+                require(boundingBox.size == BBOX_SIZE) {
+                    "boundingBox must have $BBOX_SIZE floats, got ${boundingBox.size}"
+                }
+                putJsonArray(BBOX_KEY) {
+                    boundingBox.forEach { add(JsonPrimitive(it)) }
+                }
+            }
         })
     }
 
@@ -256,6 +286,12 @@ class OcrTokenStreamWriter private constructor(
          * the same Binder-aware limit.
          */
         const val MAX_FRAME_BYTES: Int = 1_048_576
+
+        /** JSON key for the optional bounding-box quadrilateral. */
+        internal const val BBOX_KEY: String = "bbox"
+
+        /** Number of floats in a bounding-box quadrilateral. */
+        internal const val BBOX_SIZE: Int = 8
 
         /** Test-only factory accepting a plain [OutputStream]. */
         internal fun forTesting(output: OutputStream): OcrTokenStreamWriter =
