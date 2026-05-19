@@ -368,6 +368,35 @@ class OcrSessionManager(
     fun isOwner(uid: Int, sessionId: String): Boolean =
         sessions[sessionId]?.uid == uid
 
+    /**
+     * Attach an OCR_V1 event-stream writer to a session. The binder
+     * layer calls this after validating ownership of [sessionId] for
+     * [uid]. Subsequent intake/processing calls emit events via this
+     * writer.
+     *
+     * Idempotent: attaching the same writer twice is fine; attaching
+     * a different writer replaces the previous (the binder closes
+     * the displaced pipe on the SDK side via the AutoClose semantics
+     * of [android.os.ParcelFileDescriptor]).
+     *
+     * @return true when the session was found + owned; false otherwise
+     *   (caller must close the pipe in that case).
+     */
+    fun attachEventWriter(uid: Int, sessionId: String, writer: Any): Boolean {
+        val session = sessions[sessionId] ?: return false
+        if (session.uid != uid) return false
+        session.eventWriter = writer
+        session.streamAttached = true
+        return true
+    }
+
+    /** Read-only view of the attached event writer for tests + binder cleanup. */
+    internal fun eventWriterFor(uid: Int, sessionId: String): Any? {
+        val session = sessions[sessionId] ?: return null
+        if (session.uid != uid) return null
+        return session.eventWriter
+    }
+
     /** Currently active session count — used for diagnostics + tests. */
     fun activeSessionCount(): Int =
         sessions.values.count { it.phase < OcrSessionState.PHASE_CLOSED }
@@ -431,6 +460,19 @@ class OcrSessionManager(
         @Volatile var lastFrameAtMs: Long = 0
         @Volatile var lastFrameId: Long? = null
         @Volatile var lastAcceptedDHash: ULong? = null
+
+        /**
+         * Optional event-stream writer for the OCR_V1 protocol pipe.
+         * Set via [OcrSessionManager.attachEventWriter] when a caller
+         * invokes `streamOcrEvents`. The session manager emits OCR
+         * events through this writer; null when no caller has
+         * subscribed.
+         *
+         * Type-erased to `Any?` to keep the inner-class declaration
+         * dependency-free; the binder layer casts to
+         * `OcrTokenStreamWriter` before invoking.
+         */
+        @Volatile var eventWriter: Any? = null
     }
 
     /**
