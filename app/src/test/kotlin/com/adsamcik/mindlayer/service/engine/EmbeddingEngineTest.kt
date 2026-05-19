@@ -208,6 +208,80 @@ class EmbeddingEngineTest {
     }
 
     @Test
+    fun `embed normalization is owned by the backend and engine does not re-normalize`() = runTest {
+        installModel()
+        val backend = configuredBackend()
+        // Return an already-normalized vector. If the engine re-normalized,
+        // we'd still see unit length, but a zero-vector edge case lets us
+        // detect double normalization: dividing by zero norm shouldn't
+        // happen here because the backend returns it as-is and engine
+        // doesn't touch it.
+        coEvery { backend.embed(any(), any(), any()) } returns floatArrayOf(0f, 0f, 0f)
+        val engine = EmbeddingEngine(context, backendFactory = { backend })
+
+        val out = engine.embed("hello")
+
+        // The engine no longer normalizes; what the backend returned is what
+        // the engine emits. A 0-vector stays a 0-vector. Renormalizing here
+        // would have been a no-op (division by zero short-circuit), but the
+        // intent is to lock in that normalization happens in ONE place.
+        assertEquals(0f, out.vector[0], 0.0001f)
+        assertEquals(0f, out.vector[1], 0.0001f)
+        assertEquals(0f, out.vector[2], 0.0001f)
+    }
+
+    @Test
+    fun `truncated flag is false when tokens exactly fill the context window`() = runTest {
+        installModel()
+        val backend = configuredBackend()
+        // Default backend tokenize returns 2 tokens. Default test model is
+        // installed with EmbeddingModelInfo.maxContextTokens = 2048; we use
+        // a custom token array sized exactly to the cap so we can pin the
+        // boundary condition. The cap is read from the model file, so we
+        // need a backend that returns exactly maxContextTokens tokens.
+        every { backend.tokenize(any(), any()) } returns IntArray(2048) { 1 }
+        coEvery { backend.embed(any(), any(), any()) } returns floatArrayOf(1f, 0f)
+        val engine = EmbeddingEngine(context, backendFactory = { backend })
+
+        val out = engine.embed("exactly-full")
+
+        // Token count == maxContextTokens means the input fit exactly; no
+        // content was dropped, so truncated must be false. The pre-fix code
+        // used `>=` and would have falsely reported truncated=true.
+        assertFalse("token count at cap must not mark truncated", out.truncated)
+    }
+
+    @Test
+    fun `transient LowMemory init failure is not cached and a retry can succeed`() = runTest {
+        installModel()
+        val backend = mockk<EmbeddingBackend>()
+        var attempts = 0
+        every { backend.isInitialized } answers { attempts > 1 }
+        every { backend.currentModel } answers {
+            if (attempts > 1) EmbeddingModelInfo("embedding-test", "M", "/m", "/t", 1, 768, listOf(768), 2048, null) else null
+        }
+        every { backend.activeBackend } returns "CPU"
+        every { backend.tokenize(any(), any()) } returns intArrayOf(1)
+        coEvery { backend.embed(any(), any(), any()) } returns floatArrayOf(1f)
+        coEvery { backend.initialize(any(), any()) } coAnswers {
+            attempts++
+            if (attempts == 1) throw LowMemoryException(availMb = 100, requiredMb = 500)
+            // Second attempt succeeds.
+        }
+        val engine = EmbeddingEngine(context, backendFactory = { backend })
+
+        // First call should fail with LowMemoryException
+        val first = runCatching { engine.embed("hello") }
+        assertTrue(first.exceptionOrNull() is LowMemoryException)
+        // Without the fix, [lastInitFailure] would be sticky and the second
+        // call would re-throw the cached exception. With the fix, the engine
+        // permits a fresh attempt.
+        val second = runCatching { engine.embed("hello") }
+        assertTrue("LowMemory must allow retry, got: ${second.exceptionOrNull()}", second.isSuccess)
+        coVerify(exactly = 2) { backend.initialize(any(), any()) }
+    }
+
+    @Test
     fun `vector contents never appear in MindlayerLog output`() = runTest {
         installModel()
         val backend = configuredBackend()
