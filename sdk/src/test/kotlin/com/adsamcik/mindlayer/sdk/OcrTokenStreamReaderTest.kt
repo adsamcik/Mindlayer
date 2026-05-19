@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -209,5 +210,110 @@ class OcrTokenStreamReaderTest {
             payload = buildJsonObject { put("code", "OCR_SCHEMA_INVALID"); put("codeInt", 3007) },
         )
         assertNull(OcrTokenStreamReader.parseFrame(json.encodeToString(StreamEvent.serializer(), error)))
+    }
+
+    @Test fun `ocr_field_update with bbox decodes the FloatArray`() {
+        val event = StreamEvent(
+            seq = 11L,
+            type = StreamEventType.OCR_FIELD_UPDATE,
+            tsMs = 0L,
+            payload = buildJsonObject {
+                put("fieldName", "/total")
+                put("topValue", "12.99")
+                put("confidence", "high")
+                put("consecutiveAgreement", 2)
+                putJsonArray("bbox") {
+                    listOf(0.1f, 0.2f, 0.3f, 0.2f, 0.3f, 0.4f, 0.1f, 0.4f).forEach { add(JsonPrimitive(it)) }
+                }
+            },
+        )
+        val parsed = OcrTokenStreamReader.parseFrame(json.encodeToString(StreamEvent.serializer(), event))
+        assertTrue(parsed is OcrEvent.FieldUpdate)
+        val u = parsed as OcrEvent.FieldUpdate
+        val bbox = u.boundingBox
+        assertTrue("bbox should be non-null", bbox != null)
+        assertEquals(8, bbox!!.size)
+        assertEquals(0.1f, bbox[0], 1e-6f)
+        assertEquals(0.4f, bbox[7], 1e-6f)
+    }
+
+    @Test fun `ocr_field_update without bbox decodes boundingBox as null`() {
+        val event = StreamEvent(
+            seq = 12L,
+            type = StreamEventType.OCR_FIELD_UPDATE,
+            tsMs = 0L,
+            payload = buildJsonObject {
+                put("fieldName", "/total")
+                put("topValue", "12.99")
+                put("confidence", "high")
+                put("consecutiveAgreement", 1)
+            },
+        )
+        val parsed = OcrTokenStreamReader.parseFrame(json.encodeToString(StreamEvent.serializer(), event))
+        assertTrue(parsed is OcrEvent.FieldUpdate)
+        assertNull((parsed as OcrEvent.FieldUpdate).boundingBox)
+    }
+
+    @Test fun `ocr_field_locked with bbox decodes the FloatArray`() {
+        val event = StreamEvent(
+            seq = 13L,
+            type = StreamEventType.OCR_FIELD_LOCKED,
+            tsMs = 0L,
+            payload = buildJsonObject {
+                put("fieldName", "/merchant")
+                put("topValue", "Cafe X")
+                putJsonArray("bbox") {
+                    listOf(0f, 0f, 1f, 0f, 1f, 1f, 0f, 1f).forEach { add(JsonPrimitive(it)) }
+                }
+            },
+        )
+        val parsed = OcrTokenStreamReader.parseFrame(json.encodeToString(StreamEvent.serializer(), event))
+        assertTrue(parsed is OcrEvent.FieldLocked)
+        val l = parsed as OcrEvent.FieldLocked
+        val bbox = l.boundingBox
+        assertTrue("bbox should be non-null", bbox != null)
+        assertEquals(8, bbox!!.size)
+        assertEquals(1f, bbox[2], 1e-6f)
+    }
+
+    @Test fun `bbox with wrong length is treated as null (event still surfaced)`() {
+        val event = StreamEvent(
+            seq = 14L,
+            type = StreamEventType.OCR_FIELD_UPDATE,
+            tsMs = 0L,
+            payload = buildJsonObject {
+                put("fieldName", "/total")
+                put("topValue", "12.99")
+                put("confidence", "low")
+                put("consecutiveAgreement", 1)
+                putJsonArray("bbox") {
+                    listOf(0.1f, 0.2f, 0.3f).forEach { add(JsonPrimitive(it)) }
+                }
+            },
+        )
+        val parsed = OcrTokenStreamReader.parseFrame(json.encodeToString(StreamEvent.serializer(), event))
+        assertTrue("Malformed bbox must NOT swallow the event", parsed is OcrEvent.FieldUpdate)
+        assertNull((parsed as OcrEvent.FieldUpdate).boundingBox)
+    }
+
+    @Test fun `bbox with non-numeric entry is treated as null (event still surfaced)`() {
+        val event = StreamEvent(
+            seq = 15L,
+            type = StreamEventType.OCR_FIELD_UPDATE,
+            tsMs = 0L,
+            payload = buildJsonObject {
+                put("fieldName", "/total")
+                put("topValue", "12.99")
+                put("confidence", "low")
+                put("consecutiveAgreement", 1)
+                putJsonArray("bbox") {
+                    repeat(7) { add(JsonPrimitive(0f)) }
+                    add(JsonPrimitive("not-a-number"))
+                }
+            },
+        )
+        val parsed = OcrTokenStreamReader.parseFrame(json.encodeToString(StreamEvent.serializer(), event))
+        assertTrue("Non-numeric bbox entry must NOT swallow the event", parsed is OcrEvent.FieldUpdate)
+        assertNull((parsed as OcrEvent.FieldUpdate).boundingBox)
     }
 }
