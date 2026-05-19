@@ -48,4 +48,19 @@ class ServiceCapabilitiesEmbeddingTest {
             parcel.recycle()
         }
     }
+
+    @Test fun `baselines never advertise FEATURE_EMBEDDINGS`() {
+        // Both baselines are emitted by SDKs talking to old services. Old
+        // services pre-date the embedding feature entirely, so the baseline
+        // must always advertise the feature off and all caps at zero —
+        // otherwise a forward-compat SDK would attempt embeddings against a
+        // service that doesn't have them.
+        for (baseline in listOf(ServiceCapabilities.v0Baseline(), ServiceCapabilities.v1Baseline())) {
+            assertFalse(baseline.supports(ServiceCapabilities.FEATURE_EMBEDDINGS))
+            assertEquals(0, baseline.maxEmbeddingBatchInline)
+            assertEquals(0, baseline.maxEmbeddingBatchShm)
+            assertEquals(0, baseline.maxEmbeddingBatchTotal)
+            assertEquals(0L, baseline.maxEmbeddingInputBytes)
+        }
+    }
 }
