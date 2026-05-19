@@ -59,6 +59,20 @@ class ServiceBinderEmbeddingTest {
         coordinator = mockk(relaxed = true)
         val model = EmbeddingModelInfo("m", "M", "/m", "/t", 1, 768, listOf(768, 256), 2048, null)
         every { coordinator.defaultModelOrNull() } returns model
+        // FEATURE_EMBEDDINGS in getCapabilities() now requires both a model
+        // AND the production-readiness flag. Tests that exercise the "feature
+        // on" path stub this to true; tests that exercise the gated-off path
+        // leave it at the default (false).
+        every { coordinator.isProductionReady } returns true
+        // The new IpcInputValidator wiring in ServiceBinder reads batch
+        // caps from the coordinator. `mockk(relaxed = true)` returns 0 for
+        // primitive properties, so a batch of N requests would be rejected
+        // as "too large" before reaching the AIDL method body. Stub the
+        // production defaults so the validator passes.
+        every { coordinator.maxBatchInline } returns 64
+        every { coordinator.maxBatchShm } returns 4096
+        every { coordinator.maxBatchTotal } returns 4096
+        every { coordinator.maxInputBytes } returns 512L * 1024L
         coEvery { coordinator.embed(any(), any(), any()) } returns EmbeddingResult(vector = floatArrayOf(), dim = 0, modelId = "m", tokenCount = 0, truncated = false, backend = "CPU", durationMs = 0)
         coEvery { coordinator.embedBatch(any(), any(), any()) } returns EmbeddingBatchResult(results = emptyList(), totalDurationMs = 0, backend = "CPU")
         coEvery { coordinator.embedBatchDeferred(any(), any()) } returns com.adsamcik.mindlayer.DeferredHandle(requestId = "d", expiresAtMs = 1)
@@ -109,5 +123,21 @@ class ServiceBinderEmbeddingTest {
         val no = binder.getCapabilities()
         assertFalse(no.supports(ServiceCapabilities.FEATURE_EMBEDDINGS))
         assertEquals(0, no.maxEmbeddingBatchInline)
+    }
+
+    @Test fun `capabilities omit embeddings when backend is not production ready`() {
+        // With a real model installed but the production-readiness flag
+        // off (Phase A scaffold state), FEATURE_EMBEDDINGS must not be
+        // advertised and the numeric caps must all be zero — otherwise
+        // capability-aware SDKs would call into the stub backend.
+        every { coordinator.isProductionReady } returns false
+        val caps = binder.getCapabilities()
+        assertFalse(caps.supports(ServiceCapabilities.FEATURE_EMBEDDINGS))
+        assertEquals(0, caps.maxEmbeddingBatchInline)
+        assertEquals(0, caps.maxEmbeddingBatchShm)
+        assertEquals(0, caps.maxEmbeddingBatchTotal)
+        assertEquals(0L, caps.maxEmbeddingInputBytes)
+        assertEquals(emptyList<String>(), caps.embeddingModelIds)
+        assertEquals(emptyList<Int>(), caps.embeddingDims)
     }
 }
