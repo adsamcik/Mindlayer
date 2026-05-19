@@ -2373,15 +2373,33 @@ class ServiceBinder(
                 "Session not found or not owned by caller",
             )
         }
-        // PR C3a: pipe-attach is wire-only — we close the FD until the
-        // engine recognition path lands. A follow-up wires the
-        // OCR_V1 stream protocol (TokenStreamWriter sibling) and emits
-        // ocr_frame_received / ocr_frame_rejected_quality /
-        // ocr_field_update / ocr_result_finalized events.
+        // Phase 2 #2: attach the OCR_V1 event-stream writer to the
+        // session. The writer takes ownership of the PFD (the
+        // wrapped AutoCloseOutputStream closes it on writer close).
+        val writer = com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter(eventWriteEnd)
         try {
-            eventWriteEnd.close()
-        } catch (_: java.io.IOException) {
-            // best-effort close; the AIDL transport already dup'd the FD
+            writer.writeHeader()
+        } catch (t: Throwable) {
+            MindlayerLog.w(
+                TAG,
+                "OCR pipe header write failed: ${t.safeLabel()}",
+                sessionId = sanitizeLogField(sessionId),
+                throwable = null,
+            )
+        }
+        val attached = ocrSessionManager.attachEventWriter(uid, sessionId, writer)
+        if (!attached) {
+            // Ownership flipped between isOwner check and attach —
+            // close the writer (which closes the PFD).
+            try {
+                writer.close()
+            } catch (_: Throwable) {
+                // best-effort
+            }
+            throw typedBinderException(
+                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                "Session not found or not owned by caller",
+            )
         }
     }
 
