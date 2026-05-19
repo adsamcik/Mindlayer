@@ -33,6 +33,7 @@ import com.adsamcik.mindlayer.SessionInfo
 import com.adsamcik.mindlayer.ToolResult
 import com.adsamcik.mindlayer.service.engine.EngineManager
 import com.adsamcik.mindlayer.service.engine.EmbeddingCoordinator
+import com.adsamcik.mindlayer.service.engine.MediaPartYPlaneExtractor
 import com.adsamcik.mindlayer.service.engine.OcrSessionManager
 import com.adsamcik.mindlayer.service.engine.EngineState
 import com.adsamcik.mindlayer.service.engine.InitFailure
@@ -100,6 +101,7 @@ class ServiceBinder(
     private val embeddingCoordinator: EmbeddingCoordinator? = null,
     private val callbackRegistry: EvictionRegistry = EvictionRegistry(),
     private val ocrSessionManager: OcrSessionManager = OcrSessionManager(),
+    private val sharedMemoryPool: com.adsamcik.mindlayer.service.ipc.SharedMemoryPool? = null,
 ) : IMindlayerService.Stub() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -2301,16 +2303,56 @@ class ServiceBinder(
         IpcInputValidator.validateOcrFrameMeta(meta)
         val uid = Binder.getCallingUid()
         if (!ocrSessionManager.isOwner(uid, sessionId)) {
+            // Close the MediaPart PFD before throwing — without this
+            // the FD leaks for cross-UID push attempts.
+            try { frame.source.close() } catch (_: Throwable) { /* fine */ }
             throw typedBinderException(
                 MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
                 "Session not found or not owned by caller",
             )
         }
-        // PR C3a: metadata-only intake. A follow-up adds Y-plane
-        // extraction from `frame` (via SharedMemoryPool) and switches
-        // to ocrSessionManager.pushFrame(uid, sessionId, meta, yPlane,
-        // width, height) so the service-side presort runs.
-        return ocrSessionManager.pushFrameMetadataOnly(uid, sessionId, meta)
+        // Phase 2 #1: extract Y-plane and run full presort.
+        // When no SharedMemoryPool is wired (e.g. unit tests with
+        // the default-constructed ServiceBinder), fall back to the
+        // metadata-only intake path so the lifecycle remains
+        // exercisable in JVM tests.
+        val pool = sharedMemoryPool
+            ?: return ocrSessionManager.pushFrameMetadataOnly(uid, sessionId, meta)
+
+        val scopedKey = "ocr:$uid:$sessionId:${meta.frameId}"
+        val extracted = try {
+            MediaPartYPlaneExtractor.extractY(frame, pool, scopedKey)
+        } catch (e: SecurityException) {
+            // Already wire-prefixed with INVALID_REQUEST or
+            // TRANSIENT_RESOURCE_EXHAUSTED — propagate as-is.
+            throw e
+        } catch (t: Throwable) {
+            // Anything else surfaces as a quality rejection so the
+            // SDK retries the frame rather than tearing down the
+            // session. The PFD is closed inside the staging pipeline.
+            MindlayerLog.w(
+                TAG,
+                "OCR Y-plane extraction failed: ${t.safeLabel()}",
+                requestId = scopedKey,
+                sessionId = sanitizeLogField(sessionId),
+                throwable = null,
+            )
+            return com.adsamcik.mindlayer.OcrFrameAck(
+                frameId = meta.frameId,
+                status = com.adsamcik.mindlayer.OcrFrameAck.STATUS_REJECTED_QUALITY,
+                queueDepth = 0,
+                retryAfterMs = 0L,
+            )
+        }
+
+        return ocrSessionManager.pushFrame(
+            uid = uid,
+            sessionId = sessionId,
+            meta = meta,
+            yPlane = extracted.yPlane,
+            width = extracted.width,
+            height = extracted.height,
+        )
     }
 
     override fun streamOcrEvents(
