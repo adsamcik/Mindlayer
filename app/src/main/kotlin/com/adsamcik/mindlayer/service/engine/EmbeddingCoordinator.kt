@@ -60,6 +60,13 @@ class EmbeddingCoordinator(
     val maxBatchShm: Int = 4096,
     val maxBatchTotal: Int = 4096,
     val maxInputBytes: Long = 512L * 1024,
+    /**
+     * Whether the underlying LiteRT embedding backend actually produces real
+     * vectors. Defaults to [EmbeddingFeatureFlags.IS_PRODUCTION_READY]; tests
+     * override to exercise the capability-gated branches without forcing the
+     * compile-time flag.
+     */
+    val isProductionReady: Boolean = EmbeddingFeatureFlags.IS_PRODUCTION_READY,
 ) {
     private val activeJobs = ConcurrentHashMap<String, Job>()
     private val activeCount = AtomicInteger(0)
@@ -68,6 +75,58 @@ class EmbeddingCoordinator(
 
     fun installedModels(): List<EmbeddingModelInfo> = EmbeddingModelRegistry.discoverModels(context)
     fun defaultModelOrNull(): EmbeddingModelInfo? = EmbeddingModelRegistry.getDefaultModel(installedModels())
+
+    /**
+     * One-shot startup sweep of `cacheDir/embedding-blobs/`. Removes:
+     *
+     *  - All stale temp files (`*.tmp-*`) left behind by an interrupted
+     *    [writeBlobFile] (process kill between `RandomAccessFile.close` and
+     *    `Files.move`).
+     *  - Final `<requestId>.bin` blobs that have no matching DeferredEntity
+     *    row in [deferredStore] — these are orphaned because the row was
+     *    deleted (ack, expire, prune) but the file wasn't reachable from
+     *    that code path, *or* because the process died between
+     *    [writeBlobFile] and [DeferredStore.completeEmbeddingBatch] (an
+     *    ack/expire path can't clean up a row that never got created).
+     *
+     * Safe to call from `MindlayerMlService.onCreate` before clients can
+     * bind — it walks one directory per UID with a stat-only filter, deletes
+     * any matches, and never throws (errors are best-effort logged).
+     */
+    suspend fun cleanupOrphanBlobsOnStartup() {
+        runCatching {
+            val root = File(context.cacheDir, "embedding-blobs")
+            if (!root.isDirectory) return@runCatching
+            val uidDirs = root.listFiles()?.filter { it.isDirectory } ?: return@runCatching
+            var orphanedTmp = 0
+            var orphanedBin = 0
+            for (dir in uidDirs) {
+                val files = dir.listFiles() ?: continue
+                for (file in files) {
+                    if (!file.isFile) continue
+                    val name = file.name
+                    if (name.contains(".tmp-")) {
+                        // Stale temp file from a crashed atomic-move write.
+                        if (file.delete()) orphanedTmp++
+                    } else if (name.endsWith(".bin")) {
+                        val requestId = name.removeSuffix(".bin")
+                        val row = deferredStore.entityByRequestIdOrNull(requestId)
+                        if (row == null || row.blobPath != file.absolutePath) {
+                            if (file.delete()) orphanedBin++
+                        }
+                    }
+                }
+            }
+            if (orphanedTmp > 0 || orphanedBin > 0) {
+                MindlayerLog.i(
+                    TAG,
+                    "Embedding blob startup sweep: removed $orphanedTmp temp + $orphanedBin orphan .bin files",
+                )
+            }
+        }.onFailure {
+            MindlayerLog.w(TAG, "Embedding blob startup sweep error: ${it.safeLabel()}", throwable = null)
+        }
+    }
 
     suspend fun embed(uid: Int, req: EmbeddingRequest, requestId: String): EmbeddingResult = withTracked(uid, requestId) {
         validateSingle(req)
@@ -114,6 +173,14 @@ class EmbeddingCoordinator(
         val job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             activeCount.incrementAndGet()
             enterForeground()
+            // Track the blob file separately from the local `val file` so the
+            // catch / finally cleanup paths can delete an orphaned blob that
+            // was atomically renamed to its final path BEFORE the deferred
+            // entity was marked READY. Without this, a cancellation or
+            // throwable between `writeBlobFile` and `completeEmbeddingBatch`
+            // leaks `cacheDir/embedding-blobs/<uid>/<requestId>.bin` until
+            // pruneExpired() removes it via TTL (24h by default).
+            var blobFile: File? = null
             try {
                 val started = System.nanoTime()
                 val results = reqs.map { req ->
@@ -123,6 +190,7 @@ class EmbeddingCoordinator(
                 val total = (System.nanoTime() - started) / 1_000_000L
                 currentCoroutineContext().ensureActive()
                 val file = writeBlobFile(uid, requestId, results)
+                blobFile = file
                 currentCoroutineContext().ensureActive()
                 val metrics = Bundle().apply {
                     putInt("count", results.size)
@@ -139,11 +207,19 @@ class EmbeddingCoordinator(
                     metrics = metrics,
                     metadata = results.map { EmbeddingItemMetadata(it.tag, it.tokenCount, it.truncated) },
                 )
+                // Successful completion — DeferredStore now owns the blob's
+                // lifetime via ack/expire. Null out so the finally cleanup
+                // doesn't delete it.
+                blobFile = null
             } catch (ce: CancellationException) {
+                deleteOrphanBlobQuietly(blobFile)
+                blobFile = null
                 deferredStore.completeCancelled(requestId, uid)
                 throw ce
             } catch (t: Throwable) {
                 MindlayerLog.w(TAG, "Deferred embedding failed: ${t.safeLabel()}", requestId = requestId, throwable = null)
+                deleteOrphanBlobQuietly(blobFile)
+                blobFile = null
                 deferredStore.failEmbeddingBatch(
                     requestId,
                     uid,
@@ -151,6 +227,7 @@ class EmbeddingCoordinator(
                     MindlayerErrorCode.nameOf(MindlayerErrorCode.INTERNAL),
                 )
             } finally {
+                deleteOrphanBlobQuietly(blobFile)
                 activeJobs.remove(key(uid, requestId))
                 exitForeground()
                 activeCount.decrementAndGet()
@@ -339,7 +416,14 @@ class EmbeddingCoordinator(
     private fun blobDir(uid: Int): File = File(File(context.cacheDir, "embedding-blobs"), uid.toString())
 
     private fun validateRequestId(requestId: String) {
-        if (!SAFE_ID.matches(requestId)) throw typed(MindlayerErrorCode.INVALID_REQUEST, "invalid requestId")
+        if (!SAFE_ID.matches(requestId) || requestId.contains("..")) {
+            throw typed(MindlayerErrorCode.INVALID_REQUEST, "invalid requestId")
+        }
+    }
+
+    private fun deleteOrphanBlobQuietly(file: File?) {
+        if (file == null) return
+        runCatching { if (file.exists()) file.delete() }
     }
 
     private fun key(uid: Int, requestId: String): String = "$uid:$requestId"
@@ -352,6 +436,12 @@ class EmbeddingCoordinator(
 
     private companion object {
         private const val TAG = "EmbeddingCoordinator"
+        // Allows `A-Z`, `a-z`, `0-9`, `.`, `_`, `-` up to 160 chars. The
+        // `..` substring is additionally rejected by [validateRequestId]
+        // as defense in depth — `writeBlobFile`/`transferFromBlob` already
+        // canonicalize and clamp to the per-uid blob dir, but tightening
+        // the regex up-front keeps any future code path that builds a
+        // filename from requestId from regressing.
         private val SAFE_ID = Regex("^[A-Za-z0-9._-]{1,160}$")
     }
 }

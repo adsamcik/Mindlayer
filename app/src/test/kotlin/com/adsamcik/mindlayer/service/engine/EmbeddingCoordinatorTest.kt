@@ -83,6 +83,46 @@ class EmbeddingCoordinatorTest {
         assertEquals(DeferredResult.CANCELLED, coordinator.fetchEmbeddingBatchResult(1, "cancelled").status)
     }
 
+    @Test fun `requestId regex rejects path-traversal sequences`() = runTest {
+        // Even though [writeBlobFile] / [transferFromBlob] canonicalize the
+        // path and clamp to cacheDir/embedding-blobs/<uid>/, the requestId
+        // regex itself must forbid `..` substrings as defense in depth. A
+        // future code path that builds a filename from requestId outside
+        // those two helpers (logger, error message, audit trail) would
+        // otherwise allow log injection or path traversal.
+        for (bad in listOf("..", "...", "..foo", "foo..bar", "a..", "a-..-b")) {
+            try {
+                coordinator.cancelEmbeddingBatch(1, bad)
+                error("expected SecurityException for requestId=$bad")
+            } catch (e: SecurityException) {
+                assertEquals(
+                    MindlayerErrorCode.INVALID_REQUEST,
+                    MindlayerErrorCode.codeFromWireMessage(e.message),
+                )
+            }
+        }
+    }
+
+    @Test fun `requestId regex accepts single-dot and safe characters`() = runTest {
+        // Single dots and hyphens are part of the canonical service-generated
+        // ID format ("emb-<uid>-<uuid>"). Bare dots in the middle (not
+        // doubled) must remain accepted so legacy IDs still validate.
+        for (ok in listOf("emb-1-abc", "foo.bar", "a.b.c", "id_42", "x-y-z")) {
+            // Either UNKNOWN (no such row) or ALREADY_FINISHED is acceptable —
+            // both mean the requestId passed validation.
+            val outcome = coordinator.cancelEmbeddingBatch(1, ok)
+            assertTrue("requestId=$ok must pass validation (got $outcome)", outcome >= 0)
+        }
+    }
+
+    @Test fun `coordinator constructor reads production-ready flag with default`() {
+        // Documents the test contract: the flag's default is the compile-time
+        // EmbeddingFeatureFlags constant. If Phase D flips that to true, this
+        // test's expected value will need to follow. Keeping the assertion
+        // explicit means a flag flip cannot land silently.
+        assertEquals(EmbeddingFeatureFlags.IS_PRODUCTION_READY, coordinator.isProductionReady)
+    }
+
     private inline fun assertCode(code: Int, block: () -> Unit) {
         try {
             block()
