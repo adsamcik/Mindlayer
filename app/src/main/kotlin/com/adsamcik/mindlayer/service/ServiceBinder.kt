@@ -270,6 +270,12 @@ class ServiceBinder(
             // so they know they can rely on `barcode[FMT|VAL]` field
             // updates appearing for receipts / product captures.
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_BARCODE_ANCHOR,
+            // Phase 2 #7: per-line bounding-box geometry surfaced on
+            // OCR_FIELD_UPDATE / OCR_FIELD_LOCKED events. Pure wire-
+            // shape capability — advertised unconditionally since the
+            // OcrTokenStreamWriter and SDK reader handle the optional
+            // box field as a no-op on receivers that don't ask for it.
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_BOUNDING_BOXES,
         )
 
         /** Allowed characters for caller-supplied identifiers (sessionId/requestId). */
@@ -2143,10 +2149,25 @@ class ServiceBinder(
         // free fingerprinting endpoint.
         authorizeCall(cost = 0.25)
         val embeddingModel = embeddingCoordinator?.defaultModelOrNull()
-        val embeddingFeatures = if (embeddingModel != null) SUPPORTED_FEATURES + com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_EMBEDDINGS else SUPPORTED_FEATURES
+        val baseFeatures = if (embeddingModel != null) {
+            SUPPORTED_FEATURES + com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_EMBEDDINGS
+        } else {
+            SUPPORTED_FEATURES
+        }
+        // Phase 2 #5 (p2-feature-flip): advertise FEATURE_OCR_SESSION
+        // ONLY when the PaddleOCR engine is in PaddleOcrEngineState.Ready
+        // (model bundle present + native delegates initialized).
+        // Capability-aware SDKs then exercise the OCR API safely on
+        // supported devices and degrade silently on devices that lack
+        // the bundle.
+        val effectiveFeatures = if (ocrSessionManager.isEngineReady()) {
+            baseFeatures + com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_SESSION
+        } else {
+            baseFeatures
+        }
         return com.adsamcik.mindlayer.ServiceCapabilities(
             apiVersion = CURRENT_API_VERSION,
-            supportedFeatures = embeddingFeatures,
+            supportedFeatures = effectiveFeatures,
             pipeProtocol = "mindlayer.stream.v1",
             maxFrameBytes = 1_048_576,
             maxToolRounds = com.adsamcik.mindlayer.service.engine.InferenceOrchestrator.MAX_TOOL_ROUNDS,
@@ -2278,9 +2299,10 @@ class ServiceBinder(
 
     // ─────────────────────────────────────────────────────────────────────
     //  v0.8 multi-frame OCR — session lifecycle wired to OcrSessionManager
-    //  (Phase 1 PR C3). recognition-call path is gated on PaddleOcrEngine
-    //  becoming non-scaffold (separate follow-up). FEATURE_OCR_SESSION is
-    //  still NOT in SUPPORTED_FEATURES — flipped when the engine is real.
+    //  (Phase 1 PR C3 + Phase 2 #1–#4 evidence + extraction pipeline).
+    //  FEATURE_OCR_SESSION is now CONDITIONALLY advertised by
+    //  getCapabilities() when OcrSessionManager.isEngineReady() returns
+    //  true (Phase 2 #5, p2-feature-flip).
     // ─────────────────────────────────────────────────────────────────────
 
     override fun createOcrSession(cfg: com.adsamcik.mindlayer.OcrSessionConfig): String {
@@ -2461,11 +2483,10 @@ class ServiceBinder(
     override fun getOcrLimits(): com.adsamcik.mindlayer.OcrLimits {
         // No authorization gate: OcrLimits is a public discovery
         // surface mirroring ServiceCapabilities.
-        // Returns the manager's configured limits (PR C3) instead of
-        // zeroBaseline; FEATURE_OCR_SESSION is still NOT advertised
-        // in SUPPORTED_FEATURES until the engine recognition path
-        // lands, so capability-aware SDKs treat these as advisory
-        // until the flag flips.
+        // Returns the manager's configured limits (PR C3). Phase 2 #5
+        // flipped FEATURE_OCR_SESSION into the SUPPORTED_FEATURES set
+        // conditionally on engine readiness — these limits remain the
+        // authoritative shape regardless of whether the flag is on.
         return ocrSessionManager.getLimits()
     }
 
