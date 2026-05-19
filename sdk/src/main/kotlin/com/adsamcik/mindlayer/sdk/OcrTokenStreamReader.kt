@@ -14,8 +14,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.float
+import kotlinx.serialization.json.floatOrNull
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import java.io.BufferedInputStream
@@ -148,10 +150,12 @@ object OcrTokenStreamReader {
             topValue = e.payload["topValue"]?.jsonPrimitive?.contentOrNull ?: return null,
             confidence = e.payload["confidence"]?.jsonPrimitive?.contentOrNull ?: "low",
             consecutiveAgreement = e.payload["consecutiveAgreement"]?.jsonPrimitive?.intOrNull ?: 1,
+            boundingBox = parseBoundingBox(e),
         )
         StreamEventType.OCR_FIELD_LOCKED -> OcrEvent.FieldLocked(
             fieldName = e.payload["fieldName"]?.jsonPrimitive?.contentOrNull ?: return null,
             topValue = e.payload["topValue"]?.jsonPrimitive?.contentOrNull ?: return null,
+            boundingBox = parseBoundingBox(e),
         )
         StreamEventType.OCR_RESULT_SNAPSHOT -> OcrEvent.ResultSnapshot(
             partialJson = e.payload["partialJson"]?.jsonPrimitive?.contentOrNull ?: return null,
@@ -165,5 +169,27 @@ object OcrTokenStreamReader {
         StreamEventType.DONE -> null // terminal, handled in readStream loop break
         StreamEventType.ERROR -> null // not surfaced in OcrEvent (yet)
         else -> null
+    }
+
+    /**
+     * Decode the optional ``bbox`` JSON array on an
+     * [StreamEventType.OCR_FIELD_UPDATE] / [StreamEventType.OCR_FIELD_LOCKED]
+     * payload into the 8-float quadrilateral.
+     *
+     * Returns `null` when the key is absent (older service writes), or
+     * when the array shape is invalid (wrong length / non-numeric
+     * entries). Defensive: a malformed bbox must NEVER cause the
+     * SDK to drop the whole event — losing the bbox alone is the
+     * correct partial-degrade.
+     */
+    private fun parseBoundingBox(e: StreamEvent): FloatArray? {
+        val arr = e.payload["bbox"]?.jsonArray ?: return null
+        if (arr.size != 8) return null
+        val out = FloatArray(8)
+        for (i in 0 until 8) {
+            val v = arr[i].jsonPrimitive.floatOrNull ?: return null
+            out[i] = v
+        }
+        return out
     }
 }
