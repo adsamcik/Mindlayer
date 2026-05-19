@@ -263,6 +263,13 @@ class ServiceBinder(
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TOKEN_BATCH,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_EVICTION_CALLBACK,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DEFERRED_INFERENCE,
+            // Phase 2 #6: ZXing barcode anchor injected into the OCR
+            // evidence package. The detector runs unconditionally
+            // alongside recognition in OcrRecognitionDispatcher; the
+            // capability flag advertises the surface to SDK callers
+            // so they know they can rely on `barcode[FMT|VAL]` field
+            // updates appearing for receipts / product captures.
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_BARCODE_ANCHOR,
         )
 
         /** Allowed characters for caller-supplied identifiers (sessionId/requestId). */

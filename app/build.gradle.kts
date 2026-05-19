@@ -566,6 +566,11 @@ dependencies {
     implementation(libs.sqlcipher.android)
     ksp(libs.room.compiler)
 
+    // ZXing core (pure-JVM barcode decoder) — used by
+    // BarcodeAnchorDetector to inject GTIN / QR / Code-128 anchors
+    // into the OCR evidence package. Pure JVM => unit-testable.
+    implementation(libs.zxing.core)
+
     testImplementation(libs.junit)
     testImplementation(libs.mockk)
     testImplementation(libs.kotlinx.coroutines.test)
