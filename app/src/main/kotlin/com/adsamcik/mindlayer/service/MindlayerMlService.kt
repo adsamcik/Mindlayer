@@ -114,6 +114,17 @@ class MindlayerMlService : Service() {
         private set
     lateinit var embeddingCoordinator: EmbeddingCoordinator
         private set
+    /**
+     * Phase 3 #1: service-owned PaddleOCR engine. Instantiated lazily in
+     * [onCreate]; eager async init kicked off so [PaddleOcrEngine.state]
+     * transitions to [com.adsamcik.mindlayer.service.engine.PaddleOcrEngineState.Ready]
+     * (or `Failed`) without waiting for the first `pushOcrFrame` call.
+     * That lets [com.adsamcik.mindlayer.service.engine.OcrSessionManager.isEngineReady]
+     * flip the [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_SESSION]
+     * capability flag during the SDK's initial handshake.
+     */
+    lateinit var paddleOcrEngine: com.adsamcik.mindlayer.service.engine.PaddleOcrEngine
+        private set
     private lateinit var sharedMemoryPool: SharedMemoryPool
     private lateinit var binder: ServiceBinder
     private lateinit var logRepository: LogRepository
@@ -206,12 +217,38 @@ class MindlayerMlService : Service() {
         // when GPU/NPU delegates are flipped on; the
         // `EngineCoexistenceInstrumentedTest` runs an in-process
         // smoke version of that checklist on the CI emulator matrix.
-        val paddleOcrEngine = com.adsamcik.mindlayer.service.engine.PaddleOcrEngine(this, logRepository = logRepository)
+        //
+        // Phase 3 #1: promote `paddleOcrEngine` to a service-owned field
+        // so `onDestroy` can `shutdown()` it and `observeMemoryPressure()`
+        // can hook the `unloadForMemoryPressure()` path. Kick off eager
+        // async `initialize()` so `state` transitions to Ready (or Failed
+        // / ModelMissing) without waiting for the first `pushOcrFrame`
+        // call — that lets `OcrSessionManager.isEngineReady()` flip the
+        // FEATURE_OCR_SESSION capability flag during the SDK handshake.
+        paddleOcrEngine = com.adsamcik.mindlayer.service.engine.PaddleOcrEngine(this, logRepository = logRepository)
         val ocrRecognitionDispatcher = com.adsamcik.mindlayer.service.engine.OcrRecognitionDispatcher(paddleOcrEngine)
         val ocrSessionManager = com.adsamcik.mindlayer.service.engine.OcrSessionManager(
             engine = paddleOcrEngine,
             recognitionDispatcher = ocrRecognitionDispatcher,
         )
+        // Eager async init — failure-tolerant. If the PaddleOCR bundle
+        // isn't installed, the engine settles into `Failed(ModelMissing)`
+        // and `isEngineReady()` stays false (FEATURE_OCR_SESSION stays
+        // unadvertised). Lives on the IO dispatcher so it does NOT block
+        // service startup.
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                paddleOcrEngine.initialize()
+            } catch (t: Throwable) {
+                // Already logged + state==Failed inside PaddleOcrEngine.initialize().
+                // Swallow here — the capability flag stays off and the
+                // service keeps running for other features (LLM, embeddings).
+                MindlayerLog.i(
+                    TAG,
+                    "PaddleOCR eager init did not complete: ${t.safeLabel()}",
+                )
+            }
+        }
 
         val diagnosticExporter = DiagnosticExporter(
             engineManager, thermalMonitor, memoryBudget, sessionManager, logDb.logDao()
@@ -294,6 +331,21 @@ class MindlayerMlService : Service() {
         }
         if (::embeddingEngine.isInitialized) {
             runBlocking { embeddingEngine.shutdown() }
+        }
+        // Phase 3 #1: shut down the PaddleOCR engine so native delegate
+        // resources are released alongside LiteRT-LM and EmbeddingGemma.
+        // Best-effort — Throwables here are non-recoverable shutdown
+        // failures and must NOT block the rest of the teardown chain.
+        if (::paddleOcrEngine.isInitialized) {
+            try {
+                runBlocking { paddleOcrEngine.shutdown() }
+            } catch (t: Throwable) {
+                MindlayerLog.w(
+                    TAG,
+                    "PaddleOcrEngine.shutdown raised: ${t.safeLabel()}",
+                    throwable = null,
+                )
+            }
         }
         orchestrator.shutdown()
         logRepository.shutdown()
@@ -394,6 +446,21 @@ class MindlayerMlService : Service() {
                     MindlayerLog.i(TAG, "Memory pressure changed: $pressure")
                     if (pressure >= MemoryPressure.CRITICAL && ::embeddingEngine.isInitialized) {
                         embeddingEngine.unloadForMemoryPressure()
+                    }
+                    // Phase 3 #1: under CRITICAL pressure, also release
+                    // the PaddleOCR native delegates so we don't compete
+                    // for memory with the LLM. PaddleOcrEngine reloads
+                    // lazily on the next recognise() call.
+                    if (pressure >= MemoryPressure.CRITICAL && ::paddleOcrEngine.isInitialized) {
+                        try {
+                            paddleOcrEngine.unloadForMemoryPressure()
+                        } catch (t: Throwable) {
+                            MindlayerLog.w(
+                                TAG,
+                                "PaddleOcrEngine.unloadForMemoryPressure raised: ${t.safeLabel()}",
+                                throwable = null,
+                            )
+                        }
                     }
                     sessionManager.applyMemoryPressure(pressure)
                 }
