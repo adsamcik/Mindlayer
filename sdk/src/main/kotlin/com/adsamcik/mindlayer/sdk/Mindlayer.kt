@@ -2135,6 +2135,15 @@ class Mindlayer private constructor(
             // best-effort
         }
     }
+
+    /** Internal: attach the OCR_V1 event-stream write-end. */
+    internal suspend fun attachOcrEventStream(
+        sessionId: String,
+        writeEnd: ParcelFileDescriptor,
+    ) {
+        val service = connection.awaitConnected()
+        service.streamOcrEvents(sessionId, writeEnd)
+    }
 }
 
 /**

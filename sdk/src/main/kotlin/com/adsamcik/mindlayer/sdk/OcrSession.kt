@@ -4,6 +4,9 @@ import com.adsamcik.mindlayer.OcrFrameAck
 import com.adsamcik.mindlayer.OcrLimits
 import com.adsamcik.mindlayer.OcrSessionConfig
 import com.adsamcik.mindlayer.OcrSessionState
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 
 /**
  * Builder-style configuration for an OCR session.
@@ -78,17 +81,23 @@ class OcrSessionConfigBuilder internal constructor(private val profile: OcrProfi
  * service-side [com.adsamcik.mindlayer.service.engine.OcrSessionManager]
  * is concurrent.
  *
- * # Phase 1 limitations
+ * # Phase 2 #2 status
  *
- * - ``events`` returns an empty stream until the engine recognition
- *   path is wired (the service closes the pipe immediately at this
- *   stage).
- * - The synchronous [pushFrame] / [pushFrameMetadataOnly] return the
- *   real wire-stable [OcrFrameAck], including ``REJECTED_QUALITY``
- *   verdicts from the service-side presort.
+ * - ``events`` is now a real [Flow] backed by the OCR_V1 protocol
+ *   pipe. The service emits OCR_FRAME_* and OCR_FIELD_* events as
+ *   frames flow through the session; when the engine recognition
+ *   path lands (track p2-engine-pipeline) those events surface
+ *   recognized text. Until then, the flow is reachable but typically
+ *   empty (the service only emits ``ocr_frame_received`` /
+ *   ``ocr_frame_rejected_quality`` / ``ocr_frame_dropped_busy``
+ *   events because no engine runs yet).
+ * - The synchronous [pushFrame] returns the real wire-stable
+ *   [OcrFrameAck], including ``REJECTED_QUALITY`` verdicts from the
+ *   service-side presort wired in Phase 2 #1.
  * - ``Mindlayer.capabilities.supportsFeature(FEATURE_OCR_SESSION)``
- *   returns ``false`` until the engine is wired. Capability-aware
- *   callers should check this before opening a session.
+ *   returns ``false`` until the engine + extraction land
+ *   (p2-feature-flip). Capability-aware callers should check this
+ *   before opening a session.
  */
 class OcrSession internal constructor(
     val sessionId: String,
@@ -102,11 +111,9 @@ class OcrSession internal constructor(
     /**
      * Push a frame's metadata into the session intake.
      *
-     * In Phase 1 PR C3 the service-side accepts metadata-only (the
-     * `frame` parameter on the AIDL call is still required for wire
-     * compatibility but the service does not extract Y-plane pixels
-     * yet). A follow-up wires pixel extraction and runs the full
-     * service-side quality presort.
+     * As of Phase 2 #1 the service extracts the Y-plane from the
+     * MediaPart and runs the full service-side quality presort.
+     * Bad frames return ``REJECTED_QUALITY`` synchronously.
      *
      * Returns the intake verdict; check [OcrFrameAck.status] for the
      * outcome (or use the [isAccepted] / [isDroppedBusy] etc. helpers).
@@ -114,6 +121,35 @@ class OcrSession internal constructor(
     suspend fun pushFrame(meta: com.adsamcik.mindlayer.OcrFrameMeta): OcrFrameAck {
         checkNotClosed()
         return mindlayer.pushOcrFrameMetadataOnly(sessionId, meta)
+    }
+
+    /**
+     * Cold [Flow] of OCR events for this session. Attach the pipe
+     * once; subsequent collects on the returned Flow re-attach a
+     * fresh pipe so multiple observers each get their own stream.
+     *
+     * Cancelling the collecting coroutine closes the read-end and
+     * the service-side writer surfaces the disconnect on its next
+     * emit (silently no-ops further events).
+     */
+    val events: Flow<OcrEvent> get() = flow {
+        checkNotClosed()
+        val pipe = android.os.ParcelFileDescriptor.createPipe()
+        val readEnd = pipe[0]
+        val writeEnd = pipe[1]
+        try {
+            mindlayer.attachOcrEventStream(sessionId, writeEnd)
+        } catch (t: Throwable) {
+            try { readEnd.close() } catch (_: Throwable) {}
+            try { writeEnd.close() } catch (_: Throwable) {}
+            throw t
+        }
+        // Service has taken ownership of writeEnd via the binder
+        // call (the AIDL transport dup'd it; our local copy is now
+        // safe to close). The service-side OcrTokenStreamWriter
+        // will close its dup'd FD on session end.
+        try { writeEnd.close() } catch (_: Throwable) {}
+        emitAll(OcrTokenStreamReader.readStream(readEnd))
     }
 
     /** Snapshot of the session's current state. */
