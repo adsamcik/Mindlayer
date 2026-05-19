@@ -66,6 +66,14 @@ class OcrSessionManager(
     private val limits: OcrLimits = defaultLimits(),
     private val clock: () -> Long = { SystemClock.elapsedRealtime() },
     private val idleTimeoutMs: Long = DEFAULT_IDLE_TIMEOUT_MS,
+    /**
+     * Phase 2 #3: optional recognition dispatcher. When null, intake
+     * still works (frames accepted/rejected per presort) but no
+     * recognition runs — this keeps Phase 1 + Phase 2 #1/#2 test
+     * paths unchanged. The binder layer constructs a dispatcher
+     * paired with [engine] when both are wired.
+     */
+    private val recognitionDispatcher: OcrRecognitionDispatcher? = null,
 ) {
 
     private val sessions = ConcurrentHashMap<String, OcrSession>()
@@ -169,6 +177,21 @@ class OcrSessionManager(
         }
 
         recordAcceptedFrame(session, intake.now, score.dHash)
+
+        // Phase 2 #3: schedule recognition on the dispatcher when both
+        // engine + dispatcher are wired. Fire-and-forget — the binder
+        // path returns the synchronous ACK immediately; recognition
+        // results stream via OCR_V1 events on the session's writer.
+        recognitionDispatcher?.submit(
+            sessionId = sessionId,
+            frameId = meta.frameId,
+            yPlane = yPlane,
+            width = width,
+            height = height,
+            config = OcrEngineConfig(),
+            writer = session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter,
+        )
+
         return OcrFrameAck(
             frameId = meta.frameId,
             status = OcrFrameAck.STATUS_ACCEPTED,
@@ -344,6 +367,11 @@ class OcrSessionManager(
             throw IllegalStateException("Session not owned by uid=$uid")
         }
         sessions.remove(sessionId)
+        recognitionDispatcher?.closeSession(sessionId)
+        // Close the event-stream writer if attached so the SDK-side
+        // Flow.collect coroutine sees EOF and terminates.
+        (session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter)
+            ?.runCatching { close() }
         MindlayerLog.i(
             TAG,
             "OCR session closed: id=$sessionId, accepted=${session.framesAccepted}, " +
@@ -357,7 +385,12 @@ class OcrSessionManager(
      */
     fun closeAllForUid(uid: Int) {
         val owned = sessions.entries.filter { it.value.uid == uid }
-        owned.forEach { sessions.remove(it.key) }
+        owned.forEach { entry ->
+            sessions.remove(entry.key)
+            recognitionDispatcher?.closeSession(entry.key)
+            (entry.value.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter)
+                ?.runCatching { close() }
+        }
         frameRateBuckets.remove(uid)
         if (owned.isNotEmpty()) {
             MindlayerLog.i(TAG, "Closed ${owned.size} OCR session(s) for uid=$uid on death")
