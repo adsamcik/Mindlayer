@@ -20,11 +20,16 @@ import java.io.File
 class DeferredStoreEmbeddingTest {
     private lateinit var dao: FakeDeferredDao
     private var now = 1_000L
-    private fun store(maxBytes: Long = 1_000L, ttlMs: Long = 10_000L) = DeferredStore(
+    private fun store(
+        maxBytes: Long = 1_000L,
+        maxEmbeddingBytes: Long = maxBytes,
+        ttlMs: Long = 10_000L,
+    ) = DeferredStore(
         dao = dao,
         clock = { now },
         ttlMs = ttlMs,
         maxResultBytesPerUid = maxBytes,
+        maxEmbeddingResultBytesPerUid = maxEmbeddingBytes,
     )
 
     @Before fun setUp() {
@@ -45,7 +50,10 @@ class DeferredStoreEmbeddingTest {
     }
 
     @Test fun `blobBytes count against quota and oldest evicted`() = runTest {
-        val s = store(maxBytes = 100L)
+        // Embedding blobs are sized against [maxEmbeddingResultBytesPerUid]
+        // independently from chat. The test sets BOTH caps to 100 B to
+        // pin the eviction boundary.
+        val s = store(maxBytes = 100L, maxEmbeddingBytes = 100L)
         val old = File.createTempFile("old", ".bin").apply { writeBytes(ByteArray(80)) }
         val newer = File.createTempFile("new", ".bin").apply { writeBytes(ByteArray(40)) }
         s.createEmbeddingBatch(1, "old", 1)
@@ -56,6 +64,20 @@ class DeferredStoreEmbeddingTest {
         assertNull(dao.snapshot("old"))
         assertFalse(old.exists())
         assertTrue(newer.exists())
+    }
+
+    @Test fun `embedding quota independent from chat quota`() = runTest {
+        // Pin the regression that motivated the per-kind quota split: at
+        // chat-quota=1MiB and embedding-quota=16MiB, a 12MiB embedding
+        // batch must NOT be evicted just because it exceeds the chat cap.
+        val s = store(maxBytes = 1L * 1024 * 1024, maxEmbeddingBytes = 16L * 1024 * 1024)
+        val big = File.createTempFile("big", ".bin").apply { writeBytes(ByteArray(12 * 1024)) }
+        s.createEmbeddingBatch(1, "big", 1)
+        s.completeEmbeddingBatch("big", 1, big.absolutePath, (12L * 1024 * 1024), null)
+        // Row must survive: blob bytes (12 MiB) exceed the chat cap (1 MiB)
+        // but stay well under the embedding cap (16 MiB).
+        assertTrue(dao.snapshot("big") != null)
+        assertTrue(big.exists())
     }
 
     @Test fun `cancel acknowledge and prune remove blob files`() = runTest {
