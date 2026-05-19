@@ -1,6 +1,8 @@
 package com.adsamcik.mindlayer.service.security
 
 import com.adsamcik.mindlayer.AudioTransfer
+import com.adsamcik.mindlayer.EmbeddingRequest
+import com.adsamcik.mindlayer.EmbeddingTask
 import com.adsamcik.mindlayer.HistoryTurn
 import com.adsamcik.mindlayer.ImageTransfer
 import com.adsamcik.mindlayer.OcrFrameMeta
@@ -629,6 +631,95 @@ object IpcInputValidator {
             require(e.length <= MAX_OCR_SCHEMA_JSON_LEN) {
                 "OcrFrameMeta.extraJson too long (${e.length} > $MAX_OCR_SCHEMA_JSON_LEN)"
             }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Embedding validators
+    // ─────────────────────────────────────────────────────────────────────
+
+    /** Hard per-request and per-batch byte cap for embedding text inputs. */
+    const val MAX_EMBEDDING_INPUT_BYTES: Long = 512L * 1024L
+    /** Hard cap on the opaque [EmbeddingRequest.tag] echoed back in results. */
+    const val MAX_EMBEDDING_TAG_LEN: Int = 256
+    /** Hard cap on the optional [EmbeddingRequest.modelId] shape. */
+    const val MAX_EMBEDDING_MODEL_ID_LEN: Int = 128
+    /** Hard upper bound on [EmbeddingRequest.outputDim] (defense in depth). */
+    const val MAX_EMBEDDING_OUTPUT_DIM: Int = 8192
+
+    /**
+     * Validate an [EmbeddingRequest] before it reaches the engine. Mirrors
+     * the OCR / MediaPart validators: schema version pin, free-form text
+     * byte cap, opaque-tag length cap, modelId length cap, task-type range,
+     * and output-dimension non-negativity.
+     *
+     * Per-model dimension checks (e.g. "must be ∈ supportedDims") are NOT
+     * done here — they require the engine's model catalog and live in
+     * `EmbeddingCoordinator.validateSingle`. This validator is the
+     * schema-shape gate at the AIDL boundary; the coordinator is the
+     * semantic gate just above the engine.
+     *
+     * @throws IllegalArgumentException with a precise label; the
+     *   `ServiceBinder` layer translates these to typed wire errors.
+     */
+    fun validateEmbeddingRequest(req: EmbeddingRequest) {
+        require(req.schemaVersion in 1..EmbeddingRequest.CURRENT_SCHEMA_VERSION) {
+            "EmbeddingRequest.schemaVersion=${req.schemaVersion} unsupported " +
+                "(expected 1..${EmbeddingRequest.CURRENT_SCHEMA_VERSION})"
+        }
+        val textBytes = req.text.toByteArray(Charsets.UTF_8).size
+        require(textBytes <= MAX_EMBEDDING_INPUT_BYTES) {
+            "EmbeddingRequest.text too long ($textBytes > $MAX_EMBEDDING_INPUT_BYTES bytes)"
+        }
+        req.tag?.let {
+            require(it.length <= MAX_EMBEDDING_TAG_LEN) {
+                "EmbeddingRequest.tag too long (${it.length} > $MAX_EMBEDDING_TAG_LEN)"
+            }
+        }
+        req.modelId?.let {
+            require(it.isNotEmpty()) {
+                "EmbeddingRequest.modelId must not be empty when supplied"
+            }
+            require(it.length <= MAX_EMBEDDING_MODEL_ID_LEN) {
+                "EmbeddingRequest.modelId too long (${it.length} > $MAX_EMBEDDING_MODEL_ID_LEN)"
+            }
+        }
+        require(EmbeddingTask.isValid(req.taskType)) {
+            "EmbeddingRequest.taskType=${req.taskType} not in 0..7"
+        }
+        req.outputDim?.let {
+            require(it in 1..MAX_EMBEDDING_OUTPUT_DIM) {
+                "EmbeddingRequest.outputDim=$it out of range (1..$MAX_EMBEDDING_OUTPUT_DIM)"
+            }
+        }
+    }
+
+    /**
+     * Validate a batch of [EmbeddingRequest]s. Enforces the batch-size cap
+     * passed by the binder (different limits for inline vs SHM vs deferred
+     * routes) plus per-item validation via [validateEmbeddingRequest], plus
+     * an aggregate-bytes cap so a batch of N maximum-length items doesn't
+     * slip past the per-item check.
+     */
+    fun validateEmbeddingRequests(
+        requests: List<EmbeddingRequest>,
+        maxBatchSize: Int,
+    ) {
+        require(requests.isNotEmpty()) { "embedding batch must not be empty" }
+        require(requests.size <= maxBatchSize) {
+            "embedding batch too large (${requests.size} > $maxBatchSize)"
+        }
+        var totalBytes = 0L
+        for (req in requests) {
+            validateEmbeddingRequest(req)
+            try {
+                totalBytes = Math.addExact(totalBytes, req.text.toByteArray(Charsets.UTF_8).size.toLong())
+            } catch (_: ArithmeticException) {
+                throw IllegalArgumentException("aggregate embedding text bytes overflow")
+            }
+        }
+        require(totalBytes <= MAX_EMBEDDING_INPUT_BYTES) {
+            "aggregate embedding text bytes ($totalBytes) > $MAX_EMBEDDING_INPUT_BYTES"
         }
     }
 }
