@@ -10,6 +10,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Per-session recognition dispatcher.
@@ -69,10 +70,30 @@ class OcrRecognitionDispatcher(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher),
     private val barcodeDetector: BarcodeAnchorDetector? = BarcodeAnchorDetector(),
+    private val llmExtractor: OcrLlmExtractor = NoOpOcrLlmExtractor(),
 ) {
 
     /** Per-session inflight jobs + per-session fusion accumulator. */
     private val perSession = ConcurrentHashMap<String, SessionState>()
+
+    /**
+     * Per-session structured-extraction context (schema + mode). Populated
+     * by [registerSession] when the OCR session is created. When absent
+     * for a session, the LLM extraction pass is skipped for that session
+     * — useful for tests and for the legacy dispatcher-only path before
+     * the manager wires the context through.
+     */
+    private val extractionContexts = ConcurrentHashMap<String, OcrExtractionContext>()
+
+    /**
+     * Register the per-session structured-extraction context. Called by
+     * [OcrSessionManager.createSession] right after the session record is
+     * created. Idempotent — repeated calls for the same `sessionId`
+     * overwrite. The context is removed by [closeSession].
+     */
+    fun registerSession(sessionId: String, context: OcrExtractionContext) {
+        extractionContexts[sessionId] = context
+    }
 
     /**
      * Submit a frame for recognition.
@@ -203,6 +224,78 @@ class OcrRecognitionDispatcher(
                     }
                 }
             }
+
+            // Structured extraction (Phase 2 #4 — p2-llm-extraction).
+            // Runs the LLM extractor on the evidence package built from
+            // this frame's recognised lines + decoded barcodes. The
+            // resulting structured fields flow through OcrFieldFusion
+            // using the same field-update/field-locked wire path as the
+            // raw-line and barcode emitters above.
+            //
+            // Strategy A — reset-per-frame KV: each frame is a fresh
+            // one-shot prompt. Cross-frame agreement happens in fusion,
+            // not in the LLM's context window.
+            //
+            // Failure-tolerant: if no extraction context is registered
+            // (legacy dispatcher-only path / unit tests), or if the
+            // extractor throws, the extraction emission is skipped and
+            // the per-line + barcode emissions above are unaffected.
+            val context = extractionContexts[sessionId]
+            if (context != null) {
+                val frameIndex = state.frameIndex.getAndIncrement()
+                val evidence = OcrEvidencePackage(
+                    sessionId = sessionId,
+                    frameId = frameId,
+                    frameIndex = frameIndex,
+                    mode = context.mode,
+                    outputSchemaJson = context.outputSchemaJson,
+                    textLines = output.lines,
+                    barcodeAnchors = state.barcodes.values.toList(),
+                    frameQuality = DEFAULT_FRAME_QUALITY,
+                )
+                val extraction = try {
+                    llmExtractor.extract(evidence)
+                } catch (t: Throwable) {
+                    // Like the recognise() scaffold above: degrade
+                    // silently and let the per-line emission keep
+                    // flowing. The extractor implementation owns its
+                    // own privacy-safe logging.
+                    MindlayerLog.w(
+                        TAG,
+                        "OCR LLM extraction failed: ${t.safeLabel()}",
+                        sessionId = sessionId,
+                        throwable = null,
+                    )
+                    OcrExtractionResult.EMPTY
+                }
+                if (extraction.rawJson != null) {
+                    state.lastExtractionRawJson = extraction.rawJson
+                }
+                for (field in extraction.fields) {
+                    val fieldName = "extract.${field.name}"
+                    val obs = OcrFieldFusion.FieldObservation(
+                        value = field.value,
+                        confidence = field.confidence,
+                        frameQuality = evidence.frameQuality,
+                        frameId = frameId,
+                    )
+                    val newState = state.fusion.accept(fieldName, obs)
+                    writer?.runCatching {
+                        writeFieldUpdate(
+                            fieldName = fieldName,
+                            topValue = newState.topValue ?: "",
+                            confidence = newState.locked.toConfidenceString(),
+                            consecutiveAgreement = newState.consecutiveAgreement,
+                        )
+                    }
+                    if (newState.locked && !state.lockedFields.contains(fieldName)) {
+                        state.lockedFields.add(fieldName)
+                        writer?.runCatching {
+                            writeFieldLocked(fieldName, newState.topValue ?: "")
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -222,7 +315,7 @@ class OcrRecognitionDispatcher(
         // last pushFrame to enqueue. A future refinement can track
         // active jobs and join them here.
         val snapshot = state.fusion.snapshot()
-        val fullJson = buildResultJson(snapshot)
+        val fullJson = buildResultJson(snapshot, state.lastExtractionRawJson)
         writer?.runCatching { writeResultFinalized(fullJson) }
         writer?.runCatching { writeDone("ocr_complete") }
     }
@@ -233,6 +326,7 @@ class OcrRecognitionDispatcher(
      */
     fun closeSession(sessionId: String) {
         perSession.remove(sessionId)
+        extractionContexts.remove(sessionId)
     }
 
     /** Tear down everything. Idempotent. */
@@ -241,9 +335,19 @@ class OcrRecognitionDispatcher(
         scope.coroutineContext[Job]?.cancel()
     }
 
-    private fun buildResultJson(snapshot: Map<String, OcrFieldFusion.FieldState>): String {
-        // Minimal JSON — Phase 2 #4 (p2-llm-extraction) replaces this
-        // with a real schema-constrained JSON from Gemma extraction.
+    private fun buildResultJson(
+        snapshot: Map<String, OcrFieldFusion.FieldState>,
+        lastExtractionRawJson: String?,
+    ): String {
+        // Phase 2 #4: prefer the LLM extractor's last raw JSON when
+        // present (it is the schema-shaped object the caller actually
+        // asked for). Fall back to a flat fusion-snapshot dump so the
+        // wire surface keeps emitting *something* even when the
+        // extractor stays silent (NoOpOcrLlmExtractor default, or the
+        // extractor errored out on every frame).
+        if (lastExtractionRawJson != null) {
+            return lastExtractionRawJson
+        }
         val sb = StringBuilder("{")
         var first = true
         for ((field, state) in snapshot) {
@@ -273,6 +377,23 @@ class OcrRecognitionDispatcher(
          */
         val barcodes: MutableMap<String, BarcodeAnchor> =
             java.util.concurrent.ConcurrentHashMap()
+
+        /**
+         * Monotonic per-session frame index handed to the LLM extractor
+         * as [OcrEvidencePackage.frameIndex]. Distinct from the
+         * caller-supplied [OcrEvidencePackage.frameId] — the index lets
+         * the extractor reason about position in the accepted-frame
+         * sequence regardless of frame-id gaps from rejected frames.
+         */
+        val frameIndex: AtomicInteger = AtomicInteger(0)
+
+        /**
+         * Most-recent raw-JSON output from the LLM extractor, if any.
+         * Used by [buildResultJson] to surface the schema-shaped object
+         * verbatim on `OcrEvent.ResultFinalized` instead of the flat
+         * fusion-snapshot fallback.
+         */
+        @Volatile var lastExtractionRawJson: String? = null
     }
 
     private companion object {
@@ -285,5 +406,16 @@ class OcrRecognitionDispatcher(
          * fusion-state map key footprint.
          */
         private const val BARCODE_VALUE_KEY_PREFIX_CHARS = 16
+
+        /**
+         * Default frame-quality weight handed to the LLM extractor's
+         * evidence package. The presort already gated this frame as
+         * "accepted" so it is at least average quality; the actual
+         * per-frame blur score is computed during intake but is not
+         * threaded back here yet. Conservatively treat every accepted
+         * frame as a strong reading until a future patch wires the
+         * presort score forward.
+         */
+        private const val DEFAULT_FRAME_QUALITY = 1.0
     }
 }
