@@ -488,6 +488,49 @@ class ServiceBinder(
     private fun requireEmbeddingCoordinator(): EmbeddingCoordinator =
         embeddingCoordinator ?: throw typedBinderException(MindlayerErrorCode.EMBEDDING_DISABLED, "embeddings unavailable")
 
+    /**
+     * Apply [IpcInputValidator.validateEmbeddingRequest] at the AIDL
+     * boundary and translate validator [IllegalArgumentException]s into the
+     * service's typed wire error [MindlayerErrorCode.INVALID_REQUEST]. The
+     * SDK's `withTypedErrors` chokepoint then maps this to a
+     * [MindlayerException] with the same code on the client side.
+     *
+     * Semantic checks that depend on the loaded model (modelId match,
+     * outputDim ∈ supportedDims) still happen in
+     * `EmbeddingCoordinator.validateSingle`; this validator is the
+     * pre-engine shape gate.
+     */
+    private fun validateEmbeddingRequestOrThrow(req: com.adsamcik.mindlayer.EmbeddingRequest) {
+        try {
+            IpcInputValidator.validateEmbeddingRequest(req)
+        } catch (e: IllegalArgumentException) {
+            throw typedBinderException(MindlayerErrorCode.INVALID_REQUEST, e.message ?: "invalid embedding request")
+        }
+    }
+
+    private fun validateEmbeddingRequestsOrThrow(
+        list: List<com.adsamcik.mindlayer.EmbeddingRequest>,
+        maxBatchSize: Int,
+    ) {
+        try {
+            IpcInputValidator.validateEmbeddingRequests(list, maxBatchSize)
+        } catch (e: IllegalArgumentException) {
+            // Batch-size violations map to a different typed code than per-item
+            // shape errors so capability-aware SDKs can produce a precise error
+            // ("you sent N requests but the cap is M") rather than the generic
+            // INVALID_REQUEST.
+            val msg = e.message.orEmpty()
+            val code = if (msg.contains("batch too large") || msg.contains("must not be empty")) {
+                MindlayerErrorCode.EMBEDDING_BATCH_TOO_LARGE
+            } else if (msg.contains("text too long") || msg.contains("aggregate embedding text bytes")) {
+                MindlayerErrorCode.EMBEDDING_INPUT_TOO_LONG
+            } else {
+                MindlayerErrorCode.INVALID_REQUEST
+            }
+            throw typedBinderException(code, msg.ifEmpty { "invalid embedding batch" })
+        }
+    }
+
     private fun requireRegisteredClient(): ClientRegistration? {
         val uid = Binder.getCallingUid()
         if (uid == Process.myUid()) return null
@@ -2148,8 +2191,19 @@ class ServiceBinder(
         // through the standard pending-approval path rather than getting a
         // free fingerprinting endpoint.
         authorizeCall(cost = 0.25)
-        val embeddingModel = embeddingCoordinator?.defaultModelOrNull()
-        val baseFeatures = if (embeddingModel != null) {
+        val coord = embeddingCoordinator
+        // FEATURE_EMBEDDINGS is conditional on TWO independent signals:
+        //   1. A real embedding model is installed (defaultModelOrNull != null)
+        //   2. The backend is production-ready (EmbeddingFeatureFlags.IS_PRODUCTION_READY)
+        // Phase A intentionally ships #1 = sometimes, #2 = false. Advertising
+        // FEATURE_EMBEDDINGS when #2 is false would tell capability-aware
+        // SDKs that embed works, and every call would then throw — worse than
+        // leaving the feature dark. When Phase D wires the real LiteRT
+        // pipeline, IS_PRODUCTION_READY flips to true and the feature lights
+        // up.
+        val embeddingModel = coord?.defaultModelOrNull()
+        val embeddingsLive = embeddingModel != null && coord.isProductionReady
+        val baseFeatures = if (embeddingsLive) {
             SUPPORTED_FEATURES + com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_EMBEDDINGS
         } else {
             SUPPORTED_FEATURES
@@ -2165,6 +2219,11 @@ class ServiceBinder(
         } else {
             baseFeatures
         }
+        // android.os.SharedMemory was introduced in API 27 (O_MR1). On API
+        // 26 the SHM path in EmbeddingCoordinator.embedBatchShm cannot be
+        // taken at all — advertise maxEmbeddingBatchShm=0 so capability-aware
+        // SDKs route to embedBatch or embedBatchDeferred instead.
+        val shmSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1
         return com.adsamcik.mindlayer.ServiceCapabilities(
             apiVersion = CURRENT_API_VERSION,
             supportedFeatures = effectiveFeatures,
@@ -2181,12 +2240,12 @@ class ServiceBinder(
             // #1874 lifts multi-image, this rises with the validator caps.
             maxMediaPartsPerRequest = MAX_MEDIA_PARTS_PER_REQUEST,
             maxTotalMediaBytesPerRequest = IpcInputValidator.MAX_TOTAL_MEDIA_BYTES_PER_REQUEST,
-            maxEmbeddingBatchInline = if (embeddingModel != null) requireEmbeddingCoordinator().maxBatchInline else 0,
-            maxEmbeddingBatchShm = if (embeddingModel != null) requireEmbeddingCoordinator().maxBatchShm else 0,
-            maxEmbeddingBatchTotal = if (embeddingModel != null) requireEmbeddingCoordinator().maxBatchTotal else 0,
-            maxEmbeddingInputBytes = if (embeddingModel != null) requireEmbeddingCoordinator().maxInputBytes else 0L,
-            embeddingModelIds = embeddingModel?.let { listOf(it.id) } ?: emptyList(),
-            embeddingDims = embeddingModel?.supportedDims ?: emptyList(),
+            maxEmbeddingBatchInline = if (embeddingsLive) coord!!.maxBatchInline else 0,
+            maxEmbeddingBatchShm = if (embeddingsLive && shmSupported) coord!!.maxBatchShm else 0,
+            maxEmbeddingBatchTotal = if (embeddingsLive) coord!!.maxBatchTotal else 0,
+            maxEmbeddingInputBytes = if (embeddingsLive) coord!!.maxInputBytes else 0L,
+            embeddingModelIds = if (embeddingsLive) listOf(embeddingModel!!.id) else emptyList(),
+            embeddingDims = if (embeddingsLive) embeddingModel!!.supportedDims else emptyList(),
         )
     }
 
@@ -2242,14 +2301,17 @@ class ServiceBinder(
 
     override fun embed(req: com.adsamcik.mindlayer.EmbeddingRequest): com.adsamcik.mindlayer.EmbeddingResult {
         authorizeCall(cost = 1.0)
+        validateEmbeddingRequestOrThrow(req)
         val requestId = "emb-${Binder.getCallingUid()}-${UUID.randomUUID()}"
         return runBlocking { requireEmbeddingCoordinator().embed(Binder.getCallingUid(), req, requestId) }
     }
 
     override fun embedBatch(reqs: List<com.adsamcik.mindlayer.EmbeddingRequest>?): com.adsamcik.mindlayer.EmbeddingBatchResult {
         authorizeCall(cost = ((reqs?.size ?: 0) * 0.5).coerceAtMost(RateLimiter.MAX_COST))
+        val list = reqs ?: emptyList()
+        validateEmbeddingRequestsOrThrow(list, requireEmbeddingCoordinator().maxBatchInline)
         val requestId = "emb-${Binder.getCallingUid()}-${UUID.randomUUID()}"
-        return runBlocking { requireEmbeddingCoordinator().embedBatch(Binder.getCallingUid(), reqs ?: emptyList(), requestId) }
+        return runBlocking { requireEmbeddingCoordinator().embedBatch(Binder.getCallingUid(), list, requestId) }
     }
 
     override fun embedBatchShm(reqs: List<com.adsamcik.mindlayer.EmbeddingRequest>?): com.adsamcik.mindlayer.EmbeddingBatchTransfer {
@@ -2266,13 +2328,17 @@ class ServiceBinder(
                 "embedBatchShm requires API 27+ (SharedMemory); use embedBatch or embedBatchDeferred",
             )
         }
+        val list = reqs ?: emptyList()
+        validateEmbeddingRequestsOrThrow(list, requireEmbeddingCoordinator().maxBatchShm)
         val requestId = "emb-${Binder.getCallingUid()}-${UUID.randomUUID()}"
-        return runBlocking { requireEmbeddingCoordinator().embedBatchShm(Binder.getCallingUid(), reqs ?: emptyList(), requestId) }
+        return runBlocking { requireEmbeddingCoordinator().embedBatchShm(Binder.getCallingUid(), list, requestId) }
     }
 
     override fun embedBatchDeferred(reqs: List<com.adsamcik.mindlayer.EmbeddingRequest>?): DeferredHandle {
         authorizeCall(cost = 0.5)
-        return runBlocking { requireEmbeddingCoordinator().embedBatchDeferred(Binder.getCallingUid(), reqs ?: emptyList()) }
+        val list = reqs ?: emptyList()
+        validateEmbeddingRequestsOrThrow(list, requireEmbeddingCoordinator().maxBatchTotal)
+        return runBlocking { requireEmbeddingCoordinator().embedBatchDeferred(Binder.getCallingUid(), list) }
     }
 
     override fun fetchEmbeddingBatchResult(requestId: String): com.adsamcik.mindlayer.VectorBlobHandle {
