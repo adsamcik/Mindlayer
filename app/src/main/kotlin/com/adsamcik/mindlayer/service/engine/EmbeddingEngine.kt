@@ -11,7 +11,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.Objects
-import kotlin.math.sqrt
 
 sealed class EmbeddingEngineState {
     object Idle : EmbeddingEngineState()
@@ -109,8 +108,13 @@ class EmbeddingEngine(
         val prefixedText = EmbeddingTask.prefixFor(task) + text
         val startedNs = System.nanoTime()
         val tokens = backend.tokenize(prefixedText, model.maxContextTokens)
-        val rawVector = backend.embed(tokens, outputDim, normalize)
-        val vector = if (normalize) normalized(rawVector) else rawVector
+        // The [EmbeddingBackend.embed] contract delegates L2 normalization to
+        // the backend. Engine-level re-normalization here would be wasted
+        // work on already-unit vectors and a silent double-correction if a
+        // future backend returns scaled vectors that intentionally aren't
+        // unit-length. Keep normalization with the single owner (the backend
+        // implementation) so the responsibility chain stays clear.
+        val vector = backend.embed(tokens, outputDim, normalize)
         val durationMs = (System.nanoTime() - startedNs) / 1_000_000L
 
         MindlayerLog.i(
@@ -122,7 +126,13 @@ class EmbeddingEngine(
             dim = vector.size,
             modelId = model.id,
             tokenCount = tokens.size,
-            truncated = tokens.size >= model.maxContextTokens,
+            // The tokenizer is contracted to clip at [maxContextTokens]
+            // (see [EmbeddingBackend.tokenize]). A token count *exactly equal*
+            // to the cap means the input fit precisely — no content was
+            // dropped, so `truncated` is false. Only counts strictly greater
+            // than the cap (which the backend is supposed to never return,
+            // but which we treat defensively) signal real truncation.
+            truncated = tokens.size > model.maxContextTokens,
             backend = backend.activeBackend,
             durationMs = durationMs,
         )
@@ -147,8 +157,18 @@ class EmbeddingEngine(
             model
         } catch (t: Throwable) {
             val failure = classifyInitFailure(t)
-            lastInitFailure = failure
-            lastInitThrowable = t
+            // Transient failures must not poison the engine for the rest of
+            // the process lifetime. [InitFailure.LowMemory] is the canonical
+            // transient case: memory pressure typically recovers, and the
+            // caller should be allowed to retry rather than be wedged until
+            // an explicit [unloadForMemoryPressure] / [shutdown] call. All
+            // other failure classes are sticky because they reflect on-disk
+            // model state that doesn't fix itself without operator action
+            // (ModelMissing, IntegrityMismatch, NativeError).
+            if (failure !is InitFailure.LowMemory) {
+                lastInitFailure = failure
+                lastInitThrowable = t
+            }
             _state.value = EmbeddingEngineState.Failed(failure)
             logRepository?.logInitFailureCategorized(failure)
             MindlayerLog.w(TAG, "Embedding init failed: ${t.safeLabel()}", throwable = null)
@@ -172,14 +192,6 @@ class EmbeddingEngine(
 
     private fun noEmbeddingModelFoundException(): IllegalStateException =
         IllegalStateException("No embedding model files found. Phase D adds the embedding Asset Pack.")
-
-    private fun normalized(vector: FloatArray): FloatArray {
-        var sum = 0f
-        for (value in vector) sum += value * value
-        if (sum == 0f) return vector
-        val norm = sqrt(sum.toDouble()).toFloat()
-        return FloatArray(vector.size) { index -> vector[index] / norm }
-    }
 
     private companion object {
         private const val TAG = "EmbeddingEngine"
