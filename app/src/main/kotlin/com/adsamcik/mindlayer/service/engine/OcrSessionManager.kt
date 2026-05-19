@@ -445,6 +445,24 @@ class OcrSessionManager(
     fun getLimits(): OcrLimits = limits
 
     /**
+     * True when the OCR engine bundle is loaded and the native delegates
+     * have initialized successfully (i.e. the engine's state machine is
+     * in [PaddleOcrEngineState.Ready]).
+     *
+     * Used by [com.adsamcik.mindlayer.service.ServiceBinder.getCapabilities]
+     * to flip [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_SESSION]
+     * into the advertised set ONLY on devices where the OCR pipeline can
+     * actually serve traffic. Devices without the model bundle, or where
+     * native delegate init failed, keep the flag off — capability-aware
+     * SDKs then degrade gracefully instead of calling `createOcrSession`
+     * and getting a runtime error on `pushOcrFrame`.
+     *
+     * Returns `false` when no engine is wired (i.e. tests / dispatcher-only
+     * configurations).
+     */
+    fun isEngineReady(): Boolean = engine?.state?.value == PaddleOcrEngineState.Ready
+
+    /**
      * Sweep idle + expired sessions. Called opportunistically on
      * every createSession; expensive-loop-free since it iterates
      * concurrent map entries.
