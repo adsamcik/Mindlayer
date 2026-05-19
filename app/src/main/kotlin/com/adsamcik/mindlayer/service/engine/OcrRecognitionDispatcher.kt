@@ -68,6 +68,7 @@ class OcrRecognitionDispatcher(
     private val engine: PaddleOcrEngine,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher),
+    private val barcodeDetector: BarcodeAnchorDetector? = BarcodeAnchorDetector(),
 ) {
 
     /** Per-session inflight jobs + per-session fusion accumulator. */
@@ -159,6 +160,49 @@ class OcrRecognitionDispatcher(
                     }
                 }
             }
+
+            // Barcode anchors: run ZXing on the same Y-plane. Each
+            // decoded barcode is treated as a synthetic field named
+            // `barcode[<index>]` so the fusion module + wire path
+            // are reused as-is. The structured-extraction stage
+            // (p2-llm-extraction) will mine the barcodes map from
+            // SessionState to inject GTIN / QR anchors into the
+            // schema-constrained extraction prompt.
+            //
+            // Failure-tolerant: decode() returns empty on any error;
+            // a missed barcode never propagates a failure to the
+            // session lifecycle.
+            barcodeDetector?.decode(yPlane, width, height, frameId)?.forEach { anchor ->
+                val key = "${anchor.format}|${anchor.value}"
+                val merged = state.barcodes.merge(key, anchor) { existing, fresh ->
+                    // Keep the original frame's bbox (oldest detection
+                    // is typically the highest-quality one), but record
+                    // the latest frameId for downstream weighting.
+                    existing.copy(frameId = fresh.frameId)
+                } ?: anchor
+                val fieldName = "barcode[${anchor.format}|${anchor.value.take(BARCODE_VALUE_KEY_PREFIX_CHARS)}]"
+                val obs = OcrFieldFusion.FieldObservation(
+                    value = anchor.value,
+                    confidence = OcrFieldFusion.Confidence.HIGH,
+                    frameQuality = 1.0,
+                    frameId = frameId,
+                )
+                val newState = state.fusion.accept(fieldName, obs)
+                writer?.runCatching {
+                    writeFieldUpdate(
+                        fieldName = fieldName,
+                        topValue = merged.value,
+                        confidence = newState.locked.toConfidenceString(),
+                        consecutiveAgreement = newState.consecutiveAgreement,
+                    )
+                }
+                if (newState.locked && !state.lockedFields.contains(fieldName)) {
+                    state.lockedFields.add(fieldName)
+                    writer?.runCatching {
+                        writeFieldLocked(fieldName, merged.value)
+                    }
+                }
+            }
         }
     }
 
@@ -219,9 +263,27 @@ class OcrRecognitionDispatcher(
     private class SessionState {
         val fusion = OcrFieldFusion()
         val lockedFields: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+        /**
+         * Accumulator for barcode anchors decoded across the session's
+         * frames. Keyed by canonical `format|value` so repeated
+         * detections of the same barcode in successive frames merge
+         * into a single anchor (and bump the field-update agreement
+         * counter via OcrFieldFusion just like recognised text does).
+         */
+        val barcodes: MutableMap<String, BarcodeAnchor> =
+            java.util.concurrent.ConcurrentHashMap()
     }
 
     private companion object {
         private const val TAG = "OcrRecognitionDispatcher"
+
+        /**
+         * Max number of barcode-value chars used in the synthetic
+         * fusion field name. Caps the field-name length so a long
+         * QR payload (URL, vCard, etc.) does not blow up the
+         * fusion-state map key footprint.
+         */
+        private const val BARCODE_VALUE_KEY_PREFIX_CHARS = 16
     }
 }
