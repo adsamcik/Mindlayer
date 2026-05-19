@@ -198,10 +198,25 @@ class MindlayerMlService : Service() {
         val callbackRegistry = EvictionRegistry()
         embeddingCoordinator = EmbeddingCoordinator(embeddingEngine, deferredStore, this, serviceScope, callbackRegistry, sharedMemoryPool)
 
+        // Phase 2 #3: PaddleOCR engine + recognition dispatcher + OCR
+        // session manager — all wired here so they share the same process
+        // lifecycle as the LiteRT-LM Gemma engine and the LiteRT
+        // EmbeddingGemma backend. See docs/LITERT_COEXISTENCE.md for the
+        // 8-step validation checklist that must be run on a real device
+        // when GPU/NPU delegates are flipped on; the
+        // `EngineCoexistenceInstrumentedTest` runs an in-process
+        // smoke version of that checklist on the CI emulator matrix.
+        val paddleOcrEngine = com.adsamcik.mindlayer.service.engine.PaddleOcrEngine(this, logRepository = logRepository)
+        val ocrRecognitionDispatcher = com.adsamcik.mindlayer.service.engine.OcrRecognitionDispatcher(paddleOcrEngine)
+        val ocrSessionManager = com.adsamcik.mindlayer.service.engine.OcrSessionManager(
+            engine = paddleOcrEngine,
+            recognitionDispatcher = ocrRecognitionDispatcher,
+        )
+
         val diagnosticExporter = DiagnosticExporter(
             engineManager, thermalMonitor, memoryBudget, sessionManager, logDb.logDao()
         )
-        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, allowlistStore = allowlistStore, logRepository = logRepository, mlHealthRecorder = mlHealthRecorder, deferredStore = deferredStore, embeddingCoordinator = embeddingCoordinator, callbackRegistry = callbackRegistry, sharedMemoryPool = sharedMemoryPool)
+        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, allowlistStore = allowlistStore, logRepository = logRepository, mlHealthRecorder = mlHealthRecorder, deferredStore = deferredStore, embeddingCoordinator = embeddingCoordinator, callbackRegistry = callbackRegistry, ocrSessionManager = ocrSessionManager, sharedMemoryPool = sharedMemoryPool)
 
         logRepository.log(LogEntry(
             timestampMs = System.currentTimeMillis(),
