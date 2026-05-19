@@ -38,12 +38,29 @@ class DeferredStore(
     private val maxCompletedPendingPerUid: Int = DEFAULT_MAX_COMPLETED_PENDING_PER_UID,
     private val maxResultBytesPerUid: Long = DEFAULT_MAX_RESULT_BYTES_PER_UID,
     private val maxResultBytesPerResult: Int = DEFAULT_MAX_RESULT_BYTES_PER_RESULT,
+    /**
+     * Per-UID byte budget specifically for embedding deferred results. The
+     * default of 16 MiB is sized to accommodate a single max-size embedding
+     * batch (4096 items × 768 dim × 4 bytes ≈ 12 MiB) plus headroom for a
+     * partial second batch. Set independently from [maxResultBytesPerUid]
+     * because embedding result blobs are an order of magnitude larger than
+     * chat result text, and treating them under the same 1 MiB quota would
+     * cause the byte-quota path to silently delete a just-written embedding
+     * result before the client can fetch it.
+     */
+    private val maxEmbeddingResultBytesPerUid: Long = DEFAULT_MAX_EMBEDDING_RESULT_BYTES_PER_UID,
 ) {
     companion object {
         const val DEFAULT_MAX_RUNNING_PER_UID: Int = 16
         const val DEFAULT_MAX_COMPLETED_PENDING_PER_UID: Int = 64
         const val DEFAULT_MAX_RESULT_BYTES_PER_UID: Long = 1L * 1024L * 1024L
         const val DEFAULT_MAX_RESULT_BYTES_PER_RESULT: Int = 256 * 1024
+        /**
+         * 16 MiB — covers a single max-size embedding deferred batch
+         * (~12 MiB at 4096 × 768 × float32 + 8-byte header) plus headroom.
+         * If the embedding batch cap is ever raised, raise this in lockstep.
+         */
+        const val DEFAULT_MAX_EMBEDDING_RESULT_BYTES_PER_UID: Long = 16L * 1024L * 1024L
         const val DEFAULT_TTL_MS: Long = 24L * 60L * 60L * 1000L
         private val json = Json { ignoreUnknownKeys = true }
     }
@@ -149,7 +166,13 @@ class DeferredStore(
             blobBytes = blobBytes,
             perItemMetadataJson = perItemMetadataJson,
         )
-        enforceByteQuota(uid)
+        // The "kind" of the just-completed row determines which per-UID
+        // byte budget applies. Embedding blobs are ~10× larger than chat
+        // result text (12 MiB max vs 256 KiB) so they need a higher cap,
+        // applied independently — without this, a single embedding batch
+        // would trip the chat quota and self-delete before fetch.
+        val kind = dao.byRequestId(requestId)?.kind ?: DeferredEntity.KIND_CHAT
+        enforceByteQuota(uid, kind)
     }
 
     private fun capResultText(text: String): Pair<String, Boolean> =
@@ -245,14 +268,28 @@ class DeferredStore(
 
     suspend fun completedPendingForUid(uid: Int): List<DeferredEntity> = dao.completedPendingForUid(uid)
 
+    /**
+     * Lightweight lookup used by the embedding-blob startup sweep. Returns
+     * the row whose primary key matches [requestId], or null if no such row
+     * exists (e.g. because it was cleaned up by ack/expire/prune already, or
+     * because it was never created — orphaned blob case).
+     */
+    suspend fun entityByRequestIdOrNull(requestId: String): DeferredEntity? =
+        dao.byRequestId(requestId)
+
     suspend fun pruneExpired(): Int {
         val now = clock()
         dao.expiredBefore(now).forEach { deleteBlob(it) }
         return dao.deleteExpired(now)
     }
 
-    private suspend fun enforceByteQuota(uid: Int) {
-        while (dao.resultBytes(uid) > maxResultBytesPerUid) {
+    private suspend fun enforceByteQuota(uid: Int, kind: String) {
+        val cap = if (kind == DeferredEntity.KIND_EMBEDDING) {
+            maxEmbeddingResultBytesPerUid
+        } else {
+            maxResultBytesPerUid
+        }
+        while (dao.resultBytes(uid) > cap) {
             val oldest = dao.oldestCompletedWithText(uid) ?: return
             dao.deleteAny(oldest.requestId)
             deleteBlob(oldest)
