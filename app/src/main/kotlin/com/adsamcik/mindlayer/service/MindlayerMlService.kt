@@ -198,6 +198,16 @@ class MindlayerMlService : Service() {
         val callbackRegistry = EvictionRegistry()
         embeddingCoordinator = EmbeddingCoordinator(embeddingEngine, deferredStore, this, serviceScope, callbackRegistry, sharedMemoryPool)
 
+        // Sweep orphaned embedding blobs before any client can bind. Two
+        // crash windows can leave files in `cacheDir/embedding-blobs/<uid>/`
+        // that aren't reachable from any DeferredStore row: (a) a `.tmp-*`
+        // file from an interrupted atomic-rename in
+        // `EmbeddingCoordinator.writeBlobFile`, (b) a `<requestId>.bin` that
+        // was atomically moved into place but whose
+        // `completeEmbeddingBatch` call never ran because the process died.
+        // Both cases otherwise leak disk until the 24h TTL prune fires.
+        runBlocking { embeddingCoordinator.cleanupOrphanBlobsOnStartup() }
+
         // Phase 2 #3: PaddleOCR engine + recognition dispatcher + OCR
         // session manager — all wired here so they share the same process
         // lifecycle as the LiteRT-LM Gemma engine and the LiteRT
