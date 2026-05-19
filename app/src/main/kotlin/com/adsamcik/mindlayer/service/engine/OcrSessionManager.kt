@@ -120,6 +120,13 @@ class OcrSessionManager(
         )
         session.lastFrameAtMs = session.createdAtMs
         sessions[sessionId] = session
+        recognitionDispatcher?.registerSession(
+            sessionId = sessionId,
+            context = OcrExtractionContext(
+                mode = config.mode,
+                outputSchemaJson = config.outputSchemaJson,
+            ),
+        )
         MindlayerLog.i(
             TAG,
             "OCR session created: id=$sessionId, uid=$uid, mode=${config.mode}, " +
