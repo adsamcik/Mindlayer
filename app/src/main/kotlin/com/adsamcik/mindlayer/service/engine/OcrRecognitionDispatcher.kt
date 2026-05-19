@@ -149,12 +149,13 @@ class OcrRecognitionDispatcher(
                         topValue = newState.topValue ?: "",
                         confidence = newState.locked.toConfidenceString(),
                         consecutiveAgreement = newState.consecutiveAgreement,
+                        boundingBox = line.boundingBox,
                     )
                 }
                 if (newState.locked && !state.lockedFields.contains(fieldName)) {
                     state.lockedFields.add(fieldName)
                     writer?.runCatching {
-                        writeFieldLocked(fieldName, newState.topValue ?: "")
+                        writeFieldLocked(fieldName, newState.topValue ?: "", line.boundingBox)
                     }
                 }
             }

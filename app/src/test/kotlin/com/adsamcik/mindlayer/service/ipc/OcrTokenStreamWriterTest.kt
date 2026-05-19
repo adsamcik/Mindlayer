@@ -182,6 +182,68 @@ class OcrTokenStreamWriterTest {
         assertTrue("Second frame should be the event", frames[1].contains("ocr_frame_received"))
     }
 
+    @Test fun `writeFieldUpdate with bbox emits 8-element array`() {
+        val out = ByteArrayOutputStream()
+        val writer = OcrTokenStreamWriter.forTesting(out)
+        val bbox = floatArrayOf(0.1f, 0.2f, 0.3f, 0.2f, 0.3f, 0.4f, 0.1f, 0.4f)
+        writer.writeFieldUpdate(
+            fieldName = "/total",
+            topValue = "12.99",
+            confidence = "high",
+            consecutiveAgreement = 1,
+            boundingBox = bbox,
+        )
+        writer.close()
+        val event = readAllFrames(out.toByteArray())[1]
+        assertTrue(event.contains("ocr_field_update"))
+        assertTrue(event.contains("\"bbox\":[0.1,0.2,0.3,0.2,0.3,0.4,0.1,0.4]"))
+    }
+
+    @Test fun `writeFieldUpdate without bbox omits the bbox key`() {
+        val out = ByteArrayOutputStream()
+        val writer = OcrTokenStreamWriter.forTesting(out)
+        writer.writeFieldUpdate(
+            fieldName = "/total",
+            topValue = "12.99",
+            confidence = "high",
+            consecutiveAgreement = 1,
+        )
+        writer.close()
+        val event = readAllFrames(out.toByteArray())[1]
+        assertTrue("bbox key must be absent when null", !event.contains("\"bbox\""))
+    }
+
+    @Test fun `writeFieldLocked with bbox emits 8-element array`() {
+        val out = ByteArrayOutputStream()
+        val writer = OcrTokenStreamWriter.forTesting(out)
+        val bbox = floatArrayOf(0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f)
+        writer.writeFieldLocked("/merchant", "Cafe X", boundingBox = bbox)
+        writer.close()
+        val event = readAllFrames(out.toByteArray())[1]
+        assertTrue(event.contains("ocr_field_locked"))
+        assertTrue(event.contains("\"bbox\":[0.0,0.0,1.0,0.0,1.0,1.0,0.0,1.0]"))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `writeFieldUpdate rejects wrong-sized bbox`() {
+        val out = ByteArrayOutputStream()
+        val writer = OcrTokenStreamWriter.forTesting(out)
+        writer.writeFieldUpdate(
+            fieldName = "/total",
+            topValue = "x",
+            confidence = "low",
+            consecutiveAgreement = 1,
+            boundingBox = floatArrayOf(0f, 0f, 1f, 1f),
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `writeFieldLocked rejects wrong-sized bbox`() {
+        val out = ByteArrayOutputStream()
+        val writer = OcrTokenStreamWriter.forTesting(out)
+        writer.writeFieldLocked("/x", "v", boundingBox = floatArrayOf(0f, 0f, 1f))
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────
 
     private fun readAllFrames(bytes: ByteArray): List<String> {

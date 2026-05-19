@@ -60,26 +60,85 @@ sealed class OcrEvent {
      * @property consecutiveAgreement how many consecutive frames
      *   have agreed on ``topValue``; the field locks once this
      *   reaches the service's K-consecutive threshold.
+     * @property boundingBox optional quadrilateral in normalised
+     *   0..1 frame coordinates: ``[x1, y1, x2, y2, x3, y3, x4, y4]``
+     *   clockwise from top-left. ``null`` when the service did not
+     *   emit a bbox (e.g. older service, fused field without a
+     *   single source line, or the engine config disabled bbox
+     *   emission).
      */
     data class FieldUpdate(
         val fieldName: String,
         val topValue: String,
         val confidence: String,
         val consecutiveAgreement: Int,
+        val boundingBox: FloatArray? = null,
     ) : OcrEvent() {
         override fun toString(): String =
             "FieldUpdate(field=$fieldName, value=<redacted:${topValue.length}>, " +
-                "conf=$confidence, k=$consecutiveAgreement)"
+                "conf=$confidence, k=$consecutiveAgreement" +
+                (if (boundingBox != null) ", bbox=quad" else "") +
+                ")"
+
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is FieldUpdate) return false
+            if (fieldName != other.fieldName) return false
+            if (topValue != other.topValue) return false
+            if (confidence != other.confidence) return false
+            if (consecutiveAgreement != other.consecutiveAgreement) return false
+            return when {
+                boundingBox == null && other.boundingBox == null -> true
+                boundingBox == null || other.boundingBox == null -> false
+                else -> boundingBox.contentEquals(other.boundingBox)
+            }
+        }
+
+        override fun hashCode(): Int {
+            var result = fieldName.hashCode()
+            result = 31 * result + topValue.hashCode()
+            result = 31 * result + confidence.hashCode()
+            result = 31 * result + consecutiveAgreement
+            result = 31 * result + (boundingBox?.contentHashCode() ?: 0)
+            return result
+        }
     }
 
     /**
      * A field's K-consecutive-agreement threshold was crossed; the
      * field's value is now locked. The service stops spending decode
      * tokens on this field until a frame contradicts it.
+     *
+     * @property boundingBox same semantics as [FieldUpdate.boundingBox].
      */
-    data class FieldLocked(val fieldName: String, val topValue: String) : OcrEvent() {
+    data class FieldLocked(
+        val fieldName: String,
+        val topValue: String,
+        val boundingBox: FloatArray? = null,
+    ) : OcrEvent() {
         override fun toString(): String =
-            "FieldLocked(field=$fieldName, value=<redacted:${topValue.length}>)"
+            "FieldLocked(field=$fieldName, value=<redacted:${topValue.length}>" +
+                (if (boundingBox != null) ", bbox=quad" else "") +
+                ")"
+
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is FieldLocked) return false
+            if (fieldName != other.fieldName) return false
+            if (topValue != other.topValue) return false
+            return when {
+                boundingBox == null && other.boundingBox == null -> true
+                boundingBox == null || other.boundingBox == null -> false
+                else -> boundingBox.contentEquals(other.boundingBox)
+            }
+        }
+
+        override fun hashCode(): Int {
+            var result = fieldName.hashCode()
+            result = 31 * result + topValue.hashCode()
+            result = 31 * result + (boundingBox?.contentHashCode() ?: 0)
+            return result
+        }
     }
 
     /**
