@@ -77,16 +77,29 @@ jobs:
       - name: Install conversion tools (pinned)
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install \
+
+          # paddle2onnx 2.1.0 and onnx2tf 2.4.0 intentionally use
+          # incompatible ONNX versions. Keep them in isolated virtualenvs so
+          # the pinned conversion chain stays reproducible.
+          python -m venv .venv-paddle2onnx
+          .venv-paddle2onnx/bin/python -m pip install --upgrade pip
+          .venv-paddle2onnx/bin/python -m pip install \
             "paddle2onnx==${{ inputs.paddle2onnx_version }}" \
-            "onnx2tf==${{ inputs.onnx2tf_version }}" \
-            "tensorflow==2.16.2" \
             "onnx==1.16.2" \
             "onnxruntime==1.18.1" \
             "protobuf==4.25.4" \
             "numpy==1.26.4"
-          python -c "import paddle2onnx, onnx2tf; print('paddle2onnx=', paddle2onnx.__version__); print('onnx2tf=', onnx2tf.__version__)"
+
+          python -m venv .venv-onnx2tf
+          .venv-onnx2tf/bin/python -m pip install --upgrade pip
+          .venv-onnx2tf/bin/python -m pip install \
+            "onnx2tf==${{ inputs.onnx2tf_version }}" \
+            "tensorflow==2.16.2" \
+            "protobuf==4.25.4" \
+            "numpy==1.26.4"
+
+          .venv-paddle2onnx/bin/python -c "import importlib.metadata as m; print('paddle2onnx=', m.version('paddle2onnx')); print('onnx=', m.version('onnx'))"
+          .venv-onnx2tf/bin/python -c "import importlib.metadata as m; print('onnx2tf=', m.version('onnx2tf')); print('onnx=', m.version('onnx')); print('tensorflow=', m.version('tensorflow'))"
 
       - name: Fetch PaddleOCR PP-OCRv5 mobile artifacts
         env:
@@ -138,7 +151,7 @@ jobs:
               echo "::warning::Skipping $kind: directory $dir not found."
               continue
             fi
-            paddle2onnx \
+            ../.venv-paddle2onnx/bin/paddle2onnx \
               --model_dir "$dir" \
               --model_filename inference.json \
               --params_filename inference.pdiparams \
@@ -158,7 +171,7 @@ jobs:
               echo "::warning::Skipping $kind: no ONNX file."
               continue
             fi
-            onnx2tf \
+            ../.venv-onnx2tf/bin/onnx2tf \
               -i "$onnx" \
               -o "ppocrv5-${kind}-saved" \
               -osd \
