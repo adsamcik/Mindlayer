@@ -235,8 +235,22 @@ class MindlayerMlService : Service() {
         // / ModelMissing) without waiting for the first `pushOcrFrame`
         // call — that lets `OcrSessionManager.isEngineReady()` flip the
         // FEATURE_OCR_SESSION capability flag during the SDK handshake.
+        //
+        // Phase 3 #4 (p3-gemma-extractor): production-mode structured
+        // extractor. Per-frame opens a fresh LiteRT-LM Conversation off
+        // the shared engine, sends the OcrEvidencePromptBuilder prompt,
+        // parses the JSON response. Returns EMPTY when the engine is
+        // not yet ready (so the dispatcher's per-line + per-barcode
+        // fusion path keeps emitting events).
         paddleOcrEngine = com.adsamcik.mindlayer.service.engine.PaddleOcrEngine(this, logRepository = logRepository)
-        val ocrRecognitionDispatcher = com.adsamcik.mindlayer.service.engine.OcrRecognitionDispatcher(paddleOcrEngine)
+        val ocrLlmExtractor = com.adsamcik.mindlayer.service.engine
+            .LiteRtLmGemmaOcrExtractorProduction.create(
+                engineProvider = { engineManager.getEngine() },
+            )
+        val ocrRecognitionDispatcher = com.adsamcik.mindlayer.service.engine.OcrRecognitionDispatcher(
+            engine = paddleOcrEngine,
+            llmExtractor = ocrLlmExtractor,
+        )
         val ocrSessionManager = com.adsamcik.mindlayer.service.engine.OcrSessionManager(
             engine = paddleOcrEngine,
             recognitionDispatcher = ocrRecognitionDispatcher,
