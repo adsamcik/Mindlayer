@@ -32,19 +32,13 @@ import java.util.concurrent.atomic.AtomicLong
  *  5. **Per-UID frame-rate gate** — soft cap from
  *     [OcrLimits.maxOcrFramesPerMinute] using a sliding token bucket.
  *
- * # What is intentionally NOT here yet
+ * # Async recognition path
  *
- *  - Calling [PaddleOcrEngine.recognise] on each accepted frame
- *    (engine is a scaffold in PR C2; the manager threads frames
- *    through to the engine when present and gracefully degrades
- *    when ``recognise()`` throws the scaffolded failure).
- *  - Field fusion via [OcrFieldFusion] — wired in but only when
- *    recognise() returns lines.
- *  - LLM (Gemma) structured-extraction pass — that's a separate
- *    PR after the engine's PP-OCRv5 pipeline is wired up.
- *  - Stream-pipe writer for ``streamOcrEvents`` — the binder layer
- *    closes the pipe immediately for now; full streaming wiring is
- *    a follow-up.
+ * Accepted frames are dispatched to [OcrRecognitionDispatcher] when an engine
+ * is wired. The dispatcher runs [PaddleOcrEngine.recognise], fuses raw OCR
+ * lines via [OcrFieldFusion], emits stream events when a writer is attached,
+ * and degrades per-frame failures to `FrameProcessed(lineCount=0)` so session
+ * intake stays alive.
  *
  * # Threading
  *
@@ -328,16 +322,8 @@ class OcrSessionManager(
             session.phase = OcrSessionState.PHASE_FINALIZING
         }
 
-        // TODO(PR C3 follow-up): hand `score`, `yPlane`, `meta` to the
-        // engine on a background coroutine and stream the result via
-        // streamOcrEvents. PaddleOcrEngine.recognise() in PR C2 is a
-        // scaffold; calling it would throw. Once the engine pipeline
-        // is wired we will:
-        //   1. Capture the frame on an intake queue (max queueDepth
-        //      bounded by limits.maxConcurrentOcrSessions * 2).
-        //   2. Run recognise() on engine dispatcher.
-        //   3. Pump OcrTextLine list through OcrFieldFusion.
-        //   4. Emit ocr_field_update / ocr_field_locked events.
+        // Recognition dispatch happens after this method returns the AIDL ack,
+        // keeping frame intake synchronous and inference asynchronous.
     }
 
     /** Read-only snapshot of session state. */
