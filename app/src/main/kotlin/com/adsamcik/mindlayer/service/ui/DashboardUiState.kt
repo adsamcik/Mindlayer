@@ -30,6 +30,13 @@ enum class DashboardMessageTone {
     ERROR,
 }
 
+data class AcceleratorDecisionUi(
+    val featureName: String,
+    val backend: String,
+    val reason: String,
+    val attemptedSummary: String,
+)
+
 data class RuntimeReadinessSummary(
     val headline: String,
     val detail: String,
@@ -50,6 +57,7 @@ data class DashboardUiState(
     val isEngineLoaded: Boolean = false,
     val backend: String = "NONE",
     val gpuFailureReason: String? = null,
+    val acceleratorDecision: AcceleratorDecisionUi? = null,
     /**
      * F-077: typed structured signal for the most recent
      * [com.adsamcik.mindlayer.service.engine.EngineManager.initialize]

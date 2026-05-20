@@ -426,6 +426,11 @@ class OcrSessionManager(
         return session.eventWriter
     }
 
+    /** Cancel in-flight OCR recognition before pressure-driven native delegate unload. */
+    suspend fun drainForMemoryPressure() {
+        recognitionDispatcher?.drainForMemoryPressure()
+    }
+
     /** Currently active session count — used for diagnostics + tests. */
     fun activeSessionCount(): Int =
         sessions.values.count { it.phase < OcrSessionState.PHASE_CLOSED }

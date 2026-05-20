@@ -2,7 +2,6 @@ package com.adsamcik.mindlayer.service.engine
 
 import android.app.ActivityManager
 import android.content.Context
-import android.os.Build
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
 import kotlinx.coroutines.Dispatchers
@@ -278,26 +277,11 @@ class LiteRtEmbeddingBackend internal constructor(
      * the two stacks read consistently.
      */
     private fun resolveBackend(preferredBackend: String?): String =
-        when (preferredBackend?.uppercase()) {
-            "CPU" -> "CPU"
-            "GPU" -> "GPU"
-            "NPU" -> if (isNpuLikelySupported()) "NPU" else "CPU"
-            null -> when {
-                isNpuLikelySupported() -> "NPU"
-                else -> "CPU"
-            }
-            else -> "CPU"
-        }
-
-    private fun isNpuLikelySupported(): Boolean {
-        if (Build.VERSION.SDK_INT < 31) return false
-        @Suppress("InlinedApi")
-        val soc = Build.SOC_MODEL.orEmpty().lowercase()
-        if (soc !in QUALCOMM_NPU_SOCS && soc !in MEDIATEK_NPU_SOCS) return false
-        val libDir = File(context.applicationInfo.nativeLibraryDir ?: return false)
-        val libs = libDir.list().orEmpty()
-        return libs.any { it.contains("HtpV", ignoreCase = true) || it.startsWith("libQnn") }
-    }
+        LiteRtAcceleratorResolver.resolveBackend(
+            requested = preferredBackend,
+            featureName = "embeddings",
+            nativeLibraryDir = context.applicationInfo.nativeLibraryDir,
+        ).backend
 
     interface SentencePieceTokenizer {
         fun tokenize(text: String, maxTokens: Int): IntArray
@@ -311,13 +295,6 @@ class LiteRtEmbeddingBackend internal constructor(
         private const val TAG = "LiteRtEmbeddingBackend"
         private const val BYTES_PER_MB = 1024L * 1024L
         const val MEMORY_HEADROOM_BYTES = 256L * BYTES_PER_MB
-        private val QUALCOMM_NPU_SOCS = setOf(
-            "sm8450", "sm8475", "sm8550", "sm8650", "sm8750", "sm8850",
-        )
-        private val MEDIATEK_NPU_SOCS = setOf(
-            "mt6878", "mt6897", "mt6983", "mt6985", "mt6989", "mt6990", "mt6991",
-        )
-
         /**
          * Test-only constructor. Production code uses the public no-arg
          * `(Context)` constructor; tests inject all four collaborators so
