@@ -162,8 +162,8 @@ class PaddleOcrEngineTest {
     // ── Backend factory + dependency injection ───────────────────────────
 
     @Test fun `default backendFactory produces LiteRtPaddleOcrBackend`() {
-        // We don't initialise it (the LiteRT path is scaffolded), but we
-        // can construct it and assert the type via reflection.
+        // We don't initialise it (would load real LiteRT model files), but we
+        // can construct the engine and assert the backend delegate exists.
         val engine = PaddleOcrEngine(realContext)
         // Access the lazy backend via reflection just to assert it's the
         // right type — direct property access would force lazy load too.
