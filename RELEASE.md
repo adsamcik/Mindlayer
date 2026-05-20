@@ -189,6 +189,7 @@ bundletool dump manifest --bundle app\build\outputs\bundle\release\app-release.a
 | `lintDebug`                     | ✅ every push                 | ✅                                        |
 | `:app:bundleRelease` (unsigned) | ✅ on `main` with `MODEL_SHA256` repo variable when CI signing secrets are absent | ✅ with `-PmodelSha256=...` |
 | `:app:bundleRelease` (signed)   | ✅ on `main` when `MODEL_SHA256` and CI signing secrets are configured | ✅ only when `keystore.properties` is set |
+| **`v*` tag → attached AAB on GitHub Release** | ✅ on every release tag — `publish.yml`'s `release-aab` job builds + attaches `app-release.aab` to the GitHub Release alongside the SDK pointer (signed when CI secrets are configured, unsigned otherwise). Gated on the same `gemma-4-E2B-it.litertlm` presence check as the `main`-branch flow. | — |
 
 CI can sign the release AAB when `ANDROID_KEYSTORE_BASE64`,
 `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`
@@ -198,6 +199,13 @@ secrets, CI still builds an unsigned `app-release.aab` on `main`; that
 artifact is **not** uploadable to Play and only proves that R8 + resource
 shrinking still succeeds end-to-end with the same model-hash manifest a real
 release must provide.
+
+On `v*` release tags, `publish.yml` mirrors that build and **also attaches
+the resulting AAB to the GitHub Release** so SDK consumers can grab the
+matching service-side bundle from the same release page that hosts the SDK
+Maven coordinate. The Phase 3 `p3-signed-release` track wired this end of
+the pipeline; before it, only the SDK AAR was visible on the release page
+and the service-side AAB lived only in the `actions/upload-artifact` ZIP.
 
 ### 5.1 Dependency-integrity policy (F-067)
 
