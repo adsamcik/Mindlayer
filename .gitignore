@@ -49,6 +49,10 @@ google-services.json
 # paddleocr_model/src/main/assets/.gitkeep for details.
 *.tflite
 paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-*.txt
+# SentencePiece tokenizer binaries (e.g. EmbeddingGemma's .spm.model).
+# Delivered via Play AI Pack alongside the matching .tflite; same
+# distribution + integrity-pinning story as the .tflite files.
+*.spm.model
 # Intermediate ONNX conversion artifacts (the workflow's transient
 # output). Also produced by paddle2onnx and never shipped on-device.
 *.onnx
