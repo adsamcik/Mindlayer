@@ -43,6 +43,29 @@ object EmbeddingFeatureFlags {
      * replaces `LiteRtEmbeddingBackend.embed`'s `IllegalStateException` with
      * a real LiteRT `CompiledModel` + tokenizer pipeline.
      *
+     * # Phase D status (this commit)
+     *
+     * Flipped to **true**:
+     *   - `LiteRtEmbeddingBackend` now wires a real
+     *     `com.google.ai.edge.litert.CompiledModel` via [LiteRtRunner]
+     *     (production impl: `RealLiteRtRunner`).
+     *   - Tokenizer defaults to [SentencePieceTokenizerFactory] which
+     *     loads the Gemma `.spm.model` shipped in the
+     *     `embeddinggemma_model` AI Pack.
+     *   - The AI Pack distribution + release SHA validation are wired
+     *     end-to-end (see `:app:validateReleaseEmbeddingSha256` +
+     *     `:embeddinggemma_model:generateEmbeddingModelIntegrityManifest`).
+     *
+     * Still requires before shipping a release:
+     *   - Real-device coexistence validation per
+     *     `docs/LITERT_COEXISTENCE.md` (LiteRT-LM + LiteRT + LiteRT-OCR
+     *     all in the `:ml` process).
+     *   - The two `-PembeddingModelSha256` / `-PembeddingTokenizerSha256`
+     *     Gradle props plumbed through CI and the release-signing flow.
+     *   - A first-party product driver (per the GPT-5.5 adversarial
+     *     review) — e.g. a dashboard "search history" feature that
+     *     actually consumes the embedding API.
+     *
      * When false:
      *   - `ServiceCapabilities.supportedFeatures` does not contain
      *     `FEATURE_EMBEDDINGS`.
@@ -52,5 +75,5 @@ object EmbeddingFeatureFlags {
      * Search this constant when promoting the embedding subsystem to
      * production.
      */
-    const val IS_PRODUCTION_READY: Boolean = false
+    const val IS_PRODUCTION_READY: Boolean = true
 }
