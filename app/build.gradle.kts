@@ -44,6 +44,9 @@ val paddleOcrRecSha256 = project.findProperty("paddleOcrRecSha256")?.toString()?
 val paddleOcrClsSha256 = project.findProperty("paddleOcrClsSha256")?.toString()?.trim().orEmpty()
 val paddleOcrDictSha256 = project.findProperty("paddleOcrDictSha256")?.toString()?.trim().orEmpty()
 
+val embeddingModelSha256 = project.findProperty("embeddingModelSha256")?.toString()?.trim().orEmpty()
+val embeddingTokenizerSha256 = project.findProperty("embeddingTokenizerSha256")?.toString()?.trim().orEmpty()
+
 val validateReleaseModelSha256 by tasks.registering {
     dependsOn(":gemma_model:generateModelIntegrityManifest")
     group = "verification"
@@ -121,6 +124,58 @@ val validateReleasePaddleOcrSha256 by tasks.registering {
         assertRole("recognition", paddleOcrRecSha256)
         assertRole("orientation", paddleOcrClsSha256)
         assertRole("dictionary", paddleOcrDictSha256)
+    }
+}
+
+// Phase D #1 (release-validation): mirror the Gemma + PaddleOCR release
+// SHA guards for the two EmbeddingGemma AI-pack artifacts. The
+// :embeddinggemma_model module's own generateEmbeddingModelIntegrityManifest
+// task already fails release builds if either -PembeddingModelSha256 or
+// -PembeddingTokenizerSha256 is missing/malformed; this validator adds
+// the same defense-in-depth cross-check on the :app side, ensuring the
+// manifest file on disk matches the properties passed in. Without this
+// cross-check, a buggy CI script could silently regenerate the manifest
+// with zero hashes while still passing the per-module guard.
+val validateReleaseEmbeddingSha256 by tasks.registering {
+    dependsOn(":embeddinggemma_model:generateEmbeddingModelIntegrityManifest")
+    group = "verification"
+    description = "Fails release builds unless -PembeddingModelSha256 and -PembeddingTokenizerSha256 are 64-hex SHA-256 digests matching the embedding_model_integrity.json manifest."
+    doLast {
+        val missing = buildList {
+            if (!modelSha256Pattern.matches(embeddingModelSha256)) add("embeddingModelSha256")
+            if (!modelSha256Pattern.matches(embeddingTokenizerSha256)) add("embeddingTokenizerSha256")
+        }
+        if (missing.isNotEmpty()) {
+            throw GradleException(
+                "Release builds require -P${missing.joinToString("=<64 hex> -P")}=<64 hex>",
+            )
+        }
+        val manifest = rootProject.file("embeddinggemma_model/src/main/assets/embedding_model_integrity.json")
+        if (!manifest.isFile) {
+            throw GradleException(
+                "Release builds require embeddinggemma_model/src/main/assets/embedding_model_integrity.json.",
+            )
+        }
+        val text = manifest.readText()
+        val byRole = Regex(
+            """"filename"\s*:\s*"([^"]+)"\s*,\s*"sha256"\s*:\s*"([0-9a-f]{64})"\s*,\s*"role"\s*:\s*"([^"]+)"""",
+        )
+            .findAll(text)
+            .associate { match -> match.groupValues[3] to match.groupValues[2] }
+
+        fun assertRole(role: String, expected: String) {
+            val actual = byRole[role]
+                ?: throw GradleException(
+                    "embedding_model_integrity.json missing entry for role '$role'.",
+                )
+            if (actual != expected.lowercase()) {
+                throw GradleException(
+                    "embedding_model_integrity.json sha256 for '$role' does not match -PembeddingModelSha256 / -PembeddingTokenizerSha256.",
+                )
+            }
+        }
+        assertRole("weights", embeddingModelSha256)
+        assertRole("tokenizer", embeddingTokenizerSha256)
     }
 }
 
@@ -496,7 +551,7 @@ tasks.configureEach {
     val isReleasePackageTask = !name.contains("UnitTest") &&
         (name == "assembleRelease" || name == "bundleRelease" || name == "packageRelease")
     if (isReleasePackageTask) {
-        dependsOn(validateReleaseModelSha256, validateReleasePaddleOcrSha256)
+        dependsOn(validateReleaseModelSha256, validateReleasePaddleOcrSha256, validateReleaseEmbeddingSha256)
     }
     // F-079: every public APK/AAB packaging task must see the ABI validator.
     // assembleDebug + assembleRelease + bundleRelease are the lifecycle tasks
