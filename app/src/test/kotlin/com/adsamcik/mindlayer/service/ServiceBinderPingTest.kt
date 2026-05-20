@@ -1,0 +1,145 @@
+package com.adsamcik.mindlayer.service
+
+import android.os.Binder
+import com.adsamcik.mindlayer.HealthCheck
+import com.adsamcik.mindlayer.ServiceCapabilities
+import com.adsamcik.mindlayer.service.engine.EmbeddingCoordinator
+import com.adsamcik.mindlayer.service.engine.EngineManager
+import com.adsamcik.mindlayer.service.engine.InferenceOrchestrator
+import com.adsamcik.mindlayer.service.engine.MemoryBudget
+import com.adsamcik.mindlayer.service.engine.OcrSessionManager
+import com.adsamcik.mindlayer.service.engine.SessionManager
+import com.adsamcik.mindlayer.service.engine.ThermalMonitor
+import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
+import com.adsamcik.mindlayer.service.security.AllowlistStore
+import com.adsamcik.mindlayer.service.security.CallerIdentity
+import com.adsamcik.mindlayer.service.security.RateLimiter
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.mockkStatic
+import io.mockk.unmockkAll
+import io.mockk.verify
+import kotlinx.coroutines.flow.MutableStateFlow
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+
+/**
+ * Robolectric tests for the Phase 3 #8 `ping()` endpoint contract.
+ *
+ * Engine-state -> wire-int mapping is covered by the dedicated
+ * `HealthCheckEngineStateMapperTest`. MockK on the JVM cannot
+ * intercept final `val` properties on final classes (the shape of
+ * every engine-state holder) — so we test the mapping pure-function
+ * in isolation and the binder contract here.
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [33])
+class ServiceBinderPingTest {
+
+    private lateinit var rateLimiter: RateLimiter
+    private lateinit var allow: AllowlistStore
+    private lateinit var binder: ServiceBinder
+
+    @Before fun setUp() {
+        mockkStatic(Binder::class)
+        every { Binder.getCallingUid() } returns 42
+
+        val service = mockk<MindlayerMlService>(relaxed = true)
+        every { service.sessionManager } returns mockk<SessionManager>(relaxed = true)
+        every { service.packageName } returns "com.adsamcik.mindlayer.service"
+
+        rateLimiter = mockk(relaxed = true)
+        every { rateLimiter.tryAcquire(any(), any()) } returns true
+        every { rateLimiter.tryAcquireRejected(any()) } returns true
+        every { rateLimiter.tryAcquireRejection(any()) } returns true
+
+        allow = mockk(relaxed = true)
+        every { allow.isDenied(any(), any()) } returns false
+        every { allow.isAllowed(any(), any()) } returns true
+
+        binder = ServiceBinder(
+            service = service,
+            engineManager = mockk<EngineManager>(relaxed = true),
+            orchestrator = mockk<InferenceOrchestrator>(relaxed = true),
+            diagnosticExporter = mockk<DiagnosticExporter>(relaxed = true),
+            thermalMonitor = mockk<ThermalMonitor>(relaxed = true) {
+                every { currentPolicy } returns MutableStateFlow(mockk(relaxed = true))
+            },
+            memoryBudget = mockk<MemoryBudget>(relaxed = true),
+            callerVerifier = { _, _ -> CallerIdentity("pkg", "sig", "Pkg") },
+            allowlistStore = allow,
+            rateLimiter = rateLimiter,
+            embeddingCoordinator = mockk<EmbeddingCoordinator>(relaxed = true) {
+                every { defaultModelOrNull() } returns null
+            },
+            ocrSessionManager = mockk<OcrSessionManager>(relaxed = true) {
+                every { isEngineReady() } returns false
+            },
+        )
+    }
+
+    @After fun tearDown() = unmockkAll()
+
+    @Test fun `ping returns non-null HealthCheck`() {
+        val health = binder.ping()
+        assertNotNull(health)
+    }
+
+    @Test fun `ping does NOT charge the rate limiter`() {
+        binder.ping()
+        verify(exactly = 0) { rateLimiter.tryAcquire(any(), any()) }
+        verify(exactly = 0) { rateLimiter.tryAcquireRejected(any()) }
+        verify(exactly = 0) { rateLimiter.tryAcquireRejection(any()) }
+    }
+
+    @Test fun `ping does NOT consult the allowlist`() {
+        binder.ping()
+        verify(exactly = 0) { allow.isAllowed(any(), any()) }
+        verify(exactly = 0) { allow.isDenied(any(), any()) }
+    }
+
+    @Test fun `apiVersion matches binder CURRENT_API_VERSION`() {
+        val health = binder.ping()
+        assertEquals(binder.getCapabilities().apiVersion, health.apiVersion)
+    }
+
+    @Test fun `extensionsJson is null in v1`() {
+        val health = binder.ping()
+        assertNull(health.extensionsJson)
+    }
+
+    @Test fun `serverTimestampMs is positive`() {
+        val health = binder.ping()
+        assertTrue("timestamp ${health.serverTimestampMs} should be > 0", health.serverTimestampMs > 0)
+    }
+
+    @Test fun `serviceUptimeMs is non-negative`() {
+        val health = binder.ping()
+        assertTrue(
+            "uptime ${health.serviceUptimeMs} should be non-negative",
+            health.serviceUptimeMs >= 0,
+        )
+    }
+
+    @Test fun `FEATURE_HEALTH_CHECK is advertised in capabilities`() {
+        val caps = binder.getCapabilities()
+        assertTrue(
+            "FEATURE_HEALTH_CHECK must be advertised",
+            caps.supports(ServiceCapabilities.FEATURE_HEALTH_CHECK),
+        )
+    }
+
+    @Test fun `engine-state fields default to IDLE when service fields uninitialized`() {
+        val health = binder.ping()
+        assertEquals(HealthCheck.ENGINE_STATE_IDLE, health.embeddingEngineState)
+        assertEquals(HealthCheck.ENGINE_STATE_IDLE, health.ocrEngineState)
+    }
+}

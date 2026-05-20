@@ -206,6 +206,28 @@ data class ServiceCapabilities(
          */
         const val FEATURE_OCR_BOUNDING_BOXES: String = "ocr_bounding_boxes"
 
+        /**
+         * v0.8.1: lightweight `ping()` health-check endpoint.
+         *
+         * Returns a [com.adsamcik.mindlayer.HealthCheck] parcelable
+         * with server timestamp, service uptime, apiVersion, and
+         * per-engine state. Designed for low-overhead liveness probes,
+         * watchdog checks, and clock-skew detection.
+         *
+         * Distinct from [getStatus] (heavier dashboard snapshot) and
+         * [getCapabilities] (one-time wire handshake). Bypasses the
+         * allowlist gate so co-signed peers in pending-approval can
+         * still confirm the service is alive; charges zero rate-limit
+         * cost.
+         *
+         * Old services that don't advertise this flag also won't
+         * implement `ping()` — the SDK catches `NoSuchMethodError` /
+         * `AbstractMethodError` and falls back to a heavier `getStatus`
+         * call (or treats the connection as alive if `getStatus` also
+         * fails).
+         */
+        const val FEATURE_HEALTH_CHECK: String = "health_check"
+
         // ---- Future OCR flags (documented but not yet advertised) ---------
 
         /**
