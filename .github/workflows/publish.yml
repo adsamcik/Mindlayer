@@ -126,7 +126,8 @@ jobs:
     # universal APK when bundletool is available) to the GitHub Release
     # so end users can actually install the service the SDK talks to.
     # Mirrors the build matrix in `ci.yml` -> `release-aab` job so the
-    # MODEL_SHA256 + ANDROID_KEYSTORE_* secret discipline is identical.
+    # MODEL_SHA256 / PADDLEOCR_* / EMBEDDING_* + ANDROID_KEYSTORE_* secret
+    # discipline is identical.
     # Skipped silently when the gemma .litertlm payload is not yet
     # uploaded — the artifact-upload step in the model-publish flow
     # gates this end of the pipeline too.
@@ -168,21 +169,52 @@ jobs:
         if: steps.check-bundle.outputs.have-bundle == 'true'
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
 
-      - name: Validate model hash input
+      - name: Validate model hash inputs
         if: steps.check-bundle.outputs.have-bundle == 'true'
         run: |
-          if [[ ! "${MODEL_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "::error::MODEL_SHA256 repository variable must be a lowercase 64-character SHA-256 digest"
-            exit 1
-          fi
+          declare -A hashes=(
+            [MODEL_SHA256]="${MODEL_SHA256}"
+            [PADDLEOCR_DET_SHA256]="${PADDLEOCR_DET_SHA256}"
+            [PADDLEOCR_REC_SHA256]="${PADDLEOCR_REC_SHA256}"
+            [PADDLEOCR_CLS_SHA256]="${PADDLEOCR_CLS_SHA256}"
+            [PADDLEOCR_DICT_SHA256]="${PADDLEOCR_DICT_SHA256}"
+            [EMBEDDING_MODEL_SHA256]="${EMBEDDING_MODEL_SHA256}"
+            [EMBEDDING_TOKENIZER_SHA256]="${EMBEDDING_TOKENIZER_SHA256}"
+          )
+          for name in "${!hashes[@]}"; do
+            if [[ ! "${hashes[$name]}" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::${name} repository variable must be a lowercase 64-character SHA-256 digest"
+              exit 1
+            fi
+          done
         env:
           MODEL_SHA256: ${{ vars.MODEL_SHA256 }}
+          PADDLEOCR_DET_SHA256: ${{ vars.PADDLEOCR_DET_SHA256 }}
+          PADDLEOCR_REC_SHA256: ${{ vars.PADDLEOCR_REC_SHA256 }}
+          PADDLEOCR_CLS_SHA256: ${{ vars.PADDLEOCR_CLS_SHA256 }}
+          PADDLEOCR_DICT_SHA256: ${{ vars.PADDLEOCR_DICT_SHA256 }}
+          EMBEDDING_MODEL_SHA256: ${{ vars.EMBEDDING_MODEL_SHA256 }}
+          EMBEDDING_TOKENIZER_SHA256: ${{ vars.EMBEDDING_TOKENIZER_SHA256 }}
 
       - name: Build release AAB
         if: steps.check-bundle.outputs.have-bundle == 'true'
-        run: ./gradlew :app:bundleRelease --no-daemon -PmodelSha256="${MODEL_SHA256}"
+        run: |
+          ./gradlew :app:bundleRelease --no-daemon \
+            -PmodelSha256="${MODEL_SHA256}" \
+            -PpaddleOcrDetSha256="${PADDLEOCR_DET_SHA256}" \
+            -PpaddleOcrRecSha256="${PADDLEOCR_REC_SHA256}" \
+            -PpaddleOcrClsSha256="${PADDLEOCR_CLS_SHA256}" \
+            -PpaddleOcrDictSha256="${PADDLEOCR_DICT_SHA256}" \
+            -PembeddingModelSha256="${EMBEDDING_MODEL_SHA256}" \
+            -PembeddingTokenizerSha256="${EMBEDDING_TOKENIZER_SHA256}"
         env:
           MODEL_SHA256: ${{ vars.MODEL_SHA256 }}
+          PADDLEOCR_DET_SHA256: ${{ vars.PADDLEOCR_DET_SHA256 }}
+          PADDLEOCR_REC_SHA256: ${{ vars.PADDLEOCR_REC_SHA256 }}
+          PADDLEOCR_CLS_SHA256: ${{ vars.PADDLEOCR_CLS_SHA256 }}
+          PADDLEOCR_DICT_SHA256: ${{ vars.PADDLEOCR_DICT_SHA256 }}
+          EMBEDDING_MODEL_SHA256: ${{ vars.EMBEDDING_MODEL_SHA256 }}
+          EMBEDDING_TOKENIZER_SHA256: ${{ vars.EMBEDDING_TOKENIZER_SHA256 }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
