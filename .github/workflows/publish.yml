@@ -100,6 +100,7 @@ jobs:
 
       - name: Create GitHub Release
         if: github.ref_type == 'tag'
+        id: gh-release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           generate_release_notes: true
@@ -109,3 +110,123 @@ jobs:
             ```kotlin
             implementation("com.adsamcik.mindlayer:sdk:${{ steps.version.outputs.version }}")
             ```
+
+            ## Service APK / AAB
+
+            The signed `:app` Android App Bundle (and, when CI signing
+            secrets are configured, a signed APK) is attached to this
+            release by the `release-aab` job below — if present, it
+            installs the Mindlayer service that the SDK above talks to.
+            Sideload-friendly users can grab the universal APK; Play
+            Store distribution uses the AAB. See `RELEASE.md` for the
+            full signing flow.
+
+  release-aab:
+    # Phase 3 #5 (p3-signed-release): attach the service-side AAB (and
+    # universal APK when bundletool is available) to the GitHub Release
+    # so end users can actually install the service the SDK talks to.
+    # Mirrors the build matrix in `ci.yml` -> `release-aab` job so the
+    # MODEL_SHA256 + ANDROID_KEYSTORE_* secret discipline is identical.
+    # Skipped silently when the gemma .litertlm payload is not yet
+    # uploaded — the artifact-upload step in the model-publish flow
+    # gates this end of the pipeline too.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [ publish ]
+    if: github.ref_type == 'tag' && vars.MODEL_SHA256 != ''
+    permissions:
+      # Need write to upload assets to the GitHub Release that the
+      # `publish` job above just created.
+      contents: write
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Verify gemma .litertlm payload is present
+        id: check-bundle
+        shell: bash
+        run: |
+          if [[ -s "gemma_model/src/main/assets/gemma-4-E2B-it.litertlm" ]]; then
+            echo "have-bundle=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have-bundle=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=AAB build skipped::No .litertlm payload found at gemma_model/src/main/assets/ — release-aab will not attach an APK/AAB to this tag's GitHub Release until the model-upload step runs."
+          fi
+
+      - name: Set up JDK 21
+        if: steps.check-bundle.outputs.have-bundle == 'true'
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Validate Gradle wrapper
+        if: steps.check-bundle.outputs.have-bundle == 'true'
+        uses: gradle/actions/wrapper-validation@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
+
+      - name: Setup Gradle
+        if: steps.check-bundle.outputs.have-bundle == 'true'
+        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
+
+      - name: Validate model hash input
+        if: steps.check-bundle.outputs.have-bundle == 'true'
+        run: |
+          if [[ ! "${MODEL_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::MODEL_SHA256 repository variable must be a lowercase 64-character SHA-256 digest"
+            exit 1
+          fi
+        env:
+          MODEL_SHA256: ${{ vars.MODEL_SHA256 }}
+
+      - name: Build release AAB
+        if: steps.check-bundle.outputs.have-bundle == 'true'
+        run: ./gradlew :app:bundleRelease --no-daemon -PmodelSha256="${MODEL_SHA256}"
+        env:
+          MODEL_SHA256: ${{ vars.MODEL_SHA256 }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Report release signing mode
+        if: steps.check-bundle.outputs.have-bundle == 'true'
+        shell: bash
+        run: |
+          if [[ -n "${ANDROID_KEYSTORE_BASE64:-}" && -n "${ANDROID_KEYSTORE_PASSWORD:-}" && -n "${ANDROID_KEY_ALIAS:-}" && -n "${ANDROID_KEY_PASSWORD:-}" ]]; then
+            echo "Release AAB built with CI signing secrets."
+          else
+            echo "::warning::Release AAB built UNSIGNED because CI signing secrets are not configured. Install the locally-signed AAB manually via Play Console; do not distribute this artifact to end users."
+          fi
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Locate AAB artifact
+        if: steps.check-bundle.outputs.have-bundle == 'true'
+        id: locate-aab
+        shell: bash
+        run: |
+          AAB_PATH="$(find app/build/outputs/bundle/release -name '*.aab' -print -quit)"
+          if [[ -z "$AAB_PATH" ]]; then
+            echo "::error::No AAB found under app/build/outputs/bundle/release/"
+            exit 1
+          fi
+          echo "aab-path=$AAB_PATH" >> "$GITHUB_OUTPUT"
+          echo "Found AAB at $AAB_PATH"
+
+      - name: Attach AAB to GitHub Release
+        if: steps.check-bundle.outputs.have-bundle == 'true'
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          files: ${{ steps.locate-aab.outputs.aab-path }}
+          fail_on_unmatched_files: true
+
+      - name: Upload AAB as workflow artifact (30-day retention)
+        if: steps.check-bundle.outputs.have-bundle == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: mindlayer-service-${{ github.ref_name }}-aab
+          path: app/build/outputs/bundle/release/*.aab
+          retention-days: 30
