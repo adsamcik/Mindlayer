@@ -2240,12 +2240,12 @@ class ServiceBinder(
             // #1874 lifts multi-image, this rises with the validator caps.
             maxMediaPartsPerRequest = MAX_MEDIA_PARTS_PER_REQUEST,
             maxTotalMediaBytesPerRequest = IpcInputValidator.MAX_TOTAL_MEDIA_BYTES_PER_REQUEST,
-            maxEmbeddingBatchInline = if (embeddingsLive) coord!!.maxBatchInline else 0,
-            maxEmbeddingBatchShm = if (embeddingsLive && shmSupported) coord!!.maxBatchShm else 0,
-            maxEmbeddingBatchTotal = if (embeddingsLive) coord!!.maxBatchTotal else 0,
-            maxEmbeddingInputBytes = if (embeddingsLive) coord!!.maxInputBytes else 0L,
-            embeddingModelIds = if (embeddingsLive) listOf(embeddingModel!!.id) else emptyList(),
-            embeddingDims = if (embeddingsLive) embeddingModel!!.supportedDims else emptyList(),
+            maxEmbeddingBatchInline = if (embeddingsLive) coord.maxBatchInline else 0,
+            maxEmbeddingBatchShm = if (embeddingsLive && shmSupported) coord.maxBatchShm else 0,
+            maxEmbeddingBatchTotal = if (embeddingsLive) coord.maxBatchTotal else 0,
+            maxEmbeddingInputBytes = if (embeddingsLive) coord.maxInputBytes else 0L,
+            embeddingModelIds = if (embeddingsLive) listOf(embeddingModel.id) else emptyList(),
+            embeddingDims = if (embeddingsLive) embeddingModel.supportedDims else emptyList(),
         )
     }
 
