@@ -546,6 +546,14 @@ private fun StatusSection(state: DashboardUiState) {
                 }
             }
 
+            state.acceleratorDecision?.let { decision ->
+                DiagnosticCallout(
+                    message = "${decision.featureName} selected ${decision.backend}: ${decision.reason}" +
+                        decision.attemptedSummary.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty(),
+                    tone = DashboardMessageTone.INFO,
+                )
+            }
+
             if (!state.isEngineLoaded || state.backend.equals("NONE", ignoreCase = true)) {
                 DiagnosticCallout(
                     message = "Runtime sample does not show a loaded model. Earlier test output is historical.",

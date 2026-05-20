@@ -70,7 +70,8 @@ strictly more complex.
 |---|---|---|---|
 | Gemma chat | LiteRT-LM 0.11.0 | NPU → GPU → CPU chain in `EngineManager` | Production |
 | EmbeddingGemma | Base LiteRT 2.1.5 | GPU/CPU via `CompiledModel` (`LiteRtEmbeddingBackend`) | Scaffold — verify-on-device markers |
-| PaddleOCR PP-OCRv5 | Base LiteRT 2.1.5 | GPU/CPU via `CompiledModel` (`LiteRtPaddleOcrBackend`) | Scaffold — verify-on-device markers |
+| PaddleOCR PP-OCRv5 | Base LiteRT 2.1.5 | CPU-only via `LiteRtAcceleratorResolver` until coexistence validation; `CompiledModel` path remains base LiteRT 2.1.5 | Prototype — OCR acceleration locked off |
+| Chat + embeddings + OCR together | LiteRT-LM 0.11.0 + base LiteRT 2.1.5 (embeddings) + base LiteRT 2.1.5 (OCR) | Chat owns LiteRT-LM backend chain; embeddings resolve through the shared `LiteRtAcceleratorResolver`; OCR resolves CPU-only via the same resolver | Three-stack Phase 4 validation matrix |
 
 All three stacks share the service process. The OCR path is the
 **newest** and so the highest-risk for surfacing coexistence
@@ -143,6 +144,20 @@ PaddleOCR) in one process:
 Each of these files now references this doc from the verify-on-
 device TODO comment so a grep for `LITERT_COEXISTENCE.md` surfaces
 every site that's currently unverified.
+
+## #5264 hazard surface
+
+LiteRT issue #5264 is directly relevant to every site that calls `CompiledModel.create` while another LiteRT-family model can remain active in the same Android process:
+
+- `app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/RealLiteRtRunner.kt` creates the EmbeddingGemma base-LiteRT `CompiledModel`.
+- `app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/RealPaddleOcrLiteRtRunner.kt` creates PaddleOCR detection, recognition, and optional orientation-classifier `CompiledModel`s back-to-back.
+- `app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/EngineManager.kt` creates the LiteRT-LM Gemma `Engine` with its own CPU/GPU/NPU backend surface.
+
+`LiteRtAcceleratorResolver` currently allows embeddings to preserve the existing best-effort labels (`NPU` on allowlisted SoC + native library probe, explicit `GPU`, otherwise `CPU`). OCR is explicitly CPU-only with reason `OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED` until this checklist passes on target devices.
+
+## Per-feature accelerator overrides
+
+`app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/LiteRtAcceleratorResolver.kt` is the single coordination point for per-feature LiteRT accelerator decisions. Callers pass `featureName` (`embeddings`, `ocr`, or `chat`) and receive the selected backend plus a downgrade reason chain suitable for logs and the dashboard. Add future GPU/NPU OCR opt-ins there first, not in individual backend files.
 
 ## References
 

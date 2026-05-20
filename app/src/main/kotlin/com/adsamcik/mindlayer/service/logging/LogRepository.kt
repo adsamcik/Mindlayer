@@ -5,6 +5,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.security.MessageDigest
@@ -292,6 +293,33 @@ class LogRepository(
             backend = backend,
             durationMs = durationMs,
             extraJson = logExtraJson { put("bundleId", bundleId) },
+        ))
+    }
+
+
+    fun logBackendDecision(
+        featureName: String,
+        backend: String,
+        reason: String,
+        attempted: List<Pair<String, String>>,
+    ) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.ENGINE,
+            event = LogEvent.BACKEND_DECISION,
+            backend = backend,
+            extraJson = buildJsonObject {
+                put("feature", JsonPrimitive(featureName))
+                put("reason", JsonPrimitive(reason))
+                put("attempted", kotlinx.serialization.json.buildJsonArray {
+                    attempted.forEach { (candidate, candidateReason) ->
+                        addJsonObject {
+                            put("backend", JsonPrimitive(candidate))
+                            put("reason", JsonPrimitive(candidateReason))
+                        }
+                    }
+                })
+            }.toString(),
         ))
     }
 
