@@ -173,15 +173,34 @@ jobs:
         run: |
           set -euo pipefail
           cd tflite-out
+          # LiteRT CompiledModel has no resize API in the Android Java surface
+          # used by Mindlayer. Emit fixed-shape artifacts so the on-device
+          # runner can allocate stable input/output TensorBuffers.
+          declare -A onnx_input_dims=(
+            [det]="1,3,640,640"
+            [rec]="1,3,48,320"
+            [cls]="1,3,80,160"
+          )
           for kind in det rec cls; do
             onnx="paddleocr-ppocrv5-mobile-${kind}.onnx"
             if [ ! -f "$onnx" ]; then
               echo "::error::Required ONNX file missing: $onnx."
               exit 1
             fi
+            input_name=$(../.venv-paddle2onnx/bin/python - "$onnx" <<'PY'
+import sys
+import onnx
+
+model = onnx.load(sys.argv[1])
+if len(model.graph.input) != 1:
+    raise SystemExit(f"Expected one input, found {len(model.graph.input)}")
+print(model.graph.input[0].name)
+PY
+)
             ../.venv-onnx2tf/bin/onnx2tf \
               -i "$onnx" \
               -o "ppocrv5-${kind}-saved" \
+              -ois "${input_name}:${onnx_input_dims[$kind]}" \
               -osd
             generated="ppocrv5-${kind}-saved/paddleocr-ppocrv5-mobile-${kind}_float32.tflite"
             if [ ! -f "$generated" ]; then
@@ -192,6 +211,33 @@ jobs:
             mv "$generated" "paddleocr-ppocrv5-mobile-${kind}.tflite"
             rm -rf "ppocrv5-${kind}-saved"
           done
+          ../.venv-onnx2tf/bin/python <<'PY'
+import sys
+import tensorflow as tf
+
+expected = {
+    "det": [1, 640, 640, 3],
+    "rec": [1, 48, 320, 3],
+    "cls": [1, 80, 160, 3],
+}
+
+for kind, shape in expected.items():
+    path = f"paddleocr-ppocrv5-mobile-{kind}.tflite"
+    interpreter = tf.lite.Interpreter(model_path=path)
+    input_details = interpreter.get_input_details()
+    if len(input_details) != 1:
+        print(f"::error::{path} expected one input, found {len(input_details)}")
+        sys.exit(1)
+    actual_shape = input_details[0]["shape"].tolist()
+    signature = input_details[0].get("shape_signature", input_details[0]["shape"]).tolist()
+    if actual_shape != shape:
+        print(f"::error::{path} input shape {actual_shape} != expected {shape}")
+        sys.exit(1)
+    if any(dim < 0 for dim in signature):
+        print(f"::error::{path} still has dynamic input signature {signature}")
+        sys.exit(1)
+    print(f"{path} input shape OK: {actual_shape}")
+PY
           ls -1
 
       - name: Stage character dictionary
