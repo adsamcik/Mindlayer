@@ -25,6 +25,7 @@ import com.adsamcik.mindlayer.OcrFrameMeta;
 import com.adsamcik.mindlayer.OcrFrameAck;
 import com.adsamcik.mindlayer.OcrSessionState;
 import com.adsamcik.mindlayer.OcrLimits;
+import com.adsamcik.mindlayer.HealthCheck;
 import com.adsamcik.mindlayer.IClientCallback;
 
 interface IMindlayerService {
@@ -149,6 +150,18 @@ interface IMindlayerService {
     void finalizeOcrSession(String sessionId);
     void closeOcrSession(String sessionId);
     OcrLimits getOcrLimits();
+
+    // v0.8.1 health check. Lightweight liveness probe — returns the
+    // service's wall-clock + uptime + per-engine state + apiVersion.
+    // Deliberately bypasses the allowlist gate (a co-signed peer in
+    // pending-approval can still confirm the service is alive) and
+    // charges zero rate-limit cost. Capability-gated via
+    // ServiceCapabilities.FEATURE_HEALTH_CHECK. Old services that don't
+    // know about the method raise NoSuchMethodError / AbstractMethodError
+    // on the binder stub — capability-aware SDKs catch and fall back to
+    // getStatus() (heavier) or assume the service is alive when this
+    // call simply doesn't exist.
+    HealthCheck ping();
 }
 
 

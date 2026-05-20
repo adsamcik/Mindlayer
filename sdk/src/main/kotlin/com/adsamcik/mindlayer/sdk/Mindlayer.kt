@@ -1274,6 +1274,69 @@ class Mindlayer private constructor(
         return withTypedErrors { it.status }
     }
 
+    /**
+     * Lightweight liveness probe — Phase 3 #8 (`p3-health-check`).
+     *
+     * Returns a [com.adsamcik.mindlayer.HealthCheck] with the server's
+     * wall-clock, service uptime, [com.adsamcik.mindlayer.ServiceCapabilities.apiVersion],
+     * and per-engine state. Designed for low-overhead round-trip
+     * checks, watchdog probes, and clock-skew detection.
+     *
+     * Cheaper than [getStatus] (which produces a richer
+     * [com.adsamcik.mindlayer.ServiceStatus] snapshot with memory
+     * pressure, thermal band, backend, etc.). The service bypasses
+     * the allowlist gate and rate-limit cost for `ping()` so a
+     * co-signed peer in pending-approval can still confirm the
+     * service is alive.
+     *
+     * Capability-gated via
+     * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_HEALTH_CHECK].
+     * When talking to an older service that doesn't implement
+     * `ping()` (`NoSuchMethodError` / `AbstractMethodError` on the
+     * binder stub), this method falls back to issuing a `getStatus`
+     * call and synthesising a [com.adsamcik.mindlayer.HealthCheck]
+     * from the result — apiVersion is read from the cached
+     * capabilities, engine states are derived from the status's
+     * `isEngineLoaded` / `engineWarming` fields (best-effort).
+     *
+     * Throws the same typed errors as any other AIDL call (network
+     * down, service crashed, etc.) on persistent failure.
+     */
+    suspend fun ping(): com.adsamcik.mindlayer.HealthCheck {
+        return try {
+            withTypedErrors { it.ping() }
+        } catch (_: NoSuchMethodError) {
+            synthesiseHealthCheckFallback()
+        } catch (_: AbstractMethodError) {
+            synthesiseHealthCheckFallback()
+        }
+    }
+
+    /**
+     * Fallback for pre-v0.8.1 services that don't implement `ping()`.
+     * Derives a best-effort [com.adsamcik.mindlayer.HealthCheck] from
+     * the heavier [getStatus] surface so callers don't have to handle
+     * the version skew themselves.
+     */
+    private suspend fun synthesiseHealthCheckFallback(): com.adsamcik.mindlayer.HealthCheck {
+        val status = getStatus()
+        val caps = getCapabilities()
+        val llmState = when {
+            status.isEngineLoaded -> com.adsamcik.mindlayer.HealthCheck.ENGINE_STATE_READY
+            status.engineWarming -> com.adsamcik.mindlayer.HealthCheck.ENGINE_STATE_INITIALIZING
+            else -> com.adsamcik.mindlayer.HealthCheck.ENGINE_STATE_IDLE
+        }
+        return com.adsamcik.mindlayer.HealthCheck(
+            serverTimestampMs = System.currentTimeMillis(),
+            serviceUptimeMs = status.uptimeMs,
+            apiVersion = caps.apiVersion,
+            llmEngineState = llmState,
+            embeddingEngineState = com.adsamcik.mindlayer.HealthCheck.ENGINE_STATE_IDLE,
+            ocrEngineState = com.adsamcik.mindlayer.HealthCheck.ENGINE_STATE_IDLE,
+            extensionsJson = null,
+        )
+    }
+
     /** Get engine info (selected model, perf stats, etc.). */
     suspend fun getEngineInfo(): EngineInfo {
         return withTypedErrors { it.engineInfo }

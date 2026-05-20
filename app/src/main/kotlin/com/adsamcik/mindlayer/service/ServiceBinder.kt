@@ -276,6 +276,11 @@ class ServiceBinder(
             // OcrTokenStreamWriter and SDK reader handle the optional
             // box field as a no-op on receivers that don't ask for it.
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_BOUNDING_BOXES,
+            // Phase 3 #8 (p3-health-check): lightweight ping() endpoint
+            // returning a HealthCheck parcelable. Bypasses the allowlist
+            // gate and charges zero rate-limit cost; co-signed peers in
+            // pending-approval can use it for liveness probes.
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_HEALTH_CHECK,
         )
 
         /** Allowed characters for caller-supplied identifiers (sessionId/requestId). */
@@ -2554,6 +2559,55 @@ class ServiceBinder(
         // conditionally on engine readiness — these limits remain the
         // authoritative shape regardless of whether the flag is on.
         return ocrSessionManager.getLimits()
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  v0.8.1 health check — Phase 3 #8 (p3-health-check)
+    //
+    //  Lightweight liveness probe. Deliberately BYPASSES authorizeCall
+    //  (no allowlist gate, no rate-limit cost) so:
+    //    - co-signed peers in pending-approval can confirm the service
+    //      is alive without bumping their pending-approval rate-limit
+    //      bucket;
+    //    - the dashboard can poll cheaply for an in-process indicator;
+    //    - watchdog probes don't compete with real inference for the
+    //      caller's rate budget.
+    //
+    //  The first-hop signature-permission gate (BIND_ML_SERVICE) still
+    //  applies — only co-signed peers can bind in the first place. ping()
+    //  intentionally surfaces NO caller-specific information (no UID
+    //  echo, no per-caller-uptime, no per-caller-state) so a hostile
+    //  un-approved peer cannot use it for fingerprinting.
+    // ─────────────────────────────────────────────────────────────────────
+
+    override fun ping(): com.adsamcik.mindlayer.HealthCheck {
+        return com.adsamcik.mindlayer.HealthCheck(
+            serverTimestampMs = System.currentTimeMillis(),
+            serviceUptimeMs = android.os.SystemClock.elapsedRealtime() - service.createdAtMs,
+            apiVersion = CURRENT_API_VERSION,
+            llmEngineState = safeEngineState { engineManager.state.value },
+            embeddingEngineState = safeEngineState { service.embeddingEngine.state.value },
+            ocrEngineState = safeEngineState { service.paddleOcrEngine.state.value },
+            extensionsJson = null,
+        )
+    }
+
+    /**
+     * Read an engine's sealed-class state, catching the
+     * `UninitializedPropertyAccessException` that fires when the
+     * lateinit field on the service hasn't been wired yet (test
+     * fixtures, very early boot), and any unexpected throwable. Returns
+     * `IDLE` in either case.
+     */
+    private inline fun safeEngineState(read: () -> Any?): Int {
+        val state = try {
+            read()
+        } catch (_: UninitializedPropertyAccessException) {
+            return com.adsamcik.mindlayer.HealthCheck.ENGINE_STATE_IDLE
+        } catch (_: Throwable) {
+            return com.adsamcik.mindlayer.HealthCheck.ENGINE_STATE_IDLE
+        }
+        return HealthCheckEngineStateMapper.map(state)
     }
 
     private fun callerAidlMethodName(): String =
