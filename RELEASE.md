@@ -94,7 +94,23 @@ release: 0.4.0
 $modelPath = Get-ChildItem gemma_model -Recurse -Filter *.litertlm | Select-Object -First 1
 if ($null -eq $modelPath) { throw "Place the release .litertlm model under gemma_model before building." }
 $modelSha256 = (Get-FileHash $modelPath.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-./gradlew.bat clean :app:bundleRelease -PmodelSha256=$modelSha256
+
+$paddleDetSha256 = (Get-FileHash "paddleocr_model\src\main\assets\paddleocr-ppocrv5-mobile-det.tflite" -Algorithm SHA256).Hash.ToLowerInvariant()
+$paddleRecSha256 = (Get-FileHash "paddleocr_model\src\main\assets\paddleocr-ppocrv5-mobile-rec.tflite" -Algorithm SHA256).Hash.ToLowerInvariant()
+$paddleClsSha256 = (Get-FileHash "paddleocr_model\src\main\assets\paddleocr-ppocrv5-mobile-cls.tflite" -Algorithm SHA256).Hash.ToLowerInvariant()
+$paddleDictSha256 = (Get-FileHash "paddleocr_model\src\main\assets\paddleocr-ppocrv5-mobile-dict.txt" -Algorithm SHA256).Hash.ToLowerInvariant()
+
+$embeddingModelSha256 = (Get-FileHash "embeddinggemma_model\src\main\assets\embedding-gemma-300m-v1.tflite" -Algorithm SHA256).Hash.ToLowerInvariant()
+$embeddingTokenizerSha256 = (Get-FileHash "embeddinggemma_model\src\main\assets\embedding-gemma-300m-v1.spm.model" -Algorithm SHA256).Hash.ToLowerInvariant()
+
+./gradlew.bat clean :app:bundleRelease `
+  -PmodelSha256=$modelSha256 `
+  -PpaddleOcrDetSha256=$paddleDetSha256 `
+  -PpaddleOcrRecSha256=$paddleRecSha256 `
+  -PpaddleOcrClsSha256=$paddleClsSha256 `
+  -PpaddleOcrDictSha256=$paddleDictSha256 `
+  -PembeddingModelSha256=$embeddingModelSha256 `
+  -PembeddingTokenizerSha256=$embeddingTokenizerSha256
 ```
 
 Output:
@@ -110,15 +126,12 @@ This is the file you upload to Play. It is:
 * **Packaged with the Gemma AI-Pack** (install-time delivery, declared in
   `app/build.gradle.kts` via `assetPacks += listOf(":gemma_model")`).
 
-> ⚠️ The Gemma `.litertlm` model is **not** checked into git. For a Play
-> Store release, place the real model binary at the path expected by the
-> ⚠️ The Gemma `.litertlm` model is **not** checked into git. For a Play
-> Store release, place the real model binary at the path expected by the
-> `:gemma_model` module before running `:app:bundleRelease`. If the model is
-> absent, the release build should fail. Release builds also require
-> `-PmodelSha256=<64 lowercase hex SHA-256>` for the exact `.litertlm` file
-> being bundled; debug builds keep advisory model-hash behavior for local
-> development.
+> ⚠️ The Gemma `.litertlm`, PaddleOCR `.tflite`/dictionary files, and
+> EmbeddingGemma artifacts are **not** checked into git. For a Play Store
+> release, place the real model binaries at the paths expected by their AI-pack
+> modules before running `:app:bundleRelease`. Release builds require all seven
+> `-P*Sha256` properties for the exact files being bundled; debug builds keep
+> advisory model-hash behavior for local development.
 
 ### 2.3 (Optional) Build a signed universal APK for side-loading
 
@@ -187,18 +200,18 @@ bundletool dump manifest --bundle app\build\outputs\bundle\release\app-release.a
 | `:app:testDebugUnitTest`        | ✅ every push                 | ✅                                        |
 | `:app:connectedDebugAndroidTest`| ✅ every push (API 33 AVD)    | ✅ with connected device                  |
 | `lintDebug`                     | ✅ every push                 | ✅                                        |
-| `:app:bundleRelease` (unsigned) | ✅ on `main` with `MODEL_SHA256` repo variable when CI signing secrets are absent | ✅ with `-PmodelSha256=...` |
-| `:app:bundleRelease` (signed)   | ✅ on `main` when `MODEL_SHA256` and CI signing secrets are configured | ✅ only when `keystore.properties` is set |
+| `:app:bundleRelease` (unsigned) | ✅ on `main` with all model SHA repo variables when CI signing secrets are absent | ✅ with all `-P*Sha256=...` properties |
+| `:app:bundleRelease` (signed)   | ✅ on `main` when all model SHA repo variables and CI signing secrets are configured | ✅ only when `keystore.properties` is set |
 | **`v*` tag → attached AAB on GitHub Release** | ✅ on every release tag — `publish.yml`'s `release-aab` job builds + attaches `app-release.aab` to the GitHub Release alongside the SDK pointer (signed when CI secrets are configured, unsigned otherwise). Gated on the same `gemma-4-E2B-it.litertlm` presence check as the `main`-branch flow. | — |
 
 CI can sign the release AAB when `ANDROID_KEYSTORE_BASE64`,
 `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`
-are configured as repository secrets, in addition to the `MODEL_SHA256`
-repository variable that all release builds require. Without the signing
-secrets, CI still builds an unsigned `app-release.aab` on `main`; that
-artifact is **not** uploadable to Play and only proves that R8 + resource
-shrinking still succeeds end-to-end with the same model-hash manifest a real
-release must provide.
+are configured as repository secrets, in addition to the `MODEL_SHA256`,
+`PADDLEOCR_*_SHA256`, and `EMBEDDING_*_SHA256` repository variables that all
+release builds require. Without the signing secrets, CI still builds an
+unsigned `app-release.aab` on `main`; that artifact is **not** uploadable to
+Play and only proves that R8 + resource shrinking still succeeds end-to-end
+with the same model-hash manifests a real release must provide.
 
 On `v*` release tags, `publish.yml` mirrors that build and **also attaches
 the resulting AAB to the GitHub Release** so SDK consumers can grab the
