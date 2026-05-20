@@ -182,9 +182,7 @@ jobs:
             ../.venv-onnx2tf/bin/onnx2tf \
               -i "$onnx" \
               -o "ppocrv5-${kind}-saved" \
-              -osd \
-              -ois \
-              -kt
+              -osd
             mv "ppocrv5-${kind}-saved/saved_model.tflite" \
                "paddleocr-ppocrv5-mobile-${kind}.tflite"
             rm -rf "ppocrv5-${kind}-saved"
