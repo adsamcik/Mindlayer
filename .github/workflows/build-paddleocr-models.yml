@@ -68,25 +68,41 @@ jobs:
       - name: Set up Python 3.12
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v6
         with:
-          # onnx2tf 2.x requires Python >= 3.12; paddle2onnx 2.1.0 and
-          # tensorflow 2.16.2 both support Python 3.12. Verified via the
-          # original 2026-05-19 run (#26124473504) which failed on Python
-          # 3.11 with "ERROR: No matching distribution found for onnx2tf==2.4.0".
+          # onnx2tf 2.x requires Python >= 3.12; paddle2onnx 2.1.0
+          # supports cp312, and TensorFlow 2.19.1 satisfies onnx2tf 2.4.0's
+          # ml-dtypes/protobuf pins. The original 2026-05-19 run
+          # (#26124473504) failed on Python 3.11 with "ERROR: No matching
+          # distribution found for onnx2tf==2.4.0".
           python-version: '3.12'
 
       - name: Install conversion tools (pinned)
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install \
+
+          # paddle2onnx 2.1.0 and onnx2tf 2.4.0 intentionally use
+          # incompatible ONNX versions. Keep them in isolated virtualenvs so
+          # the pinned conversion chain stays reproducible.
+          python -m venv .venv-paddle2onnx
+          .venv-paddle2onnx/bin/python -m pip install --upgrade pip
+          .venv-paddle2onnx/bin/python -m pip install \
+            "setuptools==80.9.0" \
+            "paddlepaddle==3.0.0" \
             "paddle2onnx==${{ inputs.paddle2onnx_version }}" \
-            "onnx2tf==${{ inputs.onnx2tf_version }}" \
-            "tensorflow==2.16.2" \
             "onnx==1.16.2" \
             "onnxruntime==1.18.1" \
             "protobuf==4.25.4" \
             "numpy==1.26.4"
-          python -c "import paddle2onnx, onnx2tf; print('paddle2onnx=', paddle2onnx.__version__); print('onnx2tf=', onnx2tf.__version__)"
+
+          python -m venv .venv-onnx2tf
+          .venv-onnx2tf/bin/python -m pip install --upgrade pip
+          .venv-onnx2tf/bin/python -m pip install \
+            "onnx2tf==${{ inputs.onnx2tf_version }}" \
+            "tensorflow==2.19.1" \
+            "protobuf==4.25.5" \
+            "numpy==1.26.4"
+
+          .venv-paddle2onnx/bin/python -c "import importlib.metadata as m; print('paddle2onnx=', m.version('paddle2onnx')); print('onnx=', m.version('onnx'))"
+          .venv-onnx2tf/bin/python -c "import importlib.metadata as m; print('onnx2tf=', m.version('onnx2tf')); print('onnx=', m.version('onnx')); print('tensorflow=', m.version('tensorflow'))"
 
       - name: Fetch PaddleOCR PP-OCRv5 mobile artifacts
         env:
@@ -95,34 +111,34 @@ jobs:
           set -euo pipefail
           mkdir -p paddle-src tflite-out
           cd paddle-src
-          # PaddleOCR ships the mobile artifacts as downloadable .tar files
-          # under the v3 release assets. The exact URLs change between
-          # releases; treat them as inputs of this workflow (a human picks
-          # the right .tar for the ref and lists them in this step's env).
-          # Refer to: https://github.com/PaddlePaddle/PaddleOCR/releases
-          # For PP-OCRv5 mobile the typical layout is:
-          #   PP-OCRv5_mobile_det_infer.tar
-          #   PP-OCRv5_mobile_rec_infer.tar
-          #   PP-OCRv5_mobile_cls_infer.tar  (optional; ships in some releases)
-          #   ppocrv5_dict.txt
-          #
-          # We download the release tag's source tree to pick up the
-          # canonical dictionary, then download the three model tarballs
-          # from the assets page.
+          # PaddleOCR v3 publishes PP-OCRv5 mobile artifacts through the
+          # PaddleX official inference-model bucket. We download the release
+          # tag's source tree to pick up the canonical dictionary, then
+          # download det/rec plus the lightweight text-line orientation model.
 
           # Source tree (for dict.txt):
           curl -fsSL -o paddleocr-src.tar.gz \
             "https://github.com/PaddlePaddle/PaddleOCR/archive/refs/tags/${PADDLEOCR_REF}.tar.gz"
           tar -xzf paddleocr-src.tar.gz --strip-components=1 -C .
 
-          # Model tarballs (URLs depend on release; this is the
-          # 'paddleocr-release-models' convention used by v3.x):
+          base_url="https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0"
+          declare -A model_urls=(
+            [det]="${base_url}/PP-OCRv5_mobile_det_infer.tar"
+            [rec]="${base_url}/PP-OCRv5_mobile_rec_infer.tar"
+            [cls]="${base_url}/PP-LCNet_x0_25_textline_ori_infer.tar"
+          )
+          declare -A model_dirs=(
+            [det]="PP-OCRv5_mobile_det_infer"
+            [rec]="PP-OCRv5_mobile_rec_infer"
+            [cls]="PP-LCNet_x0_25_textline_ori_infer"
+          )
           for kind in det rec cls; do
-            curl -fsSL -o "PP-OCRv5_mobile_${kind}_infer.tar" \
-              "https://paddleocr.bj.bcebos.com/PP-OCRv5/mobile/PP-OCRv5_mobile_${kind}_infer.tar" \
-              || echo "::warning::Failed to fetch ${kind} mobile model; pipeline will only emit available roles."
-            if [ -f "PP-OCRv5_mobile_${kind}_infer.tar" ]; then
-              tar -xf "PP-OCRv5_mobile_${kind}_infer.tar"
+            tar_name="${model_dirs[$kind]}.tar"
+            curl -fsSL -o "$tar_name" "${model_urls[$kind]}"
+            tar -xf "$tar_name"
+            if [ ! -d "${model_dirs[$kind]}" ]; then
+              echo "::error::Expected ${model_dirs[$kind]} after extracting $tar_name."
+              exit 1
             fi
           done
 
@@ -132,13 +148,18 @@ jobs:
         run: |
           set -euo pipefail
           cd paddle-src
+          declare -A model_dirs=(
+            [det]="PP-OCRv5_mobile_det_infer"
+            [rec]="PP-OCRv5_mobile_rec_infer"
+            [cls]="PP-LCNet_x0_25_textline_ori_infer"
+          )
           for kind in det rec cls; do
-            dir="PP-OCRv5_mobile_${kind}_infer"
+            dir="${model_dirs[$kind]}"
             if [ ! -d "$dir" ]; then
-              echo "::warning::Skipping $kind: directory $dir not found."
-              continue
+              echo "::error::Required Paddle model directory missing: $dir."
+              exit 1
             fi
-            paddle2onnx \
+            ../.venv-paddle2onnx/bin/paddle2onnx \
               --model_dir "$dir" \
               --model_filename inference.json \
               --params_filename inference.pdiparams \
@@ -155,17 +176,20 @@ jobs:
           for kind in det rec cls; do
             onnx="paddleocr-ppocrv5-mobile-${kind}.onnx"
             if [ ! -f "$onnx" ]; then
-              echo "::warning::Skipping $kind: no ONNX file."
-              continue
+              echo "::error::Required ONNX file missing: $onnx."
+              exit 1
             fi
-            onnx2tf \
+            ../.venv-onnx2tf/bin/onnx2tf \
               -i "$onnx" \
               -o "ppocrv5-${kind}-saved" \
-              -osd \
-              -ois \
-              -kt
-            mv "ppocrv5-${kind}-saved/saved_model.tflite" \
-               "paddleocr-ppocrv5-mobile-${kind}.tflite"
+              -osd
+            generated="ppocrv5-${kind}-saved/paddleocr-ppocrv5-mobile-${kind}_float32.tflite"
+            if [ ! -f "$generated" ]; then
+              echo "::error::Expected onnx2tf float32 output missing: $generated"
+              find "ppocrv5-${kind}-saved" -maxdepth 2 -type f -print
+              exit 1
+            fi
+            mv "$generated" "paddleocr-ppocrv5-mobile-${kind}.tflite"
             rm -rf "ppocrv5-${kind}-saved"
           done
           ls -1
@@ -195,19 +219,26 @@ jobs:
         run: |
           set -euo pipefail
           cd tflite-out
+          required_files=(
+            paddleocr-ppocrv5-mobile-det.tflite
+            paddleocr-ppocrv5-mobile-rec.tflite
+            paddleocr-ppocrv5-mobile-cls.tflite
+            paddleocr-ppocrv5-mobile-dict.txt
+          )
+          for f in "${required_files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Required converted artifact missing: $f"
+              exit 1
+            fi
+          done
           {
             echo "# PaddleOCR PP-OCRv5 mobile artifact SHA-256 values"
             echo "# Generated by .github/workflows/build-paddleocr-models.yml"
             echo "# Plug into MODEL_SHA256 family of repository variables."
             echo ""
-            for f in paddleocr-ppocrv5-mobile-det.tflite \
-                     paddleocr-ppocrv5-mobile-rec.tflite \
-                     paddleocr-ppocrv5-mobile-cls.tflite \
-                     paddleocr-ppocrv5-mobile-dict.txt; do
-              if [ -f "$f" ]; then
-                sha=$(sha256sum "$f" | awk '{print $1}')
-                echo "$f  $sha"
-              fi
+            for f in "${required_files[@]}"; do
+              sha=$(sha256sum "$f" | awk '{print $1}')
+              echo "$f  $sha"
             done
           } | tee expected_shas.txt
           {
