@@ -47,23 +47,12 @@ import java.util.concurrent.atomic.AtomicInteger
  * keeps push frequency below the engine's throughput on real
  * devices.
  *
- * # Engine-scaffold tolerance
+ * # Engine failure tolerance
  *
- * If `engine.recognise()` throws — including the
- * `LiteRtPaddleOcrBackend` scaffold's intentional
- * `IllegalStateException("PaddleOCR recognise() pipeline not yet
- * wired ...")` — the dispatcher logs the failure with `safeLabel`,
- * silently skips emitting recognition events, and DOES NOT poison
- * the session. The session manager's intake path keeps accepting
- * frames; only the recognition results are missing.
- *
- * This is the intentional Phase 2 #3 shipping behavior: the
- * dispatcher is wired and tested, but until the native PP-OCRv5
- * det/cls/rec pipeline + uploaded `.tflite` artifacts land
- * (separate follow-up after the `build-paddleocr-models.yml`
- * workflow runs and the integrity manifest is updated), the engine
- * scaffolds keep failing closed and no `OcrEvent.FieldUpdate` /
- * `OcrEvent.FieldLocked` / `OcrEvent.ResultFinalized` events fire.
+ * If `engine.recognise()` throws, the dispatcher logs the failure with
+ * `safeLabel`, emits `FrameProcessed(lineCount=0)`, and DOES NOT poison the
+ * session. The session manager's intake path keeps accepting frames; only
+ * recognition results for the failed frame are missing.
  */
 class OcrRecognitionDispatcher(
     private val engine: PaddleOcrEngine,
@@ -130,11 +119,6 @@ class OcrRecognitionDispatcher(
             val output = try {
                 engine.recognise(yPlane, width, height, config)
             } catch (t: Throwable) {
-                // Most importantly: PR C2's LiteRtPaddleOcrBackend scaffold
-                // throws IllegalStateException pointing at the conversion
-                // workflow. Swallow + log + skip — Phase 2 #3 intentionally
-                // ships the dispatcher even when the engine scaffold
-                // hasn't been replaced with the native pipeline yet.
                 MindlayerLog.w(
                     TAG,
                     "OCR recognise failed: ${t.safeLabel()}",
@@ -256,10 +240,9 @@ class OcrRecognitionDispatcher(
                 val extraction = try {
                     llmExtractor.extract(evidence)
                 } catch (t: Throwable) {
-                    // Like the recognise() scaffold above: degrade
-                    // silently and let the per-line emission keep
-                    // flowing. The extractor implementation owns its
-                    // own privacy-safe logging.
+                    // Degrade silently and let the per-line emission keep
+                    // flowing. The extractor implementation owns its own
+                    // privacy-safe logging.
                     MindlayerLog.w(
                         TAG,
                         "OCR LLM extraction failed: ${t.safeLabel()}",
