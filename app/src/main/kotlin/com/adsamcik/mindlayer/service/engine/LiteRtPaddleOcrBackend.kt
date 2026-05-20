@@ -3,12 +3,14 @@ package com.adsamcik.mindlayer.service.engine
 import android.app.ActivityManager
 import android.content.Context
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
+import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.safeLabel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.ceil
 import kotlin.math.exp
 import kotlin.math.floor
@@ -37,12 +39,14 @@ class LiteRtPaddleOcrBackend internal constructor(
     private val memoryHeadroomBytes: Long = MEMORY_HEADROOM_BYTES,
     private val availableMemoryProvider: () -> Long = defaultAvailableMemoryProvider(context),
     private val runnerFactory: PaddleOcrLiteRtRunnerFactory,
+    private val logRepository: LogRepository? = null,
 ) : PaddleOcrBackend {
 
     constructor(
         context: Context,
         memoryHeadroomBytes: Long = MEMORY_HEADROOM_BYTES,
         availableMemoryProvider: () -> Long = defaultAvailableMemoryProvider(context),
+        logRepository: LogRepository? = null,
     ) : this(
         context = context,
         memoryHeadroomBytes = memoryHeadroomBytes,
@@ -50,6 +54,7 @@ class LiteRtPaddleOcrBackend internal constructor(
         runnerFactory = { bundle, acceleratorLabel ->
             RealPaddleOcrLiteRtRunner.create(bundle, acceleratorLabel)
         },
+        logRepository = logRepository,
     )
 
     private val mutex = Mutex()
@@ -66,6 +71,9 @@ class LiteRtPaddleOcrBackend internal constructor(
     @Volatile
     private var backendLabel: String = "NONE"
 
+    @Volatile
+    private var shuttingDown: Boolean = false
+
     override val activeBackend: String
         get() = backendLabel
 
@@ -79,6 +87,8 @@ class LiteRtPaddleOcrBackend internal constructor(
         bundle: PaddleOcrModelInfo,
         preferredBackend: String?,
     ): Unit = mutex.withLock {
+        val initStartNs = System.nanoTime()
+        shuttingDown = false
         val selectedBackend = resolveBackend(preferredBackend)
         loadedBundle?.let { current ->
             if (current.id == bundle.id &&
@@ -94,8 +104,8 @@ class LiteRtPaddleOcrBackend internal constructor(
 
         checkMemoryHeadroom(bundle)
         var pendingRunner: PaddleOcrLiteRtRunner? = null
-        val loaded = try {
-            withContext(Dispatchers.IO) {
+        try {
+            val loaded = withContext(Dispatchers.IO) {
                 verifyBundleFilesExist(bundle)
                 val loadedDictionary = loadDictionary(bundle.dictionaryPath)
                 val newRunner = runnerFactory(bundle, selectedBackend)
@@ -105,26 +115,33 @@ class LiteRtPaddleOcrBackend internal constructor(
                     dictionary = loadedDictionary,
                 )
             }
+            val previousRunner = runner
+            runner = loaded.runner
+            dictionary = loaded.dictionary
+            backendLabel = selectedBackend
+            loadedBundle = bundle
+            pendingRunner = null
+            if (previousRunner !== loaded.runner) {
+                previousRunner?.runCatching { close() }
+            }
+            val durationMs = elapsedMs(initStartNs)
+            logRepository?.logOcrBackendReady(
+                backend = selectedBackend,
+                bundleId = bundle.id,
+                durationMs = durationMs,
+            )
+            MindlayerLog.i(
+                TAG,
+                "PaddleOCR backend ready: id=${bundle.id}, backend=$selectedBackend, " +
+                    "size=${bundle.totalSizeBytes}B, hasCls=${bundle.hasOrientationClassifier}",
+            )
         } catch (t: Throwable) {
             pendingRunner?.runCatching { close() }
             MindlayerLog.w(TAG, "PaddleOCR backend init failed: ${t.safeLabel()}", throwable = null)
             throw t
+        } finally {
+            pendingRunner = null
         }
-
-        val previousRunner = runner
-        runner = loaded.runner
-        dictionary = loaded.dictionary
-        backendLabel = selectedBackend
-        loadedBundle = bundle
-        pendingRunner = null
-        if (previousRunner !== loaded.runner) {
-            previousRunner?.runCatching { close() }
-        }
-        MindlayerLog.i(
-            TAG,
-            "PaddleOCR backend ready: id=${bundle.id}, backend=$selectedBackend, " +
-                "size=${bundle.totalSizeBytes}B, hasCls=${bundle.hasOrientationClassifier}",
-        )
     }
 
     override suspend fun recognise(
@@ -132,7 +149,10 @@ class LiteRtPaddleOcrBackend internal constructor(
         width: Int,
         height: Int,
         config: OcrEngineConfig,
-    ): OcrEngineOutput = mutex.withLock {
+    ): OcrEngineOutput {
+        if (shuttingDown) return emptyOutput()
+        return mutex.withLock {
+            if (shuttingDown) return@withLock emptyOutput()
         val bundle = loadedBundle ?: error(
             "PaddleOCR backend not initialised; call initialize() first.",
         )
@@ -151,21 +171,32 @@ class LiteRtPaddleOcrBackend internal constructor(
                 config = config,
             )
         }
+        }
     }
 
-    override suspend fun shutdown(): Unit = mutex.withLock {
-        if (loadedBundle == null) return
-        try {
-            withContext(Dispatchers.IO) {
-                runner?.runCatching { close() }
+    override suspend fun shutdown(): Unit {
+        shuttingDown = true
+        val shutdownStartNs = System.nanoTime()
+        mutex.withLock {
+            val bundle = loadedBundle ?: return
+            val selectedBackend = backendLabel
+            try {
+                withContext(Dispatchers.IO) {
+                    runner?.runCatching { close() }
+                }
+                logRepository?.logOcrBackendShutdown(
+                    backend = selectedBackend,
+                    bundleId = bundle.id,
+                    durationMs = elapsedMs(shutdownStartNs),
+                )
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "PaddleOCR shutdown error: ${t.safeLabel()}", throwable = null)
+            } finally {
+                runner = null
+                dictionary = emptyList()
+                loadedBundle = null
+                backendLabel = "NONE"
             }
-        } catch (t: Throwable) {
-            MindlayerLog.w(TAG, "PaddleOCR shutdown error: ${t.safeLabel()}", throwable = null)
-        } finally {
-            runner = null
-            dictionary = emptyList()
-            loadedBundle = null
-            backendLabel = "NONE"
         }
     }
 
@@ -186,8 +217,14 @@ class LiteRtPaddleOcrBackend internal constructor(
      * explicitly request GPU/NPU for prototype validation.
      */
     private fun resolveBackend(preferred: String?): String = when (preferred?.uppercase()) {
-        "GPU", "CPU", "NPU" -> preferred.uppercase()
-        null -> "CPU"
+        "GPU", "NPU" -> {
+            MindlayerLog.w(
+                TAG,
+                "PaddleOCR GPU/NPU request refused due to LiteRT issue #5264 hazard; falling back to CPU until PR #4 shared resolver lands.",
+            )
+            "CPU"
+        }
+        "CPU", null -> "CPU"
         else -> "CPU"
     }
 
@@ -207,11 +244,29 @@ class LiteRtPaddleOcrBackend internal constructor(
     }
 
     private fun loadDictionary(path: String): List<String> {
-        val chars = File(path).readLines(Charsets.UTF_8)
-            .filter { it.isNotEmpty() }
-        require(chars.isNotEmpty()) { "PaddleOCR dictionary is empty: $path" }
+        val raw = File(path).readText(Charsets.UTF_8)
+        require(!Regex("\r(?!\n)").containsMatchIn(raw)) {
+            "PaddleOCR dictionary contains bare CR line separators: $path"
+        }
+        val chars = raw.reader().buffered().use { reader ->
+            reader.lineSequence()
+                .map { it.trimEnd(Char(13)) }
+                .filter(String::isNotEmpty)
+                .mapIndexed { index, value -> if (index == 0) value.removePrefix("\uFEFF") else value }
+                .toList()
+        }
+        require(chars.size in 100..10_000) { "PaddleOCR dictionary size ${chars.size} outside 100..10000: $path" }
         return chars
     }
+
+    private fun emptyOutput(): OcrEngineOutput = OcrEngineOutput(
+        lines = emptyList(),
+        backend = backendLabel,
+        detDurationMs = 0L,
+        recDurationMs = 0L,
+        clsDurationMs = 0L,
+        totalDurationMs = 0L,
+    )
 
     private fun runPipeline(
         runner: PaddleOcrLiteRtRunner,
@@ -584,12 +639,21 @@ class LiteRtPaddleOcrBackend internal constructor(
         private val IMAGE_NET_MEAN = floatArrayOf(0.485f, 0.456f, 0.406f)
         private val IMAGE_NET_STD = floatArrayOf(0.229f, 0.224f, 0.225f)
 
-        // Matches the production bundle size plus native working buffers.
-        private const val MEMORY_HEADROOM_BYTES = 64L * BYTES_PER_MB
+        /**
+         * OCR headroom covers three concurrent base-LiteRT model handles plus
+         * two FloatArray(640*640*3) preprocessing buffers, while leaving room
+         * for the LiteRT-LM Gemma KV-cache budget shared in this process.
+         */
+        private const val MEMORY_HEADROOM_BYTES = 192L * BYTES_PER_MB
+
+        private val missingActivityManagerWarned = AtomicBoolean(false)
 
         private fun defaultAvailableMemoryProvider(context: Context): () -> Long = {
             val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
             if (am == null) {
+                if (missingActivityManagerWarned.compareAndSet(false, true)) {
+                    MindlayerLog.w(TAG, "ActivityManager unavailable; OCR memory headroom check disabled.")
+                }
                 Long.MAX_VALUE
             } else {
                 val info = ActivityManager.MemoryInfo()
@@ -608,6 +672,7 @@ class LiteRtPaddleOcrBackend internal constructor(
             memoryHeadroomBytes = memoryHeadroomBytes,
             availableMemoryProvider = availableMemoryProvider,
             runnerFactory = runnerFactory,
+            logRepository = null,
         )
     }
 }

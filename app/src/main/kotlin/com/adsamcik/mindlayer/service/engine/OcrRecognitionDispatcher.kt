@@ -121,7 +121,7 @@ class OcrRecognitionDispatcher(
             } catch (t: Throwable) {
                 MindlayerLog.w(
                     TAG,
-                    "OCR recognise failed: ${t.safeLabel()}",
+                    "OCR recognise failed: ${t.safeLabel()}, frameId=$frameId",
                     sessionId = sessionId,
                     throwable = null,
                 )

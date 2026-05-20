@@ -93,6 +93,34 @@ class PaddleOcrEngineTest {
         }
     }
 
+
+    @Test fun lowMemoryInitFailureIsNotCachedAndRetryCanSucceed() = runTest {
+        val backend = FakePaddleOcrBackend(initErrors = ArrayDeque(listOf(LowMemoryException(1, 2))))
+        val engine = engine(backend)
+
+        assertThrows(LowMemoryException::class.java) {
+            kotlinx.coroutines.runBlocking { engine.initialize() }
+        }
+        assertTrue(engine.state.value is PaddleOcrEngineState.Failed)
+
+        engine.initialize()
+        assertEquals(2, backend.initCallCount)
+        assertEquals(PaddleOcrEngineState.Ready, engine.state.value)
+    }
+
+    @Test fun nativeInitFailureRemainsSticky() = runTest {
+        val backend = FakePaddleOcrBackend(initErrors = ArrayDeque(listOf(IllegalStateException("native secret detail"))))
+        val engine = engine(backend)
+
+        assertThrows(IllegalStateException::class.java) {
+            kotlinx.coroutines.runBlocking { engine.initialize() }
+        }
+        assertThrows(IllegalStateException::class.java) {
+            kotlinx.coroutines.runBlocking { engine.initialize() }
+        }
+        assertEquals(1, backend.initCallCount)
+    }
+
     // ── recognise() ──────────────────────────────────────────────────────
 
     @Test fun `recognise lazily initialises`() = runTest {
@@ -178,6 +206,7 @@ class PaddleOcrEngineTest {
  */
 internal class FakePaddleOcrBackend(
     private val recogniseError: Throwable? = null,
+    private val initErrors: ArrayDeque<Throwable> = ArrayDeque(),
     private val cannedOutput: OcrEngineOutput = defaultOutput(),
 ) : PaddleOcrBackend {
 
@@ -194,6 +223,7 @@ internal class FakePaddleOcrBackend(
 
     override suspend fun initialize(bundle: PaddleOcrModelInfo, preferredBackend: String?) {
         initCallCount++
+        initErrors.removeFirstOrNull()?.let { throw it }
         currentBundle = bundle
         isInitialized = true
         activeBackend = preferredBackend ?: "GPU"

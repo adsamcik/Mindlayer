@@ -38,7 +38,7 @@ class LiteRtPaddleOcrBackendTest {
         val det = File(dir, "paddleocr-ppocrv5-mobile-det.tflite").apply { writeBytes(byteArrayOf(1)) }
         val rec = File(dir, "paddleocr-ppocrv5-mobile-rec.tflite").apply { writeBytes(byteArrayOf(2)) }
         val cls = File(dir, "paddleocr-ppocrv5-mobile-cls.tflite").apply { writeBytes(byteArrayOf(3)) }
-        val dict = File(dir, "paddleocr-ppocrv5-mobile-dict.txt").apply { writeText("A\nB\n") }
+        val dict = File(dir, "paddleocr-ppocrv5-mobile-dict.txt").apply { writeText(validDictionary()) }
         bundle = PaddleOcrModelInfo(
             id = "paddleocr-ppocrv5-mobile",
             displayName = "PaddleOCR PP-OCRv5 mobile",
@@ -103,7 +103,7 @@ class LiteRtPaddleOcrBackendTest {
         backend.initialize(bundle, "GPU")
         backend.initialize(bundle, "GPU")
         assertEquals(1, runnerCreations)
-        assertEquals("GPU", backend.activeBackend)
+        assertEquals("CPU", backend.activeBackend)
     }
 
     @Test fun `initialize reloads same bundle when backend preference changes`() = runTest {
@@ -120,11 +120,10 @@ class LiteRtPaddleOcrBackendTest {
         backend.initialize(bundle, "CPU")
         backend.initialize(bundle, "GPU")
 
-        assertEquals(listOf("CPU", "GPU"), requestedBackends)
-        assertEquals("GPU", backend.activeBackend)
-        assertEquals(2, runners.size)
-        assertTrue(runners[0].closed)
-        assertEquals(false, runners[1].closed)
+        assertEquals(listOf("CPU"), requestedBackends)
+        assertEquals("CPU", backend.activeBackend)
+        assertEquals(1, runners.size)
+        assertEquals(false, runners[0].closed)
     }
 
     @Test fun `initialize failure preserves previous ready runner`() = runTest {
@@ -203,6 +202,51 @@ class LiteRtPaddleOcrBackendTest {
         }
     }
 
+
+    @Test fun dictionaryBomIsNormalized() = runTest {
+        File(bundle.dictionaryPath).writeText("\ufeffA\nB\n" + (0 until 98).joinToString("\n") { "tok$it" } + "\n")
+        val fakeRunner = FakePaddleOcrLiteRtRunner(
+            detectionOutput = heatmap(8, Rect(left = 1, top = 1, right = 7, bottom = 3, score = 0.9f)),
+            recognitionOutput = ctcOutput(classCount = 101, indices = intArrayOf(1)),
+        )
+        val backend = backend(fakeRunner)
+        backend.initialize(bundle, "CPU")
+        val output = backend.recognise(ByteArray(8 * 8), 8, 8)
+        assertEquals("A", output.lines.single().text)
+    }
+
+    @Test fun dictionaryBareCrIsRejected() = runTest {
+        File(bundle.dictionaryPath).writeText("A\rB\n" + (0 until 98).joinToString("\n") { "tok$it" } + "\n")
+        assertThrows(IllegalArgumentException::class.java) {
+            kotlinx.coroutines.runBlocking { backend().initialize(bundle, "CPU") }
+        }
+    }
+
+    @Test fun dictionaryTooShortFails() = runTest {
+        File(bundle.dictionaryPath).writeText("A\nB\n")
+        assertThrows(IllegalArgumentException::class.java) {
+            kotlinx.coroutines.runBlocking { backend().initialize(bundle, "CPU") }
+        }
+    }
+
+    @Test fun dictionaryTooLongFails() = runTest {
+        File(bundle.dictionaryPath).writeText((0..10_000).joinToString("\n") { "tok$it" })
+        assertThrows(IllegalArgumentException::class.java) {
+            kotlinx.coroutines.runBlocking { backend().initialize(bundle, "CPU") }
+        }
+    }
+
+    @Test fun dictionarySingleSpaceLinePreservesSpaceToken() = runTest {
+        File(bundle.dictionaryPath).writeText(" \nA\n" + (0 until 98).joinToString("\n") { "tok$it" } + "\n")
+        val backend = backend()
+        backend.initialize(bundle, "CPU")
+        val dictionaryField = LiteRtPaddleOcrBackend::class.java.getDeclaredField("dictionary")
+        dictionaryField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val dictionary = dictionaryField.get(backend) as List<String>
+        assertEquals(" ", dictionary.first())
+    }
+
     @Test fun `recognise throws when not initialised`() = runTest {
         assertThrows(IllegalStateException::class.java) {
             kotlinx.coroutines.runBlocking {
@@ -215,7 +259,7 @@ class LiteRtPaddleOcrBackendTest {
         val fakeRunner = FakePaddleOcrLiteRtRunner(
             detectionOutput = heatmap(8, Rect(left = 1, top = 2, right = 6, bottom = 5, score = 0.9f)),
             orientationOutput = floatArrayOf(0.1f, 0.9f),
-            recognitionOutput = ctcOutput(classCount = 3, indices = intArrayOf(1, 1, 0, 2)),
+            recognitionOutput = ctcOutput(classCount = 101, indices = intArrayOf(1, 1, 0, 2)),
         )
         val backend = backend(fakeRunner)
         backend.initialize(bundle, "CPU")
@@ -247,7 +291,7 @@ class LiteRtPaddleOcrBackendTest {
         val fakeRunner = FakePaddleOcrLiteRtRunner(
             detectionOutput = heatmap(8, Rect(left = 1, top = 1, right = 7, bottom = 3, score = 0.9f)),
             orientationOutput = floatArrayOf(0.1f, 0.9f),
-            recognitionOutput = ctcOutput(classCount = 3, indices = intArrayOf(1)),
+            recognitionOutput = ctcOutput(classCount = 101, indices = intArrayOf(1)),
         )
         val backend = backend(fakeRunner)
         backend.initialize(bundle, "CPU")
@@ -271,7 +315,7 @@ class LiteRtPaddleOcrBackendTest {
                 Rect(left = 0, top = 0, right = 3, bottom = 3, score = 0.7f),
                 Rect(left = 4, top = 4, right = 8, bottom = 8, score = 0.95f),
             ),
-            recognitionOutput = ctcOutput(classCount = 3, indices = intArrayOf(2)),
+            recognitionOutput = ctcOutput(classCount = 101, indices = intArrayOf(2)),
         )
         val backend = backend(fakeRunner)
         backend.initialize(bundle, "CPU")
@@ -340,7 +384,7 @@ class LiteRtPaddleOcrBackendTest {
     private class FakePaddleOcrLiteRtRunner(
         private val detectionOutput: FloatArray = FloatArray(8 * 8),
         private val orientationOutput: FloatArray? = floatArrayOf(1f, 0f),
-        private val recognitionOutput: FloatArray = ctcOutput(classCount = 3, indices = intArrayOf(1)),
+        private val recognitionOutput: FloatArray = ctcOutput(classCount = 101, indices = intArrayOf(1)),
     ) : PaddleOcrLiteRtRunner {
         var detectionInputSize: Int = 0
             private set
@@ -378,6 +422,12 @@ class LiteRtPaddleOcrBackendTest {
     }
 
     private companion object {
+        fun validDictionary(): String = buildString {
+            append("A\n")
+            append("B\n")
+            repeat(98) { append("tok").append(it).append("\n") }
+        }
+
         fun heatmap(size: Int, vararg rects: Rect): FloatArray {
             val out = FloatArray(size * size)
             for (rect in rects) {

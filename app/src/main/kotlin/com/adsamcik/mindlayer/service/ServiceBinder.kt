@@ -2219,7 +2219,10 @@ class ServiceBinder(
         // Capability-aware SDKs then exercise the OCR API safely on
         // supported devices and degrade silently on devices that lack
         // the bundle.
-        val effectiveFeatures = if (ocrSessionManager.isEngineReady()) {
+        val effectiveFeatures = if (
+            ocrSessionManager.isProductionReady &&
+            ocrSessionManager.isEngineReady()
+        ) {
             baseFeatures + com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_SESSION
         } else {
             baseFeatures
@@ -2552,12 +2555,8 @@ class ServiceBinder(
     }
 
     override fun getOcrLimits(): com.adsamcik.mindlayer.OcrLimits {
-        // No authorization gate: OcrLimits is a public discovery
-        // surface mirroring ServiceCapabilities.
-        // Returns the manager's configured limits (PR C3). Phase 2 #5
-        // flipped FEATURE_OCR_SESSION into the SUPPORTED_FEATURES set
-        // conditionally on engine readiness — these limits remain the
-        // authoritative shape regardless of whether the flag is on.
+        authorizeCall(cost = 0.1)
+        // Returns the manager configured limits regardless of whether FEATURE_OCR_SESSION is advertised.
         return ocrSessionManager.getLimits()
     }
 
