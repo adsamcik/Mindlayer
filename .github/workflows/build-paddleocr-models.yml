@@ -85,6 +85,7 @@ jobs:
           python -m venv .venv-paddle2onnx
           .venv-paddle2onnx/bin/python -m pip install --upgrade pip
           .venv-paddle2onnx/bin/python -m pip install \
+            "setuptools==80.9.0" \
             "paddlepaddle==3.0.0" \
             "paddle2onnx==${{ inputs.paddle2onnx_version }}" \
             "onnx==1.16.2" \
