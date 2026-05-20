@@ -187,22 +187,35 @@ jobs:
               echo "::error::Required ONNX file missing: $onnx."
               exit 1
             fi
-            input_name=$(../.venv-paddle2onnx/bin/python - "$onnx" <<'PY'
+            fixed_onnx="paddleocr-ppocrv5-mobile-${kind}-fixed.onnx"
+            input_name=$(../.venv-paddle2onnx/bin/python - "$onnx" "$fixed_onnx" "${onnx_input_dims[$kind]}" <<'PY'
           import sys
           import onnx
 
           model = onnx.load(sys.argv[1])
+          output_path = sys.argv[2]
+          static_shape = [int(part) for part in sys.argv[3].split(",")]
           if len(model.graph.input) != 1:
               raise SystemExit(f"Expected one input, found {len(model.graph.input)}")
-          print(model.graph.input[0].name)
+          graph_input = model.graph.input[0]
+          dims = graph_input.type.tensor_type.shape.dim
+          if len(dims) != len(static_shape):
+              raise SystemExit(
+                  f"Expected input rank {len(static_shape)}, found {len(dims)} for {graph_input.name}"
+              )
+          for dim, value in zip(dims, static_shape):
+              dim.ClearField("dim_param")
+              dim.dim_value = value
+          onnx.save(model, output_path)
+          print(graph_input.name)
           PY
           )
             ../.venv-onnx2tf/bin/onnx2tf \
-              -i "$onnx" \
+              -i "$fixed_onnx" \
               -o "ppocrv5-${kind}-saved" \
               -ois "${input_name}:${onnx_input_dims[$kind]}" \
               -osd
-            generated="ppocrv5-${kind}-saved/paddleocr-ppocrv5-mobile-${kind}_float32.tflite"
+            generated="ppocrv5-${kind}-saved/paddleocr-ppocrv5-mobile-${kind}-fixed_float32.tflite"
             if [ ! -f "$generated" ]; then
               echo "::error::Expected onnx2tf float32 output missing: $generated"
               find "ppocrv5-${kind}-saved" -maxdepth 2 -type f -print
