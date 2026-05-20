@@ -95,7 +95,7 @@ jobs:
           .venv-onnx2tf/bin/python -m pip install \
             "onnx2tf==${{ inputs.onnx2tf_version }}" \
             "tensorflow==2.16.2" \
-            "protobuf==4.25.4" \
+            "protobuf==4.25.5" \
             "numpy==1.26.4"
 
           .venv-paddle2onnx/bin/python -c "import importlib.metadata as m; print('paddle2onnx=', m.version('paddle2onnx')); print('onnx=', m.version('onnx'))"
