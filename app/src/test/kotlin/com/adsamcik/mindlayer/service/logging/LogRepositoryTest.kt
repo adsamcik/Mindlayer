@@ -274,7 +274,7 @@ class LogRepositoryTest {
     // --- logEngineInit ---
 
     @Test
-    fun `logEngineInit includes backend duration and modelPath`() = runTest {
+    fun `logEngineInit includes backend duration and model filename only`() = runTest {
         repo.logEngineInit("GPU", 3500L, "/data/models/llama.bin")
         val e = awaitSingleEntry()
 
@@ -283,17 +283,18 @@ class LogRepositoryTest {
         assertEquals("GPU", e.backend)
         assertEquals(3500L, e.durationMs)
         assertNotNull(e.extraJson)
-        assertTrue(e.extraJson!!.contains("/data/models/llama.bin"))
+        assertTrue(e.extraJson!!.contains("llama.bin"))
+        assertFalse(e.extraJson!!.contains("/data/models"))
     }
 
     @Test
-    fun `logEngineInit escapes model path as valid JSON`() = runTest {
+    fun `logEngineInit stores model filename as valid JSON`() = runTest {
         val modelPath = "C:\\models\\Gemma \"4\"\\model.litertlm"
 
         repo.logEngineInit("GPU", 3500L, modelPath)
         val extra = parsedExtra(awaitSingleEntry())
 
-        assertEquals(modelPath, extra["modelPath"]!!.jsonPrimitive.content)
+        assertEquals("model.litertlm", extra["modelFile"]!!.jsonPrimitive.content)
     }
 
     // --- logEngineShutdown ---

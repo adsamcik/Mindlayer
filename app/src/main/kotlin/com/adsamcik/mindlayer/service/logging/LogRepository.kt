@@ -263,12 +263,35 @@ class LogRepository(
     }
 
     fun logEngineInit(backend: String, durationMs: Long, modelPath: String) {
+        val modelFile = modelPath.substringAfterLast("/").substringAfterLast(Char(92))
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.ENGINE,
             event = LogEvent.ENGINE_INIT,
             backend = backend, durationMs = durationMs,
-            extraJson = logExtraJson { put("modelPath", modelPath) },
+            extraJson = logExtraJson { put("modelFile", modelFile) },
+        ))
+    }
+
+    fun logOcrBackendReady(backend: String, bundleId: String, durationMs: Long) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.ENGINE,
+            event = LogEvent.OCR_BACKEND_READY,
+            backend = backend,
+            durationMs = durationMs,
+            extraJson = logExtraJson { put("bundleId", bundleId) },
+        ))
+    }
+
+    fun logOcrBackendShutdown(backend: String, bundleId: String, durationMs: Long) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.ENGINE,
+            event = LogEvent.OCR_BACKEND_SHUTDOWN,
+            backend = backend,
+            durationMs = durationMs,
+            extraJson = logExtraJson { put("bundleId", bundleId) },
         ))
     }
 

@@ -81,6 +81,8 @@ object LogEvent {
     // Engine
     const val ENGINE_INIT = "engine_init"
     const val ENGINE_SHUTDOWN = "engine_shutdown"
+    const val OCR_BACKEND_READY = "ocr_backend_ready"
+    const val OCR_BACKEND_SHUTDOWN = "ocr_backend_shutdown"
     const val ENGINE_FALLBACK = "engine_fallback"
     const val FGS_PROMOTED = "fgs_promoted"
     const val FGS_DEMOTED = "fgs_demoted"

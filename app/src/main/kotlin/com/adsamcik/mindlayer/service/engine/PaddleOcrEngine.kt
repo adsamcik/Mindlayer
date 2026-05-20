@@ -53,8 +53,10 @@ sealed class PaddleOcrEngineState {
  */
 class PaddleOcrEngine(
     private val context: Context,
-    private val backendFactory: () -> PaddleOcrBackend = { LiteRtPaddleOcrBackend(context) },
     private val logRepository: LogRepository? = null,
+    private val backendFactory: () -> PaddleOcrBackend = {
+        LiteRtPaddleOcrBackend(context, logRepository = logRepository)
+    },
 ) {
 
     private val mutex = Mutex()
@@ -139,8 +141,12 @@ class PaddleOcrEngine(
             bundle
         } catch (t: Throwable) {
             val failure = classifyInitFailure(t)
-            lastInitFailure = failure
-            lastInitThrowable = t
+            // LowMemory is transient: mirror EmbeddingEngine and do not poison
+            // the process-lifetime init cache. On-disk/native failures remain sticky.
+            if (failure !is InitFailure.LowMemory) {
+                lastInitFailure = failure
+                lastInitThrowable = t
+            }
             _state.value = PaddleOcrEngineState.Failed(failure)
             logRepository?.logInitFailureCategorized(failure)
             MindlayerLog.w(TAG, "PaddleOCR init failed: ${t.safeLabel()}", throwable = null)

@@ -68,6 +68,8 @@ class OcrSessionManager(
      * paired with [engine] when both are wired.
      */
     private val recognitionDispatcher: OcrRecognitionDispatcher? = null,
+    /** Defaults to OcrFeatureFlags.IS_PRODUCTION_READY; tests override for capability gating. */
+    val isProductionReady: Boolean = OcrFeatureFlags.IS_PRODUCTION_READY,
 ) {
 
     private val sessions = ConcurrentHashMap<String, OcrSession>()
@@ -123,8 +125,8 @@ class OcrSessionManager(
         )
         MindlayerLog.i(
             TAG,
-            "OCR session created: id=$sessionId, uid=$uid, mode=${config.mode}, " +
-                "maxFrames=$effectiveMaxFrames",
+            "OCR session created: uid=$uid, mode=${config.mode}, maxFrames=$effectiveMaxFrames",
+            sessionId = sessionId,
         )
         return sessionId
     }
@@ -367,8 +369,9 @@ class OcrSessionManager(
             ?.runCatching { close() }
         MindlayerLog.i(
             TAG,
-            "OCR session closed: id=$sessionId, accepted=${session.framesAccepted}, " +
+            "OCR session closed: accepted=${session.framesAccepted}, " +
                 "dropped=${session.framesDropped}, rejected=${session.framesRejected}",
+            sessionId = sessionId,
         )
     }
 
@@ -461,10 +464,10 @@ class OcrSessionManager(
             val age = now - session.createdAtMs
             val idleFor = now - session.lastFrameAtMs
             if (maxDuration in 1..age) {
-                MindlayerLog.i(TAG, "OCR session $id expired (age=${age}ms)")
+                MindlayerLog.i(TAG, "OCR session expired (age=${age}ms)", sessionId = id)
                 toRemove += id
             } else if (idleTimeoutMs in 1..idleFor && session.phase < OcrSessionState.PHASE_FINALIZING) {
-                MindlayerLog.i(TAG, "OCR session $id idle (${idleFor}ms)")
+                MindlayerLog.i(TAG, "OCR session idle (${idleFor}ms)", sessionId = id)
                 toRemove += id
             }
         }
