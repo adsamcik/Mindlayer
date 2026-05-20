@@ -32,6 +32,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedInputStream
@@ -298,12 +299,14 @@ class DashboardViewModel : ViewModel() {
                             gpuFailure = dao.latestGpuFallbackMessage(),
                             sampledAtMs = System.currentTimeMillis(),
                             initFailure = dao.latestInitFailure()?.let(::parseInitFailureLogRow),
+                            acceleratorDecision = dao.latestBackendDecision()?.let(::parseBackendDecisionLogRow),
                         )
                     }
                     val recent = sample.recent
                     val gpuFailure = sample.gpuFailure
                     val now = sample.sampledAtMs
                     val initFailure = sample.initFailure
+                    val acceleratorDecision = sample.acceleratorDecision
                     _uiState.update { current ->
                         current.copy(
                             isLogsLoading = false,
@@ -311,6 +314,7 @@ class DashboardViewModel : ViewModel() {
                             logsErrorMessage = null,
                             gpuFailureReason = gpuFailure,
                             lastInitFailure = initFailure,
+                            acceleratorDecision = acceleratorDecision,
                             recentLogs = recent.map { entry ->
                                 LogUiItem(
                                     timestampLabel = formatRelativeTimestamp(entry.timestampMs, now),
@@ -342,6 +346,11 @@ class DashboardViewModel : ViewModel() {
         entry.tokensPerSec?.let { add("speed=${"%.1f".format(it)} tok/s") }
         entry.thermalBand?.let { add("band=$it") }
         entry.errorMessage?.let { add("error=$it") }
+        entry.extraJson?.takeIf { entry.event == com.adsamcik.mindlayer.service.logging.LogEvent.BACKEND_DECISION }?.let { extra ->
+            parseBackendDecisionLogRow(entry)?.let { decision ->
+                add("reason=${decision.reason}")
+            }
+        }
     }.joinToString(" • ")
 
     // ---- Test inference --------------------------------------------------------
@@ -610,6 +619,7 @@ class DashboardViewModel : ViewModel() {
         val gpuFailure: String?,
         val sampledAtMs: Long,
         val initFailure: com.adsamcik.mindlayer.service.engine.InitFailure? = null,
+        val acceleratorDecision: AcceleratorDecisionUi? = null,
     )
 }
 
@@ -649,5 +659,29 @@ internal fun parseInitFailureLogRow(
             safeLabel = entry.errorMessage.orEmpty(),
         )
         else -> null
+    }
+}
+
+
+internal fun parseBackendDecisionLogRow(entry: LogEntry): AcceleratorDecisionUi? {
+    val extra = entry.extraJson ?: return null
+    return try {
+        val root = Json.parseToJsonElement(extra).jsonObject
+        val feature = root["feature"]?.jsonPrimitive?.contentOrNull ?: return null
+        val reason = root["reason"]?.jsonPrimitive?.contentOrNull ?: return null
+        val attempted = root["attempted"]?.jsonArray.orEmpty().mapNotNull { element ->
+            val obj = element.jsonObject
+            val backend = obj["backend"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val candidateReason = obj["reason"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            "$backend:$candidateReason"
+        }.joinToString(" -> ")
+        AcceleratorDecisionUi(
+            featureName = feature,
+            backend = entry.backend.orEmpty(),
+            reason = reason,
+            attemptedSummary = attempted,
+        )
+    } catch (_: Exception) {
+        null
     }
 }

@@ -151,6 +151,14 @@ class EmbeddingEngine(
                 EmbeddingModelRegistry.discoverModels(context),
             ) ?: throw noEmbeddingModelFoundException()
             backend.initialize(model, preferredBackend)
+            LiteRtAcceleratorResolver.latestDecision("embeddings")?.let { decision ->
+                logRepository?.logBackendDecision(
+                    featureName = "embeddings",
+                    backend = decision.backend,
+                    reason = decision.reason,
+                    attempted = decision.attempted,
+                )
+            }
             lastInitFailure = null
             lastInitThrowable = null
             _state.value = EmbeddingEngineState.Ready

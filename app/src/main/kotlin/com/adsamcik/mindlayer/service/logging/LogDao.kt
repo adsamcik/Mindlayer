@@ -96,6 +96,9 @@ interface LogDao {
      */
     @Query("SELECT * FROM usage_logs WHERE event = 'init_failure_categorized' ORDER BY timestampMs DESC LIMIT 1")
     suspend fun latestInitFailure(): LogEntry?
+
+    @Query("SELECT * FROM usage_logs WHERE event = 'backend_decision' ORDER BY timestampMs DESC LIMIT 1")
+    suspend fun latestBackendDecision(): LogEntry?
 }
 
 data class ThermalBandCount(
