@@ -117,9 +117,10 @@ class EmbeddingCoordinatorTest {
 
     @Test fun `coordinator constructor reads production-ready flag with default`() {
         // Documents the test contract: the flag's default is the compile-time
-        // EmbeddingFeatureFlags constant. If Phase D flips that to true, this
-        // test's expected value will need to follow. Keeping the assertion
-        // explicit means a flag flip cannot land silently.
+        // EmbeddingFeatureFlags constant. If the constant flips, this
+        // assertion's expected value follows automatically — but the
+        // EmbeddingCoordinatorTest covers the default-binding contract,
+        // not the value choice.
         assertEquals(EmbeddingFeatureFlags.IS_PRODUCTION_READY, coordinator.isProductionReady)
     }
 
