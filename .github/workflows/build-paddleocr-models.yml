@@ -183,8 +183,13 @@ jobs:
               -i "$onnx" \
               -o "ppocrv5-${kind}-saved" \
               -osd
-            mv "ppocrv5-${kind}-saved/saved_model.tflite" \
-               "paddleocr-ppocrv5-mobile-${kind}.tflite"
+            generated="ppocrv5-${kind}-saved/paddleocr-ppocrv5-mobile-${kind}_float32.tflite"
+            if [ ! -f "$generated" ]; then
+              echo "::error::Expected onnx2tf float32 output missing: $generated"
+              find "ppocrv5-${kind}-saved" -maxdepth 2 -type f -print
+              exit 1
+            fi
+            mv "$generated" "paddleocr-ppocrv5-mobile-${kind}.tflite"
             rm -rf "ppocrv5-${kind}-saved"
           done
           ls -1
