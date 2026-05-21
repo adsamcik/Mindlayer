@@ -21,20 +21,21 @@ import java.io.File
  * Runs on the existing CI emulator matrix (API 33 + 34) via the
  * `instrumented-tests` job. Covers the structural / classloader
  * parts of the LITERT_COEXISTENCE.md 8-step checklist that can
- * be exercised without the actual `.tflite` artifacts uploaded:
+ * be exercised without real model payloads present:
  *
  *   - All three backend classes resolve + instantiate in the same
  *     process without DexLoader / linker conflicts (covers issue
  *     LiteRT-LM #2211's class-of-failure: missing libLiteRt.so in
  *     the expected namespace).
- *   - LiteRtPaddleOcrBackend + LiteRtEmbeddingBackend lifecycle
- *     transitions (initialize/shutdown) work back-to-back without
- *     state bleed.
- *   - OcrRecognitionDispatcher correctly catches the engine
- *     scaffold's IllegalStateException and emits an empty
- *     FrameProcessed event instead of poisoning the session.
+ *   - LiteRtPaddleOcrBackend Kotlin lifecycle transitions work
+ *     back-to-back with LiteRtEmbeddingBackend construction without
+ *     state bleed. The OCR runner is fake here; real CompiledModel
+ *     creation belongs to the device checklist.
+ *   - OcrRecognitionDispatcher emits an empty FrameProcessed event
+ *     when the fake detector returns no text instead of poisoning the
+ *     session.
  *   - OcrSessionManager + OcrTokenStreamWriter end-to-end intake
- *     -> recognition (scaffold) -> event emission pipeline.
+ *     -> recognition -> event emission pipeline.
  *
  * # What this test does NOT cover
  *
@@ -50,6 +51,13 @@ import java.io.File
 class EngineCoexistenceInstrumentedTest {
 
     private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
+
+    /**
+     * Seeds a 128-line stub dictionary that satisfies the PR #1 length-sanity
+     * guard (`require(chars.size in 100..10_000)` in `LiteRtPaddleOcrBackend`).
+     * Tokens are deterministic to keep CTC fixtures stable.
+     */
+    private fun stubDictText(): String = (0 until 128).joinToString(separator = "\n") { "tok$it" }
 
     @Test
     fun all_three_backend_classes_load_in_the_same_process() {
@@ -72,15 +80,14 @@ class EngineCoexistenceInstrumentedTest {
 
     @Test
     fun paddleocr_and_embedding_backends_initialize_back_to_back_without_state_bleed() = runBlocking {
-        // Seed minimal bundle files for the PaddleOCR scaffold so its
-        // file-existence guard passes. The native delegate creation
-        // is TODO(verifyOnDevice) so initialize() succeeds without
-        // attempting LiteRT calls.
+        // Seed minimal bundle files so the file-existence guard passes.
+        // The runner is injected because this CI smoke is not the real
+        // Shared LiteRT delegate / model-byte validation path.
         val dir = context.filesDir
         dir.listFiles()?.forEach { if (it.name.startsWith("paddleocr-")) it.delete() }
         val det = File(dir, "paddleocr-ppocrv5-mobile-det.tflite").apply { writeBytes(byteArrayOf(1)) }
         val rec = File(dir, "paddleocr-ppocrv5-mobile-rec.tflite").apply { writeBytes(byteArrayOf(2)) }
-        val dict = File(dir, "paddleocr-ppocrv5-mobile-dict.txt").apply { writeBytes(byteArrayOf(3)) }
+        val dict = File(dir, "paddleocr-ppocrv5-mobile-dict.txt").apply { writeText(stubDictText()) }
         val bundle = PaddleOcrModelInfo(
             id = "paddleocr-ppocrv5-mobile",
             displayName = "test",
@@ -92,10 +99,11 @@ class EngineCoexistenceInstrumentedTest {
             detSha256 = null, recSha256 = null, clsSha256 = null, dictSha256 = null,
         )
 
-        val paddleBackend = LiteRtPaddleOcrBackend(
-            context,
+        val paddleBackend = LiteRtPaddleOcrBackend.forTesting(
+            context = context,
             memoryHeadroomBytes = 0L,
             availableMemoryProvider = { Long.MAX_VALUE },
+            runnerFactory = { _, _ -> FakePaddleOcrLiteRtRunner() },
         )
         paddleBackend.initialize(bundle, "CPU")
         assertEquals("CPU", paddleBackend.activeBackend)
@@ -114,21 +122,22 @@ class EngineCoexistenceInstrumentedTest {
     }
 
     @Test
-    fun recognition_dispatcher_swallows_scaffold_exception_and_emits_frame_processed() = runBlocking {
+    fun recognition_dispatcher_emits_frame_processed_when_no_lines_are_detected() = runBlocking {
         // Seed bundle files (same as the back-to-back test).
         val dir = context.filesDir
         dir.listFiles()?.forEach { if (it.name.startsWith("paddleocr-")) it.delete() }
         File(dir, "paddleocr-ppocrv5-mobile-det.tflite").writeBytes(byteArrayOf(1))
         File(dir, "paddleocr-ppocrv5-mobile-rec.tflite").writeBytes(byteArrayOf(2))
-        File(dir, "paddleocr-ppocrv5-mobile-dict.txt").writeBytes(byteArrayOf(3))
+        File(dir, "paddleocr-ppocrv5-mobile-dict.txt").writeText(stubDictText())
 
         val engine = PaddleOcrEngine(
             context,
             backendFactory = {
-                LiteRtPaddleOcrBackend(
-                    context,
+                LiteRtPaddleOcrBackend.forTesting(
+                    context = context,
                     memoryHeadroomBytes = 0L,
                     availableMemoryProvider = { Long.MAX_VALUE },
+                    runnerFactory = { _, _ -> FakePaddleOcrLiteRtRunner() },
                 )
             },
         )
@@ -149,11 +158,9 @@ class EngineCoexistenceInstrumentedTest {
         job.join()
         writer.close()
 
-        // The scaffold throws IllegalStateException with the
-        // "build-paddleocr-models" reference — the dispatcher must
-        // swallow it and still emit OCR_FRAME_PROCESSED with
-        // lineCount=0 so the SDK Flow consumer sees the frame
-        // closed out rather than hanging forever.
+        // The fake runner produces no detections; the dispatcher must still
+        // emit OCR_FRAME_PROCESSED with lineCount=0 so the SDK Flow consumer
+        // sees the frame closed out rather than hanging forever.
         val captureText = captured.toByteArray().decodeToString()
         assertTrue(
             "Should emit OCR_FRAME_PROCESSED even on engine failure: $captureText",
@@ -165,5 +172,12 @@ class EngineCoexistenceInstrumentedTest {
         )
 
         dispatcher.shutdown()
+    }
+
+    private class FakePaddleOcrLiteRtRunner : PaddleOcrLiteRtRunner {
+        override fun runDetection(input: FloatArray): FloatArray = FloatArray(8 * 8)
+        override fun runOrientation(input: FloatArray): FloatArray? = floatArrayOf(1f, 0f)
+        override fun runRecognition(input: FloatArray): FloatArray = FloatArray(3)
+        override fun close() = Unit
     }
 }

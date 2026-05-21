@@ -52,6 +52,7 @@ class ServiceBinderOcrCapabilityTest {
         mockkStatic(Binder::class)
         every { Binder.getCallingUid() } returns 42
         ocrManager = mockk(relaxed = true)
+        every { ocrManager.isProductionReady } returns true
     }
 
     @After fun tearDown() = unmockkAll()

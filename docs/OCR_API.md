@@ -10,7 +10,7 @@
 val mindlayer = Mindlayer.connect(context)
 mindlayer.awaitConnected()
 
-if (!mindlayer.getCapabilities().supportsFeature(ServiceCapabilities.FEATURE_OCR_SESSION)) {
+if (!mindlayer.getCapabilities().supports(ServiceCapabilities.FEATURE_OCR_SESSION)) {
     return  // Service hasn't shipped the engine path yet.
 }
 
@@ -189,30 +189,27 @@ Error codes are returned as `SecurityException` with wire-prefixed
 message (`mindlayer:<code>:<human-message>`); `MindlayerException`
 parses them on the SDK side.
 
-## Implementation status (Phase 1)
+## Implementation status (Phase 1 -> 4)
 
-| Piece | Status | PR |
-|---|---|---|
-| Wire types + AIDL surface | ✅ Merged | #52 |
-| `paddleocr_model` AAB + CI conversion | ✅ Merged | #53 |
-| Model registry + frame presort + field fusion | ✅ Merged | #55 |
-| `PaddleOcrEngine` scaffold | ✅ Merged | #56 |
-| `OcrSessionManager` + binder wiring | ✅ Merged | #57 |
-| SDK DSL + 5 profiles | ✅ Merged | #58 |
-| `:sdk-camerax` optional module | 🔄 PR | #59 |
-| Integration tests + this doc + CI gates | 🔄 PR | (this PR) |
+`FEATURE_OCR_SESSION` is additionally guarded by
+`OcrFeatureFlags.IS_PRODUCTION_READY`. Phase 4 PR #1 intentionally leaves the
+flag `false`, so callers must continue to check
+`ServiceCapabilities.supports(ServiceCapabilities.FEATURE_OCR_SESSION)` before
+opening sessions even when the AI Pack is installed.
 
-## Roadmap (after Phase 1)
-
-| Follow-up | What lands |
-|---|---|
-| PR-engine-pipeline | Native PP-OCRv5 mobile det/cls/rec wired against LiteRT |
-| PR-y-plane-extraction | Service-side Y-plane decode from `MediaPart` in `pushOcrFrame` |
-| PR-event-stream | `OCR_V1` stream pipe writer + Flow consumer |
-| PR-feature-flip | `FEATURE_OCR_SESSION` added to `SUPPORTED_FEATURES` |
-| PR-llm-extraction | Gemma structured extraction pass + field fusion integration |
-| PR-barcode-anchor | ZXing barcode anchor evidence injection |
-| PR-bounding-boxes | Per-line bounding box emit (gated by `FEATURE_OCR_BOUNDING_BOXES`) |
+| Phase | Piece | Status | PR | Notes |
+|---|---|---|---|---|
+| 1 | Wire types + AIDL surface | Merged | #52 | Wire-frozen parcelables. |
+| 1 | `paddleocr_model` AAB + CI conversion | Merged | #53 | Install-time AI Pack scaffold. |
+| 1 | Model registry + frame presort + field fusion | Merged | #55 | Service-side presort. |
+| 1 | `PaddleOcrEngine` scaffold | Merged | #56 | Lazy engine lifecycle. |
+| 1 | `OcrSessionManager` + binder wiring | Merged | #57 | Session lifecycle/intake surface. |
+| 1 | SDK DSL + 5 profiles | Merged | #58 | Capability checks use `ServiceCapabilities.supports(...)`. |
+| 1 | `:sdk-camerax` optional module | Merged | #59 | CameraX helper module. |
+| 2/3 | Frame transport, finalization, algorithm correctness | Planned | Phase 4 PR #2/#3 | Real pixels, terminal events, DB postprocessor, preprocessing correctness. |
+| 4 | Safety gates + cleanup | This PR | Phase 4 PR #1 | Production flag, OCR limits auth, transient init retry, log redaction, CPU-only fallback. |
+| 4 | Accelerator coordination | Parallel | Phase 4 PR #4 | Shared LiteRT accelerator resolver replaces this PR temporary CPU fallback. |
+| 5 | Coexistence validation + real-device gates | Planned | Phase 4 PR #5 | Production flag stays false until this passes and a first-party driver exists. |
 
 ## References
 
