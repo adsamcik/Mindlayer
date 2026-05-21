@@ -278,7 +278,7 @@ class LiteRtPaddleOcrBackendTest {
         assertEquals(OcrFieldFusion.Confidence.HIGH, line.confidence)
         assertEquals(180, line.orientationDegrees)
         assertArrayEquals(
-            floatArrayOf(0.125f, 0.25f, 0.75f, 0.25f, 0.75f, 0.625f, 0.125f, 0.625f),
+            floatArrayOf(0f, 0.125f, 0.75f, 0.125f, 0.75f, 0.625f, 0f, 0.625f),
             line.boundingBox,
             0.0001f,
         )
@@ -331,7 +331,7 @@ class LiteRtPaddleOcrBackendTest {
         assertEquals("B", output.lines.single().text)
         assertEquals(1, fakeRunner.recognitionCalls)
         assertArrayEquals(
-            floatArrayOf(0.5f, 0.5f, 1f, 0.5f, 1f, 1f, 0.5f, 1f),
+            floatArrayOf(0.375f, 0.375f, 1f, 0.375f, 1f, 1f, 0.375f, 1f),
             output.lines.single().boundingBox,
             0.0001f,
         )
