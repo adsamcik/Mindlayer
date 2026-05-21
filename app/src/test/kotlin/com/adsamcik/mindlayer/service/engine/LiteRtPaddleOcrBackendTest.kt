@@ -2,6 +2,7 @@ package com.adsamcik.mindlayer.service.engine
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
@@ -30,15 +31,18 @@ class LiteRtPaddleOcrBackendTest {
 
     private lateinit var context: Context
     private lateinit var bundle: PaddleOcrModelInfo
+    private lateinit var modelDir: File
 
     @Before fun setUp() {
         context = ApplicationProvider.getApplicationContext()
-        val dir = context.filesDir
-        dir.listFiles()?.forEach { it.delete() }
-        val det = File(dir, "paddleocr-ppocrv5-mobile-det.tflite").apply { writeBytes(byteArrayOf(1)) }
-        val rec = File(dir, "paddleocr-ppocrv5-mobile-rec.tflite").apply { writeBytes(byteArrayOf(2)) }
-        val cls = File(dir, "paddleocr-ppocrv5-mobile-cls.tflite").apply { writeBytes(byteArrayOf(3)) }
-        val dict = File(dir, "paddleocr-ppocrv5-mobile-dict.txt").apply { writeText(validDictionary()) }
+        modelDir = File(context.filesDir, "paddleocr-backend-test").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        val det = File(modelDir, "paddleocr-ppocrv5-mobile-det.tflite").apply { writeBytes(byteArrayOf(1)) }
+        val rec = File(modelDir, "paddleocr-ppocrv5-mobile-rec.tflite").apply { writeBytes(byteArrayOf(2)) }
+        val cls = File(modelDir, "paddleocr-ppocrv5-mobile-cls.tflite").apply { writeBytes(byteArrayOf(3)) }
+        val dict = File(modelDir, "paddleocr-ppocrv5-mobile-dict.txt").apply { writeText(validDictionary()) }
         bundle = PaddleOcrModelInfo(
             id = "paddleocr-ppocrv5-mobile",
             displayName = "PaddleOCR PP-OCRv5 mobile",
@@ -135,7 +139,7 @@ class LiteRtPaddleOcrBackendTest {
         backend.initialize(bundle, "CPU")
         val badBundle = bundle.copy(
             id = "paddleocr-ppocrv5-mobile-bad",
-            dictionaryPath = File(context.filesDir, "missing-dict.txt").absolutePath,
+            dictionaryPath = File(modelDir, "missing-dict.txt").absolutePath,
         )
 
         assertThrows(IllegalStateException::class.java) {
@@ -159,7 +163,7 @@ class LiteRtPaddleOcrBackendTest {
             },
         )
 
-        val child = launch(initJob) {
+        val child = CoroutineScope(coroutineContext + initJob).launch {
             backend.initialize(bundle, "CPU")
         }
         child.join()

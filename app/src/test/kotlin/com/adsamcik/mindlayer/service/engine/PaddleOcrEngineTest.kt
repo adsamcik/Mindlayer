@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.service.engine
 
 import android.content.Context
+import android.content.ContextWrapper
 import androidx.test.core.app.ApplicationProvider
 import com.adsamcik.mindlayer.service.engine.OcrFieldFusion.Confidence
 import kotlinx.coroutines.test.runTest
@@ -35,9 +36,14 @@ class PaddleOcrEngineTest {
     private lateinit var filesDir: File
 
     @Before fun setUp() {
-        realContext = ApplicationProvider.getApplicationContext()
-        filesDir = realContext.filesDir
-        filesDir.listFiles()?.forEach { it.delete() }
+        val baseContext = ApplicationProvider.getApplicationContext<Context>()
+        filesDir = File(baseContext.filesDir, "paddleocr-engine-test").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        realContext = object : ContextWrapper(baseContext) {
+            override fun getFilesDir(): File = this@PaddleOcrEngineTest.filesDir
+        }
         // Seed a minimal bundle so the registry has something to discover.
         File(filesDir, "paddleocr-ppocrv5-mobile-det.tflite").writeBytes(byteArrayOf(1))
         File(filesDir, "paddleocr-ppocrv5-mobile-rec.tflite").writeBytes(byteArrayOf(2))
@@ -71,7 +77,7 @@ class PaddleOcrEngineTest {
 
     @Test fun `initialize without bundle throws and enters Failed`() = runTest {
         // Strip bundle files so registry returns empty.
-        filesDir.listFiles()?.forEach { it.delete() }
+        filesDir.listFiles()?.forEach { it.deleteRecursively() }
         val engine = engine()
         assertThrows(IllegalStateException::class.java) {
             kotlinx.coroutines.runBlocking { engine.initialize() }
@@ -82,7 +88,7 @@ class PaddleOcrEngineTest {
     }
 
     @Test fun `cached failure rethrows on second initialize`() = runTest {
-        filesDir.listFiles()?.forEach { it.delete() }
+        filesDir.listFiles()?.forEach { it.deleteRecursively() }
         val engine = engine()
         assertThrows(IllegalStateException::class.java) {
             kotlinx.coroutines.runBlocking { engine.initialize() }

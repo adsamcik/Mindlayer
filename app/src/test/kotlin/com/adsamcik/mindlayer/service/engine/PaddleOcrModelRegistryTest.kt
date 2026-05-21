@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.service.engine
 
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.ApplicationInfo
 import android.content.res.AssetManager
 import androidx.test.core.app.ApplicationProvider
@@ -38,9 +39,14 @@ class PaddleOcrModelRegistryTest {
     private lateinit var filesDir: File
 
     @Before fun setUp() {
-        realContext = ApplicationProvider.getApplicationContext()
-        filesDir = realContext.filesDir
-        filesDir.listFiles()?.forEach { it.delete() }
+        val baseContext = ApplicationProvider.getApplicationContext<Context>()
+        filesDir = File(baseContext.filesDir, "paddleocr-registry-test").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        realContext = object : ContextWrapper(baseContext) {
+            override fun getFilesDir(): File = this@PaddleOcrModelRegistryTest.filesDir
+        }
     }
 
     // ── filesDir scan ────────────────────────────────────────────────────
