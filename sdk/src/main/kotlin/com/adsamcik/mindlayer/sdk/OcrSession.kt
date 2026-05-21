@@ -4,6 +4,7 @@ import com.adsamcik.mindlayer.OcrFrameAck
 import com.adsamcik.mindlayer.OcrLimits
 import com.adsamcik.mindlayer.OcrSessionConfig
 import com.adsamcik.mindlayer.OcrSessionState
+import com.adsamcik.mindlayer.MediaPart
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
@@ -108,19 +109,40 @@ class OcrSession internal constructor(
     @Volatile
     private var closed: Boolean = false
 
-    /**
-     * Push a frame's metadata into the session intake.
-     *
-     * As of Phase 2 #1 the service extracts the Y-plane from the
-     * MediaPart and runs the full service-side quality presort.
-     * Bad frames return ``REJECTED_QUALITY`` synchronously.
-     *
-     * Returns the intake verdict; check [OcrFrameAck.status] for the
-     * outcome (or use the [isAccepted] / [isDroppedBusy] etc. helpers).
-     */
-    suspend fun pushFrame(meta: com.adsamcik.mindlayer.OcrFrameMeta): OcrFrameAck {
+    /** Push a raw Y-plane OCR frame. */
+    suspend fun pushFrame(
+        meta: com.adsamcik.mindlayer.OcrFrameMeta,
+        yPlane: ByteArray,
+        width: Int,
+        height: Int,
+        rowStride: Int = width,
+        pixelStride: Int = 1,
+    ): OcrFrameAck {
         checkNotClosed()
-        return mindlayer.pushOcrFrameMetadataOnly(sessionId, meta)
+        val part = MediaTransfer.ocrYPlanePart(
+            requestId = "ocr-frame-${java.util.UUID.randomUUID()}",
+            yPlane = yPlane,
+            width = width,
+            height = height,
+            rowStride = rowStride,
+            pixelStride = pixelStride,
+        )
+        return mindlayer.pushOcrFrame(sessionId, part, meta)
+    }
+
+    /** Push an encoded JPEG/PNG/WEBP OCR frame. */
+    suspend fun pushEncodedFrame(
+        meta: com.adsamcik.mindlayer.OcrFrameMeta,
+        bytes: ByteArray,
+        mimeType: String,
+    ): OcrFrameAck {
+        checkNotClosed()
+        val part = MediaTransfer.ocrEncodedImagePart(
+            requestId = "ocr-frame-${java.util.UUID.randomUUID()}",
+            bytes = bytes,
+            mimeType = mimeType,
+        )
+        return mindlayer.pushOcrFrame(sessionId, part, meta)
     }
 
     /**

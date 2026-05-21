@@ -106,12 +106,24 @@ class OcrImageAnalyzer(
             }
             scope.launch {
                 try {
-                    val ack = session.pushFrame(frameWithHint.toFrameMeta())
+                    val ack = session.pushFrame(
+                        meta = frameWithHint.toFrameMeta(),
+                        yPlane = frameWithHint.bytes,
+                        width = frameWithHint.width,
+                        height = frameWithHint.height,
+                    )
                     onAck?.invoke(frameWithHint, ack)
                 } catch (_: Throwable) {
-                    // Session may have closed; CameraX should be torn
-                    // down separately. Swallow to keep the analyzer
-                    // resilient to single-frame failures.
+                    droppedCount++
+                    onAck?.invoke(
+                        frameWithHint,
+                        OcrFrameAck(
+                            frameId = frameWithHint.frameId,
+                            status = OcrFrameAck.STATUS_DROPPED_BUSY,
+                            queueDepth = 0,
+                            retryAfterMs = 0L,
+                        ),
+                    )
                 }
             }
         } finally {

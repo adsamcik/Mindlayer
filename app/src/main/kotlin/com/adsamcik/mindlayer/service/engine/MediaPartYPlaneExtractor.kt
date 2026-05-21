@@ -2,12 +2,12 @@ package com.adsamcik.mindlayer.service.engine
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.ParcelFileDescriptor
 import com.adsamcik.mindlayer.MediaPart
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
-import java.io.File
 
 /**
  * Service-side Y-plane extractor for the v0.8 multi-frame OCR API.
@@ -103,6 +103,11 @@ object MediaPartYPlaneExtractor {
             throw wireError("MediaPart kind ${part.kind} is not KIND_IMAGE")
         }
 
+
+        if (part.mimeType == com.adsamcik.mindlayer.service.security.IpcInputValidator.OCR_RAW_Y_PLANE_MIME) {
+            return extractRawYPlane(part)
+        }
+
         // Translate MediaPart to the ImageTransfer surface stageImage
         // accepts. This re-uses the existing security validators,
         // SHM reconstruction, FD cleanup, and per-request reservation
@@ -150,6 +155,46 @@ object MediaPartYPlaneExtractor {
                 )
             }
         }
+    }
+
+
+    private fun extractRawYPlane(part: MediaPart): ExtractedYFrame {
+        val width = part.width
+        val height = part.height
+        val rowStride = part.rowStride
+        if (width <= 0 || height <= 0 || rowStride < width) {
+            try { part.source.close() } catch (_: Throwable) {}
+            throw wireError("Invalid raw Y-plane layout")
+        }
+        val minimumBytes = if (height == 1) width.toLong() else rowStride.toLong() * (height - 1).toLong() + width.toLong()
+        if (part.payloadBytes < minimumBytes || part.payloadBytes > Int.MAX_VALUE) {
+            try { part.source.close() } catch (_: Throwable) {}
+            throw wireError("Invalid raw Y-plane payload size")
+        }
+        val bytes = readExactlyAndClose(part.source, part.payloadBytes.toInt())
+        val tight = if (rowStride == width && bytes.size == width * height) {
+            bytes
+        } else {
+            ByteArray(width * height).also { dst ->
+                for (row in 0 until height) {
+                    System.arraycopy(bytes, row * rowStride, dst, row * width, width)
+                }
+            }
+        }
+        return ExtractedYFrame(tight, width, height)
+    }
+
+    private fun readExactlyAndClose(source: ParcelFileDescriptor, size: Int): ByteArray {
+        val out = ByteArray(size)
+        ParcelFileDescriptor.AutoCloseInputStream(source).use { input ->
+            var offset = 0
+            while (offset < size) {
+                val read = input.read(out, offset, size - offset)
+                if (read == -1) throw wireError("Raw Y-plane PFD ended early")
+                offset += read
+            }
+        }
+        return out
     }
 
     /**
