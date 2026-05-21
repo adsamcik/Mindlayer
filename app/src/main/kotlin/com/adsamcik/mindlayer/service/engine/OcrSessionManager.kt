@@ -6,8 +6,9 @@ import com.adsamcik.mindlayer.OcrFrameMeta
 import com.adsamcik.mindlayer.OcrLimits
 import com.adsamcik.mindlayer.OcrSessionConfig
 import com.adsamcik.mindlayer.OcrSessionState
-import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
+import com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter
+import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -179,7 +180,8 @@ class OcrSessionManager(
             )
         }
 
-        recordAcceptedFrame(session, intake.now, score.dHash)
+        val finalizeAfterSubmit = recordAcceptedFrame(session, intake.now, score.dHash)
+        val writer = session.eventWriter as? OcrTokenStreamWriter
 
         // Phase 2 #3: schedule recognition on the dispatcher when both
         // engine + dispatcher are wired. Fire-and-forget — the binder
@@ -192,8 +194,11 @@ class OcrSessionManager(
             width = width,
             height = height,
             config = OcrEngineConfig(),
-            writer = session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter,
+            writer = writer,
         )
+        if (finalizeAfterSubmit) {
+            recognitionDispatcher?.finalizeAsync(sessionId, writer)
+        }
 
         return OcrFrameAck(
             frameId = meta.frameId,
@@ -313,7 +318,7 @@ class OcrSessionManager(
         retryAfterMs = 0L,
     )
 
-    private fun recordAcceptedFrame(session: OcrSession, now: Long, dhash: ULong?) {
+    private fun recordAcceptedFrame(session: OcrSession, now: Long, dhash: ULong?): Boolean {
         session.framesAccepted++
         session.lastFrameAtMs = now
         if (dhash != null) session.lastAcceptedDHash = dhash
@@ -322,10 +327,12 @@ class OcrSessionManager(
         // maxFrames the session auto-finalises.
         if (session.framesAccepted >= session.maxFrames) {
             session.phase = OcrSessionState.PHASE_FINALIZING
+            return true
         }
 
         // Recognition dispatch happens after this method returns the AIDL ack,
         // keeping frame intake synchronous and inference asynchronous.
+        return false
     }
 
     /** Read-only snapshot of session state. */
@@ -349,9 +356,8 @@ class OcrSessionManager(
         val session = requireOwnedSession(uid, sessionId)
         if (session.phase < OcrSessionState.PHASE_FINALIZING) {
             session.phase = OcrSessionState.PHASE_FINALIZING
-            // TODO(PR C3 follow-up): drain queue + emit ocr_result_finalized.
-            // For now we just transition phase; the next stateOf() call
-            // observes FINALIZING.
+            val writer = session.eventWriter as? OcrTokenStreamWriter
+            recognitionDispatcher?.finalizeAsync(sessionId, writer)
         }
     }
 
