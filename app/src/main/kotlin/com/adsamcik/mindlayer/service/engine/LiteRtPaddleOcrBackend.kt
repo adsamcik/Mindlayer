@@ -11,9 +11,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.ceil
 import kotlin.math.exp
-import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -347,87 +345,15 @@ class LiteRtPaddleOcrBackend internal constructor(
         require(side > 0 && side * side == output.size) {
             "Unexpected PaddleOCR detection output size: ${output.size}"
         }
-        val visited = BooleanArray(output.size)
-        val queue = IntArray(output.size)
-        val candidates = mutableListOf<DetectionCandidate>()
-        val minArea = max(MIN_DETECTION_AREA_PIXELS, (side * side) / MIN_DETECTION_AREA_DIVISOR)
-        val minSide = max(1, side / MIN_DETECTION_SIDE_DIVISOR)
-
-        for (y in 0 until side) {
-            for (x in 0 until side) {
-                val start = y * side + x
-                if (visited[start]) continue
-                val startScore = activation(output[start])
-                if (startScore < DETECTION_PIXEL_THRESHOLD) {
-                    visited[start] = true
-                    continue
-                }
-
-                var head = 0
-                var tail = 0
-                queue[tail++] = start
-                visited[start] = true
-                var left = x
-                var right = x
-                var top = y
-                var bottom = y
-                var area = 0
-                var scoreSum = 0.0
-
-                while (head < tail) {
-                    val index = queue[head++]
-                    val px = index % side
-                    val py = index / side
-                    val score = activation(output[index])
-                    area++
-                    scoreSum += score.toDouble()
-                    left = min(left, px)
-                    right = max(right, px)
-                    top = min(top, py)
-                    bottom = max(bottom, py)
-
-                    for (dy in -1..1) {
-                        for (dx in -1..1) {
-                            if (dx == 0 && dy == 0) continue
-                            val nx = px + dx
-                            val ny = py + dy
-                            if (nx !in 0 until side || ny !in 0 until side) continue
-                            val ni = ny * side + nx
-                            if (visited[ni]) continue
-                            if (activation(output[ni]) >= DETECTION_PIXEL_THRESHOLD) {
-                                visited[ni] = true
-                                queue[tail++] = ni
-                            }
-                        }
-                    }
-                }
-
-                val boxWidth = right - left + 1
-                val boxHeight = bottom - top + 1
-                val avgScore = (scoreSum / area.toDouble()).toFloat()
-                if (area >= minArea &&
-                    boxWidth >= minSide &&
-                    boxHeight >= minSide &&
-                    avgScore >= DETECTION_BOX_THRESHOLD
-                ) {
-                    candidates += DetectionCandidate.fromMapBox(
-                        left = left,
-                        top = top,
-                        rightExclusive = right + 1,
-                        bottomExclusive = bottom + 1,
-                        mapSide = side,
-                        score = avgScore,
-                    )
-                }
-            }
-        }
-
-        val strongest = candidates.sortedByDescending { it.score }
-            .let { if (maxLines > 0) it.take(maxLines) else it }
-        return strongest.sortedWith(
-            compareBy<DetectionCandidate> { it.top }
-                .thenBy { it.left },
+        val config = DetectionConfig(
+            maxCandidates = if (maxLines > 0) maxLines else DetectionConfig.DEFAULT_MAX_CANDIDATES,
         )
+        return DbPostProcessor.decode(output, side, config)
+            .map { DetectionCandidate.fromDetectedQuad(it, side) }
+            .sortedWith(
+                compareBy<DetectionCandidate> { it.top }
+                    .thenBy { it.left },
+            )
     }
 
     private fun resizeFrameToRgbFloat(
@@ -439,11 +365,18 @@ class LiteRtPaddleOcrBackend internal constructor(
         normalization: Normalization,
     ): FloatArray {
         val out = FloatArray(outputWidth * outputHeight * CHANNELS)
+        val scaleX = width.toFloat() / outputWidth.toFloat()
+        val scaleY = height.toFloat() / outputHeight.toFloat()
         for (oy in 0 until outputHeight) {
-            val sy = ((oy.toLong() * height) / outputHeight).toInt().coerceIn(0, height - 1)
+            val sy = (oy + 0.5f) * scaleY - 0.5f
             for (ox in 0 until outputWidth) {
-                val sx = ((ox.toLong() * width) / outputWidth).toInt().coerceIn(0, width - 1)
-                writeRgb(out, (oy * outputWidth + ox) * CHANNELS, yAt(yPlane, width, sx, sy), normalization)
+                val sx = (ox + 0.5f) * scaleX - 0.5f
+                writeRgb(
+                    out = out,
+                    offset = (oy * outputWidth + ox) * CHANNELS,
+                    gray = sampleBilinear(yPlane, width, height, sx, sy),
+                    normalization = normalization,
+                )
             }
         }
         return out
@@ -459,27 +392,70 @@ class LiteRtPaddleOcrBackend internal constructor(
         normalization: Normalization,
         rotate180: Boolean,
     ): FloatArray {
-        val cropLeft = floor(box.left * width).toInt().coerceIn(0, width - 1)
-        val cropTop = floor(box.top * height).toInt().coerceIn(0, height - 1)
-        val cropRight = ceil(box.right * width).toInt().coerceIn(cropLeft + 1, width)
-        val cropBottom = ceil(box.bottom * height).toInt().coerceIn(cropTop + 1, height)
+        val cropLeft = (box.left * width).coerceIn(0f, (width - 1).toFloat())
+        val cropTop = (box.top * height).coerceIn(0f, (height - 1).toFloat())
+        val cropRight = (box.right * width).coerceIn(cropLeft + 1f, width.toFloat())
+        val cropBottom = (box.bottom * height).coerceIn(cropTop + 1f, height.toFloat())
         val cropWidth = cropRight - cropLeft
         val cropHeight = cropBottom - cropTop
         val out = FloatArray(outputWidth * outputHeight * CHANNELS)
 
-        for (oy in 0 until outputHeight) {
-            val localY = ((oy.toLong() * cropHeight) / outputHeight).toInt().coerceIn(0, cropHeight - 1)
-            for (ox in 0 until outputWidth) {
-                val localX = ((ox.toLong() * cropWidth) / outputWidth).toInt().coerceIn(0, cropWidth - 1)
-                val sx = cropLeft + if (rotate180) cropWidth - 1 - localX else localX
-                val sy = cropTop + if (rotate180) cropHeight - 1 - localY else localY
-                writeRgb(out, (oy * outputWidth + ox) * CHANNELS, yAt(yPlane, width, sx, sy), normalization)
+        val heightScale = outputHeight.toFloat() / cropHeight
+        val widthAtModelHeight = cropWidth * heightScale
+        val resizeScale = if (widthAtModelHeight <= outputWidth) {
+            heightScale
+        } else {
+            outputWidth.toFloat() / cropWidth
+        }
+        val resizedWidth = min(outputWidth, max(1, (cropWidth * resizeScale).roundToInt()))
+        val resizedHeight = min(outputHeight, max(1, (cropHeight * resizeScale).roundToInt()))
+        val srcStepX = cropWidth / resizedWidth.toFloat()
+        val srcStepY = cropHeight / resizedHeight.toFloat()
+
+        for (oy in 0 until resizedHeight) {
+            val localY = (oy + 0.5f) * srcStepY - 0.5f
+            for (ox in 0 until resizedWidth) {
+                val localX = (ox + 0.5f) * srcStepX - 0.5f
+                val sourceLocalX = if (rotate180) cropWidth - 1f - localX else localX
+                val sourceLocalY = if (rotate180) cropHeight - 1f - localY else localY
+                writeRgb(
+                    out = out,
+                    offset = (oy * outputWidth + ox) * CHANNELS,
+                    gray = sampleBilinear(
+                        yPlane = yPlane,
+                        width = width,
+                        height = height,
+                        x = cropLeft + sourceLocalX,
+                        y = cropTop + sourceLocalY,
+                    ),
+                    normalization = normalization,
+                )
             }
         }
         return out
     }
 
-    private fun writeRgb(out: FloatArray, offset: Int, gray: Int, normalization: Normalization) {
+    private fun sampleBilinear(
+        yPlane: ByteArray,
+        width: Int,
+        height: Int,
+        x: Float,
+        y: Float,
+    ): Float {
+        val clampedX = x.coerceIn(0f, (width - 1).toFloat())
+        val clampedY = y.coerceIn(0f, (height - 1).toFloat())
+        val x0 = clampedX.toInt()
+        val y0 = clampedY.toInt()
+        val x1 = min(x0 + 1, width - 1)
+        val y1 = min(y0 + 1, height - 1)
+        val dx = clampedX - x0
+        val dy = clampedY - y0
+        val top = yAt(yPlane, width, x0, y0) * (1f - dx) + yAt(yPlane, width, x1, y0) * dx
+        val bottom = yAt(yPlane, width, x0, y1) * (1f - dx) + yAt(yPlane, width, x1, y1) * dx
+        return top * (1f - dy) + bottom * dy
+    }
+
+    private fun writeRgb(out: FloatArray, offset: Int, gray: Float, normalization: Normalization) {
         when (normalization) {
             Normalization.CENTERED -> {
                 val value = gray / 127.5f - 1.0f
@@ -559,12 +535,6 @@ class LiteRtPaddleOcrBackend internal constructor(
         else -> OcrFieldFusion.Confidence.LOW
     }
 
-    private fun activation(value: Float): Float = when {
-        !value.isFinite() -> 0f
-        value in 0f..1f -> value
-        else -> (1.0 / (1.0 + exp(-value.toDouble()))).toFloat()
-    }
-
     private fun elapsedMs(startNs: Long): Long =
         (System.nanoTime() - startNs) / NANOS_PER_MS
 
@@ -582,24 +552,29 @@ class LiteRtPaddleOcrBackend internal constructor(
         val right: Float,
         val bottom: Float,
         val score: Float,
+        val boundingBox: FloatArray = floatArrayOf(left, top, right, top, right, bottom, left, bottom),
     ) {
-        val boundingBox: FloatArray = floatArrayOf(left, top, right, top, right, bottom, left, bottom)
-
         companion object {
-            fun fromMapBox(
-                left: Int,
-                top: Int,
-                rightExclusive: Int,
-                bottomExclusive: Int,
-                mapSide: Int,
-                score: Float,
-            ): DetectionCandidate = DetectionCandidate(
-                left = (left.toFloat() / mapSide).coerceIn(0f, 1f),
-                top = (top.toFloat() / mapSide).coerceIn(0f, 1f),
-                right = (rightExclusive.toFloat() / mapSide).coerceIn(0f, 1f),
-                bottom = (bottomExclusive.toFloat() / mapSide).coerceIn(0f, 1f),
-                score = score,
-            )
+            fun fromDetectedQuad(quad: DetectedQuad, mapSide: Int): DetectionCandidate {
+                val normalized = quad.polygon
+                    .flatMap { point ->
+                        listOf(
+                            (point.x.toFloat() / mapSide.toFloat()).coerceIn(0f, 1f),
+                            (point.y.toFloat() / mapSide.toFloat()).coerceIn(0f, 1f),
+                        )
+                    }
+                    .toFloatArray()
+                val xs = quad.polygon.map { it.x.toFloat() / mapSide.toFloat() }
+                val ys = quad.polygon.map { it.y.toFloat() / mapSide.toFloat() }
+                return DetectionCandidate(
+                    left = xs.minOrNull()?.coerceIn(0f, 1f) ?: 0f,
+                    top = ys.minOrNull()?.coerceIn(0f, 1f) ?: 0f,
+                    right = xs.maxOrNull()?.coerceIn(0f, 1f) ?: 0f,
+                    bottom = ys.maxOrNull()?.coerceIn(0f, 1f) ?: 0f,
+                    score = quad.score,
+                    boundingBox = normalized,
+                )
+            }
         }
     }
 
@@ -618,11 +593,6 @@ class LiteRtPaddleOcrBackend internal constructor(
         private const val REC_INPUT_HEIGHT = 48
         private const val CLS_INPUT_WIDTH = 160
         private const val CLS_INPUT_HEIGHT = 80
-        private const val DETECTION_PIXEL_THRESHOLD = 0.3f
-        private const val DETECTION_BOX_THRESHOLD = 0.6f
-        private const val MIN_DETECTION_AREA_PIXELS = 4
-        private const val MIN_DETECTION_AREA_DIVISOR = 20_000
-        private const val MIN_DETECTION_SIDE_DIVISOR = 160
         private const val CTC_BLANK_INDEX = 0
         private const val HIGH_CONFIDENCE_THRESHOLD = 0.85f
         private const val MEDIUM_CONFIDENCE_THRESHOLD = 0.55f
