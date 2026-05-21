@@ -77,24 +77,61 @@ Find a profile by integer mode via `OcrProfile.forMode(int)`.
 1. **Open** — `Mindlayer.ocrSession(profile) { configure }` →
    `OcrSession`. Service-side `OcrSessionManager.createSession`
    enforces per-UID concurrent limit and starts the idle timer.
-2. **Push** — `session.pushFrame(meta)` →
-   `OcrFrameAck(status, queueDepth, retryAfterMs)`. The wire-stable
-   status enum:
+2. **Push frame** — three transports, all converging on the same
+   service-side intake path (Phase 4 PR #2):
+   - **Y-plane bytes** (`session.pushFrame(meta, yPlane)`) — direct
+     `ByteArray` over the binder. Capped at `MAX_FRAME_BYTES`
+     (1 MiB). Larger payloads must use SharedMemory; see below.
+   - **Encoded bytes** (`session.pushFrame(meta, encodedBytes,
+     mimeType)`) — pre-encoded JPEG/PNG passed through to the
+     server-side decoder. Same 1 MiB cap.
+   - **SharedMemory handle** (`session.pushFrameShm(meta, shm)`) —
+     for frames > 1 MiB on API 27+. The handle is mapped read-only
+     server-side and unmapped immediately after intake decision.
+   All three return `OcrFrameAck(status, queueDepth,
+   retryAfterMs)`. The wire-stable status enum:
    - `STATUS_ACCEPTED (1)` — frame entered the engine queue.
    - `STATUS_DROPPED_BUSY (2)` — rate-limit token bucket exhausted;
      retry after `retryAfterMs`.
    - `STATUS_REJECTED_QUALITY (3)` — service-side presort rejected.
    - `STATUS_REJECTED_FINALIZED (4)` — session is finalizing/closed.
+   - `STATUS_REJECTED_OVERSIZED (5)` — payload exceeded
+     `MAX_FRAME_BYTES`; caller must downscale or switch to SHM.
 3. **Poll** — `session.state()` returns `OcrSessionState` with
    counters + phase. Phase machine: `PHASE_ACTIVE → PHASE_FINALIZING
    → PHASE_FINALIZED → PHASE_CLOSED`.
-4. **Stream** (future) — `session.events: Flow<OcrEvent>` over the
-   `mindlayer.stream.ocr.v1` pipe. Currently empty; the service
-   closes the pipe immediately until the engine recognition path
-   lands.
-5. **Finalize** — `session.finalize()` drains in-flight work and
-   emits the final `OcrEvent.ResultFinalized` (once events flow).
+4. **Stream events** — `session.events: Flow<OcrEvent>` over the
+   `mindlayer.stream.ocr.v1` pipe. Phase 4 PR #2 wires the live
+   event stream. Per-frame events:
+   - `FRAME_PROCESSING` — engine has started this frame.
+   - `FRAME_PROCESSED` — engine finished; carries `lineCount` and
+     per-stage timings.
+   - `FRAME_DROPPED` — frame entered the queue but was dropped
+     before engine pickup (e.g. queue depth exceeded the per-session
+     backpressure budget); the Flow stays open.
+   - `RESULT_FINALIZED` — terminal event after `finalize()` drains
+     in-flight frames. Carries the fused output.
+5. **Finalize** — `session.finalize()` triggers the drain. Frames
+   already in flight complete; frames pushed AFTER `finalize()` are
+   rejected with `STATUS_REJECTED_FINALIZED` and the wire error
+   `OCR_SESSION_FINALIZED (3008)`. The `events` Flow emits
+   `RESULT_FINALIZED` then closes; the SDK collector terminates
+   cleanly without an additional `close()`.
 6. **Close** — `session.close()` / `session.use { }`. Idempotent.
+   Equivalent to calling `finalize()` then discarding the channel.
+
+### Backpressure
+
+Phase 4 PR #2 introduced explicit backpressure surfaces alongside
+the existing rate limiter:
+
+- **Per-frame size guard** — `MAX_FRAME_BYTES = 1 MiB` matches the
+  Android Binder transaction cap. Payloads above this fail with
+  `STATUS_REJECTED_OVERSIZED` BEFORE traversing the binder.
+- **Queue depth** — each `OcrFrameAck` carries `queueDepth` so the
+  SDK can throttle ImageAnalysis. When the engine queue would
+  overflow, the dispatcher emits `FRAME_DROPPED` for the oldest
+  in-flight frame rather than backing up indefinitely.
 
 ### Auto-close conditions
 
@@ -192,10 +229,12 @@ parses them on the SDK side.
 ## Implementation status (Phase 1 -> 4)
 
 `FEATURE_OCR_SESSION` is additionally guarded by
-`OcrFeatureFlags.IS_PRODUCTION_READY`. Phase 4 PR #1 intentionally leaves the
-flag `false`, so callers must continue to check
-`ServiceCapabilities.supports(ServiceCapabilities.FEATURE_OCR_SESSION)` before
-opening sessions even when the AI Pack is installed.
+`OcrFeatureFlags.IS_PRODUCTION_READY`. Phase 4 leaves the flag
+`false` until the device-validation matrix and a first-party driver
+land (Phase 4 PR #6, single-line atomic flip). Callers must continue
+to check `ServiceCapabilities.supports(ServiceCapabilities.FEATURE_OCR_SESSION)`
+before opening sessions — the capability stays dark on every device
+until both gates flip.
 
 | Phase | Piece | Status | PR | Notes |
 |---|---|---|---|---|
@@ -206,10 +245,56 @@ opening sessions even when the AI Pack is installed.
 | 1 | `OcrSessionManager` + binder wiring | Merged | #57 | Session lifecycle/intake surface. |
 | 1 | SDK DSL + 5 profiles | Merged | #58 | Capability checks use `ServiceCapabilities.supports(...)`. |
 | 1 | `:sdk-camerax` optional module | Merged | #59 | CameraX helper module. |
-| 2/3 | Frame transport, finalization, algorithm correctness | Planned | Phase 4 PR #2/#3 | Real pixels, terminal events, DB postprocessor, preprocessing correctness. |
-| 4 | Safety gates + cleanup | This PR | Phase 4 PR #1 | Production flag, OCR limits auth, transient init retry, log redaction, CPU-only fallback. |
-| 4 | Accelerator coordination | Parallel | Phase 4 PR #4 | Shared LiteRT accelerator resolver replaces this PR temporary CPU fallback. |
-| 5 | Coexistence validation + real-device gates | Planned | Phase 4 PR #5 | Production flag stays false until this passes and a first-party driver exists. |
+| 2 | LLM extraction + structured output | Merged | #69 | `OcrLlmExtractor` Strategy A reset-per-frame KV. |
+| 2 | `FEATURE_OCR_SESSION` capability flip wiring | Merged | #70 | Engine-ready gate (still product-flag gated below). |
+| 3 | Bounding boxes + barcode anchor | Merged | #72–#74 | Wire-shape features always advertised. |
+| 4 | Safety gates + dictionary sanity + transient-init retry + log redaction + CPU-only fallback | Merged | #78 (Phase 4 PR #1) | Production flag, `safeLabel` redaction on inference paths, dictionary length/encoding validation. |
+| 4 | Real frame transport (Y-plane + encoded + SHM) + per-session finalization + drain semantics + `FRAME_DROPPED` | Merged | #85 (Phase 4 PR #2) | Three transports, `MAX_FRAME_BYTES` guard, `STATUS_REJECTED_OVERSIZED`. |
+| 4 | Bilinear sampling + aspect-preserved rec preprocessing + pure-Kotlin `DbPostProcessor` (Suzuki–Abe + minAreaRect + unclip + NMS) | Merged | #87 (Phase 4 PR #3) | Algorithm correctness; numeric ICDAR2015 validation still device-gated. |
+| 4 | Shared `LiteRtAcceleratorResolver` + per-feature override | Merged | (Phase 4 PR #4) | OCR is CPU-locked under reason `OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED`. |
+| 4 | OCR end-to-end smoke (`OcrEndToEndInstrumentedTest`) | Merged | #88 | Coverage reference for the live OCR pipe. |
+| 4 | SDK Robolectric end-to-end (`OcrSdkEndToEndTest`) | Merged | #89 (Phase 4 PR #2) | Three transports + finalization drain on the SDK side. |
+| 4 | Backend test backfill + EngineCoexistence production gate + OCR_API refresh | This PR | Phase 4 PR #5 | Init-failure matrix, runner-throws, mutex, CTC blank-only, dictionary edge cases, `OcrFeatureFlagsTest`, `@assumeTrue`-gated real-asset coexistence variant. |
+| 4 | `IS_PRODUCTION_READY` → true | Future | Phase 4 PR #6 | Single-line atomic flip; gated on a signed-off device-validation matrix + first-party driver. |
+| 4 | Per-call GPU/NPU opt-in | Future | Phase 4 PR #7 | Once the process-wide accelerator lease is mature. |
+
+### Accelerator selection (Phase 4 PR #4)
+
+`LiteRtAcceleratorResolver` is the single owner of CPU/GPU/NPU
+resolution for both embeddings and OCR. OCR currently forces the
+backend to CPU regardless of `preferredBackend` with the recorded
+reason `OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED` — the dashboard
+surfaces the downgrade alongside any GPU/NPU downgrade taken by the
+embedding stack. Once the coexistence checklist signs off and PR #6
+ships the production flag, OCR can opt back into the resolver's
+GPU/NPU path on allowlisted SoCs.
+
+### Logging contract
+
+Every reachable OCR error path goes through
+`Throwable.safeLabel()` and passes `throwable = null` to
+`MindlayerLog.{w,e}`. The persisted log row therefore carries the
+exception **class chain only** — never a `message` / `cause.message`
+fragment, which native LiteRT-LM errors can use to inline prompt or
+file-path content. Pinned by
+`LiteRtPaddleOcrBackendInitFailureSafeLabelTest` and the matching
+embeddings Phase D matrix.
+
+### Coverage map (PR #5)
+
+The PR #5 backfill brings `LiteRtPaddleOcrBackend.kt` line coverage
+to the agreed bar by exercising the previously untested branches:
+missing-cls (no-cls AI Pack variant), runner-throws on each of
+det/cls/rec, non-square detection output rejection, recognition
+output not divisible by `dictionary.size + 1`, CTC blank-only output
+(empty line dropped via `text.isNotBlank()`), all-NaN softmax
+fallback, mutex serialisation of concurrent `recognise()` calls,
+init → shutdown → init cycle, and the dictionary edge cases
+(BOM normalization, bare CR rejection, length bounds, single-space
+line preservation). The remaining uncovered lines are the
+`defaultAvailableMemoryProvider` path (Android-only `ActivityManager`
+service lookup) and the production `RealPaddleOcrLiteRtRunner.create`
+factory — both exercised by the on-device coexistence test.
 
 ## References
 
