@@ -7,6 +7,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
@@ -310,6 +311,13 @@ class OcrRecognitionDispatcher(
     fun closeSession(sessionId: String) {
         perSession.remove(sessionId)
         extractionContexts.remove(sessionId)
+    }
+
+    suspend fun drainForMemoryPressure() {
+        scope.coroutineContext[Job]?.children?.toList()?.forEach { child ->
+            child.cancelAndJoin()
+        }
+        perSession.clear()
     }
 
     /** Tear down everything. Idempotent. */

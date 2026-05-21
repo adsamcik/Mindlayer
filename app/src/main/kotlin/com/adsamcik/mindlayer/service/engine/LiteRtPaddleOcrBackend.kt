@@ -216,17 +216,11 @@ class LiteRtPaddleOcrBackend internal constructor(
      * checklist is completed for GPU/NPU on target devices. Callers can still
      * explicitly request GPU/NPU for prototype validation.
      */
-    private fun resolveBackend(preferred: String?): String = when (preferred?.uppercase()) {
-        "GPU", "NPU" -> {
-            MindlayerLog.w(
-                TAG,
-                "PaddleOCR GPU/NPU request refused due to LiteRT issue #5264 hazard; falling back to CPU until PR #4 shared resolver lands.",
-            )
-            "CPU"
-        }
-        "CPU", null -> "CPU"
-        else -> "CPU"
-    }
+    private fun resolveBackend(preferred: String?): String =
+        LiteRtAcceleratorResolver.resolveBackend(
+            requested = preferred,
+            featureName = "ocr",
+        ).backend
 
     private fun verifyBundleFilesExist(bundle: PaddleOcrModelInfo) {
         val missing = mutableListOf<String>()
