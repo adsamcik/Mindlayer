@@ -20,6 +20,8 @@ import com.adsamcik.mindlayer.service.engine.EmbeddingEngine
 import com.adsamcik.mindlayer.service.engine.InferenceOrchestrator
 import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.MemoryPressure
+import com.adsamcik.mindlayer.service.engine.OcrSessionManager
+import com.adsamcik.mindlayer.service.engine.PaddleOcrEngine
 import com.adsamcik.mindlayer.service.engine.SessionManager
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
 import com.adsamcik.mindlayer.service.health.MlHealthRecorder
@@ -123,7 +125,9 @@ class MindlayerMlService : Service() {
      * flip the [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_SESSION]
      * capability flag during the SDK's initial handshake.
      */
-    lateinit var paddleOcrEngine: com.adsamcik.mindlayer.service.engine.PaddleOcrEngine
+    lateinit var paddleOcrEngine: PaddleOcrEngine
+        private set
+    lateinit var ocrSessionManager: OcrSessionManager
         private set
     private lateinit var sharedMemoryPool: SharedMemoryPool
     private lateinit var binder: ServiceBinder
@@ -242,7 +246,7 @@ class MindlayerMlService : Service() {
         // parses the JSON response. Returns EMPTY when the engine is
         // not yet ready (so the dispatcher's per-line + per-barcode
         // fusion path keeps emitting events).
-        paddleOcrEngine = com.adsamcik.mindlayer.service.engine.PaddleOcrEngine(this, logRepository = logRepository)
+        paddleOcrEngine = PaddleOcrEngine(this, logRepository = logRepository)
         val ocrLlmExtractor = com.adsamcik.mindlayer.service.engine
             .LiteRtLmGemmaOcrExtractorProduction.create(
                 engineProvider = { engineManager.getEngine() },
@@ -251,7 +255,7 @@ class MindlayerMlService : Service() {
             engine = paddleOcrEngine,
             llmExtractor = ocrLlmExtractor,
         )
-        val ocrSessionManager = com.adsamcik.mindlayer.service.engine.OcrSessionManager(
+        ocrSessionManager = OcrSessionManager(
             engine = paddleOcrEngine,
             recognitionDispatcher = ocrRecognitionDispatcher,
         )
@@ -405,38 +409,13 @@ class MindlayerMlService : Service() {
         memoryBudget.onTrimMemory(level)
 
         if (memoryBudget.pressure.value == MemoryPressure.EMERGENCY) {
-            val unloadDecision = if (sessionManager.hasActiveStreaming()) {
-                "after_active_streams"
-            } else {
-                "immediate"
-            }
             logRepository.log(LogEntry(
                 timestampMs = System.currentTimeMillis(),
                 category = LogCategory.MEMORY,
                 event = LogEvent.PRESSURE_CHANGE,
-                extraJson = "{\"trimLevel\":$level,\"engineUnload\":\"$unloadDecision\"}",
+                extraJson = "{\"trimLevel\":$level,\"engineUnload\":\"ordered_emergency\"}",
             ))
-            sessionManager.applyMemoryPressure(MemoryPressure.EMERGENCY)
-            serviceScope.launch {
-                if (unloadDecision == "after_active_streams") {
-                    orchestrator.awaitAllJobs(timeoutMs = 5_000)
-                    sessionManager.applyMemoryPressure(MemoryPressure.EMERGENCY)
-                }
-                // M-E1: close the TOCTOU between "no active streams" check
-                // and the engine teardown by routing through
-                // engineManager.shutdownIfIdle(predicate). The engine
-                // mutex held during the predicate evaluation prevents a
-                // racing request from starting a fresh init under us; any
-                // request that lands AFTER shutdown succeeds will find the
-                // engine in Idle state and rearm via the standard
-                // SessionManager.ensureInitStarted() path.
-                val unloaded = engineManager.shutdownIfIdle {
-                    !sessionManager.hasActiveStreaming()
-                }
-                if (unloaded) {
-                    sessionManager.invalidateIdleSessionsForBackendSwitch()
-                }
-            }
+            serviceScope.launch { applyMemoryPressure(MemoryPressure.EMERGENCY) }
         }
     }
 
@@ -459,6 +438,56 @@ class MindlayerMlService : Service() {
         }
     }
 
+    internal suspend fun applyMemoryPressure(level: MemoryPressure) {
+        if (level < MemoryPressure.CRITICAL) {
+            sessionManager.applyMemoryPressure(level)
+            return
+        }
+
+        if (level == MemoryPressure.EMERGENCY) {
+            if (::ocrSessionManager.isInitialized) {
+                ocrSessionManager.drainForMemoryPressure()
+            }
+            unloadPaddleOcrForMemoryPressure()
+            unloadEmbeddingForMemoryPressure()
+            if (sessionManager.hasActiveStreaming()) {
+                orchestrator.awaitAllJobs(timeoutMs = 5_000)
+            }
+            sessionManager.applyMemoryPressure(level)
+            val unloaded = engineManager.shutdownIfIdle {
+                !sessionManager.hasActiveStreaming()
+            }
+            if (unloaded) {
+                sessionManager.invalidateIdleSessionsForBackendSwitch()
+            }
+            return
+        }
+
+        unloadEmbeddingForMemoryPressure()
+        unloadPaddleOcrForMemoryPressure()
+        sessionManager.applyMemoryPressure(level)
+    }
+
+    private suspend fun unloadEmbeddingForMemoryPressure() {
+        if (::embeddingEngine.isInitialized) {
+            embeddingEngine.unloadForMemoryPressure()
+        }
+    }
+
+    private suspend fun unloadPaddleOcrForMemoryPressure() {
+        if (::paddleOcrEngine.isInitialized) {
+            try {
+                paddleOcrEngine.unloadForMemoryPressure()
+            } catch (t: Throwable) {
+                MindlayerLog.w(
+                    TAG,
+                    "PaddleOcrEngine.unloadForMemoryPressure raised: ${t.safeLabel()}",
+                    throwable = null,
+                )
+            }
+        }
+    }
+
     /**
      * Observe [MemoryBudget.pressure] and forward changes to [SessionManager].
      * Runs in [serviceScope] so it's cancelled on destroy.
@@ -468,25 +497,7 @@ class MindlayerMlService : Service() {
             memoryBudget.pressure
                 .collect { pressure ->
                     MindlayerLog.i(TAG, "Memory pressure changed: $pressure")
-                    if (pressure >= MemoryPressure.CRITICAL && ::embeddingEngine.isInitialized) {
-                        embeddingEngine.unloadForMemoryPressure()
-                    }
-                    // Phase 3 #1: under CRITICAL pressure, also release
-                    // the PaddleOCR native delegates so we don't compete
-                    // for memory with the LLM. PaddleOcrEngine reloads
-                    // lazily on the next recognise() call.
-                    if (pressure >= MemoryPressure.CRITICAL && ::paddleOcrEngine.isInitialized) {
-                        try {
-                            paddleOcrEngine.unloadForMemoryPressure()
-                        } catch (t: Throwable) {
-                            MindlayerLog.w(
-                                TAG,
-                                "PaddleOcrEngine.unloadForMemoryPressure raised: ${t.safeLabel()}",
-                                throwable = null,
-                            )
-                        }
-                    }
-                    sessionManager.applyMemoryPressure(pressure)
+                    applyMemoryPressure(pressure)
                 }
         }
     }

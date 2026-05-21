@@ -135,6 +135,14 @@ class PaddleOcrEngine(
                 PaddleOcrModelRegistry.discoverBundles(context),
             ) ?: throw noPaddleOcrBundleFoundException()
             backend.initialize(bundle, preferredBackend)
+            LiteRtAcceleratorResolver.latestDecision("ocr")?.let { decision ->
+                logRepository?.logBackendDecision(
+                    featureName = "ocr",
+                    backend = decision.backend,
+                    reason = decision.reason,
+                    attempted = decision.attempted,
+                )
+            }
             lastInitFailure = null
             lastInitThrowable = null
             _state.value = PaddleOcrEngineState.Ready
