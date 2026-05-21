@@ -5,6 +5,8 @@ import com.adsamcik.mindlayer.OcrFrameMeta
 import com.adsamcik.mindlayer.OcrLimits
 import com.adsamcik.mindlayer.OcrSessionConfig
 import com.adsamcik.mindlayer.OcrSessionState
+import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.Runs
 import io.mockk.every
 import io.mockk.just
@@ -18,6 +20,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -99,8 +102,9 @@ class OcrSessionManagerTest {
     private fun dispatcherMock(): OcrRecognitionDispatcher =
         mockk(relaxed = true) {
             every { registerSession(any(), any()) } just Runs
-            every { submit(any(), any(), any(), any(), any(), any(), any()) } returns Job()
+            every { submit(any(), any(), any(), any(), any(), any(), any(), any()) } returns Job()
             every { finalizeAsync(any(), any()) } returns Job()
+            coEvery { finalize(any(), any()) } just Runs
             every { closeSession(any()) } just Runs
         }
 
@@ -212,7 +216,7 @@ class OcrSessionManagerTest {
 
         assertEquals(OcrFrameAck.STATUS_ACCEPTED, ack.status)
         verify(exactly = 1) {
-            dispatcher.submit(sid, 1L, any(), 64, 64, any(), null)
+            dispatcher.submit(sid, 1L, any(), 64, 64, any(), null, any())
             dispatcher.finalizeAsync(sid, null)
         }
     }
@@ -222,17 +226,19 @@ class OcrSessionManagerTest {
         val m = mgr(recognitionDispatcher = dispatcher)
         val sid = m.createSession(100, config())
 
-        m.finalize(100, sid)
-        m.finalize(100, sid)
+        runBlocking {
+            m.finalize(100, sid)
+            m.finalize(100, sid)
+        }
 
-        assertEquals(OcrSessionState.PHASE_FINALIZING, m.stateOf(100, sid).phase)
-        verify(exactly = 1) { dispatcher.finalizeAsync(sid, null) }
+        assertEquals(OcrSessionState.PHASE_FINALIZED, m.stateOf(100, sid).phase)
+        coVerify(exactly = 1) { dispatcher.finalize(sid, null) }
     }
 
     @Test fun `pushFrame after finalize returns REJECTED_FINALIZED`() {
         val m = mgr()
         val sid = m.createSession(100, config())
-        m.finalize(100, sid)
+        runBlocking { m.finalize(100, sid) }
         val ack = m.pushFrame(100, sid, meta(1L), textLikeFrame(seed = 1), 64, 64)
         assertEquals(OcrFrameAck.STATUS_REJECTED_FINALIZED, ack.status)
     }
@@ -312,7 +318,7 @@ class OcrSessionManagerTest {
     @Test fun `close removes session`() {
         val m = mgr()
         val sid = m.createSession(100, config())
-        m.close(100, sid)
+        runBlocking { m.close(100, sid) }
         assertEquals(0, m.activeSessionCount())
         assertFalse(m.isOwner(100, sid))
     }
@@ -320,15 +326,15 @@ class OcrSessionManagerTest {
     @Test fun `close is idempotent`() {
         val m = mgr()
         val sid = m.createSession(100, config())
-        m.close(100, sid)
-        m.close(100, sid)
+        runBlocking { m.close(100, sid) }
+        runBlocking { m.close(100, sid) }
     }
 
     @Test fun `close by wrong uid throws`() {
         val m = mgr()
         val sid = m.createSession(100, config())
         assertThrows(IllegalStateException::class.java) {
-            m.close(200, sid)
+            runBlocking { m.close(200, sid) }
         }
     }
 

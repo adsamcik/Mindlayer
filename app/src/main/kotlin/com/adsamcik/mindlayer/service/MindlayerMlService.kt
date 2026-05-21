@@ -360,6 +360,9 @@ class MindlayerMlService : Service() {
         if (::embeddingEngine.isInitialized) {
             runBlocking { embeddingEngine.shutdown() }
         }
+        if (::ocrSessionManager.isInitialized) {
+            runBlocking { ocrSessionManager.shutdown() }
+        }
         // Phase 3 #1: shut down the PaddleOCR engine so native delegate
         // resources are released alongside LiteRT-LM and EmbeddingGemma.
         // Best-effort — Throwables here are non-recoverable shutdown
