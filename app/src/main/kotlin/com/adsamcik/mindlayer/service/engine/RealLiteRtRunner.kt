@@ -27,20 +27,23 @@ internal class RealLiteRtRunner private constructor(
 
     override fun runEmbedding(inputIds: IntArray, attentionMask: IntArray): FloatArray {
         val inputBuffers = compiledModel.createInputBuffers()
-        val outputBuffers = compiledModel.createOutputBuffers()
         try {
-            inputBuffers[0].writeInt(inputIds)
-            inputBuffers[1].writeInt(attentionMask)
-            compiledModel.run(inputBuffers, outputBuffers)
-            return outputBuffers[0].readFloat()
+            val outputBuffers = compiledModel.createOutputBuffers()
+            try {
+                inputBuffers[0].writeInt(inputIds)
+                inputBuffers[1].writeInt(attentionMask)
+                compiledModel.run(inputBuffers, outputBuffers)
+                return outputBuffers[0].readFloat()
+            } finally {
+                outputBuffers.forEach { runCatching { it.close() } }
+            }
         } finally {
             // CompiledModel.createInputBuffers / createOutputBuffers each
             // allocate native backing storage that must be closed to
-            // avoid leaking AHardwareBuffer / NPU memory. The
-            // collections themselves expose close() per LiteRT 2.1.5;
-            // close in finally so a run() throw still releases.
+            // avoid leaking AHardwareBuffer / NPU memory. Nest the
+            // finalizers so input buffers are still closed if output
+            // buffer creation fails.
             inputBuffers.forEach { runCatching { it.close() } }
-            outputBuffers.forEach { runCatching { it.close() } }
         }
     }
 
