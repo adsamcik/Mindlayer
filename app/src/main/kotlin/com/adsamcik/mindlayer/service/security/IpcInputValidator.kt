@@ -73,8 +73,9 @@ object IpcInputValidator {
     const val MAX_IMG_PIXELS = 64L * 1024L * 1024L // 64 megapixels
 
     // ── MIME allowlists ───────────────────────────────────────────────────
+    const val OCR_RAW_Y_PLANE_MIME: String = "image/raw-yuv;y-plane"
     val ALLOWED_IMAGE_MIME = setOf(
-        "image/jpeg", "image/png", "image/webp", "image/bmp",
+        "image/jpeg", "image/png", "image/webp", "image/bmp", OCR_RAW_Y_PLANE_MIME,
     )
     val ALLOWED_AUDIO_MIME = setOf(
         "audio/wav", "audio/x-wav",
@@ -439,6 +440,23 @@ object IpcInputValidator {
         }
     }
 
+
+    /** Validate an OCR/session [MediaPart] carrying exactly one image frame. */
+    fun validateImageTransfer(part: com.adsamcik.mindlayer.MediaPart, maxMediaBytes: Int) {
+        require(part.schemaVersion == com.adsamcik.mindlayer.MediaPart.CURRENT_SCHEMA_VERSION) {
+            "MediaPart.schemaVersion ${part.schemaVersion} unsupported " +
+                "(expected ${com.adsamcik.mindlayer.MediaPart.CURRENT_SCHEMA_VERSION})"
+        }
+        validateId(part.requestId, "MediaPart.requestId")
+        require(part.kind == com.adsamcik.mindlayer.MediaPart.KIND_IMAGE) {
+            "MediaPart.kind ${part.kind} is not KIND_IMAGE"
+        }
+        require(part.payloadBytes in 1L..maxMediaBytes.toLong()) {
+            "MediaPart.payloadBytes out of bounds: ${part.payloadBytes}"
+        }
+        validateImagePart(part, index = 0, maxMediaBytes = maxMediaBytes)
+    }
+
     private fun validateImagePart(
         part: com.adsamcik.mindlayer.MediaPart,
         index: Int,
@@ -449,6 +467,32 @@ object IpcInputValidator {
         }
         require(part.height in 0..MAX_IMG_DIMENSION) {
             "media[$index].height out of bounds: ${part.height}"
+        }
+        val isRawYPlane = part.mimeType == OCR_RAW_Y_PLANE_MIME
+        if (isRawYPlane) {
+            require(part.width > 0 && part.height > 0) {
+                "media[$index] raw Y-plane requires positive width and height"
+            }
+            val pixels: Long = try {
+                Math.multiplyExact(part.width.toLong(), part.height.toLong())
+            } catch (_: ArithmeticException) {
+                throw IllegalArgumentException("media[$index] width x height overflow")
+            }
+            require(pixels <= MAX_IMG_PIXELS) {
+                "media[$index].pixel count out of bounds: $pixels"
+            }
+            require(part.rowStride >= part.width) {
+                "media[$index].rowStride (${part.rowStride}) < width (${part.width})"
+            }
+            val minimumBytes = if (part.height == 1) {
+                part.width.toLong()
+            } else {
+                Math.addExact(Math.multiplyExact(part.rowStride.toLong(), (part.height - 1).toLong()), part.width.toLong())
+            }
+            require(part.payloadBytes >= minimumBytes) {
+                "media[$index].payloadBytes (${part.payloadBytes}) smaller than raw Y-plane layout ($minimumBytes)"
+            }
+            return
         }
         val isRawPixels = part.isSharedMemory && part.mimeType == null
         if (isRawPixels) {

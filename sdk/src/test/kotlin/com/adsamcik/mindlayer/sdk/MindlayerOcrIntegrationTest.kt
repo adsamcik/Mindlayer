@@ -37,7 +37,7 @@ import org.robolectric.annotation.Config
  *  - ``Mindlayer.ocrSession(profile, configure) { }`` builds the
  *    correct ``OcrSessionConfig`` and calls ``createOcrSession``.
  *  - ``OcrSession.pushFrame(meta)`` round-trips through
- *    ``pushOcrFrame(sessionId, MediaPart-stub, meta)`` and returns
+ *    ``pushOcrFrame(sessionId, real MediaPart, meta)`` and returns
  *    the service's ``OcrFrameAck``.
  *  - ``OcrSession.state()`` round-trips through
  *    ``getOcrSessionState``.
@@ -190,7 +190,7 @@ class MindlayerOcrIntegrationTest {
     @Test fun `pushFrame round-trips through AIDL`() = runBlocking {
         val session = mindlayer.ocrSession(OcrProfile.GeneralDocument)
         val meta = OcrFrameMeta(frameId = 7L, captureTimeMs = 0L)
-        val ack = session.pushFrame(meta)
+        val ack = session.pushFrame(meta, ByteArray(64 * 64) { 127.toByte() }, 64, 64)
         assertEquals(7L, ack.frameId)
         assertEquals(OcrFrameAck.STATUS_ACCEPTED, ack.status)
     }
@@ -220,7 +220,7 @@ class MindlayerOcrIntegrationTest {
             val session = mindlayer.ocrSession(OcrProfile.GeneralDocument)
             session.close()
             assertThrows(IllegalStateException::class.java) {
-                runBlocking { session.pushFrame(OcrFrameMeta(frameId = 1L, captureTimeMs = 0L)) }
+                runBlocking { session.pushFrame(OcrFrameMeta(frameId = 1L, captureTimeMs = 0L), ByteArray(64 * 64) { 127.toByte() }, 64, 64) }
             }
         }
     }
@@ -246,9 +246,9 @@ class MindlayerOcrIntegrationTest {
             maxFrames = 10
         }.use { session ->
             assertNotNull(session.sessionId)
-            val ack1 = session.pushFrame(OcrFrameMeta(frameId = 1L, captureTimeMs = 0L))
+            val ack1 = session.pushFrame(OcrFrameMeta(frameId = 1L, captureTimeMs = 0L), ByteArray(64 * 64) { 127.toByte() }, 64, 64)
             assertEquals(OcrFrameAck.STATUS_ACCEPTED, ack1.status)
-            val ack2 = session.pushFrame(OcrFrameMeta(frameId = 2L, captureTimeMs = 100L))
+            val ack2 = session.pushFrame(OcrFrameMeta(frameId = 2L, captureTimeMs = 100L), ByteArray(64 * 64) { 128.toByte() }, 64, 64)
             assertEquals(2L, ack2.frameId)
             val state = session.state()
             assertEquals(OcrSessionState.PHASE_ACTIVE, state.phase)

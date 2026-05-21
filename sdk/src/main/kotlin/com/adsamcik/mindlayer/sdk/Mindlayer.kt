@@ -2150,30 +2150,17 @@ class Mindlayer private constructor(
         return OcrSession(sessionId = sessionId, config = config, mindlayer = this)
     }
 
-    /** Internal: forward push to the AIDL stub. */
-    internal suspend fun pushOcrFrameMetadataOnly(
+    /** Internal: forward a fully-staged OCR frame to the AIDL stub. */
+    internal suspend fun pushOcrFrame(
         sessionId: String,
+        mediaPart: com.adsamcik.mindlayer.MediaPart,
         meta: com.adsamcik.mindlayer.OcrFrameMeta,
     ): com.adsamcik.mindlayer.OcrFrameAck {
         val service = connection.awaitConnected()
-        // The AIDL signature requires a MediaPart; in Phase 1 PR D
-        // we provide a stub MediaPart wrapping an empty pipe so the
-        // service-side metadata-only path accepts the call. A
-        // follow-up wires real Y-plane staging via MediaTransfer.
-        val pipe = ParcelFileDescriptor.createPipe()
-        pipe[1].closeQuietly()
-        val mediaPart = com.adsamcik.mindlayer.MediaPart(
-            requestId = "ocr-frame-${UUID.randomUUID()}",
-            kind = com.adsamcik.mindlayer.MediaPart.KIND_IMAGE,
-            mimeType = "application/octet-stream",
-            source = pipe[0],
-            isSharedMemory = false,
-            payloadBytes = 0L,
-        )
         return try {
             service.pushOcrFrame(sessionId, mediaPart, meta)
         } finally {
-            pipe[0].closeQuietly()
+            mediaPart.source.closeQuietly()
         }
     }
 
