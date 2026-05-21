@@ -641,4 +641,5 @@ dependencies {
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.mockk.android)
     androidTestImplementation(libs.room.testing)
+    androidTestImplementation(project(":sdk"))
 }

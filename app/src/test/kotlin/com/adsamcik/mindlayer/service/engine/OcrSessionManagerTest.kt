@@ -5,6 +5,12 @@ import com.adsamcik.mindlayer.OcrFrameMeta
 import com.adsamcik.mindlayer.OcrLimits
 import com.adsamcik.mindlayer.OcrSessionConfig
 import com.adsamcik.mindlayer.OcrSessionState
+import io.mockk.Runs
+import io.mockk.every
+import io.mockk.just
+import io.mockk.mockk
+import io.mockk.verify
+import kotlinx.coroutines.Job
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -82,11 +88,21 @@ class OcrSessionManagerTest {
         lim: OcrLimits = limits(),
         clockNow: () -> Long = { 0L },
         idleTimeoutMs: Long = OcrSessionManager.DEFAULT_IDLE_TIMEOUT_MS,
+        recognitionDispatcher: OcrRecognitionDispatcher? = null,
     ) = OcrSessionManager(
         limits = lim,
         clock = clockNow,
         idleTimeoutMs = idleTimeoutMs,
+        recognitionDispatcher = recognitionDispatcher,
     )
+
+    private fun dispatcherMock(): OcrRecognitionDispatcher =
+        mockk(relaxed = true) {
+            every { registerSession(any(), any()) } just Runs
+            every { submit(any(), any(), any(), any(), any(), any(), any()) } returns Job()
+            every { finalizeAsync(any(), any()) } returns Job()
+            every { closeSession(any()) } just Runs
+        }
 
     // ── createSession ─────────────────────────────────────────────────────
 
@@ -186,6 +202,31 @@ class OcrSessionManagerTest {
         m.pushFrame(100, sid, meta(2L), textLikeFrame(seed = 2), 64, 64)
         val state = m.stateOf(100, sid)
         assertEquals(OcrSessionState.PHASE_FINALIZING, state.phase)
+    }
+
+    @Test fun `pushFrame auto-finalize schedules terminal event after maxFrames`() {
+        val dispatcher = dispatcherMock()
+        val m = mgr(lim = limits(maxFramesPerSession = 1), recognitionDispatcher = dispatcher)
+        val sid = m.createSession(100, config())
+        val ack = m.pushFrame(100, sid, meta(1L), textLikeFrame(seed = 1), 64, 64)
+
+        assertEquals(OcrFrameAck.STATUS_ACCEPTED, ack.status)
+        verify(exactly = 1) {
+            dispatcher.submit(sid, 1L, any(), 64, 64, any(), null)
+            dispatcher.finalizeAsync(sid, null)
+        }
+    }
+
+    @Test fun `finalize schedules terminal event once`() {
+        val dispatcher = dispatcherMock()
+        val m = mgr(recognitionDispatcher = dispatcher)
+        val sid = m.createSession(100, config())
+
+        m.finalize(100, sid)
+        m.finalize(100, sid)
+
+        assertEquals(OcrSessionState.PHASE_FINALIZING, m.stateOf(100, sid).phase)
+        verify(exactly = 1) { dispatcher.finalizeAsync(sid, null) }
     }
 
     @Test fun `pushFrame after finalize returns REJECTED_FINALIZED`() {
