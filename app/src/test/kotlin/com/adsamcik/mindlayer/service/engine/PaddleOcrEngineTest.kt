@@ -93,6 +93,34 @@ class PaddleOcrEngineTest {
         }
     }
 
+
+    @Test fun lowMemoryInitFailureIsNotCachedAndRetryCanSucceed() = runTest {
+        val backend = FakePaddleOcrBackend(initErrors = ArrayDeque(listOf(LowMemoryException(1, 2))))
+        val engine = engine(backend)
+
+        assertThrows(LowMemoryException::class.java) {
+            kotlinx.coroutines.runBlocking { engine.initialize() }
+        }
+        assertTrue(engine.state.value is PaddleOcrEngineState.Failed)
+
+        engine.initialize()
+        assertEquals(2, backend.initCallCount)
+        assertEquals(PaddleOcrEngineState.Ready, engine.state.value)
+    }
+
+    @Test fun nativeInitFailureRemainsSticky() = runTest {
+        val backend = FakePaddleOcrBackend(initErrors = ArrayDeque(listOf(IllegalStateException("native secret detail"))))
+        val engine = engine(backend)
+
+        assertThrows(IllegalStateException::class.java) {
+            kotlinx.coroutines.runBlocking { engine.initialize() }
+        }
+        assertThrows(IllegalStateException::class.java) {
+            kotlinx.coroutines.runBlocking { engine.initialize() }
+        }
+        assertEquals(1, backend.initCallCount)
+    }
+
     // ── recognise() ──────────────────────────────────────────────────────
 
     @Test fun `recognise lazily initialises`() = runTest {
@@ -162,8 +190,8 @@ class PaddleOcrEngineTest {
     // ── Backend factory + dependency injection ───────────────────────────
 
     @Test fun `default backendFactory produces LiteRtPaddleOcrBackend`() {
-        // We don't initialise it (the LiteRT path is scaffolded), but we
-        // can construct it and assert the type via reflection.
+        // We don't initialise it (would load real LiteRT model files), but we
+        // can construct the engine and assert the backend delegate exists.
         val engine = PaddleOcrEngine(realContext)
         // Access the lazy backend via reflection just to assert it's the
         // right type — direct property access would force lazy load too.
@@ -178,6 +206,7 @@ class PaddleOcrEngineTest {
  */
 internal class FakePaddleOcrBackend(
     private val recogniseError: Throwable? = null,
+    private val initErrors: ArrayDeque<Throwable> = ArrayDeque(),
     private val cannedOutput: OcrEngineOutput = defaultOutput(),
 ) : PaddleOcrBackend {
 
@@ -194,6 +223,7 @@ internal class FakePaddleOcrBackend(
 
     override suspend fun initialize(bundle: PaddleOcrModelInfo, preferredBackend: String?) {
         initCallCount++
+        initErrors.removeFirstOrNull()?.let { throw it }
         currentBundle = bundle
         isInitialized = true
         activeBackend = preferredBackend ?: "GPU"

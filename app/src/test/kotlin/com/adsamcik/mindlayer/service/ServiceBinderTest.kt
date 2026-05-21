@@ -19,6 +19,9 @@ import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.MemoryPressure
 import com.adsamcik.mindlayer.service.engine.MemorySnapshot
 import com.adsamcik.mindlayer.service.engine.ModelInfo
+import com.adsamcik.mindlayer.service.engine.OcrSessionManager
+import com.adsamcik.mindlayer.service.engine.PaddleOcrEngine
+import com.adsamcik.mindlayer.service.engine.PaddleOcrEngineState
 import com.adsamcik.mindlayer.service.engine.SessionOwnerToken
 import com.adsamcik.mindlayer.service.engine.ThermalBand
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
@@ -163,7 +166,10 @@ class ServiceBinderTest {
         binder = newBinder(diagnosticExporter)
     }
 
-    private fun newBinder(exporter: DiagnosticExporter): ServiceBinder =
+    private fun newBinder(
+        exporter: DiagnosticExporter,
+        ocrSessionManager: OcrSessionManager = OcrSessionManager(),
+    ): ServiceBinder =
         ServiceBinder(
             service = service,
             engineManager = engineManager,
@@ -184,6 +190,7 @@ class ServiceBinderTest {
                 every { isAllowed(any(), any()) } returns true
             },
             rateLimiter = rateLimiter,
+            ocrSessionManager = ocrSessionManager,
         )
 
     @After
@@ -480,6 +487,77 @@ class ServiceBinderTest {
                 resultJson = """{"answer": 42}""",
             )
         }
+    }
+
+
+    // ---- OCR capability / auth gates -----------------------------------------
+
+    @Test
+    fun getOcrLimitsRequiresAuthorization() {
+        val deniedStore = mockk<AllowlistStore>(relaxed = true) {
+            every { isDenied(any(), any()) } returns false
+            every { isAllowed(any(), any()) } returns false
+        }
+        val localBinder = ServiceBinder(
+            service = service,
+            engineManager = engineManager,
+            orchestrator = orchestrator,
+            diagnosticExporter = diagnosticExporter,
+            thermalMonitor = thermalMonitor,
+            memoryBudget = memoryBudget,
+            callerVerifier = { _, _ ->
+                CallerIdentity(
+                    packageName = "pending.caller",
+                    signingCertSha256 = "sig",
+                    displayName = "Pending",
+                )
+            },
+            allowlistStore = deniedStore,
+            rateLimiter = rateLimiter,
+        )
+        every { Binder.getCallingUid() } returns 12_345
+
+        assertThrows(SecurityException::class.java) {
+            localBinder.getOcrLimits()
+        }
+    }
+
+    @Test
+    fun getCapabilitiesDoesNotAdvertiseOcrWhenProductionGateIsFalse() {
+        val readyEngine = mockk<PaddleOcrEngine> {
+            every { state } returns MutableStateFlow(PaddleOcrEngineState.Ready)
+        }
+        val gatedBinder = newBinder(
+            diagnosticExporter,
+            ocrSessionManager = OcrSessionManager(engine = readyEngine, isProductionReady = false),
+        )
+
+        val capabilities = gatedBinder.getCapabilities()
+
+        assertFalse(
+            capabilities.supportedFeatures.contains(
+                com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_SESSION,
+            ),
+        )
+    }
+
+    @Test
+    fun getCapabilitiesAdvertisesOcrWhenProductionGateAndEngineReady() {
+        val readyEngine = mockk<PaddleOcrEngine> {
+            every { state } returns MutableStateFlow(PaddleOcrEngineState.Ready)
+        }
+        val gatedBinder = newBinder(
+            diagnosticExporter,
+            ocrSessionManager = OcrSessionManager(engine = readyEngine, isProductionReady = true),
+        )
+
+        val capabilities = gatedBinder.getCapabilities()
+
+        assertTrue(
+            capabilities.supportedFeatures.contains(
+                com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_SESSION,
+            ),
+        )
     }
 
     // ---- getStatus ----------------------------------------------------------

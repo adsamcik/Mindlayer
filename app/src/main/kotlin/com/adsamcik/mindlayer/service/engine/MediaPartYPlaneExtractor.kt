@@ -14,9 +14,8 @@ import java.io.File
  *
  * Converts a wire-arriving [MediaPart] (raw RGBA/RGB-565 over
  * SharedMemory PFD, or encoded JPEG/PNG/WEBP/BMP over a file PFD)
- * into an 8-bit greyscale Y-plane that [OcrFrameQualityPresort]
- * (Phase 1 PR C1) and [PaddleOcrEngine] (Phase 1 PR C2 scaffold)
- * both consume.
+ * into an 8-bit greyscale Y-plane consumed by [OcrFrameQualityPresort] and
+ * [PaddleOcrEngine].
  *
  * # Strategy
  *
