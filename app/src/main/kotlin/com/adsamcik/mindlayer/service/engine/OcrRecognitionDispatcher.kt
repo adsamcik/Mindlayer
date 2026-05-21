@@ -5,10 +5,11 @@ import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -79,9 +80,12 @@ class OcrRecognitionDispatcher(
      * Register the per-session structured-extraction context. Called by
      * [OcrSessionManager.createSession] right after the session record is
      * created. Idempotent — repeated calls for the same `sessionId`
-     * overwrite. The context is removed by [closeSession].
+     * overwrite. The session state is created here so finalizing a
+     * zero-frame session still emits a terminal result instead of hanging
+     * the stream reader. The context is removed by [closeSession].
      */
     fun registerSession(sessionId: String, context: OcrExtractionContext) {
+        perSession.computeIfAbsent(sessionId) { SessionState() }
         extractionContexts[sessionId] = context
     }
 
@@ -114,7 +118,7 @@ class OcrRecognitionDispatcher(
         writer: OcrTokenStreamWriter?,
     ): Job {
         val state = perSession.computeIfAbsent(sessionId) { SessionState() }
-        return scope.launch {
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             writer?.runCatching { writeFrameProcessing(frameId) }
             val startedNs = System.nanoTime()
             val output = try {
@@ -281,6 +285,10 @@ class OcrRecognitionDispatcher(
                 }
             }
         }
+        state.activeJobs.add(job)
+        job.invokeOnCompletion { state.activeJobs.remove(job) }
+        job.start()
+        return job
     }
 
     /**
@@ -294,10 +302,7 @@ class OcrRecognitionDispatcher(
      */
     suspend fun finalize(sessionId: String, writer: OcrTokenStreamWriter?) {
         val state = perSession[sessionId] ?: return
-        // No explicit join — SupervisorJob children are cancelled on
-        // close(); for finalize the caller already waited for the
-        // last pushFrame to enqueue. A future refinement can track
-        // active jobs and join them here.
+        state.activeJobs.toList().forEach { it.join() }
         val snapshot = state.fusion.snapshot()
         val fullJson = buildResultJson(snapshot, state.lastExtractionRawJson)
         writer?.runCatching { writeResultFinalized(fullJson) }
@@ -305,11 +310,21 @@ class OcrRecognitionDispatcher(
     }
 
     /**
+     * Schedule terminal result emission without blocking the binder
+     * thread that requested finalization. The stream reader observes
+     * the result once in-flight frame jobs drain.
+     */
+    fun finalizeAsync(sessionId: String, writer: OcrTokenStreamWriter?): Job =
+        scope.launch {
+            finalize(sessionId, writer)
+        }
+
+    /**
      * Tear down per-session state. Idempotent. Called by the
      * session manager on `close()` / binder-death.
      */
     fun closeSession(sessionId: String) {
-        perSession.remove(sessionId)
+        perSession.remove(sessionId)?.activeJobs?.forEach { it.cancel() }
         extractionContexts.remove(sessionId)
     }
 
@@ -377,6 +392,7 @@ class OcrRecognitionDispatcher(
          * sequence regardless of frame-id gaps from rejected frames.
          */
         val frameIndex: AtomicInteger = AtomicInteger(0)
+        val activeJobs: MutableSet<Job> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
         /**
          * Most-recent raw-JSON output from the LLM extractor, if any.
