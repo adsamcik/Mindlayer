@@ -52,6 +52,13 @@ class EngineCoexistenceInstrumentedTest {
 
     private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
 
+    /**
+     * Seeds a 128-line stub dictionary that satisfies the PR #1 length-sanity
+     * guard (`require(chars.size in 100..10_000)` in `LiteRtPaddleOcrBackend`).
+     * Tokens are deterministic to keep CTC fixtures stable.
+     */
+    private fun stubDictText(): String = (0 until 128).joinToString(separator = "\n") { "tok$it" }
+
     @Test
     fun all_three_backend_classes_load_in_the_same_process() {
         // Trigger class init for each backend's companion + class
@@ -80,7 +87,7 @@ class EngineCoexistenceInstrumentedTest {
         dir.listFiles()?.forEach { if (it.name.startsWith("paddleocr-")) it.delete() }
         val det = File(dir, "paddleocr-ppocrv5-mobile-det.tflite").apply { writeBytes(byteArrayOf(1)) }
         val rec = File(dir, "paddleocr-ppocrv5-mobile-rec.tflite").apply { writeBytes(byteArrayOf(2)) }
-        val dict = File(dir, "paddleocr-ppocrv5-mobile-dict.txt").apply { writeBytes(byteArrayOf(3)) }
+        val dict = File(dir, "paddleocr-ppocrv5-mobile-dict.txt").apply { writeText(stubDictText()) }
         val bundle = PaddleOcrModelInfo(
             id = "paddleocr-ppocrv5-mobile",
             displayName = "test",
@@ -121,7 +128,7 @@ class EngineCoexistenceInstrumentedTest {
         dir.listFiles()?.forEach { if (it.name.startsWith("paddleocr-")) it.delete() }
         File(dir, "paddleocr-ppocrv5-mobile-det.tflite").writeBytes(byteArrayOf(1))
         File(dir, "paddleocr-ppocrv5-mobile-rec.tflite").writeBytes(byteArrayOf(2))
-        File(dir, "paddleocr-ppocrv5-mobile-dict.txt").writeBytes(byteArrayOf(3))
+        File(dir, "paddleocr-ppocrv5-mobile-dict.txt").writeText(stubDictText())
 
         val engine = PaddleOcrEngine(
             context,
