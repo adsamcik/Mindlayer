@@ -32,14 +32,17 @@ internal class RealPaddleOcrLiteRtRunner private constructor(
 
     private fun runFloatModel(model: CompiledModel, input: FloatArray): FloatArray {
         val inputBuffers = model.createInputBuffers()
-        val outputBuffers = model.createOutputBuffers()
         try {
-            inputBuffers[0].writeFloat(input)
-            model.run(inputBuffers, outputBuffers)
-            return outputBuffers[0].readFloat()
+            val outputBuffers = model.createOutputBuffers()
+            try {
+                inputBuffers[0].writeFloat(input)
+                model.run(inputBuffers, outputBuffers)
+                return outputBuffers[0].readFloat()
+            } finally {
+                outputBuffers.forEach { runCatching { it.close() } }
+            }
         } finally {
             inputBuffers.forEach { runCatching { it.close() } }
-            outputBuffers.forEach { runCatching { it.close() } }
         }
     }
 
