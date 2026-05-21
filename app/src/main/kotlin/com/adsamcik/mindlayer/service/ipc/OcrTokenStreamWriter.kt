@@ -93,7 +93,7 @@ class OcrTokenStreamWriter private constructor(
             protocol = StreamProtocol.OCR_V1,
             requestId = sessionId,
         )
-        writeFrame(json.encodeToString(StreamHeader.serializer(), header))
+        writeFrame(json.encodeToString(StreamHeader.serializer(), header), droppedEventType = "header")
         headerWritten = true
     }
 
@@ -249,14 +249,31 @@ class OcrTokenStreamWriter private constructor(
             tsMs = System.currentTimeMillis(),
             payload = payload,
         )
-        writeFrame(json.encodeToString(StreamEvent.serializer(), event))
+        writeFrame(json.encodeToString(StreamEvent.serializer(), event), droppedEventType = type)
     }
 
-    private fun writeFrame(payload: String) {
+    private fun writeFrameDroppedWarning(droppedEventType: String) {
+        writeEvent(StreamEventType.OCR_FRAME_DROPPED_BUSY, buildJsonObject {
+            put("frameId", -1L)
+            put("retryAfterMs", 0L)
+            put("reason", "oversized_event")
+            put("droppedEventType", droppedEventType)
+        })
+    }
+
+    private fun writeFrame(payload: String, droppedEventType: String) {
         if (closed) return
         val payloadBytes = payload.toByteArray(Charsets.UTF_8)
-        require(payloadBytes.size <= MAX_FRAME_BYTES) {
-            "OCR frame too large: ${payloadBytes.size} > $MAX_FRAME_BYTES"
+        if (payloadBytes.size > MAX_FRAME_BYTES) {
+            MindlayerLog.w(
+                TAG,
+                "Dropping oversized OCR stream event type=$droppedEventType bytes=${payloadBytes.size}",
+                throwable = null,
+            )
+            if (droppedEventType != StreamEventType.OCR_FRAME_DROPPED_BUSY) {
+                writeFrameDroppedWarning(droppedEventType)
+            }
+            return
         }
         val header = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
             .putInt(payloadBytes.size).array()

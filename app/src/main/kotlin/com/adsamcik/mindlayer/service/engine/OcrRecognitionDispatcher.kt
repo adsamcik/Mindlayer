@@ -11,6 +11,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -116,10 +118,13 @@ class OcrRecognitionDispatcher(
         height: Int,
         config: OcrEngineConfig,
         writer: OcrTokenStreamWriter?,
+        writerMutex: Mutex? = null,
     ): Job {
         val state = perSession.computeIfAbsent(sessionId) { SessionState() }
         val job = scope.launch(start = CoroutineStart.LAZY) {
-            writer?.runCatching { writeFrameProcessing(frameId) }
+            withWriterLock(writerMutex) {
+                writer?.runCatching { writeFrameProcessing(frameId) }
+            }
             val startedNs = System.nanoTime()
             val output = try {
                 engine.recognise(yPlane, width, height, config)
@@ -130,15 +135,18 @@ class OcrRecognitionDispatcher(
                     sessionId = sessionId,
                     throwable = null,
                 )
-                writer?.runCatching {
-                    writeFrameProcessed(frameId, lineCount = 0, durationMs = 0)
+                withWriterLock(writerMutex) {
+                    writer?.runCatching {
+                        writeFrameProcessed(frameId, lineCount = 0, durationMs = 0)
+                    }
                 }
                 return@launch
             }
             val durationMs = (System.nanoTime() - startedNs) / 1_000_000L
-            writer?.runCatching {
-                writeFrameProcessed(frameId, lineCount = output.lines.size, durationMs = durationMs)
-            }
+            withWriterLock(writerMutex) {
+                writer?.runCatching {
+                    writeFrameProcessed(frameId, lineCount = output.lines.size, durationMs = durationMs)
+                }
 
             // Per-line fusion: each OcrTextLine.text becomes a candidate
             // value for a synthetic per-line field. The actual evidence-
@@ -284,6 +292,7 @@ class OcrRecognitionDispatcher(
                     }
                 }
             }
+            }
         }
         state.activeJobs.add(job)
         job.invokeOnCompletion { state.activeJobs.remove(job) }
@@ -339,6 +348,10 @@ class OcrRecognitionDispatcher(
     fun shutdown() {
         perSession.clear()
         scope.coroutineContext[Job]?.cancel()
+    }
+
+    private suspend fun withWriterLock(mutex: Mutex?, block: suspend () -> Unit) {
+        if (mutex != null) mutex.withLock { block() } else block()
     }
 
     private fun buildResultJson(

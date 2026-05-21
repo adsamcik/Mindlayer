@@ -14,6 +14,7 @@ import androidx.annotation.RequiresApi
 import com.adsamcik.mindlayer.AudioTransfer
 import com.adsamcik.mindlayer.ImageTransfer
 import java.io.File
+import java.io.OutputStream
 import java.nio.ByteBuffer
 
 /**
@@ -108,6 +109,136 @@ object MediaTransfer {
             payloadBytes = payloadBytes,
             durationMs = t.durationMs,
         )
+
+
+    // ---- OCR frame builders -------------------------------------------------
+
+    /** MIME used by the OCR session API for raw CameraX Y-plane frames. */
+    const val MIME_OCR_RAW_Y_PLANE: String = "image/raw-yuv;y-plane"
+
+    /** Payloads at or below this size use a pipe instead of ashmem. */
+    internal const val OCR_INLINE_PIPE_THRESHOLD_BYTES: Int = 64 * 1024
+
+    /** Build an OCR [MediaPart] from raw Y-plane bytes. */
+    fun ocrYPlanePart(
+        requestId: String,
+        yPlane: ByteArray,
+        width: Int,
+        height: Int,
+        rowStride: Int = width,
+        pixelStride: Int = 1,
+    ): com.adsamcik.mindlayer.MediaPart {
+        require(width > 0 && height > 0) { "width and height must be > 0" }
+        require(rowStride >= width) { "rowStride ($rowStride) < width ($width)" }
+        require(pixelStride == 1) { "Only tightly-sampled Y planes (pixelStride=1) are supported" }
+        val minimumBytes = if (height == 1) width else rowStride * (height - 1) + width
+        require(yPlane.size >= minimumBytes) {
+            "yPlane too small: ${yPlane.size} < $minimumBytes for ${width}x$height rowStride=$rowStride"
+        }
+        return bytesImagePart(
+            requestId = requestId,
+            bytes = yPlane,
+            mimeType = MIME_OCR_RAW_Y_PLANE,
+            width = width,
+            height = height,
+            rowStride = rowStride,
+        )
+    }
+
+    /** Build an OCR [MediaPart] from encoded JPEG/PNG/WEBP image bytes. */
+    fun ocrEncodedImagePart(
+        requestId: String,
+        bytes: ByteArray,
+        mimeType: String,
+    ): com.adsamcik.mindlayer.MediaPart {
+        require(mimeType in setOf("image/jpeg", "image/png", "image/webp")) {
+            "OCR encoded frames support image/jpeg, image/png, or image/webp (got $mimeType)"
+        }
+        require(bytes.isNotEmpty()) { "encoded image bytes must not be empty" }
+        return bytesImagePart(requestId = requestId, bytes = bytes, mimeType = mimeType)
+    }
+
+    private fun bytesImagePart(
+        requestId: String,
+        bytes: ByteArray,
+        mimeType: String,
+        width: Int = 0,
+        height: Int = 0,
+        rowStride: Int = 0,
+    ): com.adsamcik.mindlayer.MediaPart {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1 && bytes.size > OCR_INLINE_PIPE_THRESHOLD_BYTES) {
+            bytesImagePartSharedMemory(requestId, bytes, mimeType, width, height, rowStride)
+        } else {
+            bytesImagePartPipe(requestId, bytes, mimeType, width, height, rowStride)
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O_MR1)
+    private fun bytesImagePartSharedMemory(
+        requestId: String,
+        bytes: ByteArray,
+        mimeType: String,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+    ): com.adsamcik.mindlayer.MediaPart {
+        val shm = SharedMemory.create("ocr-$requestId", bytes.size)
+        try {
+            val buffer = shm.mapReadWrite()
+            try {
+                buffer.put(bytes)
+            } finally {
+                SharedMemory.unmap(buffer)
+            }
+            shm.setProtect(OsConstants.PROT_READ)
+            return com.adsamcik.mindlayer.MediaPart(
+                requestId = requestId,
+                kind = com.adsamcik.mindlayer.MediaPart.KIND_IMAGE,
+                mimeType = mimeType,
+                source = sharedMemoryToPfd(shm),
+                isSharedMemory = true,
+                payloadBytes = bytes.size.toLong(),
+                width = width,
+                height = height,
+                rowStride = rowStride,
+            )
+        } finally {
+            shm.close()
+        }
+    }
+
+    private fun bytesImagePartPipe(
+        requestId: String,
+        bytes: ByteArray,
+        mimeType: String,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+    ): com.adsamcik.mindlayer.MediaPart {
+        val pipe = ParcelFileDescriptor.createReliablePipe()
+        val readEnd = pipe[0]
+        val writeEnd = pipe[1]
+        Thread({
+            try {
+                ParcelFileDescriptor.AutoCloseOutputStream(writeEnd).use { out: OutputStream ->
+                    out.write(bytes)
+                }
+            } catch (t: Throwable) {
+                try { writeEnd.closeWithError(t.message ?: "ocr_pipe_write_failed") } catch (_: Throwable) {}
+            }
+        }, "MediaTransfer-ocr-$requestId").start()
+        return com.adsamcik.mindlayer.MediaPart(
+            requestId = requestId,
+            kind = com.adsamcik.mindlayer.MediaPart.KIND_IMAGE,
+            mimeType = mimeType,
+            source = readEnd,
+            isSharedMemory = false,
+            payloadBytes = bytes.size.toLong(),
+            width = width,
+            height = height,
+            rowStride = rowStride,
+        )
+    }
 
     // ---- Image builders (legacy, used by chatWithImage) --------------------
 

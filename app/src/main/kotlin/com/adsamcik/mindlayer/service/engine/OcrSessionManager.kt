@@ -11,6 +11,11 @@ import com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -43,10 +48,11 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * # Threading
  *
- * Public methods are safe to call from any thread. State per
- * session is guarded by a per-session synchronized block (acceptable
- * because intake is naturally serialised by the caller). The global
- * registry uses a [ConcurrentHashMap].
+ * Public methods are safe to call from any thread. Each session owns a
+ * coroutine [Mutex] that serializes intake state mutation and every
+ * [com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter] emission;
+ * dispatcher jobs receive that same mutex because the writer is not
+ * thread-safe. The global registry uses a [ConcurrentHashMap].
  *
  * # Resource lifecycle
  *
@@ -148,64 +154,49 @@ class OcrSessionManager(
         yPlane: ByteArray,
         width: Int,
         height: Int,
-    ): OcrFrameAck {
-        val intake = preparePushIntake(uid, sessionId, meta) ?: return rejectFinalized(meta)
-        intake.earlyAck?.let { return it }
-        val session = intake.session
+    ): OcrFrameAck = runBlocking {
+        val sessionForLock = requireOwnedSession(uid, sessionId)
+        sessionForLock.mutex.withLock {
+            val intake = preparePushIntake(uid, sessionId, meta) ?: return@withLock rejectFinalized(meta)
+            intake.earlyAck?.let { return@withLock it }
+            val session = intake.session
 
-        // Service-side quality presort — re-evaluate the frame regardless
-        // of the client's qualityHint so a malicious client can't bypass
-        // gating by mis-labelling.
-        val score = try {
-            OcrFrameQualityPresort.score(yPlane, width, height, session.lastAcceptedDHash)
-        } catch (e: IllegalArgumentException) {
-            // Bad dimensions — surface as REJECTED_QUALITY so the SDK
-            // recalibrates without crashing the whole session.
-            session.framesRejected++
-            return OcrFrameAck(
-                frameId = meta.frameId,
-                status = OcrFrameAck.STATUS_REJECTED_QUALITY,
-                queueDepth = session.pendingQueueDepth,
-                retryAfterMs = 0L,
-            )
+            val score = try {
+                OcrFrameQualityPresort.score(yPlane, width, height, session.lastAcceptedDHash)
+            } catch (e: IllegalArgumentException) {
+                session.framesRejected++
+                return@withLock OcrFrameAck(frameId = meta.frameId, status = OcrFrameAck.STATUS_REJECTED_QUALITY, queueDepth = session.pendingQueueDepth, retryAfterMs = 0L)
+            }
+
+            if (!score.isAccepted) {
+                session.framesRejected++
+                return@withLock OcrFrameAck(frameId = meta.frameId, status = OcrFrameAck.STATUS_REJECTED_QUALITY, queueDepth = session.pendingQueueDepth, retryAfterMs = 0L)
+            }
+
+            recordAcceptedFrame(session, intake.now, score.dHash).also { finalizeAfterSubmit ->
+                recognitionDispatcher?.submit(
+                    sessionId = sessionId,
+                    frameId = meta.frameId,
+                    yPlane = yPlane,
+                    width = width,
+                    height = height,
+                    config = OcrEngineConfig(),
+                    writer = session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter,
+                    writerMutex = session.mutex,
+                )?.also { job ->
+                    session.activeJobs.add(job)
+                    job.invokeOnCompletion { session.activeJobs.remove(job) }
+                }
+                if (finalizeAfterSubmit) {
+                    recognitionDispatcher?.finalizeAsync(
+                        sessionId,
+                        session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter,
+                    )
+                }
+            }
+
+            OcrFrameAck(frameId = meta.frameId, status = OcrFrameAck.STATUS_ACCEPTED, queueDepth = session.pendingQueueDepth, retryAfterMs = 0L)
         }
-
-        if (!score.isAccepted) {
-            session.framesRejected++
-            return OcrFrameAck(
-                frameId = meta.frameId,
-                status = OcrFrameAck.STATUS_REJECTED_QUALITY,
-                queueDepth = session.pendingQueueDepth,
-                retryAfterMs = 0L,
-            )
-        }
-
-        val finalizeAfterSubmit = recordAcceptedFrame(session, intake.now, score.dHash)
-        val writer = session.eventWriter as? OcrTokenStreamWriter
-
-        // Phase 2 #3: schedule recognition on the dispatcher when both
-        // engine + dispatcher are wired. Fire-and-forget — the binder
-        // path returns the synchronous ACK immediately; recognition
-        // results stream via OCR_V1 events on the session's writer.
-        recognitionDispatcher?.submit(
-            sessionId = sessionId,
-            frameId = meta.frameId,
-            yPlane = yPlane,
-            width = width,
-            height = height,
-            config = OcrEngineConfig(),
-            writer = writer,
-        )
-        if (finalizeAfterSubmit) {
-            recognitionDispatcher?.finalizeAsync(sessionId, writer)
-        }
-
-        return OcrFrameAck(
-            frameId = meta.frameId,
-            status = OcrFrameAck.STATUS_ACCEPTED,
-            queueDepth = session.pendingQueueDepth,
-            retryAfterMs = 0L,
-        )
     }
 
     /**
@@ -231,21 +222,30 @@ class OcrSessionManager(
         uid: Int,
         sessionId: String,
         meta: OcrFrameMeta,
-    ): OcrFrameAck {
-        val intake = preparePushIntake(uid, sessionId, meta) ?: return rejectFinalized(meta)
-        intake.earlyAck?.let { return it }
-        val session = intake.session
+    ): OcrFrameAck = runBlocking {
+        val sessionForLock = requireOwnedSession(uid, sessionId)
+        sessionForLock.mutex.withLock {
+            val intake = preparePushIntake(uid, sessionId, meta) ?: return@withLock rejectFinalized(meta)
+            intake.earlyAck?.let { return@withLock it }
+            val session = intake.session
+            recordAcceptedFrame(session, intake.now, dhash = null)
+            OcrFrameAck(frameId = meta.frameId, status = OcrFrameAck.STATUS_ACCEPTED, queueDepth = session.pendingQueueDepth, retryAfterMs = 0L)
+        }
+    }
 
-        // Trust the client-side qualityHint advisorily — we still
-        // accept frames marked QUALITY_DUPLICATE / QUALITY_BLURRY /
-        // QUALITY_TOO_DARK so the SDK can choose to push them as
-        // fallbacks. Only QUALITY_GOOD and QUALITY_UNKNOWN are
-        // counted as "accept" for advisory metrics.
-        recordAcceptedFrame(session, intake.now, dhash = null)
-        return OcrFrameAck(
+    fun rejectFrame(uid: Int, sessionId: String, meta: OcrFrameMeta): OcrFrameAck = runBlocking {
+        val session = sessions[sessionId]
+        if (session != null && session.uid == uid) {
+            session.mutex.withLock {
+                session.framesRejected++
+                (session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter)
+                    ?.runCatching { writeFrameRejectedQuality(meta.frameId, "invalid_media") }
+            }
+        }
+        OcrFrameAck(
             frameId = meta.frameId,
-            status = OcrFrameAck.STATUS_ACCEPTED,
-            queueDepth = session.pendingQueueDepth,
+            status = OcrFrameAck.STATUS_REJECTED_QUALITY,
+            queueDepth = session?.pendingQueueDepth ?: 0,
             retryAfterMs = 0L,
         )
     }
@@ -351,48 +351,42 @@ class OcrSessionManager(
         )
     }
 
-    /** Mark the session as finalizing. Triggers result emission. */
-    fun finalize(uid: Int, sessionId: String) {
+    /** Mark the session as finalizing, drain jobs, and emit terminal events. */
+    suspend fun finalize(uid: Int, sessionId: String) {
         val session = requireOwnedSession(uid, sessionId)
-        if (session.phase < OcrSessionState.PHASE_FINALIZING) {
-            session.phase = OcrSessionState.PHASE_FINALIZING
-            val writer = session.eventWriter as? OcrTokenStreamWriter
-            recognitionDispatcher?.finalizeAsync(sessionId, writer)
+        session.mutex.withLock {
+            if (session.phase == OcrSessionState.PHASE_FINALIZED) return
+            if (session.phase < OcrSessionState.PHASE_FINALIZING) {
+                session.phase = OcrSessionState.PHASE_FINALIZING
+            }
+        }
+        drainActiveJobs(session, cancel = false)
+        session.mutex.withLock {
+            if (session.phase == OcrSessionState.PHASE_FINALIZED) return
+            recognitionDispatcher?.finalize(
+                sessionId,
+                session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter,
+            )
+            session.phase = OcrSessionState.PHASE_FINALIZED
         }
     }
 
     /** Close + remove a session. Idempotent. */
-    fun close(uid: Int, sessionId: String) {
+    suspend fun close(uid: Int, sessionId: String) {
         val session = sessions[sessionId] ?: return
         if (session.uid != uid) {
             throw IllegalStateException("Session not owned by uid=$uid")
         }
-        sessions.remove(sessionId)
-        recognitionDispatcher?.closeSession(sessionId)
-        // Close the event-stream writer if attached so the SDK-side
-        // Flow.collect coroutine sees EOF and terminates.
-        (session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter)
-            ?.runCatching { close() }
-        MindlayerLog.i(
-            TAG,
-            "OCR session closed: accepted=${session.framesAccepted}, " +
-                "dropped=${session.framesDropped}, rejected=${session.framesRejected}",
-            sessionId = sessionId,
-        )
+        cleanupSession(sessionId, session, cancelJobs = true)
     }
 
     /**
      * Drop all sessions owned by [uid]. Called by the binder layer
      * when a client dies (binder linkToDeath).
      */
-    fun closeAllForUid(uid: Int) {
+    fun closeAllForUid(uid: Int) = runBlocking {
         val owned = sessions.entries.filter { it.value.uid == uid }
-        owned.forEach { entry ->
-            sessions.remove(entry.key)
-            recognitionDispatcher?.closeSession(entry.key)
-            (entry.value.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter)
-                ?.runCatching { close() }
-        }
+        owned.forEach { entry -> cleanupSession(entry.key, entry.value, cancelJobs = true) }
         frameRateBuckets.remove(uid)
         if (owned.isNotEmpty()) {
             MindlayerLog.i(TAG, "Closed ${owned.size} OCR session(s) for uid=$uid on death")
@@ -417,12 +411,16 @@ class OcrSessionManager(
      * @return true when the session was found + owned; false otherwise
      *   (caller must close the pipe in that case).
      */
-    fun attachEventWriter(uid: Int, sessionId: String, writer: Any): Boolean {
-        val session = sessions[sessionId] ?: return false
-        if (session.uid != uid) return false
-        session.eventWriter = writer
-        session.streamAttached = true
-        return true
+    fun attachEventWriter(uid: Int, sessionId: String, writer: Any): Boolean = runBlocking {
+        val session = sessions[sessionId] ?: return@runBlocking false
+        if (session.uid != uid) return@runBlocking false
+        session.mutex.withLock {
+            (writer as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter)
+                ?.runCatching { writeHeader(sessionId) }
+            session.eventWriter = writer
+            session.streamAttached = true
+        }
+        true
     }
 
     /** Read-only view of the attached event writer for tests + binder cleanup. */
@@ -434,7 +432,13 @@ class OcrSessionManager(
 
     /** Cancel in-flight OCR recognition before pressure-driven native delegate unload. */
     suspend fun drainForMemoryPressure() {
+        sessions.entries.toList().forEach { cleanupSession(it.key, it.value, cancelJobs = true) }
         recognitionDispatcher?.drainForMemoryPressure()
+    }
+
+    suspend fun shutdown() {
+        drainForMemoryPressure()
+        recognitionDispatcher?.shutdown()
     }
 
     /** Currently active session count — used for diagnostics + tests. */
@@ -482,10 +486,37 @@ class OcrSessionManager(
                 toRemove += id
             }
         }
-        toRemove.forEach { sessions.remove(it) }
+        toRemove.forEach { id ->
+            sessions[id]?.let { runBlocking { cleanupSession(id, it, cancelJobs = true) } }
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
+
+    private suspend fun cleanupSession(sessionId: String, session: OcrSession, cancelJobs: Boolean) {
+        if (!sessions.remove(sessionId, session)) return
+        session.mutex.withLock { session.phase = OcrSessionState.PHASE_CLOSED }
+        drainActiveJobs(session, cancel = cancelJobs)
+        recognitionDispatcher?.closeSession(sessionId)
+        session.mutex.withLock {
+            (session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter)
+                ?.runCatching { close() }
+        }
+        MindlayerLog.i(
+            TAG,
+            "OCR session closed: accepted=${session.framesAccepted}, dropped=${session.framesDropped}, rejected=${session.framesRejected}",
+            sessionId = sessionId,
+        )
+    }
+
+    private suspend fun drainActiveJobs(session: OcrSession, cancel: Boolean) {
+        while (true) {
+            val jobs = session.activeJobs.toList()
+            if (jobs.isEmpty()) return
+            if (cancel) jobs.forEach { it.cancel() }
+            jobs.joinAll()
+        }
+    }
 
     private fun requireOwnedSession(uid: Int, sessionId: String): OcrSession {
         val session = sessions[sessionId]
@@ -531,6 +562,8 @@ class OcrSessionManager(
          * `OcrTokenStreamWriter` before invoking.
          */
         @Volatile var eventWriter: Any? = null
+        val mutex: Mutex = Mutex()
+        val activeJobs: MutableSet<Job> = ConcurrentHashMap.newKeySet()
     }
 
     /**
