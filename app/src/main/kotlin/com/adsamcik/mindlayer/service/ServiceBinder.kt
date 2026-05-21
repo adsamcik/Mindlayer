@@ -2405,20 +2405,25 @@ class ServiceBinder(
         IpcInputValidator.validateId(sessionId, "sessionId")
         IpcInputValidator.validateOcrFrameMeta(meta)
         val uid = Binder.getCallingUid()
+        try {
+            IpcInputValidator.validateImageTransfer(frame, MAX_MEDIA_BYTES)
+        } catch (t: Throwable) {
+            try { frame.source.close() } catch (_: Throwable) { /* fine */ }
+            MindlayerLog.w(
+                TAG,
+                "OCR frame MediaPart rejected: ${t.safeLabel()}",
+                sessionId = sanitizeLogField(sessionId),
+                throwable = null,
+            )
+            return ocrSessionManager.rejectFrame(uid, sessionId, meta)
+        }
         if (!ocrSessionManager.isOwner(uid, sessionId)) {
-            // Close the MediaPart PFD before throwing — without this
-            // the FD leaks for cross-UID push attempts.
             try { frame.source.close() } catch (_: Throwable) { /* fine */ }
             throw typedBinderException(
                 MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
                 "Session not found or not owned by caller",
             )
         }
-        // Phase 2 #1: extract Y-plane and run full presort.
-        // When no SharedMemoryPool is wired (e.g. unit tests with
-        // the default-constructed ServiceBinder), fall back to the
-        // metadata-only intake path so the lifecycle remains
-        // exercisable in JVM tests.
         val pool = sharedMemoryPool
             ?: return ocrSessionManager.pushFrameMetadataOnly(uid, sessionId, meta)
 
@@ -2426,13 +2431,17 @@ class ServiceBinder(
         val extracted = try {
             MediaPartYPlaneExtractor.extractY(frame, pool, scopedKey)
         } catch (e: SecurityException) {
-            // Already wire-prefixed with INVALID_REQUEST or
-            // TRANSIENT_RESOURCE_EXHAUSTED — propagate as-is.
-            throw e
+            try { frame.source.close() } catch (_: Throwable) { /* fine */ }
+            MindlayerLog.w(
+                TAG,
+                "OCR Y-plane extraction rejected: ${e.safeLabel()}",
+                requestId = scopedKey,
+                sessionId = sanitizeLogField(sessionId),
+                throwable = null,
+            )
+            return ocrSessionManager.rejectFrame(uid, sessionId, meta)
         } catch (t: Throwable) {
-            // Anything else surfaces as a quality rejection so the
-            // SDK retries the frame rather than tearing down the
-            // session. The PFD is closed inside the staging pipeline.
+            try { frame.source.close() } catch (_: Throwable) { /* fine */ }
             MindlayerLog.w(
                 TAG,
                 "OCR Y-plane extraction failed: ${t.safeLabel()}",
@@ -2440,12 +2449,7 @@ class ServiceBinder(
                 sessionId = sanitizeLogField(sessionId),
                 throwable = null,
             )
-            return com.adsamcik.mindlayer.OcrFrameAck(
-                frameId = meta.frameId,
-                status = com.adsamcik.mindlayer.OcrFrameAck.STATUS_REJECTED_QUALITY,
-                queueDepth = 0,
-                retryAfterMs = 0L,
-            )
+            return ocrSessionManager.rejectFrame(uid, sessionId, meta)
         }
 
         return ocrSessionManager.pushFrame(
@@ -2480,16 +2484,6 @@ class ServiceBinder(
         // session. The writer takes ownership of the PFD (the
         // wrapped AutoCloseOutputStream closes it on writer close).
         val writer = com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter(eventWriteEnd)
-        try {
-            writer.writeHeader()
-        } catch (t: Throwable) {
-            MindlayerLog.w(
-                TAG,
-                "OCR pipe header write failed: ${t.safeLabel()}",
-                sessionId = sanitizeLogField(sessionId),
-                throwable = null,
-            )
-        }
         val attached = ocrSessionManager.attachEventWriter(uid, sessionId, writer)
         if (!attached) {
             // Ownership flipped between isOwner check and attach —
@@ -2536,7 +2530,7 @@ class ServiceBinder(
                 "Session not found or not owned by caller",
             )
         }
-        ocrSessionManager.finalize(uid, sessionId)
+        runBlocking { ocrSessionManager.finalize(uid, sessionId) }
     }
 
     override fun closeOcrSession(sessionId: String) {
@@ -2548,7 +2542,7 @@ class ServiceBinder(
         // anti-enumerate here because close() returning silently for
         // unowned-sessions is indistinguishable from close()-of-closed.
         try {
-            ocrSessionManager.close(uid, sessionId)
+            runBlocking { ocrSessionManager.close(uid, sessionId) }
         } catch (_: IllegalStateException) {
             // Session not found or not owned — silently no-op.
         }
