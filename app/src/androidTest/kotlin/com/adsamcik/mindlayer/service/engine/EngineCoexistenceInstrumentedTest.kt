@@ -83,8 +83,7 @@ class EngineCoexistenceInstrumentedTest {
         // Seed minimal bundle files so the file-existence guard passes.
         // The runner is injected because this CI smoke is not the real
         // Shared LiteRT delegate / model-byte validation path.
-        val dir = context.filesDir
-        dir.listFiles()?.forEach { if (it.name.startsWith("paddleocr-")) it.delete() }
+        val dir = testModelDir()
         val det = File(dir, "paddleocr-ppocrv5-mobile-det.tflite").apply { writeBytes(byteArrayOf(1)) }
         val rec = File(dir, "paddleocr-ppocrv5-mobile-rec.tflite").apply { writeBytes(byteArrayOf(2)) }
         val dict = File(dir, "paddleocr-ppocrv5-mobile-dict.txt").apply { writeText(stubDictText()) }
@@ -124,8 +123,7 @@ class EngineCoexistenceInstrumentedTest {
     @Test
     fun recognition_dispatcher_emits_frame_processed_when_no_lines_are_detected() = runBlocking {
         // Seed bundle files (same as the back-to-back test).
-        val dir = context.filesDir
-        dir.listFiles()?.forEach { if (it.name.startsWith("paddleocr-")) it.delete() }
+        val dir = testModelDir()
         File(dir, "paddleocr-ppocrv5-mobile-det.tflite").writeBytes(byteArrayOf(1))
         File(dir, "paddleocr-ppocrv5-mobile-rec.tflite").writeBytes(byteArrayOf(2))
         File(dir, "paddleocr-ppocrv5-mobile-dict.txt").writeText(stubDictText())
@@ -173,6 +171,12 @@ class EngineCoexistenceInstrumentedTest {
 
         dispatcher.shutdown()
     }
+
+    private fun testModelDir(): File =
+        File(context.filesDir, "paddleocr-coexistence-test").apply {
+            deleteRecursively()
+            mkdirs()
+        }
 
     private class FakePaddleOcrLiteRtRunner : PaddleOcrLiteRtRunner {
         override fun runDetection(input: FloatArray): FloatArray = FloatArray(8 * 8)
