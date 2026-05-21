@@ -596,6 +596,8 @@ class InferencePipelineTest {
         assertTrue(eventsA.any { it.kind == "done" && it.finishReason == "stop" })
         assertTrue(eventsB.any { it.kind == "done" && it.finishReason == "stop" })
 
+        orchestrator.awaitAllJobs()
+
         // Verify foreground entered/exited for both inferences
         verify(exactly = 2) { service.enterForeground() }
         verify(exactly = 2) { service.exitForeground() }
