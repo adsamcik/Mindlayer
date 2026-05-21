@@ -8,6 +8,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayOutputStream
@@ -170,6 +171,64 @@ class EngineCoexistenceInstrumentedTest {
         )
 
         dispatcher.shutdown()
+    }
+
+    /**
+     * Production-path coexistence gate (M6 from Opus 4.7 audit).
+     *
+     * Loads the **real** PaddleOCR PP-OCRv5 mobile AI Pack assets through
+     * the production [LiteRtPaddleOcrBackend] constructor (not
+     * `forTesting`) and verifies the back-to-back init + state-bleed
+     * scenario actually exercises native LiteRT delegate creation in a
+     * three-runtime process.
+     *
+     * Skipped via [assumeTrue] when the AI Pack manifest is not bundled
+     * with the test APK — local developer runs see this as "ignored",
+     * while CI emulator runs that install the `paddleocr_model` AAB cover
+     * the production code path. Mirrors the
+     * `LITERT_COEXISTENCE.md` step-8 device checklist case.
+     *
+     * The [forTesting]-based test above (the FakeRunner path) is what
+     * keeps the dispatcher / Kotlin glue covered on every CI run.
+     */
+    @Test
+    @SdkSuppress(minSdkVersion = 33)
+    fun paddleocr_production_backend_loads_real_ai_pack_assets() = runBlocking {
+        val assetList = context.assets.list("")?.toList().orEmpty()
+        assumeTrue(
+            "PaddleOCR AI Pack manifest not bundled (paddleocr_model_integrity.json missing); " +
+                "production coexistence path covered by the device-validation matrix only.",
+            assetList.contains("paddleocr_model_integrity.json"),
+        )
+
+        val bundles = PaddleOcrModelRegistry.discoverBundles(context)
+        val bundle = PaddleOcrModelRegistry.getDefaultBundle(bundles)
+        assumeTrue(
+            "AI Pack manifest present but bundle resolution returned null; " +
+                "device matrix covers the on-disk vs install-time AAB extraction.",
+            bundle != null,
+        )
+
+        // Initialize the embedding backend FIRST so the second init runs in
+        // a process that already holds a LiteRT classloader. This is the
+        // exact ordering issue LITERT_COEXISTENCE.md step 8 calls out.
+        val embeddingBackend = LiteRtEmbeddingBackend(context, memoryHeadroomBytes = 0L)
+        embeddingBackend.shutdown()
+
+        val paddleBackend = LiteRtPaddleOcrBackend(context, memoryHeadroomBytes = 0L)
+        try {
+            paddleBackend.initialize(bundle!!, "CPU")
+            assertEquals("CPU", paddleBackend.activeBackend)
+            assertTrue(paddleBackend.isInitialized)
+            // Back-to-back shutdown -> init must not leak native delegate
+            // state. This is the regression PR #5 protects against.
+            paddleBackend.shutdown()
+            assertEquals("NONE", paddleBackend.activeBackend)
+            paddleBackend.initialize(bundle, "CPU")
+            assertTrue(paddleBackend.isInitialized)
+        } finally {
+            paddleBackend.shutdown()
+        }
     }
 
     private fun testModelDir(): File =

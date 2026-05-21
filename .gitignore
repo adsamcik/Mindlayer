@@ -85,3 +85,5 @@ reports/
 logcat*.txt
 *.logcat
 adb-*.log
+
+.pr5-msg.txt
