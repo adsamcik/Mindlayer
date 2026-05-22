@@ -71,6 +71,7 @@ object IpcInputValidator {
     // ── Image budgets ─────────────────────────────────────────────────────
     const val MAX_IMG_DIMENSION = 8192
     const val MAX_IMG_PIXELS = 64L * 1024L * 1024L // 64 megapixels
+    const val MAX_OCR_RAW_Y_PLANE_PIXELS = 24_000_000L
 
     // ── MIME allowlists ───────────────────────────────────────────────────
     const val OCR_RAW_Y_PLANE_MIME: String = "image/raw-yuv;y-plane"
@@ -480,6 +481,9 @@ object IpcInputValidator {
             }
             require(pixels <= MAX_IMG_PIXELS) {
                 "media[$index].pixel count out of bounds: $pixels"
+            }
+            require(pixels <= MAX_OCR_RAW_Y_PLANE_PIXELS) {
+                "media[$index].raw Y-plane pixel count out of bounds: $pixels"
             }
             require(part.rowStride >= part.width) {
                 "media[$index].rowStride (${part.rowStride}) < width (${part.width})"
