@@ -134,13 +134,16 @@ This is the file you upload to Play. It is:
 > `-P*Sha256` properties for the exact files being bundled; debug builds keep
 > advisory model-hash behavior for local development.
 
-### 2.2.1 Pre-release model artefact storage
+### 2.2.1 Pre-release model artefact storage and SHA variables
 
 Model binaries are stored outside git because they are large release artefacts,
 not source files. Before a local or CI release build, retrieve the vetted
 artefacts from the project's private model artefact store and place them at the
 paths shown in the PowerShell snippet above. Compute SHA-256 over the exact
-bytes being bundled, then set these repository variables for CI release jobs:
+bytes being bundled. For PaddleOCR refreshes, the manual
+`build-paddleocr-models.yml` workflow emits an `expected_shas.txt` artifact
+whose values should match the hashes you compute after placing the release
+assets. Set these repository variables for CI release jobs:
 
 * `MODEL_SHA256`
 * `PADDLEOCR_DET_SHA256`

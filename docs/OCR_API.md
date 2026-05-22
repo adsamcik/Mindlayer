@@ -1,8 +1,9 @@
 # Multi-frame OCR / parsing API
 
-> v0.8 Phase 1. Single source of truth for the Mindlayer multi-frame
-> OCR API. Composed alongside `files/final-design.md` (session
-> workspace) which carries the implementation-locked design notes.
+> v0.8 Phase 1–4 + Wave 1. Single source of truth for the Mindlayer
+> multi-frame OCR API. The AIDL/SDK/event stream is wired; production
+> exposure remains gated by `OcrFeatureFlags.IS_PRODUCTION_READY = false`
+> until the real-device validation matrix signs off.
 
 ## TL;DR
 
@@ -11,7 +12,7 @@ val mindlayer = Mindlayer.connect(context)
 mindlayer.awaitConnected()
 
 if (!mindlayer.getCapabilities().supports(ServiceCapabilities.FEATURE_OCR_SESSION)) {
-    return  // Service hasn't shipped the engine path yet.
+    return  // OCR is still hidden by the production-readiness gate.
 }
 
 mindlayer.ocrSession(OcrProfile.Receipt) {
@@ -19,16 +20,29 @@ mindlayer.ocrSession(OcrProfile.Receipt) {
     maxFrames = 30
     frameRateLimitFps = 5
 }.use { session ->
-    // For each captured frame: presort -> push -> read ack
+    // Attach before pushing frames; otherwise the service rejects intake
+    // with STATUS_REJECTED_STREAM_NOT_ATTACHED to avoid lost events.
+    val eventsJob = launch {
+        session.events.collect { event ->
+            when (event) {
+                is OcrEvent.ResultFinalized -> render(event.fullJson)
+                is OcrEvent.Error -> showError(event.code, event.message)
+                else -> Unit
+            }
+        }
+    }
+
+    // For each captured frame: presort -> push -> read ack.
     val ack = session.pushFrame(meta)
     when (ack.status) {
         OcrFrameAck.STATUS_ACCEPTED -> { /* keep capturing */ }
         OcrFrameAck.STATUS_DROPPED_BUSY -> { /* slow down, ack.retryAfterMs */ }
         OcrFrameAck.STATUS_REJECTED_QUALITY -> { /* recapture */ }
+        OcrFrameAck.STATUS_REJECTED_STREAM_NOT_ATTACHED -> { /* attach events first */ }
         OcrFrameAck.STATUS_REJECTED_FINALIZED -> { /* session ended */ }
     }
     session.finalize()
-    // (Future) collect session.events.takeUntilFinalized().toList()
+    eventsJob.join()
 }
 ```
 
@@ -39,10 +53,10 @@ The service advertises OCR support via three flags in
 
 | Flag | Meaning |
 |---|---|
-| `FEATURE_OCR_SESSION` | The multi-frame OCR session API works (lifecycle + intake). **Not yet advertised** — flips when the engine recognition path is wired. |
-| `FEATURE_OCR_PRESORT_SERVICE_SIDE` | Service runs its own quality presort. Advertised. |
-| `FEATURE_OCR_BARCODE_ANCHOR` | ZXing barcode anchor in evidence package. Future. |
-| `FEATURE_OCR_BOUNDING_BOXES` | Per-line bounding boxes in extraction output. Future. |
+| `FEATURE_OCR_SESSION` | Multi-frame OCR sessions are callable. The code path is wired, but this flag is advertised only when the PaddleOCR engine is ready **and** `OcrFeatureFlags.IS_PRODUCTION_READY` is `true`; Wave 1 keeps it dark. |
+| `FEATURE_OCR_PRESORT_SERVICE_SIDE` | Service-side quality presort capability. The presort runs on accepted OCR frames; callers should still check the advertised flag before relying on it as a version signal. |
+| `FEATURE_OCR_BARCODE_ANCHOR` | ZXing barcode anchor in the evidence package. Advertised as a wire-shape capability. |
+| `FEATURE_OCR_BOUNDING_BOXES` | Per-line bounding boxes in extraction output. Advertised as a wire-shape capability. |
 
 `Mindlayer.ocrLimits()` returns the `OcrLimits` parcelable so callers
 can size their UI throttling:
@@ -112,8 +126,12 @@ Find a profile by integer mode via `OcrProfile.forMode(int)`.
    - `FRAME_DROPPED` — frame entered the queue but was dropped
      before engine pickup (e.g. queue depth exceeded the per-session
      backpressure budget); the Flow stays open.
-   - `RESULT_FINALIZED` — terminal event after `finalize()` drains
-     in-flight frames. Carries the fused output.
+   - `RESULT_FINALIZED` / SDK `OcrEvent.ResultFinalized` — terminal
+     event after `finalize()` drains in-flight frames. Carries the final
+     fused JSON and is followed by stream `DONE` + pipe close.
+   - `ERROR` / SDK `OcrEvent.Error` — terminal stream failure with typed
+     code and optional redacted message. Added in Wave 1 PR #98 so
+     collectors do not have to infer terminal failures from pipe closure.
 5. **Finalize** — `session.finalize()` triggers the drain. Frames
    already in flight complete; frames pushed AFTER `finalize()` are
    rejected with `STATUS_REJECTED_FINALIZED` and the wire error
@@ -189,7 +207,7 @@ ImageAnalysis.Builder()
 ```
 
 CameraX is `compileOnly` on `:sdk-camerax` so consumers bring their
-own version. The minimum tested CameraX is 1.3.
+own version. The repo currently tests against CameraX 1.6.1.
 
 Non-CameraX consumers (MediaProjection, Bitmap pipelines) use
 `OcrFrame.fromYPlane(...)` directly and skip the analyzer.
@@ -229,7 +247,18 @@ Error codes are returned as `SecurityException` with wire-prefixed
 message (`mindlayer:<code>:<human-message>`); `MindlayerException`
 parses them on the SDK side.
 
-## Implementation status (Phase 1 -> 4)
+## Current state
+
+| Surface | Current state | Gate / caveat |
+|---|---|---|
+| AIDL + SDK DSL | Implemented: create, push Y-plane / encoded / SHM frames, state, finalize, close, limits. | `FEATURE_OCR_SESSION` remains absent until production-ready. |
+| Event streaming | Implemented: `streamOcrEvents` pipe, SDK `Flow<OcrEvent>`, terminal `OcrEvent.Error`, `FRAME_DROPPED`, and `RESULT_FINALIZED`. | Attach the stream before pushing; otherwise ack `STATUS_REJECTED_STREAM_NOT_ATTACHED`. |
+| Backpressure | Implemented: `MAX_FRAME_BYTES` guard, queue-depth ack, busy/quality/finalized/oversized/stream-not-attached statuses. | Payloads above 1 MiB must use SharedMemory or be downscaled. |
+| Engine + extraction | Implemented behind the service path with CPU-only OCR accelerator selection. | OCR is CPU-locked until LiteRT/LiteRT-LM coexistence validation completes. |
+| Public capability | Code exists but is dark. | `OcrFeatureFlags.IS_PRODUCTION_READY = false`; callers must capability-check and degrade. |
+| Real-device validation | Required before production exposure. | Needs signed-off device matrix for model assets, thermal/memory behavior, and LiteRT coexistence. |
+
+## Implementation status (Phase 1–4 + Wave 1)
 
 `FEATURE_OCR_SESSION` is additionally guarded by
 `OcrFeatureFlags.IS_PRODUCTION_READY`. Phase 4 leaves the flag
@@ -241,25 +270,13 @@ until both gates flip.
 
 | Phase | Piece | Status | PR | Notes |
 |---|---|---|---|---|
-| 1 | Wire types + AIDL surface | Merged | #52 | Wire-frozen parcelables. |
-| 1 | `paddleocr_model` AAB + CI conversion | Merged | #53 | Install-time AI Pack scaffold. |
-| 1 | Model registry + frame presort + field fusion | Merged | #55 | Service-side presort. |
-| 1 | `PaddleOcrEngine` scaffold | Merged | #56 | Lazy engine lifecycle. |
-| 1 | `OcrSessionManager` + binder wiring | Merged | #57 | Session lifecycle/intake surface. |
-| 1 | SDK DSL + 5 profiles | Merged | #58 | Capability checks use `ServiceCapabilities.supports(...)`. |
-| 1 | `:sdk-camerax` optional module | Merged | #59 | CameraX helper module. |
-| 2 | LLM extraction + structured output | Merged | #69 | `OcrLlmExtractor` Strategy A reset-per-frame KV. |
-| 2 | `FEATURE_OCR_SESSION` capability flip wiring | Merged | #70 | Engine-ready gate (still product-flag gated below). |
-| 3 | Bounding boxes + barcode anchor | Merged | #72–#74 | Wire-shape features always advertised. |
-| 4 | Safety gates + dictionary sanity + transient-init retry + log redaction + CPU-only fallback | Merged | #78 (Phase 4 PR #1) | Production flag, `safeLabel` redaction on inference paths, dictionary length/encoding validation. |
-| 4 | Real frame transport (Y-plane + encoded + SHM) + per-session finalization + drain semantics + `FRAME_DROPPED` | Merged | #85 (Phase 4 PR #2) | Three transports, `MAX_FRAME_BYTES` guard, `STATUS_REJECTED_OVERSIZED`. |
-| 4 | Bilinear sampling + aspect-preserved rec preprocessing + pure-Kotlin `DbPostProcessor` (Suzuki–Abe + minAreaRect + unclip + NMS) | Merged | #87 (Phase 4 PR #3) | Algorithm correctness; numeric ICDAR2015 validation still device-gated. |
-| 4 | Shared `LiteRtAcceleratorResolver` + per-feature override | Merged | (Phase 4 PR #4) | OCR is CPU-locked under reason `OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED`. |
-| 4 | OCR end-to-end smoke (`OcrEndToEndInstrumentedTest`) | Merged | #88 | Coverage reference for the live OCR pipe. |
-| 4 | SDK Robolectric end-to-end (`OcrSdkEndToEndTest`) | Merged | #89 (Phase 4 PR #2) | Three transports + finalization drain on the SDK side. |
-| 4 | Backend test backfill + EngineCoexistence production gate + OCR_API refresh | This PR | Phase 4 PR #5 | Init-failure matrix, runner-throws, mutex, CTC blank-only, dictionary edge cases, `OcrFeatureFlagsTest`, `@assumeTrue`-gated real-asset coexistence variant. |
-| 4 | `IS_PRODUCTION_READY` → true | Future | Phase 4 PR #6 | Single-line atomic flip; gated on a signed-off device-validation matrix + first-party driver. |
-| 4 | Per-call GPU/NPU opt-in | Future | Phase 4 PR #7 | Once the process-wide accelerator lease is mature. |
+| 1 | Wire types, AIDL methods, model-pack scaffold, model registry, presort, field fusion, `PaddleOcrEngine` scaffold, session manager, SDK DSL, `:sdk-camerax` | Complete | #52–#59 | Established the frozen wire surface and client ergonomics. |
+| 2 | LLM extraction, structured output, capability flip plumbing | Complete | #69–#70 | Engine-ready gate wired, but still product-flag gated. |
+| 3 | Bounding boxes, barcode anchor, typed geometry/evidence events | Complete | #72–#74 | Wire-shape capabilities are additive and safe for old readers. |
+| 4 | Safety gates, dictionary sanity, transient-init retry, log redaction, CPU-only fallback, real frame transports, finalization drain, `FRAME_DROPPED`, preprocessing/post-processing, coexistence gate, E2E smoke | Complete | #78, #85, #87–#89 | Event streaming is live; remaining production gate is `IS_PRODUCTION_READY=false`. |
+| Wave 1 | Stream-attachment ack + terminal OCR error event | Complete | #92, #98 | `STATUS_REJECTED_STREAM_NOT_ATTACHED` prevents lost events; `OcrEvent.Error` surfaces terminal stream failures. |
+| Release flip | `IS_PRODUCTION_READY` → true | Future | — | Single-line atomic flip after real-device validation and first-party driver sign-off. |
+| Acceleration | Per-call GPU/NPU OCR opt-in | Future | — | Requires process-wide LiteRT/LiteRT-LM coexistence validation. |
 
 ### Accelerator selection (Phase 4 PR #4)
 
