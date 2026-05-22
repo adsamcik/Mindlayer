@@ -1,9 +1,15 @@
 package com.adsamcik.mindlayer.sdk
 
+import android.os.ParcelFileDescriptor
+import app.cash.turbine.test
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import com.adsamcik.mindlayer.shared.StreamEvent
 import com.adsamcik.mindlayer.shared.StreamEventType
 import com.adsamcik.mindlayer.shared.StreamHeader
 import com.adsamcik.mindlayer.shared.StreamProtocol
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -14,6 +20,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 /**
  * Pure-JVM tests for [OcrTokenStreamReader.parseFrame].
@@ -26,6 +35,8 @@ import org.junit.Test
  * expected [OcrEvent] subclass; malformed frames return null without
  * crashing the reader.
  */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [33])
 class OcrTokenStreamReaderTest {
 
     private val json = Json { encodeDefaults = true }
@@ -194,7 +205,7 @@ class OcrTokenStreamReaderTest {
         assertNull(OcrTokenStreamReader.parseFrame(json.encodeToString(StreamEvent.serializer(), event)))
     }
 
-    @Test fun `DONE and ERROR events return null (terminal handled in readStream loop)`() {
+    @Test fun `DONE event returns null (terminal handled in readStream loop)`() {
         val done = StreamEvent(
             seq = 200L,
             type = StreamEventType.DONE,
@@ -202,14 +213,88 @@ class OcrTokenStreamReaderTest {
             payload = buildJsonObject { put("finish_reason", "success") },
         )
         assertNull(OcrTokenStreamReader.parseFrame(json.encodeToString(StreamEvent.serializer(), done)))
+    }
 
+    @Test fun `ERROR event maps to OcrEvent Error`() {
         val error = StreamEvent(
             seq = 201L,
             type = StreamEventType.ERROR,
             tsMs = 0L,
-            payload = buildJsonObject { put("code", "OCR_SCHEMA_INVALID"); put("codeInt", 3007) },
+            payload = buildJsonObject {
+                put("code", "OCR_SCHEMA_INVALID")
+                put("codeInt", MindlayerErrorCode.OCR_SCHEMA_INVALID)
+                put("message", "bad schema")
+            },
         )
-        assertNull(OcrTokenStreamReader.parseFrame(json.encodeToString(StreamEvent.serializer(), error)))
+        val parsed = OcrTokenStreamReader.parseFrame(json.encodeToString(StreamEvent.serializer(), error))
+        assertTrue(parsed is OcrEvent.Error)
+        val e = parsed as OcrEvent.Error
+        assertEquals("OCR_SCHEMA_INVALID", e.code)
+        assertEquals("bad schema", e.message)
+    }
+
+    @Test fun `readStream emits ERROR then fails with typed MindlayerException`() = runTest {
+        val readEnd = framedPipe(
+            StreamHeader(protocol = StreamProtocol.OCR_V1, requestId = "ocr-1"),
+            StreamEvent(
+                seq = 1L,
+                type = StreamEventType.ERROR,
+                tsMs = 123L,
+                payload = buildJsonObject {
+                    put("code", "OCR_SCHEMA_INVALID")
+                    put("codeInt", MindlayerErrorCode.OCR_SCHEMA_INVALID)
+                    put("message", "schema invalid")
+                },
+            ),
+        )
+
+        OcrTokenStreamReader.readStream(readEnd).test {
+            val event = awaitItem()
+            assertTrue(event is OcrEvent.Error)
+            val thrown = awaitError()
+            assertTrue(thrown is MindlayerException)
+            assertEquals(MindlayerErrorCode.OCR_SCHEMA_INVALID, (thrown as MindlayerException).code)
+            assertEquals("OCR_SCHEMA_INVALID", thrown.codeName)
+        }
+    }
+
+    @Test fun `readStream terminates cleanly on DONE`() = runTest {
+        val readEnd = framedPipe(
+            StreamHeader(protocol = StreamProtocol.OCR_V1, requestId = "ocr-1"),
+            StreamEvent(
+                seq = 1L,
+                type = StreamEventType.DONE,
+                tsMs = 0L,
+                payload = buildJsonObject { put("finish_reason", "success") },
+            ),
+        )
+
+        OcrTokenStreamReader.readStream(readEnd).test {
+            awaitComplete()
+        }
+    }
+
+    @Test fun `readStream emits ResultFinalized and waits for DONE terminal`() = runTest {
+        val readEnd = framedPipe(
+            StreamHeader(protocol = StreamProtocol.OCR_V1, requestId = "ocr-1"),
+            StreamEvent(
+                seq = 1L,
+                type = StreamEventType.OCR_RESULT_FINALIZED,
+                tsMs = 0L,
+                payload = buildJsonObject { put("fullJson", """{"total":"12.99"}""") },
+            ),
+            StreamEvent(
+                seq = 2L,
+                type = StreamEventType.DONE,
+                tsMs = 0L,
+                payload = buildJsonObject { put("finish_reason", "success") },
+            ),
+        )
+
+        OcrTokenStreamReader.readStream(readEnd).test {
+            assertTrue(awaitItem() is OcrEvent.ResultFinalized)
+            awaitComplete()
+        }
     }
 
     @Test fun `ocr_field_update with bbox decodes the FloatArray`() {
@@ -315,5 +400,22 @@ class OcrTokenStreamReaderTest {
         val parsed = OcrTokenStreamReader.parseFrame(json.encodeToString(StreamEvent.serializer(), event))
         assertTrue("Non-numeric bbox entry must NOT swallow the event", parsed is OcrEvent.FieldUpdate)
         assertNull((parsed as OcrEvent.FieldUpdate).boundingBox)
+    }
+
+    private fun framedPipe(vararg frames: Any): ParcelFileDescriptor {
+        val pipe = ParcelFileDescriptor.createPipe()
+        ParcelFileDescriptor.AutoCloseOutputStream(pipe[1]).use { out ->
+            frames.forEach { frame ->
+                val text = when (frame) {
+                    is StreamHeader -> json.encodeToString(StreamHeader.serializer(), frame)
+                    is StreamEvent -> json.encodeToString(StreamEvent.serializer(), frame)
+                    else -> error("Unsupported frame $frame")
+                }
+                val bytes = text.toByteArray(Charsets.UTF_8)
+                out.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(bytes.size).array())
+                out.write(bytes)
+            }
+        }
+        return pipe[0]
     }
 }

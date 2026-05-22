@@ -13,6 +13,7 @@ import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -162,8 +163,9 @@ class ConnectionManager {
      * Returns the live binder or throws [IllegalStateException].
      */
     fun requireService(): IMindlayerService =
-        binderRef.get() ?: throw IllegalStateException(
-            "MindlayerService is not connected (state=${_state.value})",
+        binderRef.get() ?: throw MindlayerException(
+            message = "MindlayerService is not connected (state=${_state.value})",
+            code = MindlayerErrorCode.SERVICE_UNAVAILABLE,
         )
 
     /**
@@ -177,30 +179,42 @@ class ConnectionManager {
      */
     suspend fun awaitConnected(
         timeoutMs: Long = DEFAULT_CONNECT_TIMEOUT_MS,
-    ): IMindlayerService = withTimeout(timeoutMs) {
-        while (true) {
-            _state.first {
-                it == ConnectionState.CONNECTED ||
-                it == ConnectionState.REJECTED_NOT_APPROVED ||
-                it == ConnectionState.BIND_GAVE_UP
+    ): IMindlayerService = try {
+        withTimeout(timeoutMs) {
+            while (true) {
+                _state.first {
+                    it == ConnectionState.CONNECTED ||
+                    it == ConnectionState.REJECTED_NOT_APPROVED ||
+                    it == ConnectionState.BIND_GAVE_UP
+                }
+                if (_state.value == ConnectionState.REJECTED_NOT_APPROVED) {
+                    throw MindlayerException(
+                        message = "Mindlayer rejected this app — user approval required in the Mindlayer dashboard",
+                        code = MindlayerErrorCode.PERMISSION_DENIED,
+                    )
+                }
+                if (_state.value == ConnectionState.BIND_GAVE_UP) {
+                    terminalBindFailure?.let { throw it }
+                    throw MindlayerException(
+                        message = "Mindlayer service permanently unavailable after $MAX_RECONNECT_ATTEMPTS attempts; call connect() to retry",
+                        code = MindlayerErrorCode.SERVICE_UNAVAILABLE,
+                    )
+                }
+                val service = binderRef.get()
+                if (service != null) return@withTimeout service
+                // Binder invalidated between state transition and our read.
+                // State should now be RECOVERING — loop to wait for reconnect.
+                Log.w(TAG, "awaitConnected: binder invalidated after CONNECTED; retrying")
             }
-            if (_state.value == ConnectionState.REJECTED_NOT_APPROVED) {
-                throw SecurityException("Mindlayer rejected this app — user approval required in the Mindlayer dashboard")
-            }
-            if (_state.value == ConnectionState.BIND_GAVE_UP) {
-                terminalBindFailure?.let { throw it }
-                throw IllegalStateException(
-                    "Mindlayer service permanently unavailable after $MAX_RECONNECT_ATTEMPTS attempts; call connect() to retry",
-                )
-            }
-            val service = binderRef.get()
-            if (service != null) return@withTimeout service
-            // Binder invalidated between state transition and our read.
-            // State should now be RECOVERING — loop to wait for reconnect.
-            Log.w(TAG, "awaitConnected: binder invalidated after CONNECTED; retrying")
+            @Suppress("UNREACHABLE_CODE")
+            error("unreachable")
         }
-        @Suppress("UNREACHABLE_CODE")
-        error("unreachable")
+    } catch (e: TimeoutCancellationException) {
+        throw MindlayerException(
+            message = "Timed out after ${timeoutMs}ms waiting for Mindlayer service connection",
+            code = MindlayerErrorCode.CONNECT_TIMEOUT,
+            cause = e,
+        )
     }
 
     // -- Binding internals ----------------------------------------------------
@@ -331,7 +345,14 @@ class ConnectionManager {
                 _state.value = ConnectionState.BIND_GAVE_UP
                 return
             }
-            false
+            terminalBindFailure = MindlayerException(
+                message = "Android denied binding to Mindlayer service",
+                code = MindlayerErrorCode.PERMISSION_DENIED,
+                cause = e,
+            )
+            bindGaveUp = true
+            _state.value = ConnectionState.BIND_GAVE_UP
+            return
         }
 
         if (!bound) {
@@ -352,7 +373,12 @@ class ConnectionManager {
                 _state.value = ConnectionState.BIND_GAVE_UP
                 return
             }
-            _state.value = ConnectionState.DISCONNECTED
+            terminalBindFailure = MindlayerException(
+                message = "Mindlayer service unavailable; bindService returned false",
+                code = MindlayerErrorCode.SERVICE_UNAVAILABLE,
+            )
+            bindGaveUp = true
+            _state.value = ConnectionState.BIND_GAVE_UP
         }
     }
 
