@@ -10,6 +10,13 @@ val manifestFile = layout.projectDirectory.file("src/main/assets/model_integrity
 val generateModelIntegrityManifest by tasks.registering {
     group = "verification"
     description = "Writes the model_integrity.json asset from -PmodelSha256."
+    // Declare SHA/release inputs so Gradle invalidates a cached manifest
+    // when the release hash changes, matching the PaddleOCR and
+    // EmbeddingGemma asset-pack tasks.
+    inputs.property("modelSha256", modelSha256)
+    inputs.property("releaseTaskRequested", gradle.startParameter.taskNames.any {
+        it.contains("Release", ignoreCase = false) && !it.contains("UnitTest", ignoreCase = false)
+    })
     outputs.file(manifestFile)
     doLast {
         val releaseRequested = gradle.startParameter.taskNames.any {

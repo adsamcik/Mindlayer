@@ -5,9 +5,42 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "dependabot"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
 
   - package-ecosystem: "gradle"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "dependabot"
+    groups:
+      androidx-and-compose:
+        patterns:
+          - "androidx.*"
+          - "androidx.compose.*"
+      test-deps:
+        patterns:
+          - "io.mockk:*"
+          - "app.cash.turbine:*"
+          - "junit:junit"
+          - "androidx.test:*"
+      kotlin-stack:
+        patterns:
+          - "org.jetbrains.kotlin.*"
+          - "com.google.devtools.ksp*"
+          - "org.jetbrains.kotlinx:kotlinx-serialization*"
+    ignore:
+      # LiteRT-LM minor/major changes require real-device backend validation;
+      # Dependabot may still open patch-only updates automatically.
+      - dependency-name: "com.google.ai.edge.litertlm:litertlm-android"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
