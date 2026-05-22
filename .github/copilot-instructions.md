@@ -13,9 +13,9 @@ Android service app (`com.adsamcik.mindlayer.service`) that loads a single LLM (
 
 ## Tech stack
 
-- Kotlin 2.3.0 / JDK 17 / AGP 8.9.3 / `compileSdk 36`, `minSdk 26`
-- Modules: `:app` (service+dashboard), `:sdk` (client SDK), `:shared` (wire types), `:gemma_model` (Play AI Pack), `:embeddinggemma_model` (EmbeddingGemma AI Pack)
-- LiteRT-LM 0.11.0 + base LiteRT 2.1.5 for EmbeddingGemma, Jetpack Compose (BOM 2025.04.01), Room 2.7.1 + SQLCipher 4.6.1
+- Kotlin 2.3.21 / JDK 17 bytecode (Gradle tests on JDK 21) / AGP 9.2.1 / `compileSdk 36`, `minSdk 26`
+- Modules: `:app` (service+dashboard), `:sdk` (client SDK), `:sdk-camerax` (optional CameraX adapter), `:shared` (wire types), `:gemma_model`, `:embeddinggemma_model`, `:paddleocr_model` (install-time AI packs)
+- LiteRT-LM 0.12.0 + base LiteRT 2.1.5 for EmbeddingGemma, Jetpack Compose (BOM 2026.04.01), Room 2.8.4 + SQLCipher 4.15.0
 - Tests: JUnit 4, MockK, Robolectric (sdk=33), Turbine, kotlinx-coroutines-test
 
 ## Hard rules
@@ -80,7 +80,7 @@ The PR template asks for explicit confirmation that AIDL changes are mirrored. D
 ./gradlew :app:assembleDebug
 ```
 
-⚠️ CI's "Set up JDK 17" step actually installs **Java 21** by design — see `.github/context/DEVELOPMENT.md#%EF%B8%8F-the-java-21-test-runtime-gotcha`. Don't "fix" it.
+⚠️ CI's `Set up JDK 21 (compile target 17)` steps install **Java 21** by design — see `.github/context/DEVELOPMENT.md#%EF%B8%8F-the-java-21-test-runtime-gotcha`. Don't "fix" it.
 
 **Commits use Conventional Commits**: `feat(scope):`, `fix:`, `ci:`, `test:`, `docs:`, `refactor:`, `chore(release):`. Keep them atomic, run tests before committing, and include this trailer for AI-authored commits:
 
