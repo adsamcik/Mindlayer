@@ -18,6 +18,7 @@ import com.adsamcik.mindlayer.SessionInfo
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -79,6 +80,8 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     companion object {
         private const val TAG = "SessionManager"
         private const val INIT_RETRY_AFTER_MS: Long = 200L
+        private const val SESSION_INIT_AWAIT_TIMEOUT_MS: Long =
+            EngineManager.DEFAULT_AWAIT_READY_TIMEOUT_MS
 
         const val MAX_SYSTEM_PROMPT_CHARS = 64 * 1024
         const val MAX_TOOLS_JSON_CHARS = 64 * 1024
@@ -329,9 +332,14 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             // first caller until EngineManager reports Ready or Failed. This
             // replaces the old fast-fail/retry loop for cold createSession.
             ensureInitStarted(config.backend, effectiveMaxTokens)
-            when (val state = runBlocking { engineManager.awaitReady() }) {
+            when (val state = runBlocking { engineManager.awaitReady(SESSION_INIT_AWAIT_TIMEOUT_MS) }) {
                 is EngineState.Ready -> Unit
                 is EngineState.Failed -> {
+                    if (state.cause.isSyntheticInitTimeout()) {
+                        throw EngineNotReadyException(
+                            retryAfterMs = INIT_RETRY_AFTER_MS,
+                        )
+                    }
                     runBlocking { initJob.get()?.join() }
                     throw lastInitError.get()?.throwable
                         ?: IllegalStateException("Engine init failed: ${state.cause}")
@@ -986,6 +994,9 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         null -> 60_000L
     }
 
+    private fun InitFailure.isSyntheticInitTimeout(): Boolean =
+        this is InitFailure.NativeError && safeLabel == "init timeout"
+
     /**
      * F-018: idempotently kick off a background engine init. If a job is
      * already in flight, do nothing. The CAS race-handler guarantees that
@@ -1006,6 +1017,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
                 // between attempts) can serve sessions normally.
                 lastInitError.set(null)
             } catch (t: Throwable) {
+                if (t is CancellationException) throw t
                 // H-4/H-E1: cache every terminal init failure variant with
                 // a per-category TTL so callers see a deterministic typed
                 // error instead of looping on ENGINE_INITIALIZING — and so

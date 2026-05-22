@@ -6,6 +6,7 @@ import com.adsamcik.mindlayer.service.logging.safeLabel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -15,6 +16,11 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+
+interface ForegroundTracker {
+    fun enterForeground()
+    fun exitForeground()
+}
 
 /**
  * Per-session recognition dispatcher.
@@ -64,6 +70,7 @@ class OcrRecognitionDispatcher(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher),
     private val barcodeDetector: BarcodeAnchorDetector? = BarcodeAnchorDetector(),
     private val llmExtractor: OcrLlmExtractor = NoOpOcrLlmExtractor(),
+    private val foregroundTracker: ForegroundTracker? = null,
 ) {
 
     /** Per-session inflight jobs + per-session fusion accumulator. */
@@ -122,6 +129,8 @@ class OcrRecognitionDispatcher(
     ): Job {
         val state = perSession.computeIfAbsent(sessionId) { SessionState() }
         val job = scope.launch(start = CoroutineStart.LAZY) {
+            foregroundTracker?.enterForeground()
+            try {
             withWriterLock(writerMutex) {
                 writer?.runCatching { writeFrameProcessing(frameId) }
             }
@@ -129,6 +138,7 @@ class OcrRecognitionDispatcher(
             val output = try {
                 engine.recognise(yPlane, width, height, config)
             } catch (t: Throwable) {
+                if (t is CancellationException) return@launch
                 MindlayerLog.w(
                     TAG,
                     "OCR recognise failed: ${t.safeLabel()}, frameId=$frameId",
@@ -293,6 +303,9 @@ class OcrRecognitionDispatcher(
                 }
             }
             }
+            } finally {
+                foregroundTracker?.exitForeground()
+            }
         }
         state.activeJobs.add(job)
         job.invokeOnCompletion { state.activeJobs.remove(job) }
@@ -342,6 +355,14 @@ class OcrRecognitionDispatcher(
             child.cancelAndJoin()
         }
         perSession.clear()
+    }
+
+    fun cancelAllForMemoryPressure() {
+        scope.coroutineContext[Job]?.children?.toList()?.forEach { child ->
+            child.cancel()
+        }
+        perSession.clear()
+        extractionContexts.clear()
     }
 
     /** Tear down everything. Idempotent. */
