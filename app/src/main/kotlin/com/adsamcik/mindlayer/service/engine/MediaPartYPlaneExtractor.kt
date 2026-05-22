@@ -59,7 +59,7 @@ import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 object MediaPartYPlaneExtractor {
 
     /** Hard cap on per-frame Y-plane size — guards against pixel-bomb decodes. */
-    const val MAX_Y_PIXELS: Int = 24 * 1024 * 1024 // 24 megapixels (e.g. 4k x 6k)
+    const val MAX_Y_PIXELS: Int = 24_000_000 // 24 megapixels
 
     /** Decoded Y-plane + truthy dimensions. */
     data class ExtractedYFrame(
@@ -165,6 +165,16 @@ object MediaPartYPlaneExtractor {
         if (width <= 0 || height <= 0 || rowStride < width) {
             try { part.source.close() } catch (_: Throwable) {}
             throw wireError("Invalid raw Y-plane layout")
+        }
+        val pixels = try {
+            Math.multiplyExact(width.toLong(), height.toLong())
+        } catch (_: ArithmeticException) {
+            try { part.source.close() } catch (_: Throwable) {}
+            throw wireError("Raw Y-plane dimensions overflow")
+        }
+        if (pixels > MAX_Y_PIXELS) {
+            try { part.source.close() } catch (_: Throwable) {}
+            throw wireError("Raw Y-plane $pixels px > MAX_Y_PIXELS $MAX_Y_PIXELS")
         }
         val minimumBytes = if (height == 1) width.toLong() else rowStride.toLong() * (height - 1).toLong() + width.toLong()
         if (part.payloadBytes < minimumBytes || part.payloadBytes > Int.MAX_VALUE) {

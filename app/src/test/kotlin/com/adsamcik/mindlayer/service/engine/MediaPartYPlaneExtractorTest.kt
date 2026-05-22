@@ -2,7 +2,14 @@ package com.adsamcik.mindlayer.service.engine
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.os.ParcelFileDescriptor
+import com.adsamcik.mindlayer.MediaPart
+import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
+import com.adsamcik.mindlayer.service.security.IpcInputValidator
+import io.mockk.mockk
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -125,7 +132,32 @@ class MediaPartYPlaneExtractorTest {
         // We don't actually allocate a 24 megapixel bitmap in tests (that
         // would blow up Robolectric's heap); we just pin the constant so a
         // future tuning pass can't silently raise the cap.
-        assertEquals(24 * 1024 * 1024, MediaPartYPlaneExtractor.MAX_Y_PIXELS)
+        assertEquals(24_000_000, MediaPartYPlaneExtractor.MAX_Y_PIXELS)
+    }
+
+    @Test fun `extractY rejects oversized raw Y-plane before allocation and closes source`() {
+        val pipe = ParcelFileDescriptor.createPipe()
+        val source = pipe[0]
+        try {
+            val part = MediaPart(
+                requestId = "ocr-raw",
+                kind = MediaPart.KIND_IMAGE,
+                mimeType = IpcInputValidator.OCR_RAW_Y_PLANE_MIME,
+                source = source,
+                isSharedMemory = false,
+                payloadBytes = 32_000_000L,
+                width = 8_000,
+                height = 4_000,
+                rowStride = 8_000,
+            )
+
+            assertThrows(SecurityException::class.java) {
+                MediaPartYPlaneExtractor.extractY(part, mockk<SharedMemoryPool>(relaxed = true), "ocr:1:test")
+            }
+            assertFalse(source.fileDescriptor.valid())
+        } finally {
+            runCatching { pipe[1].close() }
+        }
     }
 
     @Test fun `ExtractedYFrame validates dimensions match yPlane size`() {
