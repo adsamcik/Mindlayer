@@ -10,8 +10,8 @@
 
 Mindlayer is **first-party-only**:
 
-- `<permission android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE" android:protectionLevel="signature" />` (`AndroidManifest.xml`).
-- Only apps signed with the same key as the service can bind.
+- `<permission android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE" android:protectionLevel="signature|knownSigner" />` (`AndroidManifest.xml`).
+- Same-key apps can bind via `signature`; Android 12+ first-party apps signed by known registered certs can bind via `knownSigner`.
 - The user-approved allowlist (`AllowlistStore`) gives a second gate even for co-signed apps.
 - Per-UID rate limit is generous (60 RPM, 4 concurrent).
 - `IpcInputValidator` byte budgets are tuned for trusted callers (256 KB tools JSON, 100 MB media payload, etc.).
@@ -21,7 +21,7 @@ Mindlayer is **first-party-only**:
 
 ### 1. The `BIND_ML_SERVICE` permission
 
-The `signature` protection level is the wrong fence for third-party. Two paths:
+The current `signature|knownSigner` protection level is the wrong fence for third-party. Two paths:
 
 - **Drop to `normal`** — any installed app can bind. Combine with the existing dashboard-approval flow as the actual gate.
 - **Custom permission group** — let the user grant "AI inference" as a runtime permission in Settings. Heavier UX, more granular.
