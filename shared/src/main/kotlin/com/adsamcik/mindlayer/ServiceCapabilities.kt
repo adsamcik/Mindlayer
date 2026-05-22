@@ -33,9 +33,10 @@ import kotlinx.parcelize.Parcelize
  * caller's `AllowlistEntry.trustTier`. Self-UID dashboard always sees
  * effectively-infinite quotas (signalled by [Int.MAX_VALUE] / [Long.MAX_VALUE]).
  *
- * @property schemaVersion Wire-stable schema version. Currently `1`. Bumped
- *   only when the parcelable layout itself changes (which would also
- *   require a new method per AIDL stability rules).
+ * @property schemaVersion Wire-stable schema version. Currently `2` because
+ *   the embedding limit fields were appended during the pre-1.0 compatibility
+ *   window. Future layout changes require a v2 parcelable or new method per
+ *   AIDL stability rules.
  * @property apiVersion Logical API version. Bumped whenever the AIDL
  *   surface gains a method — old SDKs use this to gate optional behavior.
  * @property supportedFeatures Stable string identifiers for available
@@ -285,4 +286,3 @@ data class ServiceCapabilities(
         fun v1Baseline(): ServiceCapabilities = v0Baseline().copy(schemaVersion = 1)
     }
 }
-

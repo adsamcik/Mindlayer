@@ -3,7 +3,7 @@
 > **Status: unverified prototype risk.** Last updated: 2026-05-18.
 >
 > The Mindlayer service loads **two distinct LiteRT-family runtimes**
-> in the same Android process: ``com.google.ai.edge.litertlm:litertlm-android:0.11.0``
+> in the same Android process: ``com.google.ai.edge.litertlm:litertlm-android:0.12.0``
 > for the Gemma chat path, and ``com.google.ai.edge.litert:litert:2.1.5``
 > for the embedding (EmbeddingGemma) and OCR (PaddleOCR PP-OCRv5
 > mobile) paths. No confirmed incompatibility is known, but
@@ -18,8 +18,8 @@
 - **LiteRT 2.1.5** (`com.google.ai.edge.litert:litert:2.1.5`,
   published 2026-05-15) — Maven dependencies: Android lifecycle,
   AI delivery, Guava, coroutines-guava.
-- **LiteRT-LM 0.11.0** (`com.google.ai.edge.litertlm:litertlm-android:0.11.0`,
-  published 2026-05-04) — Maven dependencies: Gson, Kotlin
+- **LiteRT-LM 0.12.0** (`com.google.ai.edge.litertlm:litertlm-android:0.12.0`)
+  — Maven dependencies: Gson, Kotlin
   reflection, coroutines-android.
 
 Their dependency lists are disjoint, but that does **not** prove
@@ -37,7 +37,7 @@ loading still works, but GPU/NPU acceleration runs through
 both use `CompiledModel` for accelerated inference.
 
 ### LiteRT-LM has its own backend surface
-`LiteRT-LM` 0.11.0 exposes `Backend.CPU()`, `Backend.GPU()`,
+`LiteRT-LM` 0.12.0 exposes `Backend.CPU()`, `Backend.GPU()`,
 `Backend.NPU(...)` in its Kotlin API. It also requires Android
 manifest entries declaring native libraries such as
 `libvndksupport.so` and `libOpenCL.so`, and may require passing
@@ -57,7 +57,7 @@ have to do before relying on coexistence:
 |---|---|---|
 | 1 | [LiteRT #5264](https://github.com/google-ai-edge/LiteRT/issues/5264) | Multiple GPU `CompiledModel` instances in the same Android process fail when the first model remains active. Workaround: close the first model, use CPU for one model, or restart the app process. |
 | 2 | [LiteRT-LM #2211](https://github.com/google-ai-edge/LiteRT-LM/issues/2211) | GPU samplers `dlopen` fail for AAR consumers — unresolved `LiteRtCreateEnvironment`, attributed to Android classloader linker namespaces and `libLiteRt.so` not loaded into the expected namespace. |
-| 3 | [LiteRT-LM #2292](https://github.com/google-ai-edge/LiteRT-LM/issues/2292) | LiteRT-LM 0.11.0 `Backend.GPU()` initialisation fails on Samsung S24 Ultra (Adreno 750) with OpenCL discovery problems and OpenGL fallback hitting `CreateSharedMemoryManager is not implemented`. `libLiteRtQnnAccelerator.so` not bundled in 0.11.0. |
+| 3 | [LiteRT-LM #2292](https://github.com/google-ai-edge/LiteRT-LM/issues/2292) | LiteRT-LM `Backend.GPU()` initialisation failed on Samsung S24 Ultra (Adreno 750) with OpenCL discovery problems and OpenGL fallback hitting `CreateSharedMemoryManager is not implemented`. Treat as historical evidence that accelerator setup can vary by release/device. |
 
 Issue #5264 is the closest analogue to what we're doing: it shows
 the GPU delegate is sensitive to multiple-models-in-same-process
@@ -68,10 +68,10 @@ strictly more complex.
 
 | Component | Runtime | Backend usage | Status |
 |---|---|---|---|
-| Gemma chat | LiteRT-LM 0.11.0 | NPU → GPU → CPU chain in `EngineManager` | Production |
+| Gemma chat | LiteRT-LM 0.12.0 | NPU → GPU → CPU chain in `EngineManager` | Production |
 | EmbeddingGemma | Base LiteRT 2.1.5 | GPU/CPU via `CompiledModel` (`LiteRtEmbeddingBackend`) | Scaffold — verify-on-device markers |
 | PaddleOCR PP-OCRv5 | Base LiteRT 2.1.5 | CPU-only via `LiteRtAcceleratorResolver` until coexistence validation; `CompiledModel` path remains base LiteRT 2.1.5 | Prototype — OCR acceleration locked off |
-| Chat + embeddings + OCR together | LiteRT-LM 0.11.0 + base LiteRT 2.1.5 (embeddings) + base LiteRT 2.1.5 (OCR) | Chat owns LiteRT-LM backend chain; embeddings resolve through the shared `LiteRtAcceleratorResolver`; OCR resolves CPU-only via the same resolver | Three-stack Phase 4 validation matrix |
+| Chat + embeddings + OCR together | LiteRT-LM 0.12.0 + base LiteRT 2.1.5 (embeddings) + base LiteRT 2.1.5 (OCR) | Chat owns LiteRT-LM backend chain; embeddings resolve through the shared `LiteRtAcceleratorResolver`; OCR resolves CPU-only via the same resolver | Three-stack Phase 4 validation matrix |
 
 All three stacks share the service process. The OCR path is the
 **newest** and so the highest-risk for surfacing coexistence
@@ -84,7 +84,7 @@ active simultaneously.
 Copy this into PR bodies + ADRs that touch the inline LiteRT path:
 
 > **Unverified same-process coexistence risk:** Base LiteRT 2.1.5
-> using GPU/NPU acceleration and LiteRT-LM 0.11.0 have not yet
+> using GPU/NPU acceleration and LiteRT-LM 0.12.0 have not yet
 > been validated together in one Android process. No confirmed
 > incompatibility is known, but both stacks may interact through
 > shared LiteRT runtime components, accelerator delegates, native
@@ -162,7 +162,7 @@ LiteRT issue #5264 is directly relevant to every site that calls `CompiledModel.
 ## References
 
 - [`com.google.ai.edge.litert:litert:2.1.5` on Maven Central](https://mvnrepository.com/artifact/com.google.ai.edge.litert/litert/2.1.5)
-- [`com.google.ai.edge.litertlm:litertlm-android:0.11.0` on Maven Central](https://mvnrepository.com/artifact/com.google.ai.edge.litertlm/litertlm-android/0.11.0)
+- [`com.google.ai.edge.litertlm:litertlm-android:0.12.0` on Maven Central](https://mvnrepository.com/artifact/com.google.ai.edge.litertlm/litertlm-android/0.12.0)
 - [LiteRT migration docs (Google AI for Developers)](https://ai.google.dev/edge/litert/migration) — V1 vs V2 + Interpreter vs CompiledModel split.
 - [LiteRT-LM Kotlin getting-started](https://github.com/google-ai-edge/LiteRT-LM/blob/main/docs/api/kotlin/getting_started.md) — Backend API + native-library manifest requirements.
 - [LiteRT issue #5264](https://github.com/google-ai-edge/LiteRT/issues/5264) — same-process GPU model coexistence within base LiteRT.
