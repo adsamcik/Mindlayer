@@ -604,16 +604,27 @@ class EngineManager(
      * * If `null`, the default chain is GPU → CPU.
      */
     private fun resolveBackendChain(preferred: String?): List<Backend> {
-        if (preferred != null) {
-            return when (preferred.uppercase()) {
-                "NPU" -> buildBackendChain(includeNpu = true)
-                "GPU" -> listOf(Backend.GPU(), Backend.CPU())
-                "CPU" -> listOf(Backend.CPU())
-                else  -> buildBackendChain(includeNpu = false)
-            }
+        val decision = LiteRtAcceleratorResolver.resolveBackend(
+            requested = preferred,
+            featureName = "chat",
+            nativeLibraryDir = context.applicationInfo.nativeLibraryDir,
+        )
+        logRepository?.logBackendDecision(
+            featureName = "chat",
+            backend = decision.backend,
+            reason = decision.reason,
+            attempted = decision.attempted,
+        )
+        return when (decision.backend) {
+            "NPU" -> listOf(
+                Backend.NPU(nativeLibraryDir = context.applicationInfo.nativeLibraryDir),
+                Backend.GPU(),
+                Backend.CPU(),
+            )
+            "GPU" -> listOf(Backend.GPU(), Backend.CPU())
+            "CPU" -> listOf(Backend.CPU())
+            else -> listOf(Backend.GPU(), Backend.CPU())
         }
-        // Default: GPU → CPU (NPU only when explicitly requested)
-        return buildBackendChain(includeNpu = false)
     }
 
     private fun buildBackendChain(includeNpu: Boolean): List<Backend> {
@@ -631,10 +642,9 @@ class EngineManager(
     }
 
     /**
-     * Heuristic: NPU is *likely* supported when
-     *  1. API ≥ 31 (required for `Build.SOC_MODEL`)
-     *  2. `SOC_MODEL` is on the allowlist
-     *  3. Vendor runtime native libs are bundled in the APK
+     * Legacy test-visible heuristic mirrored by [LiteRtAcceleratorResolver].
+     * Production backend selection goes through the shared resolver so chat,
+     * embeddings, and OCR expose the same downgrade-decision surface.
      */
     private fun isNpuLikelySupported(): Boolean {
         if (Build.VERSION.SDK_INT < 31) return false
@@ -646,13 +656,12 @@ class EngineManager(
         val socKnown = soc in QUALCOMM_NPU_SOCS || soc in MEDIATEK_NPU_SOCS
         if (!socKnown) return false
 
-        // Verify vendor runtime libs are actually present
         val libDir = File(context.applicationInfo.nativeLibraryDir ?: return false)
         val libs = libDir.list()?.toSet().orEmpty()
         val hasQualcomm = libs.any { it.startsWith("libQnn") }
         val hasMediaTek = libs.any {
             it.contains("mediatek", ignoreCase = true) ||
-            it.contains("dispatch", ignoreCase = true)
+                it.contains("dispatch", ignoreCase = true)
         }
         return hasQualcomm || hasMediaTek
     }

@@ -300,7 +300,11 @@ class OcrSessionManagerTest {
 
     @Test fun `rate-limit window slides after 60 seconds`() {
         var ts = 1000L
-        val m = mgr(lim = limits(maxFramesPerMinute = 1), clockNow = { ts })
+        val m = mgr(
+            lim = limits(maxFramesPerMinute = 1, maxDurationMs = Long.MAX_VALUE),
+            clockNow = { ts },
+            idleTimeoutMs = Long.MAX_VALUE,
+        )
         val sid = m.createSession(100, config())
         m.pushFrame(100, sid, meta(1L), textLikeFrame(seed = 1), 64, 64)
         ts = 70_000L // 70 seconds later
@@ -395,6 +399,18 @@ class OcrSessionManagerTest {
         val sid = m.createSession(100, config())
         ts = 2_000L
         m.createSession(100, config())
+        assertFalse(m.isOwner(100, sid))
+    }
+
+    @Test fun `idle sessions are reaped on pushFrame without new createSession`() {
+        var ts = 0L
+        val m = mgr(clockNow = { ts }, idleTimeoutMs = 1_000L)
+        val sid = m.createSession(100, config())
+        ts = 2_000L
+
+        assertThrows(IllegalStateException::class.java) {
+            m.pushFrame(100, sid, meta(1L), textLikeFrame(seed = 1), 64, 64)
+        }
         assertFalse(m.isOwner(100, sid))
     }
 
