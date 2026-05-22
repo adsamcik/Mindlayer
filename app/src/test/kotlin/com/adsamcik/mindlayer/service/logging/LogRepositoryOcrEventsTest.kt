@@ -57,7 +57,7 @@ class LogRepositoryOcrEventsTest {
         repo.logOcrBackendReady(backend = "CPU", bundleId = "paddleocr", durationMs = 12)
         advanceUntilIdle()
         val entry = dao.getRecent(10).single()
-        assertEquals(LogEvent.OCR_BACKEND_READY, entry.event)
+        assertEquals(LogEvent.OCR_BACKEND_READY.key, entry.event)
         assertEquals("CPU", entry.backend)
         assertEquals(12L, entry.durationMs)
         val extra = Json.parseToJsonElement(entry.extraJson!!).jsonObject
@@ -71,7 +71,7 @@ class LogRepositoryOcrEventsTest {
         repo.logOcrBackendShutdown(backend = "CPU", bundleId = "paddleocr", durationMs = 3)
         advanceUntilIdle()
         val entry = dao.getRecent(10).single()
-        assertEquals(LogEvent.OCR_BACKEND_SHUTDOWN, entry.event)
+        assertEquals(LogEvent.OCR_BACKEND_SHUTDOWN.key, entry.event)
         assertEquals("CPU", entry.backend)
         assertEquals(3L, entry.durationMs)
         assertFalse(entry.extraJson!!.contains("detectionPath"))

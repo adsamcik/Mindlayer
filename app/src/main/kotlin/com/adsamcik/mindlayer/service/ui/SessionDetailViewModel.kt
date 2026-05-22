@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -48,7 +49,7 @@ class SessionDetailViewModel(application: Application) : AndroidViewModel(applic
                 val newestFirstEntries = entries.sortedByDescending { it.timestampMs }
                 val firstEventMs = entries.minOf { it.timestampMs }
                 val lastEventMs = entries.maxOf { it.timestampMs }
-                val completedInferences = entries.filter { it.event == LogEvent.REQUEST_COMPLETE }
+                val completedInferences = entries.filter { it.event == LogEvent.REQUEST_COMPLETE.key }
                 val averageTokensPerSecond = completedInferences
                     .mapNotNull { it.tokensPerSec }
                     .takeIf { it.isNotEmpty() }
@@ -142,7 +143,7 @@ internal fun buildEventDetail(entry: LogEntry): String {
         entry.memoryAvailableMb?.let { add("${formatWholeNumber(it)}MB free") }
         entry.memoryUsedMb?.let { add("${formatWholeNumber(it)}MB used") }
     }
-    val safeExtra = formatSafeExtraJsonForUi(entry.extraJson)
+    val safeExtra = formatSafeExtraJsonForUi(entry.event, entry.extraJson)
     return when {
         parts.isNotEmpty() && safeExtra != null -> (parts + safeExtra).joinToString(" • ")
         parts.isNotEmpty() -> parts.joinToString(" • ")
@@ -152,12 +153,56 @@ internal fun buildEventDetail(entry: LogEntry): String {
 }
 
 
-internal fun formatSafeExtraJsonForUi(extraJson: String?): String? {
+internal fun formatSafeExtraJsonForUi(extraJson: String?): String? =
+    formatSafeExtraJsonForUi(event = null, extraJson = extraJson)
+
+internal fun formatSafeExtraJsonForUi(event: String?, extraJson: String?): String? {
     if (extraJson.isNullOrBlank()) return null
     val json = try {
         kotlinx.serialization.json.Json.parseToJsonElement(extraJson).jsonObject
     } catch (_: Exception) {
         return null
+    }
+    when (event) {
+        LogEvent.OCR_BACKEND_READY.key,
+        LogEvent.OCR_BACKEND_SHUTDOWN.key -> {
+            val bundleId = json["bundleId"]?.jsonPrimitive?.contentOrNull
+            return listOfNotNull(bundleId?.let { "bundle=$it" })
+                .takeIf { it.isNotEmpty() }
+                ?.joinToString(" • ")
+        }
+        LogEvent.EMBEDDING_BACKEND_READY.key,
+        LogEvent.EMBEDDING_BACKEND_SHUTDOWN.key -> {
+            val modelId = json["modelId"]?.jsonPrimitive?.contentOrNull
+            return listOfNotNull(modelId?.let { "model=$it" })
+                .takeIf { it.isNotEmpty() }
+                ?.joinToString(" • ")
+        }
+        LogEvent.EMBEDDING_BATCH_COMPLETE.key -> {
+            val modelId = json["modelId"]?.jsonPrimitive?.contentOrNull
+            val batchSize = json["batchSize"]?.jsonPrimitive?.intOrNull
+            val vectorCount = json["vectorCount"]?.jsonPrimitive?.intOrNull
+            return listOfNotNull(
+                modelId?.let { "model=$it" },
+                batchSize?.let { "batch=$it" },
+                vectorCount?.let { "vectors=$it" },
+            ).takeIf { it.isNotEmpty() }?.joinToString(" • ")
+        }
+        LogEvent.BACKEND_DECISION.key -> {
+            val feature = json["feature"]?.jsonPrimitive?.contentOrNull
+            val reason = json["reason"]?.jsonPrimitive?.contentOrNull
+            val attempted = json["attempted"]?.jsonArray.orEmpty().mapNotNull { element ->
+                val obj = element.jsonObject
+                val backend = obj["backend"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                val candidateReason = obj["reason"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                "$backend:$candidateReason"
+            }.joinToString(" -> ")
+            return listOfNotNull(
+                feature?.let { "feature=$it" },
+                reason?.let { "reason=$it" },
+                attempted.takeIf { it.isNotBlank() }?.let { "attempted=$it" },
+            ).takeIf { it.isNotEmpty() }?.joinToString(" • ")
+        }
     }
     val filtered = kotlinx.serialization.json.buildJsonObject {
         json["len"]?.jsonPrimitive?.intOrNull?.let { put("len", it) }

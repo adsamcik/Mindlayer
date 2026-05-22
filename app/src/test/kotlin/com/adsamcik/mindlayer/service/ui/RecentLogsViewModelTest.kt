@@ -68,7 +68,7 @@ class RecentLogsViewModelTest {
             LogEntry(
                 timestampMs = 100L,
                 category = LogCategory.INFERENCE,
-                event = LogEvent.REQUEST_START,
+                event = LogEvent.REQUEST_START.key,
                 sessionId = sessionId,
                 backend = "GPU",
             ),
@@ -77,7 +77,7 @@ class RecentLogsViewModelTest {
             LogEntry(
                 timestampMs = 200L,
                 category = LogCategory.INFERENCE,
-                event = LogEvent.REQUEST_COMPLETE,
+                event = LogEvent.REQUEST_COMPLETE.key,
                 sessionId = sessionId,
                 backend = "GPU",
                 durationMs = 1500L,
@@ -91,7 +91,7 @@ class RecentLogsViewModelTest {
             LogEntry(
                 timestampMs = 300L,
                 category = LogCategory.ERROR,
-                event = LogEvent.REQUEST_ERROR,
+                event = LogEvent.REQUEST_ERROR.key,
                 sessionId = sessionId,
                 errorMessage = "boom",
             ),
@@ -100,7 +100,7 @@ class RecentLogsViewModelTest {
             LogEntry(
                 timestampMs = 400L,
                 category = LogCategory.SESSION,
-                event = LogEvent.SESSION_CREATED,
+                event = LogEvent.SESSION_CREATED.key,
                 sessionId = sessionId,
                 extraJson = """{"maxTokens":2048}""",
             ),
@@ -109,7 +109,7 @@ class RecentLogsViewModelTest {
             LogEntry(
                 timestampMs = 500L,
                 category = LogCategory.THERMAL,
-                event = LogEvent.BAND_CHANGE,
+                event = LogEvent.BAND_CHANGE.key,
                 thermalBand = "HOT",
                 backend = "CPU",
             ),
@@ -167,7 +167,7 @@ class RecentLogsViewModelTest {
             LogEntry(
                 timestampMs = 1L,
                 category = LogCategory.ENGINE,
-                event = LogEvent.ENGINE_INIT,
+                event = LogEvent.ENGINE_INIT.key,
                 extraJson = """{"secret":"raw-model-tool-name","len":19}""",
             ),
         )

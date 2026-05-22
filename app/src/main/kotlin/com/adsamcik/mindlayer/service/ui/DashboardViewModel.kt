@@ -299,14 +299,16 @@ class DashboardViewModel : ViewModel() {
                             gpuFailure = dao.latestGpuFallbackMessage(),
                             sampledAtMs = System.currentTimeMillis(),
                             initFailure = dao.latestInitFailure()?.let(::parseInitFailureLogRow),
-                            acceleratorDecision = dao.latestBackendDecision()?.let(::parseBackendDecisionLogRow),
+                            acceleratorDecisions = BACKEND_DECISION_FEATURES.mapNotNull { feature ->
+                                dao.latestBackendDecisionByFeature(feature)?.let(::parseBackendDecisionLogRow)
+                            },
                         )
                     }
                     val recent = sample.recent
                     val gpuFailure = sample.gpuFailure
                     val now = sample.sampledAtMs
                     val initFailure = sample.initFailure
-                    val acceleratorDecision = sample.acceleratorDecision
+                    val acceleratorDecisions = sample.acceleratorDecisions
                     _uiState.update { current ->
                         current.copy(
                             isLogsLoading = false,
@@ -314,7 +316,8 @@ class DashboardViewModel : ViewModel() {
                             logsErrorMessage = null,
                             gpuFailureReason = gpuFailure,
                             lastInitFailure = initFailure,
-                            acceleratorDecision = acceleratorDecision,
+                            acceleratorDecision = acceleratorDecisions.firstOrNull(),
+                            acceleratorDecisions = acceleratorDecisions,
                             recentLogs = recent.map { entry ->
                                 LogUiItem(
                                     timestampLabel = formatRelativeTimestamp(entry.timestampMs, now),
@@ -346,7 +349,7 @@ class DashboardViewModel : ViewModel() {
         entry.tokensPerSec?.let { add("speed=${"%.1f".format(it)} tok/s") }
         entry.thermalBand?.let { add("band=$it") }
         entry.errorMessage?.let { add("error=$it") }
-        entry.extraJson?.takeIf { entry.event == com.adsamcik.mindlayer.service.logging.LogEvent.BACKEND_DECISION }?.let { extra ->
+        entry.extraJson?.takeIf { entry.event == com.adsamcik.mindlayer.service.logging.LogEvent.BACKEND_DECISION.key }?.let { extra ->
             parseBackendDecisionLogRow(entry)?.let { decision ->
                 add("reason=${decision.reason}")
             }
@@ -619,12 +622,14 @@ class DashboardViewModel : ViewModel() {
         val gpuFailure: String?,
         val sampledAtMs: Long,
         val initFailure: com.adsamcik.mindlayer.service.engine.InitFailure? = null,
-        val acceleratorDecision: AcceleratorDecisionUi? = null,
+        val acceleratorDecisions: List<AcceleratorDecisionUi> = emptyList(),
     )
 }
 
+private val BACKEND_DECISION_FEATURES = listOf("chat", "embeddings", "ocr")
+
 /**
- * F-077: parse a `LogEvent.INIT_FAILURE_CATEGORIZED` row back into the
+ * F-077: parse a `LogEvent.INIT_FAILURE_CATEGORIZED.key` row back into the
  * typed [com.adsamcik.mindlayer.service.engine.InitFailure] sealed
  * class. Returns `null` for rows that have no `failureCategory` field
  * in `extraJson`, an unknown category name, or malformed JSON — the
