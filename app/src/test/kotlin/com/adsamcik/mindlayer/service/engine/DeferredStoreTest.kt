@@ -55,7 +55,7 @@ class DeferredStoreTest {
     ) = DeferredStore(
         dao = dao,
         clock = clock,
-        ttlMs = ttlMs,
+        retentionPolicyMs = ttlMs,
         maxRunningPerUid = maxRunning,
         maxCompletedPendingPerUid = maxPending,
         maxResultBytesPerUid = maxBytesUid,
@@ -166,6 +166,19 @@ class DeferredStoreTest {
         // And the expired row was cleaned up so the next fetch sees NOT_FOUND.
         val r2 = s.fetch(uid = 1, requestId = "a")
         assertEquals(DeferredResult.NOT_FOUND_OR_NOT_OWNED, r2.status)
+    }
+
+    @Test
+    fun `pruneExpired removes rows past retention policy`() = runTest {
+        val s = store(ttlMs = 1_000L)
+        now = 1_000L
+        s.create(uid = 1, requestId = "expired", meta = meta("expired"), mediaCount = 0)
+        s.create(uid = 1, requestId = "live", meta = meta("live"), mediaCount = 0)
+
+        now = 2_001L
+        assertEquals(2, s.pruneExpired())
+        assertNull(dao.snapshot("expired"))
+        assertNull(dao.snapshot("live"))
     }
 
     // ── cancel() ───────────────────────────────────────────────────────────

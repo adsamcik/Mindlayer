@@ -33,7 +33,13 @@ sealed class EmbeddingFetchOutcome {
 class DeferredStore(
     private val dao: DeferredDao,
     private val clock: () -> Long = { System.currentTimeMillis() },
-    private val ttlMs: Long = DEFAULT_TTL_MS,
+    /**
+     * Deferred chat text rows and encrypted embedding blobs are retained for
+     * this long after creation/completion unless the caller fetches and
+     * acknowledges/cancels earlier. The default is the documented 24-hour
+     * service-side persistence window.
+     */
+    private val retentionPolicyMs: Long = DEFAULT_TTL_MS,
     private val maxRunningPerUid: Int = DEFAULT_MAX_RUNNING_PER_UID,
     private val maxCompletedPendingPerUid: Int = DEFAULT_MAX_COMPLETED_PENDING_PER_UID,
     private val maxResultBytesPerUid: Long = DEFAULT_MAX_RESULT_BYTES_PER_UID,
@@ -81,7 +87,7 @@ class DeferredStore(
             statusCode = DeferredResult.STILL_RUNNING,
             createdAtMs = now,
             completedAtMs = null,
-            expiresAtMs = now + ttlMs,
+            expiresAtMs = now + retentionPolicyMs,
             fetchedAtMs = null,
             truncated = false,
             kind = DeferredEntity.KIND_CHAT,
@@ -107,7 +113,7 @@ class DeferredStore(
             statusCode = DeferredResult.STILL_RUNNING,
             createdAtMs = now,
             completedAtMs = null,
-            expiresAtMs = now + ttlMs,
+            expiresAtMs = now + retentionPolicyMs,
             fetchedAtMs = null,
             truncated = false,
             kind = DeferredEntity.KIND_EMBEDDING,
@@ -167,7 +173,7 @@ class DeferredStore(
             errorCodeInt = errorCode,
             errorCodeName = errorName,
             completedAtMs = now,
-            expiresAtMs = now + ttlMs,
+            expiresAtMs = now + retentionPolicyMs,
             truncated = truncated,
             blobPath = blobPath,
             blobBytes = blobBytes,
@@ -272,7 +278,7 @@ class DeferredStore(
             return com.adsamcik.mindlayer.CancelResult.ALREADY_FINISHED
         }
         val now = clock()
-        dao.cancelRunning(requestId, uid, now, now + ttlMs)
+        dao.cancelRunning(requestId, uid, now, now + retentionPolicyMs)
         return com.adsamcik.mindlayer.CancelResult.CANCELLED
     }
 
@@ -294,7 +300,7 @@ class DeferredStore(
         return dao.failRunningOnInit(
             failed = DeferredResult.FAILED,
             nowMs = now,
-            expiresAtMs = now + ttlMs,
+            expiresAtMs = now + retentionPolicyMs,
             errorCode = MindlayerErrorCode.INTERNAL,
             errorName = MindlayerErrorCode.nameOf(MindlayerErrorCode.INTERNAL),
         )
