@@ -40,6 +40,8 @@ Mindlayer runs as a headless Android service that loads the Gemma 4 model once a
 
 ```kotlin
 val mindlayer = Mindlayer.connect(context)
+val caps = mindlayer.getCapabilities()
+require(caps.supports(ServiceCapabilities.FEATURE_PIPE_STREAM_V1))
 val sessionId = mindlayer.createSession {
     systemPrompt("You are a helpful assistant")
 }
@@ -89,9 +91,22 @@ adb shell am start -n com.adsamcik.mindlayer.service/.ui.MainActivity
 | Module | Purpose |
 |--------|---------|
 | `app/` | Service app — engine, IPC, logging, dashboard UI |
-| `sdk/` | Client SDK — connect, chat, media transfer, history, recovery |
+| `sdk/` | Client SDK — connect, chat, media transfer, history, recovery, embeddings, OCR |
+| `sdk-camerax/` | Optional CameraX OCR adapter (`OcrImageAnalyzer`) |
 | `shared/` | Shared Parcelable types + streaming protocol |
-| `gemma_model/` | Play for On-device AI pack (install-time delivery) |
+| `gemma_model/` | Play for On-device AI pack for Gemma 4 E2B |
+| `embeddinggemma_model/` | Play for On-device AI pack for EmbeddingGemma |
+| `paddleocr_model/` | Play for On-device AI pack for PaddleOCR PP-OCRv5 |
+
+## Capability matrix
+
+| Capability | API | Current gate |
+|---|---|---|
+| Chat / multimodal inference | `chat`, `chatWithImage`, `chatWithAudio`, `chatWithMedia` | Production surface; check stream/protocol features for optional behavior. |
+| Deferred inference | `chatDeferred`, `deferredCompletions`, `fetchDeferredResult` | `ServiceCapabilities.FEATURE_DEFERRED_INFERENCE` |
+| Embeddings | `embed`, `embedBatch`, `embedBatchShm`, deferred batch | `ServiceCapabilities.FEATURE_EMBEDDINGS`; depends on model extraction + integrity verification. |
+| OCR | `ocrSession`, `OcrEvent`, `:sdk-camerax` | `ServiceCapabilities.FEATURE_OCR_SESSION`; currently hidden by `OcrFeatureFlags.IS_PRODUCTION_READY=false`. |
+| Health check | `ping` / SDK liveness fallback | `ServiceCapabilities.FEATURE_HEALTH_CHECK` |
 
 ## Caller Authorization
 

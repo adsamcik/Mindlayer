@@ -57,7 +57,7 @@ Every public AIDL Parcelable lives in `:shared` and crosses process boundaries v
 | `ServiceStatus` | 12 fields | Polled at 2 s by the dashboard — keep cheap. |
 | `EngineInfo` | 7 fields | Static-ish; refresh on engine reload. |
 | `SessionInfo` | 10 fields incl. `expirationMs`, `expiresAtMs` | These two were added post-v0 with defaults; pre-1.0 audience accepted the wire break. **Do not repeat this pattern.** |
-| `ServiceCapabilities` (v0.2) | `schemaVersion: Int = 1` first; 13 numeric/feature fields | First parcelable to follow the schemaVersion convention. |
+| `ServiceCapabilities` (v0.2, schema v2 today) | `schemaVersion: Int = CURRENT_SCHEMA_VERSION` first; protocol/limit fields plus embedding limit/model metadata fields | First parcelable to follow the schemaVersion convention. Current schema is `2`; see capability gating and embeddings notes below. |
 | `MediaPart` (v0.4) | `schemaVersion: Int = 1` first; tagged-union kind + image/audio/video/document fields | Carries an ordered list via `inferMulti`. Wire reserves `KIND_VIDEO`/`KIND_DOCUMENT` for engines that aren't here yet. |
 
 ### 3. Pipe stream protocol (`mindlayer.stream.v1` / `mindlayer.stream.v2`)
@@ -127,12 +127,28 @@ Once `getCapabilities()` ships (`v02-capabilities`), every new feature that cros
 
 Stable feature-flag strings allocated:
 
-- `"media_list"` — `inferMulti(...)` and `MediaPart` available
-- `"detailed_cancel"` — `cancelInferenceV2` / `submitToolResultV2` return tri-state results
-- `"prewarm_await"` — `prewarmAndAwait(...)` is non-`oneway` and waits for engine init
-- `"typed_diagnostics"` — `getDiagnosticsTyped()` returns a typed snapshot
-- `"eviction_callback"` — `subscribeEvictionNotices(...)` is implemented
-- `"token_batch"` — pipe emits `mindlayer.stream.v2` with `TOKEN_DELTA_BATCH`
+| Wire string | Meaning |
+|---|---|
+| `"typed_errors"` | Service throws wire-prefixed `SecurityException`s that SDKs parse into typed `MindlayerException`s. |
+| `"pipe_proto_v1"` | SDK can validate `StreamHeader.protocol` against `mindlayer.stream.v1`. |
+| `"pipe_stream_v1"` | Service streams length-prefixed JSON frames using the v1 envelope. |
+| `"shared_memory_media"` | Image/audio media can travel via SharedMemory-backed descriptors. |
+| `"tool_results"` | Tool-call round trips via `submitToolResult` are implemented. |
+| `"history_recovery"` | `SessionConfig.initialHistory` is honored for SDK replay/recovery. |
+| `"structured_output"` | `extraContextJson` structured-output envelope is supported. |
+| `"media_list"` | `inferMulti(...)` and `MediaPart` are available. |
+| `"detailed_cancel"` | `cancelInferenceV2` / `submitToolResultV2` return tri-state results. |
+| `"prewarm_await"` | `prewarmAndAwait(...)` is non-`oneway` and waits for engine init. |
+| `"typed_diagnostics"` | `getDiagnosticsTyped()` returns a typed snapshot. |
+| `"eviction_callback"` | `subscribeEvictionNotices(...)` is implemented. |
+| `"token_batch"` | Pipe emits `mindlayer.stream.v2` with `TOKEN_DELTA_BATCH`. |
+| `"deferred_inference"` | Durable deferred inference with fetch, cancel, acknowledge, and completion callback. |
+| `"embeddings"` | Text embeddings are available across inline, batch, SharedMemory, and deferred batch endpoints. |
+| `"ocr_session"` | Multi-frame OCR session API (`create/push/stream/finalize/close/state/limits`) is callable. |
+| `"ocr_presort_service_side"` | Service-side OCR quality presort is available as a version signal. |
+| `"ocr_barcode_anchor"` | OCR evidence/events include ZXing barcode anchors. |
+| `"ocr_bounding_boxes"` | OCR field events can include per-line bounding-box geometry. |
+| `"health_check"` | Lightweight `ping()` health check returning `HealthCheck` is implemented. |
 
 Old SDKs that don't probe capabilities should call new methods inside a `try/catch (e: AbstractMethodError)` (or `NoSuchMethodError`) and fall back. New SDKs that probe should consult `supportedFeatures` first.
 
@@ -165,7 +181,9 @@ If this document is wrong, **fix the document in the same PR as the code change*
 
 New parcelables: `DeferredHandle` and `DeferredResult`. The AIDL declaration files are mirrored byte-for-byte between `app/src/main/aidl` and `sdk/src/main/aidl`.
 
-Capability flag: `ServiceCapabilities.FEATURE_DEFERRED_INFERENCE`. New SDKs must check it and throw `NOT_SUPPORTED` when connected to an older service.
+Capability flag: `ServiceCapabilities.FEATURE_DEFERRED_INFERENCE`
+(`"deferred_inference"`). New SDKs must check it and throw
+`NOT_SUPPORTED` when connected to an older service.
 
 ## Embeddings surface (v0.7)
 
@@ -176,3 +194,29 @@ AIDL method inventory additions are appended at the end of `IMindlayerService`: 
 Capability flag registry: `ServiceCapabilities.FEATURE_EMBEDDINGS` (`"embeddings"`) means text embeddings are available and model/tokenizer discovery passed integrity verification. `ServiceCapabilities` schemaVersion moved from 1 to 2 for `maxEmbeddingBatchInline`, `maxEmbeddingBatchShm`, `maxEmbeddingBatchTotal`, `maxEmbeddingInputBytes`, `embeddingModelIds`, and `embeddingDims`; `v1Baseline()` keeps old clients forward-compatible with zero embedding limits.
 
 Error code registry additions: `EMBEDDING_BATCH_TOO_LARGE`, `EMBEDDING_MODEL_UNAVAILABLE`, `EMBEDDING_INPUT_TOO_LONG`, and `EMBEDDING_DISABLED`.
+
+## OCR surface (v0.8)
+
+Capability flag registry additions:
+`ServiceCapabilities.FEATURE_OCR_SESSION` (`"ocr_session"`) gates the
+multi-frame session methods. The flag is conditionally advertised only when the
+PaddleOCR engine is ready and `OcrFeatureFlags.IS_PRODUCTION_READY` is true.
+`FEATURE_OCR_BARCODE_ANCHOR` (`"ocr_barcode_anchor"`) and
+`FEATURE_OCR_BOUNDING_BOXES` (`"ocr_bounding_boxes"`) are additive wire-shape
+signals for barcode evidence and optional field geometry.
+
+OCR stream evolution remains additive under `mindlayer.stream.ocr.v1`:
+`FRAME_DROPPED`, terminal `RESULT_FINALIZED`, and terminal `ERROR` map to SDK
+`OcrEvent.FrameDroppedBusy`/drop signals, `OcrEvent.ResultFinalized`, and
+`OcrEvent.Error`. Frame intake also has the wire-stable
+`OcrFrameAck.STATUS_REJECTED_STREAM_NOT_ATTACHED` status so callers attach the
+event pipe before pushing frames.
+
+## Health-check surface (v0.8.1)
+
+Capability flag: `ServiceCapabilities.FEATURE_HEALTH_CHECK`
+(`"health_check"`). The appended `ping()` method returns a `HealthCheck`
+parcelable with schemaVersion, server timestamp, uptime, apiVersion, and
+per-engine state. Old SDKs must gate on the capability or catch
+`NoSuchMethodError` / `AbstractMethodError` and fall back to `getStatus()` or
+Binder liveness checks.
