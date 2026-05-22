@@ -127,7 +127,7 @@ identity = CallerVerifier.identifyCaller(ctx, uid)
     ?: { rateLimiter.tryAcquireRejected(uid) || throw "Rate limit"
          throw SecurityException }                          # F-033 reject bucket
 if (!allowlistStore.isAllowed(identity.pkg, identity.sig)) {
-    rateLimiter.tryAcquireRejected(uid) || throw "Rate limit"   # F-033 reject bucket
+    rateLimiter.tryAcquireRejection(uid) || throw "Rate limit"  # pending-write bucket
     allowlistStore.recordPending(identity.pkg, identity.sig, identity.displayName)
     throw SecurityException("... user approval required")
 }
@@ -147,14 +147,16 @@ There are now **two** independent token buckets per UID:
 - **Main bucket** (`tryAcquire`, default 60 RPM) — consumed only by callers
   that have already cleared identity + allowlist. Sized for normal traffic.
 - **Rejected bucket** (`tryAcquireRejected`, default 6 RPM) — consumed
-  *before* `recordPending` whenever a caller fails identity verification or
-  is not in the allowlist. This bounds the disk I/O a hostile flooder can
-  trigger; the FileLock + fsync on `pending.json` was previously the
-  cheapest way to saturate the service.
+  whenever a caller fails identity verification.
+- **Pending-write bucket** (`tryAcquireRejection`, default 6 RPM) — consumed
+  *after* an allowlist miss and *before* `recordPending`. This bounds the
+  disk I/O a hostile flooder can trigger; the FileLock + fsync on
+  `pending.json` was previously the cheapest way to saturate the service.
 
-Order matters: the rejected bucket is consumed strictly **after** the
-allowlist decision, so its timing cannot leak allowlist state to a probing
-attacker. An additional in-memory `(pkg, sig)` dedup TTL inside
+Order matters: the main bucket is consumed strictly **after** the allowlist
+decision, so a first-time UID can still create a pending approval even though
+brand-new main buckets start empty. The pending-write bucket is isolated from
+normal traffic. An additional in-memory `(pkg, sig)` dedup TTL inside
 `AllowlistStore.recordPending` (30 s) short-circuits hot retries before
 they even touch the file lock.
 
@@ -196,6 +198,23 @@ surfaces this as `MindlayerException` with
 concurrent inferences) runs after the allowlist gate, so it never counts
 rejected callers against legitimate traffic and never leaks
 allowlist state via timing.
+
+### Deferred result privacy exception
+
+The normal service invariant is "return model output over IPC, do not persist
+it in service storage." Deferred APIs are the documented exception:
+
+- `inferDeferred` persists generated text in the SQLCipher-encrypted
+  `mindlayer-deferred.db` until fetch/ack/cancel or expiry.
+- `embedBatchDeferred` persists embedding vectors as AES-256-GCM encrypted
+  blobs under `cacheDir/embedding-blobs/<uid>/<requestId>.bin`. The blob key
+  is derived per UID from the same Keystore-wrapped SQLCipher root key, with
+  `mindlayer-embed-blob-v1` authenticated as AAD.
+- Deferred rows and encrypted blobs are caller-scoped by UID. Fetch, cancel,
+  acknowledge, quota eviction, startup orphan sweep, and expiry all enforce
+  that scope before returning or deleting data.
+- The retention policy is 24 hours by default (`DeferredStore.DEFAULT_TTL_MS`)
+  unless the caller acknowledges/cancels earlier.
 
 ## Cert rotation runbook
 
@@ -362,10 +381,23 @@ requires them:
   does not poll the service (doing so would burn the rate-limit budget
   of *every* un-approved caller).
 - **No time-limited approvals.** Entries are sticky until revoked.
-- **No audit log of approval decisions.** Approvals / revocations write
-  `entries.json` atomically; the diagnostic log captures rejections but
-  not the approve/revoke events. Add an audit trail to `LogRepository`
-  if compliance requires it.
+- **Security audit logging is local-only and metadata-only.**
+  `LogRepository.logSecurityDecision` records allowlist seed events (debug
+  builds), dashboard approve, deny, revoke, and `revokeApp`; rate-limit
+  rejections are recorded by `logRateLimitReject`. Rows live in the
+  SQLCipher-encrypted `usage_logs` DB and are retained by the current
+  `LogRepository.cleanup(retentionDays = 7)` policy. The dashboard self-UID
+  can see aggregate diagnostics; external UIDs receive scoped diagnostics for
+  their own sessions/decisions only.
+
+### `ping()` liveness exception
+
+`ping()` intentionally bypasses the allowlist so a same-signature or
+known-signer app can confirm that the service is alive before the user grants
+approval. It still requires the manifest `BIND_ML_SERVICE` permission and now
+uses a ping-specific per-UID token bucket (`RateLimiter.DEFAULT_PING_RPM`, 30
+RPM) so an unapproved peer cannot poll the endpoint at high frequency for
+fingerprinting.
 
 ## Testing
 

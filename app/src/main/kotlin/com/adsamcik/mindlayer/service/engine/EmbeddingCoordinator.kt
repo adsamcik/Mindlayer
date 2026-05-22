@@ -19,7 +19,9 @@ import com.adsamcik.mindlayer.service.MindlayerMlService
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.security.EmbeddingBlobCrypto
 import com.adsamcik.mindlayer.service.security.EvictionRegistry
+import com.adsamcik.mindlayer.service.security.IpcInputValidator
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -38,6 +40,7 @@ import java.nio.file.StandardCopyOption
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.concurrent.thread
 
 /**
  * Coordinates embedding requests and transport selection.
@@ -45,9 +48,10 @@ import java.util.concurrent.atomic.AtomicInteger
  * `embedBatchShm` uses real [android.os.SharedMemory] acquired through
  * [SharedMemoryPool] and writes `[int32 count][int32 dim]` followed by
  * `count * dim` little-endian float32 values. Deferred batches intentionally
- * persist that same layout to `cacheDir/embedding-blobs/<uid>/<requestId>.bin`
- * with atomic rename: deferred results must survive engine completion, client
- * death, service process restart, and reconnect until fetch/ack/cancel cleanup.
+ * persist an AES-256-GCM wrapped copy of that same layout to
+ * `cacheDir/embedding-blobs/<uid>/<requestId>.bin` with atomic rename:
+ * deferred results must survive engine completion, client death, service
+ * process restart, and reconnect until fetch/ack/cancel cleanup.
  */
 class EmbeddingCoordinator(
     private val engine: EmbeddingEngine,
@@ -67,6 +71,13 @@ class EmbeddingCoordinator(
      * compile-time flag.
      */
     val isProductionReady: Boolean = EmbeddingFeatureFlags.IS_PRODUCTION_READY,
+    private val blobCipher: EmbeddingBlobCipher = object : EmbeddingBlobCipher {
+        override fun encrypt(uid: Int, plaintext: ByteArray): ByteArray =
+            EmbeddingBlobCrypto.encrypt(context, uid, plaintext)
+
+        override fun decrypt(uid: Int, ciphertext: ByteArray): ByteArray =
+            EmbeddingBlobCrypto.decrypt(context, uid, ciphertext)
+    },
 ) {
     private val activeJobs = ConcurrentHashMap<String, Job>()
     private val activeCount = AtomicInteger(0)
@@ -245,7 +256,7 @@ class EmbeddingCoordinator(
             EmbeddingFetchOutcome.StillRunning -> VectorBlobHandle(status = DeferredResult.STILL_RUNNING)
             is EmbeddingFetchOutcome.Ready -> VectorBlobHandle(
                 status = DeferredResult.READY,
-                transfer = transferFromBlob(outcome.blobPath, outcome.metrics, outcome.metadata),
+                transfer = transferFromBlob(uid, outcome.blobPath, outcome.metrics, outcome.metadata),
             )
             EmbeddingFetchOutcome.Cancelled -> VectorBlobHandle(status = DeferredResult.CANCELLED)
             is EmbeddingFetchOutcome.Failed -> VectorBlobHandle(
@@ -381,10 +392,12 @@ class EmbeddingCoordinator(
         val size = checkedBlobSize(count, dim)
         val buffer = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN)
         writeLayout(buffer, results)
+        val encrypted = blobCipher.encrypt(uid, buffer.array())
+        buffer.array().fill(0)
         RandomAccessFile(temp, "rw").use { raf ->
             raf.channel.use { channel ->
                 channel.lock().use {
-                    channel.write(ByteBuffer.wrap(buffer.array()))
+                    channel.write(ByteBuffer.wrap(encrypted))
                     channel.force(true)
                 }
             }
@@ -393,10 +406,15 @@ class EmbeddingCoordinator(
         target
     }
 
-    private fun transferFromBlob(path: String, metrics: Bundle?, metadata: List<EmbeddingItemMetadata>): EmbeddingBatchTransfer {
+    private fun transferFromBlob(uid: Int, path: String, metrics: Bundle?, metadata: List<EmbeddingItemMetadata>): EmbeddingBatchTransfer {
         val file = File(path).canonicalFile
         if (!file.isFile) throw typed(MindlayerErrorCode.DEFERRED_EXPIRED, "embedding blob missing")
-        val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        val plaintext = blobCipher.decrypt(uid, file.readBytes())
+        val pfd = try {
+            pipePlaintext(plaintext)
+        } finally {
+            plaintext.fill(0)
+        }
         val count = metrics?.getInt("count") ?: 0
         val dim = metrics?.getInt("dim") ?: 0
         val modelId = metrics?.getString("modelId").orEmpty()
@@ -430,9 +448,35 @@ class EmbeddingCoordinator(
     private fun blobDir(uid: Int): File = File(File(context.cacheDir, "embedding-blobs"), uid.toString())
 
     private fun validateRequestId(requestId: String) {
-        if (!SAFE_ID.matches(requestId) || requestId.contains("..")) {
+        try {
+            IpcInputValidator.validateEmbeddingRequestId(requestId)
+        } catch (_: IllegalArgumentException) {
             throw typed(MindlayerErrorCode.INVALID_REQUEST, "invalid requestId")
         }
+    }
+
+    private fun pipePlaintext(bytes: ByteArray): ParcelFileDescriptor {
+        val pipe = ParcelFileDescriptor.createPipe()
+        val readEnd = pipe[0]
+        val writeEnd = pipe[1]
+        val pipeBytes = bytes.copyOf()
+        try {
+            thread(name = "MindlayerEmbeddingBlobPipe", isDaemon = true) {
+                try {
+                    ParcelFileDescriptor.AutoCloseOutputStream(writeEnd).use { out ->
+                        out.write(pipeBytes)
+                    }
+                } finally {
+                    pipeBytes.fill(0)
+                }
+            }
+        } catch (t: Throwable) {
+            pipeBytes.fill(0)
+            runCatching { readEnd.close() }
+            runCatching { writeEnd.close() }
+            throw t
+        }
+        return readEnd
     }
 
     private fun deleteOrphanBlobQuietly(file: File?) {
@@ -450,12 +494,10 @@ class EmbeddingCoordinator(
 
     private companion object {
         private const val TAG = "EmbeddingCoordinator"
-        // Allows `A-Z`, `a-z`, `0-9`, `.`, `_`, `-` up to 160 chars. The
-        // `..` substring is additionally rejected by [validateRequestId]
-        // as defense in depth — `writeBlobFile`/`transferFromBlob` already
-        // canonicalize and clamp to the per-uid blob dir, but tightening
-        // the regex up-front keeps any future code path that builds a
-        // filename from requestId from regressing.
-        private val SAFE_ID = Regex("^[A-Za-z0-9._-]{1,160}$")
     }
+}
+
+interface EmbeddingBlobCipher {
+    fun encrypt(uid: Int, plaintext: ByteArray): ByteArray
+    fun decrypt(uid: Int, ciphertext: ByteArray): ByteArray
 }
