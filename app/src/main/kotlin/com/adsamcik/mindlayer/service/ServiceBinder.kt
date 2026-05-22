@@ -390,16 +390,7 @@ class ServiceBinder(
                 )
             }
 
-        // 1. Rate-limit BEFORE any allowlist I/O. Stops volume regardless of
-        //    whether the caller is approved or not. F-064: cost-weighted —
-        //    cheap status/info methods pass a fractional cost.
-        if (!rateLimiter.tryAcquire(uid, cost)) {
-            logRepository?.logRateLimitReject(callerAidlMethodName(), uid, cost)
-            MindlayerLog.w(TAG, "Rate limit exceeded for ${identity.packageName} (uid=$uid)")
-            throw typedBinderException(MindlayerErrorCode.RATE_LIMITED, "Rate limit exceeded")
-        }
-
-        // 2. Allowlist check. A previously-denied caller is rejected silently.
+        // 1. Allowlist check. A previously-denied caller is rejected silently.
         val store = allowlistStore
         if (store.isDenied(identity.packageName, identity.signingCertSha256)) {
             throw typedBinderException(
@@ -428,6 +419,16 @@ class ServiceBinder(
                     MindlayerErrorCode.ALLOWLIST_PENDING,
                     "App not authorized — user approval required",
                 )
+        }
+
+        // 2. Rate-limit only callers that have cleared identity + allowlist.
+        //    Rejected callers are separately bounded by tryAcquireRejection()
+        //    around recordPending above, preserving first-run approval
+        //    discovery even though main buckets start empty.
+        if (!rateLimiter.tryAcquire(uid, cost)) {
+            logRepository?.logRateLimitReject(callerAidlMethodName(), uid, cost)
+            MindlayerLog.w(TAG, "Rate limit exceeded for ${identity.packageName} (uid=$uid)")
+            throw typedBinderException(MindlayerErrorCode.RATE_LIMITED, "Rate limit exceeded")
         }
 
         return identity
@@ -533,6 +534,14 @@ class ServiceBinder(
                 MindlayerErrorCode.INVALID_REQUEST
             }
             throw typedBinderException(code, msg.ifEmpty { "invalid embedding batch" })
+        }
+    }
+
+    private fun validateEmbeddingRequestIdOrThrow(requestId: String) {
+        try {
+            IpcInputValidator.validateEmbeddingRequestId(requestId)
+        } catch (e: IllegalArgumentException) {
+            throw typedBinderException(MindlayerErrorCode.INVALID_REQUEST, e.message ?: "invalid embedding requestId")
         }
     }
 
@@ -2368,22 +2377,26 @@ class ServiceBinder(
 
     override fun fetchEmbeddingBatchResult(requestId: String): com.adsamcik.mindlayer.VectorBlobHandle {
         authorizeCall(cost = 0.1)
+        validateEmbeddingRequestIdOrThrow(requestId)
         return runBlocking { requireEmbeddingCoordinator().fetchEmbeddingBatchResult(Binder.getCallingUid(), requestId) }
     }
 
     override fun cancelEmbeddingBatch(requestId: String): com.adsamcik.mindlayer.CancelResult {
         authorizeCall(cost = 0.1)
+        validateEmbeddingRequestIdOrThrow(requestId)
         val outcome = runBlocking { requireEmbeddingCoordinator().cancelEmbeddingBatch(Binder.getCallingUid(), requestId) }
         return com.adsamcik.mindlayer.CancelResult(outcome = outcome)
     }
 
     override fun acknowledgeEmbeddingBatchResult(requestId: String) {
         authorizeCall(cost = 0.1)
+        validateEmbeddingRequestIdOrThrow(requestId)
         runBlocking { requireEmbeddingCoordinator().acknowledgeEmbeddingBatchResult(Binder.getCallingUid(), requestId) }
     }
 
     override fun cancelEmbed(requestId: String): com.adsamcik.mindlayer.CancelResult {
         authorizeCall(cost = 0.1)
+        validateEmbeddingRequestIdOrThrow(requestId)
         val outcome = requireEmbeddingCoordinator().cancelEmbed(Binder.getCallingUid(), requestId)
         return com.adsamcik.mindlayer.CancelResult(outcome = outcome)
     }
@@ -2575,10 +2588,10 @@ class ServiceBinder(
     //  v0.8.1 health check — Phase 3 #8 (p3-health-check)
     //
     //  Lightweight liveness probe. Deliberately BYPASSES authorizeCall
-    //  (no allowlist gate, no rate-limit cost) so:
+    //  (no allowlist gate) so:
     //    - co-signed peers in pending-approval can confirm the service
     //      is alive without bumping their pending-approval rate-limit
-    //      bucket;
+    //      bucket; it is separately capped by a ping-only token bucket;
     //    - the dashboard can poll cheaply for an in-process indicator;
     //    - watchdog probes don't compete with real inference for the
     //      caller's rate budget.
@@ -2591,6 +2604,11 @@ class ServiceBinder(
     // ─────────────────────────────────────────────────────────────────────
 
     override fun ping(): com.adsamcik.mindlayer.HealthCheck {
+        val uid = Binder.getCallingUid()
+        if (uid != Process.myUid() && !rateLimiter.tryAcquirePing(uid)) {
+            logRepository?.logRateLimitReject("ping", uid, 0.0)
+            throw typedBinderException(MindlayerErrorCode.RATE_LIMITED, "Ping rate limit exceeded")
+        }
         return com.adsamcik.mindlayer.HealthCheck(
             serverTimestampMs = System.currentTimeMillis(),
             serviceUptimeMs = android.os.SystemClock.elapsedRealtime() - service.createdAtMs,
@@ -2722,7 +2740,6 @@ class ServiceBinder(
         evictionRegistry.unregister(uid, callback)
     }
 }
-
 
 
 
