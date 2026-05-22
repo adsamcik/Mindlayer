@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21 (compile target 17)
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5
         with:
           java-version: '21'
@@ -133,7 +133,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21 (compile target 17)
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5
         with:
           java-version: '21'
@@ -202,7 +202,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21 (compile target 17)
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5
         with:
           java-version: '21'
@@ -227,44 +227,107 @@ jobs:
             sdk/build/reports/lint-results-debug.html
           retention-days: 14
 
+  validate-release-shas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      release-shas-ready: ${{ steps.check.outputs.release-shas-ready }}
+
+    steps:
+      - name: Validate release SHA repository variables
+        id: check
+        shell: bash
+        run: |
+          required=(
+            MODEL_SHA256
+            PADDLEOCR_DET_SHA256
+            PADDLEOCR_REC_SHA256
+            PADDLEOCR_CLS_SHA256
+            PADDLEOCR_DICT_SHA256
+            EMBEDDING_MODEL_SHA256
+            EMBEDDING_TOKENIZER_SHA256
+          )
+          missing=()
+          invalid=()
+          for name in "${required[@]}"; do
+            value="${!name:-}"
+            if [[ -z "$value" ]]; then
+              missing+=("$name")
+              echo "::notice title=$name::unset"
+            else
+              echo "::notice title=$name::set"
+              if [[ ! "$value" =~ ^[0-9a-f]{64}$ ]]; then
+                invalid+=("$name")
+              fi
+            fi
+          done
+
+          if (( ${#invalid[@]} > 0 )); then
+            printf '::error::Release SHA vars must be lowercase 64-character SHA-256 digests: %s\n' "${invalid[*]}"
+            exit 1
+          fi
+          if (( ${#missing[@]} > 0 )); then
+            printf '::notice title=Release AAB skipped::Missing release SHA repository variables: %s\n' "${missing[*]}"
+            echo "release-shas-ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release-shas-ready=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          MODEL_SHA256: ${{ vars.MODEL_SHA256 }}
+          PADDLEOCR_DET_SHA256: ${{ vars.PADDLEOCR_DET_SHA256 }}
+          PADDLEOCR_REC_SHA256: ${{ vars.PADDLEOCR_REC_SHA256 }}
+          PADDLEOCR_CLS_SHA256: ${{ vars.PADDLEOCR_CLS_SHA256 }}
+          PADDLEOCR_DICT_SHA256: ${{ vars.PADDLEOCR_DICT_SHA256 }}
+          EMBEDDING_MODEL_SHA256: ${{ vars.EMBEDDING_MODEL_SHA256 }}
+          EMBEDDING_TOKENIZER_SHA256: ${{ vars.EMBEDDING_TOKENIZER_SHA256 }}
+
   build-bundle:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [ build-and-test ]
-    # Skip cleanly when MODEL_SHA256 is unset OR when the asset pack
-    # payload isn't in tree on this checkout. The .litertlm Gemma 4 E2B
-    # bundle is multi-gigabyte and gitignored, so on every normal push
-    # the asset pack directory is empty and `:app:assetPackReleasePreBundleTask`
-    # used to fail — chronic red on every main push. Move the visible
-    # signal to "skipped (no model bundle)" instead. Once a real artefact
-    # upload pipeline lands (downloads the .litertlm into
-    # gemma_model/src/main/assets before this job runs), the gate stops
-    # skipping and the AAB build resumes automatically. Forks and PR
-    # builds remain excluded by the `refs/heads/main` check (release
-    # secrets aren't readable there anyway).
-    if: github.ref == 'refs/heads/main' && vars.MODEL_SHA256 != ''
+    needs: [ build-and-test, validate-release-shas ]
+    # Skip cleanly until all seven release SHA variables and the local model
+    # payload are present. The model bundles are multi-gigabyte and gitignored,
+    # so normal main pushes report "skipped" instead of failing release packaging.
+    if: github.ref == 'refs/heads/main' && needs.validate-release-shas.outputs.release-shas-ready == 'true'
     permissions:
       contents: read
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Verify model artefact is present
+      - name: Verify model artefacts are present
         id: check-bundle
         shell: bash
         run: |
-          # The repo intentionally does NOT commit the multi-gigabyte
-          # gemma-4-E2B-it.litertlm to git. On a clean CI checkout the
-          # path below is missing whenever an upstream artefact-upload
-          # step has not run; that's the normal pre-release state.
-          if [[ -s "gemma_model/src/main/assets/gemma-4-E2B-it.litertlm" ]]; then
+          # The repo intentionally does NOT commit the multi-gigabyte model
+          # payloads. On a clean CI checkout these paths are missing whenever
+          # an upstream artefact-upload step has not run; that's the normal
+          # pre-release state.
+          required_files=(
+            "gemma_model/src/main/assets/gemma-4-E2B-it.litertlm"
+            "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-det.tflite"
+            "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-rec.tflite"
+            "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-cls.tflite"
+            "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-dict.txt"
+            "embeddinggemma_model/src/main/assets/embedding-gemma-300m-v1.tflite"
+            "embeddinggemma_model/src/main/assets/embedding-gemma-300m-v1.spm.model"
+          )
+          missing=()
+          for path in "${required_files[@]}"; do
+            if [[ ! -s "$path" ]]; then
+              missing+=("$path")
+            fi
+          done
+          if (( ${#missing[@]} == 0 )); then
             echo "have-bundle=true" >> "$GITHUB_OUTPUT"
           else
             echo "have-bundle=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=AAB build skipped::No .litertlm payload found at gemma_model/src/main/assets/ — skipping :app:bundleRelease until an artefact upload step adds it."
+            printf '::notice title=AAB build skipped::Missing model artefacts: %s\n' "${missing[*]}"
           fi
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21 (compile target 17)
         if: steps.check-bundle.outputs.have-bundle == 'true'
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5
         with:
@@ -279,26 +342,25 @@ jobs:
         if: steps.check-bundle.outputs.have-bundle == 'true'
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
 
-      - name: Validate model hash input
-        # The job-level `if:` already filters out empty MODEL_SHA256, so
-        # this step is the typo guard: if the variable is set but isn't a
-        # lowercase 64-char hex digest, fail loudly so the misconfigured
-        # release build doesn't silently produce a bundle with the wrong
-        # integrity manifest.
-        if: steps.check-bundle.outputs.have-bundle == 'true'
-        run: |
-          if [[ ! "${MODEL_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "::error::MODEL_SHA256 repository variable must be a lowercase 64-character SHA-256 digest"
-            exit 1
-          fi
-        env:
-          MODEL_SHA256: ${{ vars.MODEL_SHA256 }}
-
       - name: Build release AAB
         if: steps.check-bundle.outputs.have-bundle == 'true'
-        run: ./gradlew :app:bundleRelease --no-daemon -PmodelSha256="${MODEL_SHA256}"
+        run: |
+          ./gradlew :app:bundleRelease --no-daemon \
+            -PmodelSha256="${MODEL_SHA256}" \
+            -PpaddleOcrDetSha256="${PADDLEOCR_DET_SHA256}" \
+            -PpaddleOcrRecSha256="${PADDLEOCR_REC_SHA256}" \
+            -PpaddleOcrClsSha256="${PADDLEOCR_CLS_SHA256}" \
+            -PpaddleOcrDictSha256="${PADDLEOCR_DICT_SHA256}" \
+            -PembeddingModelSha256="${EMBEDDING_MODEL_SHA256}" \
+            -PembeddingTokenizerSha256="${EMBEDDING_TOKENIZER_SHA256}"
         env:
           MODEL_SHA256: ${{ vars.MODEL_SHA256 }}
+          PADDLEOCR_DET_SHA256: ${{ vars.PADDLEOCR_DET_SHA256 }}
+          PADDLEOCR_REC_SHA256: ${{ vars.PADDLEOCR_REC_SHA256 }}
+          PADDLEOCR_CLS_SHA256: ${{ vars.PADDLEOCR_CLS_SHA256 }}
+          PADDLEOCR_DICT_SHA256: ${{ vars.PADDLEOCR_DICT_SHA256 }}
+          EMBEDDING_MODEL_SHA256: ${{ vars.EMBEDDING_MODEL_SHA256 }}
+          EMBEDDING_TOKENIZER_SHA256: ${{ vars.EMBEDDING_TOKENIZER_SHA256 }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
