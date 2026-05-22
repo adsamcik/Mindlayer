@@ -13,7 +13,9 @@ import io.mockk.mockk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -22,6 +24,8 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -112,6 +116,47 @@ class EmbeddingCoordinatorTest {
             // both mean the requestId passed validation.
             val outcome = coordinator.cancelEmbeddingBatch(1, ok)
             assertTrue("requestId=$ok must pass validation (got $outcome)", outcome >= 0)
+        }
+
+        @Test fun `deferred embedding blobs are encrypted on disk and decrypted for fetch`() = runTest {
+            val dao = FakeDeferredDao()
+            val localStore = DeferredStore(dao, clock = { System.currentTimeMillis() })
+            val cipher = object : EmbeddingBlobCipher {
+                override fun encrypt(uid: Int, plaintext: ByteArray): ByteArray =
+                    byteArrayOf('e'.code.toByte(), 'n'.code.toByte(), 'c'.code.toByte(), ':'.code.toByte()) + plaintext.reversedArray()
+
+                override fun decrypt(uid: Int, ciphertext: ByteArray): ByteArray {
+                    require(ciphertext.take(4).toByteArray().contentEquals(byteArrayOf('e'.code.toByte(), 'n'.code.toByte(), 'c'.code.toByte(), ':'.code.toByte())))
+                    return ciphertext.drop(4).toByteArray().reversedArray()
+                }
+            }
+            val localCoordinator = EmbeddingCoordinator(
+                engine,
+                localStore,
+                context,
+                CoroutineScope(SupervisorJob() + Dispatchers.Default),
+                callbacks,
+                SharedMemoryPool(context.cacheDir),
+                blobCipher = cipher,
+            )
+
+            val handle = localCoordinator.embedBatchDeferred(7, listOf(EmbeddingRequest(text = "secret")))
+            withTimeout(5_000L) {
+                while (dao.snapshot(handle.requestId)?.statusCode != DeferredResult.READY) {
+                    delay(10)
+                }
+            }
+            val row = dao.snapshot(handle.requestId)!!
+            val diskBytes = File(row.blobPath!!).readBytes()
+            assertTrue(diskBytes.decodeToString().startsWith("enc:"))
+
+            val fetched = localCoordinator.fetchEmbeddingBatchResult(7, handle.requestId)
+            val plaintext = ParcelFileDescriptor.AutoCloseInputStream(fetched.transfer!!.pfd).use { it.readBytes() }
+            val buffer = ByteBuffer.wrap(plaintext).order(ByteOrder.LITTLE_ENDIAN)
+            assertEquals(1, buffer.int)
+            assertEquals(2, buffer.int)
+            assertEquals(1.0f, buffer.float, 0.0f)
+            assertEquals(2.0f, buffer.float, 0.0f)
         }
     }
 

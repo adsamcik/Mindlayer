@@ -27,7 +27,7 @@ class DeferredStoreEmbeddingTest {
     ) = DeferredStore(
         dao = dao,
         clock = { now },
-        ttlMs = ttlMs,
+        retentionPolicyMs = ttlMs,
         maxResultBytesPerUid = maxBytes,
         maxEmbeddingResultBytesPerUid = maxEmbeddingBytes,
     )
