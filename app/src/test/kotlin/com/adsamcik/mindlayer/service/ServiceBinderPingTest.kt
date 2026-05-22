@@ -60,6 +60,7 @@ class ServiceBinderPingTest {
         every { rateLimiter.tryAcquire(any(), any()) } returns true
         every { rateLimiter.tryAcquireRejected(any()) } returns true
         every { rateLimiter.tryAcquireRejection(any()) } returns true
+        every { rateLimiter.tryAcquirePing(any()) } returns true
 
         allow = mockk(relaxed = true)
         every { allow.isDenied(any(), any()) } returns false
@@ -98,6 +99,11 @@ class ServiceBinderPingTest {
         verify(exactly = 0) { rateLimiter.tryAcquire(any(), any()) }
         verify(exactly = 0) { rateLimiter.tryAcquireRejected(any()) }
         verify(exactly = 0) { rateLimiter.tryAcquireRejection(any()) }
+    }
+
+    @Test fun `ping uses the ping-specific throttle for external callers`() {
+        binder.ping()
+        verify(exactly = 1) { rateLimiter.tryAcquirePing(any()) }
     }
 
     @Test fun `ping does NOT consult the allowlist`() {
