@@ -117,30 +117,35 @@ class DeferredStore(
         } else null
     }
 
-    suspend fun completeReady(requestId: String, uid: Int, text: String, metrics: Bundle?) {
+    suspend fun completeReady(requestId: String, uid: Int, text: String, metrics: Bundle?): Boolean {
         val (capped, truncated) = capResultText(text)
-        complete(requestId, uid, DeferredResult.READY, capped, metrics, 0, null, truncated, null, null)
+        return complete(requestId, uid, DeferredEntity.KIND_CHAT, DeferredResult.READY, capped, metrics, 0, null, truncated, null, null)
     }
 
-    suspend fun completeEmbeddingBatch(requestId: String, uid: Int, blobPath: String, blobBytes: Long, metrics: Bundle?, metadata: List<EmbeddingItemMetadata> = emptyList()) {
-        complete(requestId, uid, DeferredResult.READY, null, metrics, 0, null, false, blobPath, blobBytes, metadataToJson(metadata))
+    suspend fun completeEmbeddingBatch(requestId: String, uid: Int, blobPath: String, blobBytes: Long, metrics: Bundle?, metadata: List<EmbeddingItemMetadata> = emptyList()): Boolean {
+        return complete(requestId, uid, DeferredEntity.KIND_EMBEDDING, DeferredResult.READY, null, metrics, 0, null, false, blobPath, blobBytes, metadataToJson(metadata))
     }
 
-    suspend fun completeFailed(requestId: String, uid: Int, errorCode: Int, errorName: String?) {
-        complete(requestId, uid, DeferredResult.FAILED, null, null, errorCode, errorName, false, null, null)
+    suspend fun completeFailed(requestId: String, uid: Int, errorCode: Int, errorName: String?): Boolean {
+        return complete(requestId, uid, DeferredEntity.KIND_CHAT, DeferredResult.FAILED, null, null, errorCode, errorName, false, null, null)
     }
 
-    suspend fun failEmbeddingBatch(requestId: String, uid: Int, errorCode: Int, errorName: String?) {
-        completeFailed(requestId, uid, errorCode, errorName)
+    suspend fun failEmbeddingBatch(requestId: String, uid: Int, errorCode: Int, errorName: String?): Boolean {
+        return complete(requestId, uid, DeferredEntity.KIND_EMBEDDING, DeferredResult.FAILED, null, null, errorCode, errorName, false, null, null)
     }
 
-    suspend fun completeCancelled(requestId: String, uid: Int) {
-        complete(requestId, uid, DeferredResult.CANCELLED, null, null, 0, null, false, null, null)
+    suspend fun completeCancelled(requestId: String, uid: Int): Boolean {
+        return complete(requestId, uid, DeferredEntity.KIND_CHAT, DeferredResult.CANCELLED, null, null, 0, null, false, null, null)
+    }
+
+    suspend fun completeEmbeddingCancelled(requestId: String, uid: Int): Boolean {
+        return complete(requestId, uid, DeferredEntity.KIND_EMBEDDING, DeferredResult.CANCELLED, null, null, 0, null, false, null, null)
     }
 
     private suspend fun complete(
         requestId: String,
         uid: Int,
+        kind: String,
         status: Int,
         text: String?,
         metrics: Bundle?,
@@ -150,10 +155,12 @@ class DeferredStore(
         blobPath: String?,
         blobBytes: Long?,
         perItemMetadataJson: String? = null,
-    ) {
+    ): Boolean {
         val now = clock()
-        dao.complete(
+        val updated = dao.complete(
             requestId = requestId,
+            uid = uid,
+            kind = kind,
             status = status,
             text = text,
             metricsJson = metrics?.let { metricsToJson(it) },
@@ -166,13 +173,16 @@ class DeferredStore(
             blobBytes = blobBytes,
             perItemMetadataJson = perItemMetadataJson,
         )
+        if (updated == 0) {
+            return false
+        }
         // The "kind" of the just-completed row determines which per-UID
         // byte budget applies. Embedding blobs are ~10× larger than chat
         // result text (12 MiB max vs 256 KiB) so they need a higher cap,
         // applied independently — without this, a single embedding batch
         // would trip the chat quota and self-delete before fetch.
-        val kind = dao.byRequestId(requestId)?.kind ?: DeferredEntity.KIND_CHAT
         enforceByteQuota(uid, kind)
+        return true
     }
 
     private fun capResultText(text: String): Pair<String, Boolean> =
@@ -182,6 +192,9 @@ class DeferredStore(
         val entity = dao.byRequestId(requestId) ?: return DeferredResult(status = DeferredResult.NOT_FOUND_OR_NOT_OWNED)
         if (entity.uid != uid || entity.kind != DeferredEntity.KIND_CHAT) return DeferredResult(status = DeferredResult.NOT_FOUND_OR_NOT_OWNED)
         val now = clock()
+        if (entity.fetchedAtMs != null && entity.statusCode != DeferredResult.STILL_RUNNING) {
+            return DeferredResult(status = DeferredResult.NOT_FOUND_OR_NOT_OWNED)
+        }
         if (entity.expiresAtMs <= now) {
             dao.deleteOwned(requestId, uid)
             deleteBlob(entity)
@@ -197,9 +210,18 @@ class DeferredStore(
                 dao.markFetched(requestId, uid, now)
                 DeferredResult(status = DeferredResult.READY, text = entity.resultText.orEmpty(), metrics = jsonToMetrics(entity.metricsJson, entity.truncated))
             }
-            DeferredResult.CANCELLED -> DeferredResult(status = DeferredResult.CANCELLED)
-            DeferredResult.FAILED -> DeferredResult(status = DeferredResult.FAILED, errorCodeInt = entity.errorCodeInt, errorCodeName = entity.errorCodeName)
-            else -> DeferredResult(status = DeferredResult.FAILED, errorCodeInt = entity.errorCodeInt, errorCodeName = entity.errorCodeName)
+            DeferredResult.CANCELLED -> {
+                dao.markFetched(requestId, uid, now)
+                DeferredResult(status = DeferredResult.CANCELLED)
+            }
+            DeferredResult.FAILED -> {
+                dao.markFetched(requestId, uid, now)
+                DeferredResult(status = DeferredResult.FAILED, errorCodeInt = entity.errorCodeInt, errorCodeName = entity.errorCodeName)
+            }
+            else -> {
+                dao.markFetched(requestId, uid, now)
+                DeferredResult(status = DeferredResult.FAILED, errorCodeInt = entity.errorCodeInt, errorCodeName = entity.errorCodeName)
+            }
         }
     }
 
@@ -207,6 +229,9 @@ class DeferredStore(
         val entity = dao.byRequestId(requestId) ?: return EmbeddingFetchOutcome.NotFoundOrNotOwned
         if (entity.uid != uid || entity.kind != DeferredEntity.KIND_EMBEDDING) return EmbeddingFetchOutcome.NotFoundOrNotOwned
         val now = clock()
+        if (entity.fetchedAtMs != null && entity.statusCode != DeferredResult.STILL_RUNNING) {
+            return EmbeddingFetchOutcome.NotFoundOrNotOwned
+        }
         if (entity.expiresAtMs <= now) {
             dao.deleteOwned(requestId, uid)
             deleteBlob(entity)
@@ -219,9 +244,18 @@ class DeferredStore(
                 val path = entity.blobPath ?: return EmbeddingFetchOutcome.Failed(MindlayerErrorCode.INTERNAL, MindlayerErrorCode.nameOf(MindlayerErrorCode.INTERNAL))
                 EmbeddingFetchOutcome.Ready(path, entity.blobBytes ?: 0L, jsonToMetrics(entity.metricsJson, entity.truncated), metadataFromJson(entity.perItemMetadataJson))
             }
-            DeferredResult.CANCELLED -> EmbeddingFetchOutcome.Cancelled
-            DeferredResult.FAILED -> EmbeddingFetchOutcome.Failed(entity.errorCodeInt, entity.errorCodeName)
-            else -> EmbeddingFetchOutcome.Failed(entity.errorCodeInt, entity.errorCodeName)
+            DeferredResult.CANCELLED -> {
+                dao.markFetched(requestId, uid, now)
+                EmbeddingFetchOutcome.Cancelled
+            }
+            DeferredResult.FAILED -> {
+                dao.markFetched(requestId, uid, now)
+                EmbeddingFetchOutcome.Failed(entity.errorCodeInt, entity.errorCodeName)
+            }
+            else -> {
+                dao.markFetched(requestId, uid, now)
+                EmbeddingFetchOutcome.Failed(entity.errorCodeInt, entity.errorCodeName)
+            }
         }
     }
 
@@ -266,7 +300,8 @@ class DeferredStore(
         )
     }
 
-    suspend fun completedPendingForUid(uid: Int): List<DeferredEntity> = dao.completedPendingForUid(uid)
+    suspend fun completedPendingForUid(uid: Int, kind: String = DeferredEntity.KIND_CHAT): List<DeferredEntity> =
+        dao.completedPendingForUid(uid, kind)
 
     /**
      * Lightweight lookup used by the embedding-blob startup sweep. Returns
