@@ -9,6 +9,8 @@ import com.adsamcik.mindlayer.OcrFrameMeta
 import com.adsamcik.mindlayer.OcrLimits
 import com.adsamcik.mindlayer.OcrSessionConfig
 import com.adsamcik.mindlayer.OcrSessionState
+import com.adsamcik.mindlayer.ServiceCapabilities
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -71,6 +73,7 @@ class MindlayerOcrIntegrationTest {
         every { Log.e(any(), any(), any()) } returns 0
 
         mockService = mockk(relaxed = true) {
+            every { capabilities } returns ocrCaps()
             every { ocrLimits } returns OcrLimits(
                 maxConcurrentOcrSessions = 2,
                 maxOcrFramesPerMinute = 60,
@@ -122,6 +125,21 @@ class MindlayerOcrIntegrationTest {
         return ctor.newInstance(conn, historyStore)
     }
 
+    private fun ocrCaps(): ServiceCapabilities = ServiceCapabilities(
+        apiVersion = 8,
+        supportedFeatures = setOf(ServiceCapabilities.FEATURE_OCR_SESSION),
+        pipeProtocol = "mindlayer.stream.v1",
+        maxFrameBytes = 1_048_576,
+        maxToolRounds = 25,
+        maxToolArgsLen = 64 * 1024,
+        maxRequestsPerMinute = 60,
+        maxConcurrentInferences = 4,
+        maxConcurrentSessions = 3,
+        maxSessionExpirationMs = 90L * 24 * 60 * 60 * 1000,
+        maxMediaPartsPerRequest = 2,
+        maxTotalMediaBytesPerRequest = 200L * 1024 * 1024,
+    )
+
     // ── ocrLimits ────────────────────────────────────────────────────────
 
     @Test fun `ocrLimits returns service-advertised values`() = runBlocking {
@@ -132,12 +150,14 @@ class MindlayerOcrIntegrationTest {
     }
 
     @Test fun `ocrLimits falls back to zeroBaseline on NoSuchMethodError`() = runBlocking {
+        every { mockService.capabilities } returns ocrCaps()
         every { mockService.ocrLimits } throws NoSuchMethodError("not present on old service")
         val limits = mindlayer.ocrLimits()
         assertEquals(OcrLimits.zeroBaseline(), limits)
     }
 
     @Test fun `ocrLimits falls back to zeroBaseline on AbstractMethodError`() = runBlocking {
+        every { mockService.capabilities } returns ocrCaps()
         every { mockService.ocrLimits } throws AbstractMethodError("not implemented on old service")
         val limits = mindlayer.ocrLimits()
         assertEquals(OcrLimits.zeroBaseline(), limits)
@@ -193,6 +213,26 @@ class MindlayerOcrIntegrationTest {
         val ack = session.pushFrame(meta, ByteArray(64 * 64) { 127.toByte() }, 64, 64)
         assertEquals(7L, ack.frameId)
         assertEquals(OcrFrameAck.STATUS_ACCEPTED, ack.status)
+    }
+
+    @Test fun `OCR AIDL wire-prefixed errors become MindlayerException`() = runBlocking {
+        val session = mindlayer.ocrSession(OcrProfile.GeneralDocument)
+        every { mockService.pushOcrFrame(any(), any(), any()) } throws SecurityException(
+            MindlayerErrorCode.wireMessage(MindlayerErrorCode.OCR_SESSION_FINALIZED, "finalized"),
+        )
+
+        val ex = assertThrows(MindlayerException::class.java) {
+            runBlocking {
+                session.pushFrame(
+                    OcrFrameMeta(frameId = 9L, captureTimeMs = 0L),
+                    ByteArray(64 * 64) { 127.toByte() },
+                    64,
+                    64,
+                )
+            }
+        }
+        assertEquals(MindlayerErrorCode.OCR_SESSION_FINALIZED, ex.code)
+        assertEquals("ocr-1000-fake", ex.sessionId)
     }
 
     @Test fun `state round-trips through AIDL`() = runBlocking {
