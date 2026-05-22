@@ -21,7 +21,7 @@ activityCompose = "1.10.1"
 cameraXCore = "1.6.1"
 lifecycleCompose = "2.10.0"
 navigationCompose = "2.9.8"
-sqlcipher = "4.15.0"
+sqlcipher = "4.16.0"
 biometric = "1.4.0-alpha07"
 zxing = "3.5.4"
 
