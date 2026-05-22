@@ -546,7 +546,10 @@ private fun StatusSection(state: DashboardUiState) {
                 }
             }
 
-            state.acceleratorDecision?.let { decision ->
+            val acceleratorDecisions = state.acceleratorDecisions.ifEmpty {
+                state.acceleratorDecision?.let(::listOf).orEmpty()
+            }
+            acceleratorDecisions.forEach { decision ->
                 DiagnosticCallout(
                     message = "${decision.featureName} selected ${decision.backend}: ${decision.reason}" +
                         decision.attemptedSummary.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty(),

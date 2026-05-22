@@ -44,7 +44,7 @@ import java.util.concurrent.CopyOnWriteArrayList
  * and arg-size cap. The orchestrator must:
  *
  *  - drop model-emitted tool calls whose `name` is not in the session's
- *    declared tool set (logged as [LogEvent.TOOL_CALL_REJECTED] under
+ *    declared tool set (logged as [LogEvent.TOOL_CALL_REJECTED.key] under
  *    [LogCategory.SECURITY]),
  *  - truncate `gson.toJson(arguments)` to [InferenceOrchestrator.MAX_TOOL_ARGS_LEN]
  *    when oversize, and
@@ -200,7 +200,7 @@ class ToolNameAllowlistTest {
         assertTrue("Expected no tool_call frames; got $toolCalls", toolCalls.isEmpty())
 
         val rejected = capturedLogs.filter {
-            it.category == LogCategory.SECURITY && it.event == LogEvent.TOOL_CALL_REJECTED
+            it.category == LogCategory.SECURITY && it.event == LogEvent.TOOL_CALL_REJECTED.key
         }
         assertTrue(
             "Expected at least one TOOL_CALL_REJECTED log entry, got ${capturedLogs.size}",
@@ -269,7 +269,7 @@ class ToolNameAllowlistTest {
         }
 
         val rejected = capturedLogs.filter {
-            it.category == LogCategory.SECURITY && it.event == LogEvent.TOOL_CALL_REJECTED
+            it.category == LogCategory.SECURITY && it.event == LogEvent.TOOL_CALL_REJECTED.key
         }
         assertTrue(
             "Expected continuation-chunk drop log; logs=$capturedLogs",
@@ -317,7 +317,7 @@ class ToolNameAllowlistTest {
                     argsLen <= InferenceOrchestrator.MAX_TOOL_ARGS_LEN,
                 )
                 val rejected = capturedLogs.filter {
-                    it.category == LogCategory.SECURITY && it.event == LogEvent.TOOL_CALL_REJECTED
+                    it.category == LogCategory.SECURITY && it.event == LogEvent.TOOL_CALL_REJECTED.key
                 }
                 assertTrue(
                     "Expected an oversize_args log entry, got logs=$capturedLogs",
@@ -369,7 +369,7 @@ class ToolNameAllowlistTest {
         var sawRejected = false
         while (System.currentTimeMillis() < deadline && !sawRejected) {
             val rejected = capturedLogs.filter {
-                it.category == LogCategory.SECURITY && it.event == LogEvent.TOOL_CALL_REJECTED
+                it.category == LogCategory.SECURITY && it.event == LogEvent.TOOL_CALL_REJECTED.key
             }
             if (rejected.any { it.extraJson?.contains("oversize_args") == true }) {
                 sawRejected = true

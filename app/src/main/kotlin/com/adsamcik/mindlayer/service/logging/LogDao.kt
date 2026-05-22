@@ -94,11 +94,33 @@ interface LogDao {
      * variant name from [LogEntry.extraJson]'s `failureCategory` field.
      * Returns `null` when no init failure has been logged yet.
      */
-    @Query("SELECT * FROM usage_logs WHERE event = 'init_failure_categorized' ORDER BY timestampMs DESC LIMIT 1")
+    @Query("""
+        SELECT * FROM usage_logs
+        WHERE event = 'init_failure_categorized'
+          AND timestampMs > (
+              SELECT COALESCE(MAX(timestampMs), 0)
+              FROM usage_logs
+              WHERE event IN ('engine_init_success', 'engine_init', 'ocr_backend_ready', 'embedding_backend_ready')
+          )
+        ORDER BY timestampMs DESC
+        LIMIT 1
+    """)
     suspend fun latestInitFailure(): LogEntry?
 
     @Query("SELECT * FROM usage_logs WHERE event = 'backend_decision' ORDER BY timestampMs DESC LIMIT 1")
     suspend fun latestBackendDecision(): LogEntry?
+
+    @Query("""
+        SELECT * FROM usage_logs
+        WHERE event = 'backend_decision'
+          AND extraJson LIKE '%' || '"feature":"' || :feature || '"' || '%'
+        ORDER BY timestampMs DESC
+        LIMIT 1
+    """)
+    suspend fun latestBackendDecisionByFeature(feature: String): LogEntry?
+
+    @Query("SELECT * FROM usage_logs WHERE event IN (:events) ORDER BY timestampMs DESC")
+    suspend fun getByEvents(events: List<String>): List<LogEntry>
 }
 
 data class ThermalBandCount(

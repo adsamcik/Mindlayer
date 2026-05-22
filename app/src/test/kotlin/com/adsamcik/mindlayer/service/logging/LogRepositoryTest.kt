@@ -96,7 +96,7 @@ class LogRepositoryTest {
         val e = awaitSingleEntry()
 
         assertEquals(LogCategory.INFERENCE, e.category)
-        assertEquals(LogEvent.REQUEST_START, e.event)
+        assertEquals(LogEvent.REQUEST_START.key, e.event)
         assertEquals("req-1", e.requestId)
         assertEquals("sess-1", e.sessionId)
         assertEquals("GPU", e.backend)
@@ -114,7 +114,7 @@ class LogRepositoryTest {
         val e = awaitSingleEntry()
 
         assertEquals(LogCategory.INFERENCE, e.category)
-        assertEquals(LogEvent.REQUEST_COMPLETE, e.event)
+        assertEquals(LogEvent.REQUEST_COMPLETE.key, e.event)
         assertEquals("req-2", e.requestId)
         assertEquals("sess-2", e.sessionId)
         assertEquals("CPU", e.backend)
@@ -133,7 +133,7 @@ class LogRepositoryTest {
         val e = awaitSingleEntry()
 
         assertEquals(LogCategory.ERROR, e.category)
-        assertEquals(LogEvent.REQUEST_ERROR, e.event)
+        assertEquals(LogEvent.REQUEST_ERROR.key, e.event)
         assertEquals("req-3", e.requestId)
         assertEquals("sess-3", e.sessionId)
         // Sanitized: spaces stripped
@@ -189,7 +189,7 @@ class LogRepositoryTest {
         val e = awaitSingleEntry()
 
         assertEquals(LogCategory.THERMAL, e.category)
-        assertEquals(LogEvent.BAND_CHANGE, e.event)
+        assertEquals(LogEvent.BAND_CHANGE.key, e.event)
         assertEquals("WARM", e.thermalBand)
         assertEquals("GPU", e.backend)
         assertNotNull(e.extraJson)
@@ -205,7 +205,7 @@ class LogRepositoryTest {
         val e = awaitSingleEntry()
 
         assertEquals(LogCategory.SESSION, e.category)
-        assertEquals(LogEvent.SESSION_CREATED, e.event)
+        assertEquals(LogEvent.SESSION_CREATED.key, e.event)
         assertEquals("sess-5", e.sessionId)
         assertEquals("GPU", e.backend)
         assertNotNull(e.extraJson)
@@ -228,7 +228,7 @@ class LogRepositoryTest {
         val e = awaitSingleEntry()
 
         assertEquals(LogCategory.SESSION, e.category)
-        assertEquals(LogEvent.SESSION_DESTROYED, e.event)
+        assertEquals(LogEvent.SESSION_DESTROYED.key, e.event)
         assertEquals("sess-6", e.sessionId)
     }
 
@@ -240,7 +240,7 @@ class LogRepositoryTest {
         val e = awaitSingleEntry()
 
         assertEquals(LogCategory.SESSION, e.category)
-        assertEquals(LogEvent.SESSION_EVICTED, e.event)
+        assertEquals(LogEvent.SESSION_EVICTED.key, e.event)
         assertEquals("sess-7", e.sessionId)
         assertNotNull(e.extraJson)
         assertTrue(e.extraJson!!.contains("memory_pressure"))
@@ -264,7 +264,7 @@ class LogRepositoryTest {
         val e = awaitSingleEntry()
 
         assertEquals(LogCategory.MEMORY, e.category)
-        assertEquals(LogEvent.PRESSURE_CHANGE, e.event)
+        assertEquals(LogEvent.PRESSURE_CHANGE.key, e.event)
         assertEquals(2048L, e.memoryAvailableMb)
         assertEquals(8192L - 2048L, e.memoryUsedMb)
         assertNotNull(e.extraJson)
@@ -279,7 +279,7 @@ class LogRepositoryTest {
         val e = awaitSingleEntry()
 
         assertEquals(LogCategory.ENGINE, e.category)
-        assertEquals(LogEvent.ENGINE_INIT, e.event)
+        assertEquals(LogEvent.ENGINE_INIT.key, e.event)
         assertEquals("GPU", e.backend)
         assertEquals(3500L, e.durationMs)
         assertNotNull(e.extraJson)
@@ -305,7 +305,7 @@ class LogRepositoryTest {
         val e = awaitSingleEntry()
 
         assertEquals(LogCategory.ENGINE, e.category)
-        assertEquals(LogEvent.ENGINE_SHUTDOWN, e.event)
+        assertEquals(LogEvent.ENGINE_SHUTDOWN.key, e.event)
         assertEquals("CPU", e.backend)
     }
 
@@ -321,12 +321,12 @@ class LogRepositoryTest {
         dao.insert(LogEntry(
             timestampMs = eightDaysAgo,
             category = LogCategory.INFERENCE,
-            event = LogEvent.REQUEST_COMPLETE,
+            event = LogEvent.REQUEST_COMPLETE.key,
         ))
         dao.insert(LogEntry(
             timestampMs = oneDayAgo,
             category = LogCategory.INFERENCE,
-            event = LogEvent.REQUEST_COMPLETE,
+            event = LogEvent.REQUEST_COMPLETE.key,
         ))
 
         assertEquals(2, dao.totalCount())
@@ -343,7 +343,7 @@ class LogRepositoryTest {
     private fun dummyEntry() = LogEntry(
         timestampMs = System.currentTimeMillis(),
         category = LogCategory.INFERENCE,
-        event = LogEvent.REQUEST_START,
+        event = LogEvent.REQUEST_START.key,
     )
 
     /**
@@ -432,27 +432,27 @@ class LogRepositoryTest {
         advanceUntilIdle()
         val byEvent = dao.getRecent(50).associateBy { it.event }
 
-        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.REQUEST_CANCEL).category)
-        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.RATE_LIMIT_REJECT).category)
-        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.ALLOWLIST_PENDING_RECORDED).category)
-        assertEquals(LogCategory.ENGINE, byEvent.getValue(LogEvent.FGS_PROMOTED).category)
-        assertEquals(LogCategory.ENGINE, byEvent.getValue(LogEvent.FGS_DEMOTED).category)
-        assertEquals(LogCategory.ENGINE, byEvent.getValue(LogEvent.BACKEND_SWITCH).category)
-        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.BINDER_DEATH_CLIENT).category)
-        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.BINDER_DEATH_SELF).category)
-        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.CRASH_LOOP_THROTTLE).category)
-        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.STREAM_FRAME_TOO_LARGE).category)
-        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.STREAM_BACKPRESSURE).category)
-        assertEquals(LogCategory.SESSION, byEvent.getValue(LogEvent.SESSION_QUOTA_EXCEEDED).category)
-        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.TOOL_CALL_EXIT).category)
-        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.TOOL_CALL_TIMEOUT).category)
+        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.REQUEST_CANCEL.key).category)
+        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.RATE_LIMIT_REJECT.key).category)
+        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.ALLOWLIST_PENDING_RECORDED.key).category)
+        assertEquals(LogCategory.ENGINE, byEvent.getValue(LogEvent.FGS_PROMOTED.key).category)
+        assertEquals(LogCategory.ENGINE, byEvent.getValue(LogEvent.FGS_DEMOTED.key).category)
+        assertEquals(LogCategory.ENGINE, byEvent.getValue(LogEvent.BACKEND_SWITCH.key).category)
+        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.BINDER_DEATH_CLIENT.key).category)
+        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.BINDER_DEATH_SELF.key).category)
+        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.CRASH_LOOP_THROTTLE.key).category)
+        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.STREAM_FRAME_TOO_LARGE.key).category)
+        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.STREAM_BACKPRESSURE.key).category)
+        assertEquals(LogCategory.SESSION, byEvent.getValue(LogEvent.SESSION_QUOTA_EXCEEDED.key).category)
+        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.TOOL_CALL_EXIT.key).category)
+        assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.TOOL_CALL_TIMEOUT.key).category)
     }
     @Test
     fun `recentErrorCount reflects recent completed error bucket`() = runTest {
         val now = System.currentTimeMillis()
-        dao.insert(LogEntry(timestampMs = now - 5_000, category = LogCategory.ERROR, event = LogEvent.REQUEST_ERROR))
-        dao.insert(LogEntry(timestampMs = now - 120_000, category = LogCategory.ERROR, event = LogEvent.REQUEST_ERROR))
-        dao.insert(LogEntry(timestampMs = now - 5_000, category = LogCategory.INFERENCE, event = LogEvent.REQUEST_COMPLETE))
+        dao.insert(LogEntry(timestampMs = now - 5_000, category = LogCategory.ERROR, event = LogEvent.REQUEST_ERROR.key))
+        dao.insert(LogEntry(timestampMs = now - 120_000, category = LogCategory.ERROR, event = LogEvent.REQUEST_ERROR.key))
+        dao.insert(LogEntry(timestampMs = now - 5_000, category = LogCategory.INFERENCE, event = LogEvent.REQUEST_COMPLETE.key))
 
         assertEquals(1, repo.recentErrorCount(windowMs = 60_000L))
     }

@@ -69,7 +69,7 @@ class SessionHistoryViewModelTest {
             LogEntry(
                 timestampMs = 100L,
                 category = LogCategory.SESSION,
-                event = LogEvent.SESSION_CREATED,
+                event = LogEvent.SESSION_CREATED.key,
                 sessionId = sessionA,
                 backend = "gpu",
             ),
@@ -78,7 +78,7 @@ class SessionHistoryViewModelTest {
             LogEntry(
                 timestampMs = 200L,
                 category = LogCategory.INFERENCE,
-                event = LogEvent.REQUEST_COMPLETE,
+                event = LogEvent.REQUEST_COMPLETE.key,
                 sessionId = sessionA,
                 backend = "gpu",
                 tokensGenerated = 50,
@@ -88,7 +88,7 @@ class SessionHistoryViewModelTest {
             LogEntry(
                 timestampMs = 300L,
                 category = LogCategory.INFERENCE,
-                event = LogEvent.REQUEST_COMPLETE,
+                event = LogEvent.REQUEST_COMPLETE.key,
                 sessionId = sessionA,
                 backend = "gpu",
                 tokensGenerated = 25,
@@ -99,7 +99,7 @@ class SessionHistoryViewModelTest {
             LogEntry(
                 timestampMs = 1_000L,
                 category = LogCategory.SESSION,
-                event = LogEvent.SESSION_CREATED,
+                event = LogEvent.SESSION_CREATED.key,
                 sessionId = sessionB,
             ),
         )
@@ -137,7 +137,7 @@ class SessionHistoryViewModelTest {
             LogEntry(
                 timestampMs = 10L,
                 category = LogCategory.SESSION,
-                event = LogEvent.SESSION_CREATED,
+                event = LogEvent.SESSION_CREATED.key,
                 sessionId = "sess-blank",
                 backend = "   ",
             ),
@@ -158,7 +158,7 @@ class SessionHistoryViewModelTest {
                 LogEntry(
                     timestampMs = 1_000L + i,
                     category = LogCategory.SESSION,
-                    event = LogEvent.SESSION_CREATED,
+                    event = LogEvent.SESSION_CREATED.key,
                     sessionId = "sess-$i",
                 ),
             )
