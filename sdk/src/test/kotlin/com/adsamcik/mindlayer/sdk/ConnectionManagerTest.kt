@@ -8,6 +8,7 @@ import android.os.IBinder
 import android.util.Log
 import app.cash.turbine.test
 import com.adsamcik.mindlayer.IMindlayerService
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import io.mockk.Runs
 import io.mockk.every
 import io.mockk.just
@@ -17,7 +18,6 @@ import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
@@ -159,10 +159,11 @@ class ConnectionManagerTest {
 
     @Test
     fun `requireService throws when DISCONNECTED`() {
-        val ex = assertThrows(IllegalStateException::class.java) {
+        val ex = assertThrows(MindlayerException::class.java) {
             mgr.requireService()
         }
         assertTrue(ex.message!!.contains("not connected"))
+        assertEquals(MindlayerErrorCode.SERVICE_UNAVAILABLE, ex.code)
     }
 
     @Test
@@ -219,24 +220,56 @@ class ConnectionManagerTest {
     fun `awaitConnected times out when service never connects`() = runTest {
         mgr.connect(mockContext)
 
-        assertThrows(TimeoutCancellationException::class.java) {
+        val ex = assertThrows(MindlayerException::class.java) {
             @Suppress("BlockingMethodInNonBlockingContext")
             kotlinx.coroutines.runBlocking {
                 mgr.awaitConnected(timeoutMs = 100L)
             }
         }
+        assertEquals(MindlayerErrorCode.CONNECT_TIMEOUT, ex.code)
     }
 
     @Test
     fun `awaitConnected with custom timeout`() = runTest {
         mgr.connect(mockContext)
 
-        assertThrows(TimeoutCancellationException::class.java) {
+        val ex = assertThrows(MindlayerException::class.java) {
             @Suppress("BlockingMethodInNonBlockingContext")
             kotlinx.coroutines.runBlocking {
                 mgr.awaitConnected(timeoutMs = 50L)
             }
         }
+        assertEquals(MindlayerErrorCode.CONNECT_TIMEOUT, ex.code)
+    }
+
+    @Test
+    fun `bindService returning false on supported android surfaces service unavailable`() {
+        every {
+            mockAppContext.bindService(any<Intent>(), any<ServiceConnection>(), any<Int>())
+        } returns false
+
+        mgr.connect(mockContext)
+
+        assertEquals(ConnectionState.BIND_GAVE_UP, mgr.state.value)
+        val ex = assertThrows(MindlayerException::class.java) {
+            kotlinx.coroutines.runBlocking { mgr.awaitConnected(timeoutMs = 1_000L) }
+        }
+        assertEquals(MindlayerErrorCode.SERVICE_UNAVAILABLE, ex.code)
+    }
+
+    @Test
+    fun `bindService SecurityException on supported android surfaces permission denied`() {
+        every {
+            mockAppContext.bindService(any<Intent>(), any<ServiceConnection>(), any<Int>())
+        } throws SecurityException("denied")
+
+        mgr.connect(mockContext)
+
+        assertEquals(ConnectionState.BIND_GAVE_UP, mgr.state.value)
+        val ex = assertThrows(MindlayerException::class.java) {
+            kotlinx.coroutines.runBlocking { mgr.awaitConnected(timeoutMs = 1_000L) }
+        }
+        assertEquals(MindlayerErrorCode.PERMISSION_DENIED, ex.code)
     }
 
     // -- StateFlow emissions --------------------------------------------------
@@ -300,23 +333,23 @@ class ConnectionManagerTest {
     // -- bindService failure --------------------------------------------------
 
     @Test
-    fun `connect falls back to DISCONNECTED when bindService returns false`() {
+    fun `connect moves to BIND_GAVE_UP when bindService returns false`() {
         every {
             mockAppContext.bindService(any<Intent>(), any(), any<Int>())
         } returns false
 
         mgr.connect(mockContext)
-        assertEquals(ConnectionState.DISCONNECTED, mgr.state.value)
+        assertEquals(ConnectionState.BIND_GAVE_UP, mgr.state.value)
     }
 
     @Test
-    fun `connect falls back to DISCONNECTED when bindService throws SecurityException`() {
+    fun `connect moves to BIND_GAVE_UP when bindService throws SecurityException`() {
         every {
             mockAppContext.bindService(any<Intent>(), any(), any<Int>())
         } throws SecurityException("denied")
 
         mgr.connect(mockContext)
-        assertEquals(ConnectionState.DISCONNECTED, mgr.state.value)
+        assertEquals(ConnectionState.BIND_GAVE_UP, mgr.state.value)
     }
 
     // -- onServiceConnected edge case -----------------------------------------
@@ -580,7 +613,7 @@ class ConnectionManagerTest {
     }
 
     @Test
-    fun `awaitConnected throws IllegalStateException when BIND_GAVE_UP`() = runTest {
+    fun `awaitConnected throws service unavailable when BIND_GAVE_UP`() = runTest {
         mgr.connect(mockContext)
         deliverBinder()
 
@@ -588,7 +621,7 @@ class ConnectionManagerTest {
             try {
                 mgr.awaitConnected(timeoutMs = 10_000L)
                 null
-            } catch (e: IllegalStateException) {
+            } catch (e: MindlayerException) {
                 e
             }
         }
@@ -601,6 +634,7 @@ class ConnectionManagerTest {
         val ex = deferred.await()
         assertNotNull(ex)
         assertTrue(ex!!.message!!.contains("permanently unavailable"))
+        assertEquals(MindlayerErrorCode.SERVICE_UNAVAILABLE, ex.code)
     }
 
     // -- Helpers --------------------------------------------------------------
