@@ -16,7 +16,7 @@ import org.junit.Test
  *
  * Two surface areas:
  *  1. [parseInitFailureLogRow] — re-hydrates a typed [InitFailure] from
- *     a `LogEvent.INIT_FAILURE_CATEGORIZED` row in the log database.
+ *     a `LogEvent.INIT_FAILURE_CATEGORIZED.key` row in the log database.
  *     This is the cross-process bridge: the engine logs the row in
  *     `:ml`, the dashboard reads it from the shared Room file in the
  *     main process. The wire format is `extraJson.failureCategory` +
@@ -151,7 +151,7 @@ class DashboardInitFailureRenderingTest {
         val row = LogEntry(
             timestampMs = 0L,
             category = LogCategory.ENGINE,
-            event = LogEvent.INIT_FAILURE_CATEGORIZED,
+            event = LogEvent.INIT_FAILURE_CATEGORIZED.key,
             extraJson = null,
         )
         assertNull(parseInitFailureLogRow(row))
@@ -171,7 +171,7 @@ class DashboardInitFailureRenderingTest {
         val row = LogEntry(
             timestampMs = 0L,
             category = LogCategory.ENGINE,
-            event = LogEvent.INIT_FAILURE_CATEGORIZED,
+            event = LogEvent.INIT_FAILURE_CATEGORIZED.key,
             extraJson = "{ this is not valid json",
         )
         assertNull(
@@ -185,7 +185,7 @@ class DashboardInitFailureRenderingTest {
         val row = LogEntry(
             timestampMs = 0L,
             category = LogCategory.ENGINE,
-            event = LogEvent.INIT_FAILURE_CATEGORIZED,
+            event = LogEvent.INIT_FAILURE_CATEGORIZED.key,
             extraJson = """{"otherField":"value"}""",
         )
         assertNull(parseInitFailureLogRow(row))
@@ -200,7 +200,7 @@ class DashboardInitFailureRenderingTest {
         val row = LogEntry(
             timestampMs = 0L,
             category = LogCategory.ENGINE,
-            event = LogEvent.INIT_FAILURE_CATEGORIZED,
+            event = LogEvent.INIT_FAILURE_CATEGORIZED.key,
             backend = null,
             errorMessage = null,
             extraJson = """{"failureCategory":"BackendUnavailable"}""",
@@ -209,6 +209,25 @@ class DashboardInitFailureRenderingTest {
         assertNotNull(parsed)
         assertEquals("", parsed!!.backend)
         assertEquals("", parsed.safeLabel)
+    }
+
+    @Test
+    fun `backend decision parser preserves feature-specific attempted chain`() {
+        val row = LogEntry(
+            timestampMs = 0L,
+            category = LogCategory.ENGINE,
+            event = LogEvent.BACKEND_DECISION.key,
+            backend = "CPU",
+            extraJson = """{"feature":"ocr","reason":"thermal","attempted":[{"backend":"GPU","reason":"hot"},{"backend":"CPU","reason":"fallback"}]}""",
+        )
+
+        val parsed = parseBackendDecisionLogRow(row)
+
+        assertNotNull(parsed)
+        assertEquals("ocr", parsed!!.featureName)
+        assertEquals("CPU", parsed.backend)
+        assertEquals("thermal", parsed.reason)
+        assertEquals("GPU:hot -> CPU:fallback", parsed.attemptedSummary)
     }
 
     // ---- helpers -----------------------------------------------------------
@@ -220,7 +239,7 @@ class DashboardInitFailureRenderingTest {
     ): LogEntry = LogEntry(
         timestampMs = 0L,
         category = LogCategory.ENGINE,
-        event = LogEvent.INIT_FAILURE_CATEGORIZED,
+        event = LogEvent.INIT_FAILURE_CATEGORIZED.key,
         backend = backend,
         errorMessage = errorMessage,
         extraJson = """{"failureCategory":"$category"}""",

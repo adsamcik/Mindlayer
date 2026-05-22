@@ -265,6 +265,47 @@ class TypesTest {
         assertEquals("CPU", copied.backend)
     }
 
+    @Test
+    fun `DiagnosticsSnapshot v2 exposes observability defaults and payloads`() {
+        val snapshot = DiagnosticsSnapshot(
+            capturedAtMs = 1L,
+            service = ServiceStatus(true, false, 1, 0, "GPU", "COOL", false, 10L),
+            engine = EngineInfo("gemma", 100L, "GPU", 4096, 1f, 0f, 0f),
+            callerSessionCount = 1,
+            recentInferenceCount = 2,
+            recentErrorCount = 0,
+            recentlyCompletedTrackedCount = 3,
+            ocr = OcrDiagnostics(currentBackend = "CPU", framesProcessed = 4, framesRejected = 1),
+            embedding = EmbeddingDiagnostics(
+                modelLoaded = true,
+                modelId = "embeddinggemma-300m",
+                currentBackend = "GPU",
+                batchesProcessed = 1,
+                vectorsGenerated = 8,
+            ),
+            acceleratorDecisions = mapOf(
+                "ocr" to AcceleratorDecisionSnapshot(
+                    feature = "ocr",
+                    backend = "CPU",
+                    reason = "thermal",
+                    attempted = listOf(AcceleratorAttemptSnapshot("GPU", "hot")),
+                    timestampMs = 2L,
+                ),
+            ),
+            deferredCounters = mapOf(
+                "chat" to DeferredCounters(submitted = 1, completed = 1),
+                "embedding" to DeferredCounters(submitted = 1, expired = 1),
+            ),
+        )
+
+        assertEquals(2, DiagnosticsSnapshot.CURRENT_SCHEMA_VERSION)
+        assertEquals(2, snapshot.schemaVersion)
+        assertEquals(4, snapshot.ocr.framesProcessed)
+        assertEquals(true, snapshot.embedding.modelLoaded)
+        assertEquals("thermal", snapshot.acceleratorDecisions["ocr"]!!.reason)
+        assertEquals(1, snapshot.deferredCounters["embedding"]!!.expired)
+    }
+
     // ── HistoryTurn ─────────────────────────────────────────────────────
 
     @Test

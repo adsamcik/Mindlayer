@@ -106,6 +106,7 @@ class DiagnosticExporterScopingTest {
 
         val dao = mockk<LogDao>(relaxed = true)
         coEvery { dao.getRecent(50) } returns recentLogs
+        coEvery { dao.getByEvents(any()) } returns emptyList()
         coEvery { dao.totalInferenceCount() } returns 42
         coEvery { dao.averageTokensPerSec() } returns 25.0f
         coEvery { dao.totalTokensGenerated() } returns 1234L
@@ -167,21 +168,21 @@ class DiagnosticExporterScopingTest {
                 com.adsamcik.mindlayer.service.logging.LogEntry(
                     timestampMs = 1L,
                     category = com.adsamcik.mindlayer.service.logging.LogCategory.INFERENCE,
-                    event = com.adsamcik.mindlayer.service.logging.LogEvent.REQUEST_START,
+                    event = com.adsamcik.mindlayer.service.logging.LogEvent.REQUEST_START.key,
                     sessionId = "s-mine",
                     requestId = "r-1",
                 ),
                 com.adsamcik.mindlayer.service.logging.LogEntry(
                     timestampMs = 2L,
                     category = com.adsamcik.mindlayer.service.logging.LogCategory.INFERENCE,
-                    event = com.adsamcik.mindlayer.service.logging.LogEvent.REQUEST_START,
+                    event = com.adsamcik.mindlayer.service.logging.LogEvent.REQUEST_START.key,
                     sessionId = "s-other",
                     requestId = "r-2",
                 ),
                 com.adsamcik.mindlayer.service.logging.LogEntry(
                     timestampMs = 3L,
                     category = com.adsamcik.mindlayer.service.logging.LogCategory.ENGINE,
-                    event = com.adsamcik.mindlayer.service.logging.LogEvent.ENGINE_INIT,
+                    event = com.adsamcik.mindlayer.service.logging.LogEvent.ENGINE_INIT.key,
                 ),
             )
             val exp = setUp(sessionsByUid, logs)
@@ -203,7 +204,7 @@ class DiagnosticExporterScopingTest {
                 com.adsamcik.mindlayer.service.logging.LogEntry(
                     timestampMs = 1L,
                     category = com.adsamcik.mindlayer.service.logging.LogCategory.ERROR,
-                    event = com.adsamcik.mindlayer.service.logging.LogEvent.REQUEST_ERROR,
+                    event = com.adsamcik.mindlayer.service.logging.LogEvent.REQUEST_ERROR.key,
                     sessionId = "s-mine",
                     errorMessage = "tokenizer refused chunk: 'leaked-prompt-fragment'",
                 ),

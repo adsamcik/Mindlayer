@@ -13,7 +13,7 @@ class LogEntitiesTest {
             id = 42,
             timestampMs = 1_000_000L,
             category = LogCategory.INFERENCE,
-            event = LogEvent.REQUEST_COMPLETE,
+            event = LogEvent.REQUEST_COMPLETE.key,
             sessionId = "sess-1",
             requestId = "req-1",
             backend = "GPU",
@@ -51,7 +51,7 @@ class LogEntitiesTest {
         val entry = LogEntry(
             timestampMs = 999L,
             category = LogCategory.ERROR,
-            event = LogEvent.GENERAL_ERROR,
+            event = LogEvent.GENERAL_ERROR.key,
         )
 
         assertEquals(0L, entry.id)
@@ -117,7 +117,7 @@ class LogEntitiesTest {
         val original = LogEntry(
             timestampMs = 1L,
             category = LogCategory.THERMAL,
-            event = LogEvent.BAND_CHANGE,
+            event = LogEvent.BAND_CHANGE.key,
             thermalBand = "COOL",
         )
 
@@ -152,55 +152,75 @@ class LogEntitiesTest {
     @Test
     fun `LogCategory ERROR`() = assertEquals("ERROR", LogCategory.ERROR)
 
+    @Test
+    fun `LogCategory OCR`() = assertEquals("OCR", LogCategory.OCR)
+
+    @Test
+    fun `LogCategory EMBEDDING`() = assertEquals("EMBEDDING", LogCategory.EMBEDDING)
+
+    @Test
+    fun `LogCategory IPC`() = assertEquals("IPC", LogCategory.IPC)
+
+    @Test
+    fun `LogCategory AUTH`() = assertEquals("AUTH", LogCategory.AUTH)
+
     // ── LogEvent constants ──────────────────────────────────────────────
 
     @Test
-    fun `LogEvent REQUEST_START`() = assertEquals("request_start", LogEvent.REQUEST_START)
+    fun `LogEvent REQUEST_START`() = assertEquals("request_start", LogEvent.REQUEST_START.key)
 
     @Test
-    fun `LogEvent REQUEST_COMPLETE`() = assertEquals("request_complete", LogEvent.REQUEST_COMPLETE)
+    fun `LogEvent REQUEST_COMPLETE`() = assertEquals("request_complete", LogEvent.REQUEST_COMPLETE.key)
 
     @Test
-    fun `LogEvent REQUEST_CANCEL`() = assertEquals("request_cancel", LogEvent.REQUEST_CANCEL)
+    fun `LogEvent REQUEST_CANCEL`() = assertEquals("request_cancel", LogEvent.REQUEST_CANCEL.key)
 
     @Test
-    fun `LogEvent REQUEST_ERROR`() = assertEquals("request_error", LogEvent.REQUEST_ERROR)
+    fun `LogEvent REQUEST_ERROR`() = assertEquals("request_error", LogEvent.REQUEST_ERROR.key)
 
     @Test
-    fun `LogEvent TOOL_CALL`() = assertEquals("tool_call", LogEvent.TOOL_CALL)
+    fun `LogEvent TOOL_CALL`() = assertEquals("tool_call", LogEvent.TOOL_CALL.key)
 
     @Test
-    fun `LogEvent BAND_CHANGE`() = assertEquals("band_change", LogEvent.BAND_CHANGE)
+    fun `LogEvent BAND_CHANGE`() = assertEquals("band_change", LogEvent.BAND_CHANGE.key)
 
     @Test
-    fun `LogEvent BACKEND_SWITCH`() = assertEquals("backend_switch", LogEvent.BACKEND_SWITCH)
+    fun `LogEvent BACKEND_SWITCH`() = assertEquals("backend_switch", LogEvent.BACKEND_SWITCH.key)
 
     @Test
-    fun `LogEvent SESSION_CREATED`() = assertEquals("session_created", LogEvent.SESSION_CREATED)
+    fun `LogEvent SESSION_CREATED`() = assertEquals("session_created", LogEvent.SESSION_CREATED.key)
 
     @Test
-    fun `LogEvent SESSION_DESTROYED`() = assertEquals("session_destroyed", LogEvent.SESSION_DESTROYED)
+    fun `LogEvent SESSION_DESTROYED`() = assertEquals("session_destroyed", LogEvent.SESSION_DESTROYED.key)
 
     @Test
-    fun `LogEvent SESSION_EVICTED`() = assertEquals("session_evicted", LogEvent.SESSION_EVICTED)
+    fun `LogEvent SESSION_EVICTED`() = assertEquals("session_evicted", LogEvent.SESSION_EVICTED.key)
 
     @Test
-    fun `LogEvent PRESSURE_CHANGE`() = assertEquals("pressure_change", LogEvent.PRESSURE_CHANGE)
+    fun `LogEvent PRESSURE_CHANGE`() = assertEquals("pressure_change", LogEvent.PRESSURE_CHANGE.key)
 
     @Test
-    fun `LogEvent EVICTION_TRIGGERED`() = assertEquals("eviction_triggered", LogEvent.EVICTION_TRIGGERED)
+    fun `LogEvent EVICTION_TRIGGERED`() = assertEquals("eviction_triggered", LogEvent.EVICTION_TRIGGERED.key)
 
     @Test
-    fun `LogEvent ENGINE_INIT`() = assertEquals("engine_init", LogEvent.ENGINE_INIT)
+    fun `LogEvent ENGINE_INIT`() = assertEquals("engine_init", LogEvent.ENGINE_INIT.key)
 
     @Test
-    fun `LogEvent ENGINE_SHUTDOWN`() = assertEquals("engine_shutdown", LogEvent.ENGINE_SHUTDOWN)
+    fun `LogEvent ENGINE_SHUTDOWN`() = assertEquals("engine_shutdown", LogEvent.ENGINE_SHUTDOWN.key)
 
     @Test
-    fun `LogEvent ENGINE_FALLBACK`() = assertEquals("engine_fallback", LogEvent.ENGINE_FALLBACK)
+    fun `LogEvent ENGINE_FALLBACK`() = assertEquals("engine_fallback", LogEvent.ENGINE_FALLBACK.key)
 
     @Test
-    fun `LogEvent GENERAL_ERROR`() = assertEquals("general_error", LogEvent.GENERAL_ERROR)
+    fun `LogEvent GENERAL_ERROR`() = assertEquals("general_error", LogEvent.GENERAL_ERROR.key)
+
+    @Test
+    fun `LogEvent fromKey round-trips all event keys`() {
+        LogEvent.entries.forEach { event ->
+            assertEquals(event, LogEvent.fromKey(event.key))
+        }
+        assertNull(LogEvent.fromKey("not_a_real_event"))
+    }
 
     // ── Equality & hashCode (data class contract) ───────────────────────
 
