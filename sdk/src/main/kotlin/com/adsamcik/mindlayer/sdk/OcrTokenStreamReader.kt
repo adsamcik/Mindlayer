@@ -57,8 +57,9 @@ object OcrTokenStreamReader {
 
     /**
      * Read frames until EOF and map them to [OcrEvent] emissions.
-     * Header / unknown / malformed frames produce no emission;
-     * terminal ``DONE`` / ``ERROR`` close the stream.
+     * Header / unknown / malformed frames produce no emission. ``DONE``
+     * cleanly terminates the stream. ``ERROR`` emits [OcrEvent.Error] and
+     * then fails the flow with [MindlayerException].
      */
     fun readStream(readEnd: ParcelFileDescriptor): Flow<OcrEvent> = flow {
         val input = DataInputStream(
@@ -80,9 +81,20 @@ object OcrTokenStreamReader {
                 } catch (_: EOFException) {
                     break
                 }
-                val event = parseFrame(payload.decodeToString()) ?: continue
+                val frameText = payload.decodeToString()
+                val event = parseFrame(frameText)
+                if (event == null) {
+                    if (isDoneFrame(frameText)) break
+                    continue
+                }
                 emit(event)
-                if (event is OcrEvent.ResultFinalized) break
+                if (event is OcrEvent.Error) {
+                    throw MindlayerException.fromStreamError(
+                        message = event.message ?: "OCR stream failed",
+                        codeName = event.code,
+                        codeInt = errorCodeInt(frameText),
+                    )
+                }
             }
         } finally {
             try {
@@ -101,9 +113,7 @@ object OcrTokenStreamReader {
      *
      * The terminal handling lives in [readStream]:
      *  - DONE breaks the loop with no emission (clean end).
-     *  - ERROR is not currently surfaced — `ResultFinalized` is the
-     *    canonical success-end signal. A future PR can extend the
-     *    OcrEvent hierarchy with an `Error` subtype if needed.
+     *  - ERROR emits [OcrEvent.Error] then fails the flow.
      */
     internal fun parseFrame(text: String): OcrEvent? {
         // Try header first (one-shot)
@@ -166,9 +176,28 @@ object OcrTokenStreamReader {
         StreamEventType.OCR_THROTTLE_HINT -> OcrEvent.ThrottleHint(
             recommendedIntervalMs = e.payload["recommendedIntervalMs"]?.jsonPrimitive?.long ?: 0L,
         )
-        StreamEventType.DONE -> null // terminal, handled in readStream loop break
-        StreamEventType.ERROR -> null // not surfaced in OcrEvent (yet)
+        StreamEventType.DONE -> null // terminal, handled in readStream
+        StreamEventType.ERROR -> {
+            val codeInt = e.payload["codeInt"]?.jsonPrimitive?.intOrNull
+            OcrEvent.Error(
+                code = e.payload["code"]?.jsonPrimitive?.contentOrNull
+                    ?: codeInt?.let { com.adsamcik.mindlayer.shared.MindlayerErrorCode.nameOf(it) }
+                    ?: "UNKNOWN",
+                message = e.payload["message"]?.jsonPrimitive?.contentOrNull,
+            )
+        }
         else -> null
+    }
+
+    private fun isDoneFrame(text: String): Boolean = streamEventOrNull(text)?.type == StreamEventType.DONE
+
+    private fun errorCodeInt(text: String): Int? =
+        streamEventOrNull(text)?.payload?.get("codeInt")?.jsonPrimitive?.intOrNull
+
+    private fun streamEventOrNull(text: String): StreamEvent? = try {
+        json.decodeFromString(StreamEvent.serializer(), text)
+    } catch (_: SerializationException) {
+        null
     }
 
     /**

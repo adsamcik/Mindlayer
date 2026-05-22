@@ -227,6 +227,18 @@ object MindlayerErrorCode {
      */
     const val FRAME_REJECTED_QUALITY = 5016
 
+    /** Connected service does not advertise the requested optional feature. */
+    const val FEATURE_NOT_SUPPORTED = 5017
+
+    /** SDK could not bind to the Mindlayer service process. */
+    const val SERVICE_UNAVAILABLE = 5018
+
+    /** SDK timed out waiting for the Mindlayer service connection. */
+    const val CONNECT_TIMEOUT = 5019
+
+    /** SDK observed a malformed or prematurely terminated pipe protocol. */
+    const val PROTOCOL_VIOLATION = 5020
+
     // ---- 6xxx auth / allowlist ---------------------------------------------
 
     /** App not on the allowlist; user approval pending in the dashboard. */
@@ -237,6 +249,9 @@ object MindlayerErrorCode {
 
     /** Caller identity could not be resolved (shared-UID, unknown package). */
     const val IDENTITY_UNKNOWN = 6003
+
+    /** Android denied binding to the service before the Mindlayer auth gate. */
+    const val PERMISSION_DENIED = 6004
 
     /** Internal service error; should not be observed in healthy operation. */
     const val INTERNAL = 9999
@@ -295,8 +310,11 @@ object MindlayerErrorCode {
         DEFERRED_RESULT_TOO_LARGE, EMBEDDING_BATCH_TOO_LARGE,
         EMBEDDING_MODEL_UNAVAILABLE, EMBEDDING_INPUT_TOO_LONG,
         EMBEDDING_DISABLED,
-        FRAME_DROPPED_BUSY, FRAME_REJECTED_QUALITY -> Category.RESOURCE
-        ALLOWLIST_PENDING, ALLOWLIST_REVOKED, IDENTITY_UNKNOWN -> Category.AUTH
+        FRAME_DROPPED_BUSY, FRAME_REJECTED_QUALITY,
+        FEATURE_NOT_SUPPORTED, SERVICE_UNAVAILABLE, CONNECT_TIMEOUT,
+        PROTOCOL_VIOLATION -> Category.RESOURCE
+        ALLOWLIST_PENDING, ALLOWLIST_REVOKED, IDENTITY_UNKNOWN,
+        PERMISSION_DENIED -> Category.AUTH
         INTERNAL -> Category.UNKNOWN
         else -> Category.UNKNOWN
     }
@@ -345,10 +363,15 @@ object MindlayerErrorCode {
         OCR_SESSION_FINALIZED -> "OCR_SESSION_FINALIZED"
         FRAME_DROPPED_BUSY -> "FRAME_DROPPED_BUSY"
         FRAME_REJECTED_QUALITY -> "FRAME_REJECTED_QUALITY"
+        FEATURE_NOT_SUPPORTED -> "FEATURE_NOT_SUPPORTED"
+        SERVICE_UNAVAILABLE -> "SERVICE_UNAVAILABLE"
+        CONNECT_TIMEOUT -> "CONNECT_TIMEOUT"
+        PROTOCOL_VIOLATION -> "PROTOCOL_VIOLATION"
         UNSUPPORTED_ANDROID_VERSION -> "UNSUPPORTED_ANDROID_VERSION"
         ALLOWLIST_PENDING -> "ALLOWLIST_PENDING"
         ALLOWLIST_REVOKED -> "ALLOWLIST_REVOKED"
         IDENTITY_UNKNOWN -> "IDENTITY_UNKNOWN"
+        PERMISSION_DENIED -> "PERMISSION_DENIED"
         INTERNAL -> "INTERNAL"
         else -> null
     }

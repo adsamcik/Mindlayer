@@ -9,6 +9,7 @@ import com.adsamcik.mindlayer.IMindlayerService
 import com.adsamcik.mindlayer.RequestMeta
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.sdk.db.MindlayerDatabase
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.just
@@ -223,6 +224,33 @@ class ConversationTest {
         // generate() internally creates and destroys a session
         verify(atLeast = 1) { mockService.createSession(any()) }
         verify(atLeast = 1) { mockService.destroySession(any()) }
+    }
+
+    @Test
+    fun `one-shot stream without Done throws protocol violation`() = runTest {
+        stubInferToClose()
+
+        val ex = try {
+            mindlayer.chat("empty stream")
+            throw AssertionError("expected MindlayerException")
+        } catch (e: MindlayerException) {
+            e
+        }
+        assertEquals(MindlayerErrorCode.PROTOCOL_VIOLATION, ex.code)
+    }
+
+    @Test
+    fun `conversation chat without Done throws protocol violation`() = runTest {
+        stubInferToClose()
+        val conv = mindlayer.conversation()
+
+        val ex = try {
+            conv.chat("empty stream")
+            throw AssertionError("expected MindlayerException")
+        } catch (e: MindlayerException) {
+            e
+        }
+        assertEquals(MindlayerErrorCode.PROTOCOL_VIOLATION, ex.code)
     }
 
     // ═════════════════════════════════════════════════════════════════════

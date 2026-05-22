@@ -22,8 +22,9 @@ import com.adsamcik.mindlayer.OcrSessionState
  *    0..N ``FieldLocked`` -> ``FrameProcessed``,
  *  - any time: ``ResultSnapshot`` (the current fused output state)
  *    and ``ThrottleHint`` (advisory backpressure signal),
- *  - exactly one ``ResultFinalized`` per session, immediately before
- *    the pipe closes.
+     *  - exactly one ``ResultFinalized`` per session, followed by terminal
+     *    ``DONE`` and pipe close,
+     *  - any time before ``DONE``: ``Error`` for terminal stream failures.
  *
  * # Privacy
  *
@@ -164,6 +165,9 @@ sealed class OcrEvent {
             "ResultFinalized(<redacted:${fullJson.length}>)"
     }
 
+    /** Terminal OCR stream failure. The flow emits this, then fails. */
+    data class Error(val code: String, val message: String?) : OcrEvent()
+
     /**
      * Advisory hint that the caller should slow down ``pushOcrFrame``.
      * Independent of [FrameDroppedBusy] — sent **before** the queue
@@ -193,6 +197,7 @@ fun OcrFrameAck.isAccepted(): Boolean = status == OcrFrameAck.STATUS_ACCEPTED
 fun OcrFrameAck.isDroppedBusy(): Boolean = status == OcrFrameAck.STATUS_DROPPED_BUSY
 fun OcrFrameAck.isRejectedQuality(): Boolean = status == OcrFrameAck.STATUS_REJECTED_QUALITY
 fun OcrFrameAck.isRejectedFinalized(): Boolean = status == OcrFrameAck.STATUS_REJECTED_FINALIZED
+fun OcrFrameAck.isRejectedStreamNotAttached(): Boolean = status == OcrFrameAck.STATUS_REJECTED_STREAM_NOT_ATTACHED
 
 /** Phase predicates on [OcrSessionState] for ergonomic SDK code. */
 fun OcrSessionState.isActive(): Boolean = phase == OcrSessionState.PHASE_ACTIVE

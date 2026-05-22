@@ -360,6 +360,9 @@ class Mindlayer private constructor(
         return caps
     }
 
+    /** Stable feature identifiers advertised by the currently connected service. */
+    suspend fun connectedFeatures(): Set<String> = getCapabilities().supportedFeatures
+
     /**
      * Cheap kernel-level liveness probe. Returns `true` if the service binder
      * is alive and accepting transactions, `false` if the binder is dead, the
@@ -882,6 +885,23 @@ class Mindlayer private constructor(
         return caps
     }
 
+    private suspend fun requireOcrCapability(): ServiceCapabilities {
+        val caps = getCapabilities()
+        if (ServiceCapabilities.FEATURE_OCR_SESSION !in connectedFeatures()) {
+            throw MindlayerException(
+                message = "Connected Mindlayer service does not support OCR sessions",
+                code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.FEATURE_NOT_SUPPORTED,
+            )
+        }
+        return caps
+    }
+
+    private fun ocrNotSupported(sessionId: String? = null): MindlayerException = MindlayerException(
+        message = "Connected Mindlayer service does not implement OCR sessions",
+        code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.FEATURE_NOT_SUPPORTED,
+        sessionId = sessionId,
+    )
+
     private fun embeddingNotSupported(requestId: String? = null): MindlayerException = MindlayerException(
         message = "Connected Mindlayer service does not implement embeddings",
         code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.NOT_SUPPORTED,
@@ -964,7 +984,15 @@ class Mindlayer private constructor(
      */
     suspend fun embedBatchLarge(configs: List<EmbeddingConfig>): List<com.adsamcik.mindlayer.EmbeddingResult> {
         val caps = requireEmbeddingCapability()
-        validateEmbeddingBatchSize(configs, caps.maxEmbeddingBatchShm.takeIf { it > 0 } ?: caps.maxEmbeddingBatchTotal, "shared-memory")
+        if (caps.maxEmbeddingBatchShm <= 0) {
+            return if (configs.size <= caps.maxEmbeddingBatchInline) {
+                embedBatch(configs)
+            } else {
+                validateEmbeddingBatchSize(configs, caps.maxEmbeddingBatchTotal, "deferred")
+                awaitEmbeddingBatch(embedBatchDeferred(configs))
+            }
+        }
+        validateEmbeddingBatchSize(configs, caps.maxEmbeddingBatchShm, "shared-memory")
         return try {
             withContext(Dispatchers.IO) {
                 parseEmbeddingTransfer(withTypedErrors { it.embedBatchShm(configs.map { config -> config.toAidlRequest() }) })
@@ -1020,6 +1048,65 @@ class Mindlayer private constructor(
             throw embeddingNotSupported(handle.requestId)
         } catch (_: AbstractMethodError) {
             throw embeddingNotSupported(handle.requestId)
+        }
+    }
+
+    private suspend fun awaitEmbeddingBatch(
+        handle: EmbeddingBatchHandle,
+        pollIntervalMs: Long = 250L,
+    ): List<com.adsamcik.mindlayer.EmbeddingResult> = coroutineScope {
+        val pushSignal = async {
+            embeddingBatchCompletions()
+                .filter { it == handle.requestId }
+                .first()
+        }
+        try {
+            val pollJob = async {
+                while (isActive) {
+                    delay(pollIntervalMs)
+                    val outcome = fetchEmbeddingBatch(handle)
+                    if (outcome !is EmbeddingBatchOutcome.StillRunning) {
+                        return@async outcome
+                    }
+                }
+                EmbeddingBatchOutcome.StillRunning
+            }
+            val selectedOutcome = select<EmbeddingBatchOutcome?> {
+                pushSignal.onAwait { null }
+                pollJob.onAwait { it }
+            }
+            pollJob.cancel()
+            when (val outcome = selectedOutcome ?: fetchEmbeddingBatch(handle)) {
+                is EmbeddingBatchOutcome.Ready -> outcome.results
+                is EmbeddingBatchOutcome.Failed -> throw MindlayerException(
+                    message = "Deferred embedding batch failed",
+                    code = outcome.errorCode,
+                    codeName = outcome.errorName,
+                    requestId = handle.requestId,
+                )
+                is EmbeddingBatchOutcome.Cancelled -> throw MindlayerException(
+                    message = "Deferred embedding batch was cancelled",
+                    codeName = "CANCELLED",
+                    requestId = handle.requestId,
+                )
+                is EmbeddingBatchOutcome.Expired -> throw MindlayerException(
+                    message = "Deferred embedding batch expired",
+                    code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.DEFERRED_EXPIRED,
+                    requestId = handle.requestId,
+                )
+                is EmbeddingBatchOutcome.NotFound -> throw MindlayerException(
+                    message = "Deferred embedding batch not found or not owned",
+                    code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                    requestId = handle.requestId,
+                )
+                is EmbeddingBatchOutcome.StillRunning -> throw MindlayerException(
+                    message = "Deferred embedding batch did not reach a terminal result",
+                    code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.PROTOCOL_VIOLATION,
+                    requestId = handle.requestId,
+                )
+            }
+        } finally {
+            pushSignal.cancel()
         }
     }
 
@@ -1637,8 +1724,11 @@ class Mindlayer private constructor(
                 else -> { /* Started, Metrics — ignored */ }
             }
         }
-        return result ?: throw IllegalStateException(
-            "Inference stream ended without a Done event"
+        return result ?: throw MindlayerException(
+            message = "Inference stream ended without a Done event",
+            code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.PROTOCOL_VIOLATION,
+            requestId = handle.requestId,
+            sessionId = sessionId,
         )
     }
 
@@ -2100,9 +2190,11 @@ class Mindlayer private constructor(
      * implemented → ``NoSuchMethodError`` / ``AbstractMethodError``).
      */
     suspend fun ocrLimits(): com.adsamcik.mindlayer.OcrLimits {
-        val service = connection.awaitConnected()
+        requireOcrCapability()
         return try {
-            service.ocrLimits
+            withContext(Dispatchers.IO) {
+                withTypedErrors { it.ocrLimits }
+            }
         } catch (_: NoSuchMethodError) {
             com.adsamcik.mindlayer.OcrLimits.zeroBaseline()
         } catch (_: AbstractMethodError) {
@@ -2145,8 +2237,16 @@ class Mindlayer private constructor(
      * recovery) and don't want the builder DSL.
      */
     suspend fun ocrSession(config: com.adsamcik.mindlayer.OcrSessionConfig): OcrSession {
-        val service = connection.awaitConnected()
-        val sessionId = service.createOcrSession(config)
+        requireOcrCapability()
+        val sessionId = try {
+            withContext(Dispatchers.IO) {
+                withTypedErrors { it.createOcrSession(config) }
+            }
+        } catch (_: NoSuchMethodError) {
+            throw ocrNotSupported()
+        } catch (_: AbstractMethodError) {
+            throw ocrNotSupported()
+        }
         return OcrSession(sessionId = sessionId, config = config, mindlayer = this)
     }
 
@@ -2156,9 +2256,15 @@ class Mindlayer private constructor(
         mediaPart: com.adsamcik.mindlayer.MediaPart,
         meta: com.adsamcik.mindlayer.OcrFrameMeta,
     ): com.adsamcik.mindlayer.OcrFrameAck {
-        val service = connection.awaitConnected()
+        requireOcrCapability()
         return try {
-            service.pushOcrFrame(sessionId, mediaPart, meta)
+            withContext(Dispatchers.IO) {
+                withTypedErrors(sessionId = sessionId) { it.pushOcrFrame(sessionId, mediaPart, meta) }
+            }
+        } catch (_: NoSuchMethodError) {
+            throw ocrNotSupported(sessionId)
+        } catch (_: AbstractMethodError) {
+            throw ocrNotSupported(sessionId)
         } finally {
             mediaPart.source.closeQuietly()
         }
@@ -2166,21 +2272,40 @@ class Mindlayer private constructor(
 
     /** Internal: forward state query. */
     internal suspend fun getOcrSessionState(sessionId: String): com.adsamcik.mindlayer.OcrSessionState {
-        val service = connection.awaitConnected()
-        return service.getOcrSessionState(sessionId)
+        requireOcrCapability()
+        return try {
+            withContext(Dispatchers.IO) {
+                withTypedErrors(sessionId = sessionId) { it.getOcrSessionState(sessionId) }
+            }
+        } catch (_: NoSuchMethodError) {
+            throw ocrNotSupported(sessionId)
+        } catch (_: AbstractMethodError) {
+            throw ocrNotSupported(sessionId)
+        }
     }
 
     /** Internal: forward finalize call. */
     internal suspend fun finalizeOcrSession(sessionId: String) {
-        val service = connection.awaitConnected()
-        service.finalizeOcrSession(sessionId)
+        requireOcrCapability()
+        try {
+            withContext(Dispatchers.IO) {
+                withTypedErrors(sessionId = sessionId) { it.finalizeOcrSession(sessionId) }
+            }
+        } catch (_: NoSuchMethodError) {
+            throw ocrNotSupported(sessionId)
+        } catch (_: AbstractMethodError) {
+            throw ocrNotSupported(sessionId)
+        }
     }
 
     /** Internal: fire-and-forget close; idempotent on the service side. */
     internal fun closeOcrSessionFireAndForget(sessionId: String) {
+        if (!hasOcrCapabilitySync()) return
         val service = connection.getService() ?: return
         try {
-            service.closeOcrSession(sessionId)
+            withTypedErrorsSync(service, sessionId = sessionId) {
+                it.closeOcrSession(sessionId)
+            }
         } catch (_: Throwable) {
             // best-effort
         }
@@ -2191,8 +2316,28 @@ class Mindlayer private constructor(
         sessionId: String,
         writeEnd: ParcelFileDescriptor,
     ) {
-        val service = connection.awaitConnected()
-        service.streamOcrEvents(sessionId, writeEnd)
+        requireOcrCapability()
+        try {
+            withContext(Dispatchers.IO) {
+                withTypedErrors(sessionId = sessionId) { it.streamOcrEvents(sessionId, writeEnd) }
+            }
+        } catch (_: NoSuchMethodError) {
+            throw ocrNotSupported(sessionId)
+        } catch (_: AbstractMethodError) {
+            throw ocrNotSupported(sessionId)
+        }
+    }
+
+    private fun hasOcrCapabilitySync(): Boolean {
+        cachedCapabilities?.let { return it.supports(ServiceCapabilities.FEATURE_OCR_SESSION) }
+        val service = connection.getService() ?: return false
+        return try {
+            val caps = service.capabilities
+            cachedCapabilities = caps
+            caps.supports(ServiceCapabilities.FEATURE_OCR_SESSION)
+        } catch (_: Throwable) {
+            false
+        }
     }
 }
 

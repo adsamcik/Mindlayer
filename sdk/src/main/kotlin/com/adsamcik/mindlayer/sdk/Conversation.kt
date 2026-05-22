@@ -228,8 +228,9 @@ class Conversation internal constructor(
                 else -> { /* Started, Metrics — ignored */ }
             }
         }
-        return result ?: throw IllegalStateException(
-            "Inference stream ended without a Done event"
+        return result ?: throw MindlayerException(
+            message = "Inference stream ended without a Done event",
+            code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.PROTOCOL_VIOLATION,
         )
         } finally {
             synchronized(inFlight) { inFlight.remove(handle) }

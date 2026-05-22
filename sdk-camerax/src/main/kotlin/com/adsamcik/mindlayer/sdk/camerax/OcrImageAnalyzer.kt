@@ -7,8 +7,21 @@ import com.adsamcik.mindlayer.sdk.OcrSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import java.nio.BufferUnderflowException
 import java.util.concurrent.atomic.AtomicLong
+
+/** Analyzer-internal outcomes that are not otherwise visible through OCR session events. */
+sealed class OcrAnalyzerEvent {
+    data class Dropped(val frameId: Long, val reason: String) : OcrAnalyzerEvent()
+    data class Busy(val frameId: Long, val retryAfterMs: Long) : OcrAnalyzerEvent()
+    data class Error(val throwable: Throwable) : OcrAnalyzerEvent()
+}
 
 /**
  * CameraX [ImageAnalysis.Analyzer] that:
@@ -70,6 +83,14 @@ class OcrImageAnalyzer(
     private val frameIdSequence = AtomicLong(0L)
     @Volatile private var previousDHash: ULong? = null
     @Volatile private var droppedCount: Long = 0L
+    private val _events = MutableSharedFlow<OcrAnalyzerEvent>(
+        replay = 1,
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /** Non-blocking stream of analyzer-local drops, busy acks, and failures. */
+    val events: Flow<OcrAnalyzerEvent> = _events.asSharedFlow()
 
     /** Cumulative count of frames the client-side presort dropped. */
     val clientDroppedCount: Long get() = droppedCount
@@ -87,7 +108,7 @@ class OcrImageAnalyzer(
     override fun analyze(image: ImageProxy) {
         try {
             val frameId = frameIdSequence.incrementAndGet()
-            val ocrFrame = OcrFrame.fromImageProxy(image, frameId)
+            val ocrFrame = extractFrameOrReport(image, frameId) ?: return
             val frameWithHint = if (runClientSidePresort) {
                 val score = OcrFramePresort.score(
                     yPlane = ocrFrame.bytes,
@@ -97,6 +118,7 @@ class OcrImageAnalyzer(
                 )
                 if (!score.isGood) {
                     droppedCount++
+                    _events.tryEmit(OcrAnalyzerEvent.Dropped(frameId, "client_presort"))
                     return
                 }
                 previousDHash = score.dHash
@@ -112,18 +134,23 @@ class OcrImageAnalyzer(
                         width = frameWithHint.width,
                         height = frameWithHint.height,
                     )
+                    when (ack.status) {
+                        OcrFrameAck.STATUS_DROPPED_BUSY -> {
+                            droppedCount++
+                            _events.tryEmit(OcrAnalyzerEvent.Busy(ack.frameId, ack.retryAfterMs))
+                        }
+                        OcrFrameAck.STATUS_REJECTED_QUALITY,
+                        OcrFrameAck.STATUS_REJECTED_FINALIZED,
+                        OcrFrameAck.STATUS_REJECTED_STREAM_NOT_ATTACHED -> {
+                            droppedCount++
+                            _events.tryEmit(OcrAnalyzerEvent.Dropped(ack.frameId, "service_status_${ack.status}"))
+                        }
+                    }
                     onAck?.invoke(frameWithHint, ack)
-                } catch (_: Throwable) {
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
                     droppedCount++
-                    onAck?.invoke(
-                        frameWithHint,
-                        OcrFrameAck(
-                            frameId = frameWithHint.frameId,
-                            status = OcrFrameAck.STATUS_DROPPED_BUSY,
-                            queueDepth = 0,
-                            retryAfterMs = 0L,
-                        ),
-                    )
+                    _events.tryEmit(OcrAnalyzerEvent.Error(e))
                 }
             }
         } finally {
@@ -131,5 +158,22 @@ class OcrImageAnalyzer(
             // before returning, or the pipeline stalls.
             image.close()
         }
+    }
+
+    private fun extractFrameOrReport(image: ImageProxy, frameId: Long): OcrFrame? = try {
+        OcrFrame.fromImageProxy(image, frameId)
+    } catch (e: IllegalArgumentException) {
+        _events.tryEmit(OcrAnalyzerEvent.Error(e))
+        null
+    } catch (e: IllegalStateException) {
+        if (e is CancellationException) throw e
+        _events.tryEmit(OcrAnalyzerEvent.Error(e))
+        null
+    } catch (e: IndexOutOfBoundsException) {
+        _events.tryEmit(OcrAnalyzerEvent.Error(e))
+        null
+    } catch (e: BufferUnderflowException) {
+        _events.tryEmit(OcrAnalyzerEvent.Error(e))
+        null
     }
 }
