@@ -121,6 +121,39 @@ class MindlayerEmbedTest {
         assertEquals("NPU", results[0].backend)
     }
 
+    @Test fun `embedBatchLarge falls back to inline when shared memory cap is zero`() = runTest {
+        every { mockService.capabilities } returns embeddingCaps.copy(maxEmbeddingBatchShm = 0)
+        every { mockService.embedBatch(any()) } returns com.adsamcik.mindlayer.EmbeddingBatchResult(
+            results = listOf(result(floatArrayOf(5f, 6f), dim = 2)),
+            totalDurationMs = 8L,
+            backend = "NPU",
+        )
+
+        val results = mindlayer.embedBatchLarge(listOf(EmbeddingConfig("inline")))
+
+        assertArrayEquals(floatArrayOf(5f, 6f), results.single().vector, 0f)
+        verify(exactly = 0) { mockService.embedBatchShm(any()) }
+        verify(exactly = 1) { mockService.embedBatch(any()) }
+    }
+
+    @Test fun `embedBatchLarge falls back to deferred when shared memory cap is zero and batch exceeds inline cap`() = runTest {
+        every {
+            mockService.capabilities
+        } returns embeddingCaps.copy(maxEmbeddingBatchInline = 1, maxEmbeddingBatchShm = 0, maxEmbeddingBatchTotal = 2)
+        every { mockService.embedBatchDeferred(any()) } returns DeferredHandle(requestId = "emb-fallback", expiresAtMs = 1_000L)
+        every { mockService.fetchEmbeddingBatchResult("emb-fallback") } returns VectorBlobHandle(
+            status = DeferredResult.READY,
+            transfer = transfer(listOf(floatArrayOf(7f, 8f), floatArrayOf(9f, 10f))),
+        )
+
+        val results = mindlayer.embedBatchLarge(listOf(EmbeddingConfig("a"), EmbeddingConfig("b")))
+
+        assertEquals(2, results.size)
+        assertArrayEquals(floatArrayOf(7f, 8f), results[0].vector, 0f)
+        verify(exactly = 0) { mockService.embedBatchShm(any()) }
+        verify(exactly = 1) { mockService.embedBatchDeferred(any()) }
+    }
+
     @Test fun `old service without embeddings capability throws NOT_SUPPORTED`() = runTest {
         every { mockService.capabilities } returns embeddingCaps.copy(supportedFeatures = emptySet())
         try {
