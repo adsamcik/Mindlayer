@@ -84,12 +84,12 @@ dependencies {
     // stable across CameraX 1.3+; consumers on older versions can use
     // the OcrFrame.fromYPlane(...) helper directly without ever
     // touching the CameraX types this module references.
-    compileOnly("androidx.camera:camera-core:1.6.1")
+    compileOnly(libs.camerax.core)
 
     testImplementation(libs.junit)
     testImplementation(libs.mockk)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
-    testImplementation("androidx.camera:camera-core:1.6.1")
+    testImplementation(libs.camerax.core)
 }

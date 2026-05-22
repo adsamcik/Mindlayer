@@ -9,10 +9,10 @@
 |---|---|---|
 | JDK | 17 (build) — but tests run on 21 in CI, see [Java 21 gotcha](#%EF%B8%8F-the-java-21-test-runtime-gotcha) | `compileOptions { sourceCompatibility/targetCompatibility = VERSION_17 }` and `kotlin { jvmTarget = JVM_17 }` |
 | Android SDK | `compileSdk 36`, `minSdk 26`, `targetSdk 36` | |
-| Gradle | wrapper-managed (`gradlew`) | Plugin: AGP 8.9.3 |
-| Kotlin | 2.3.0 (KSP 2.3.6) | `kotlin.code.style=official` |
-| Compose | BOM 2025.04.01, compiler 1.5.15 | |
-| LiteRT-LM | 0.10.0 (`com.google.ai.edge.litertlm:litertlm-android`) | |
+| Gradle | wrapper-managed (`gradlew`) | Plugin: AGP 9.2.1 |
+| Kotlin | 2.3.21 (KSP 2.3.8) | `kotlin.code.style=official` |
+| Compose | BOM 2026.04.01, Material3 1.5.0-alpha18 | |
+| LiteRT-LM | 0.12.0 (`com.google.ai.edge.litertlm:litertlm-android`) + LiteRT 2.1.5 | |
 | Model file | `gemma-4-E2B-it.litertlm` (~2.4 GB) | **NOT in git.** Delivered via Play AI Pack (`:gemma_model`) or `adb push` for dev. |
 | Emulator/device | API 26+, GPU recommended (Vulkan/OpenCL); Robolectric covers `:test` | Native libs `libvndksupport.so`, `libOpenCL.so` declared `required="false"`. |
 
@@ -70,14 +70,14 @@ For Play Store builds the same file is delivered via the `:gemma_model` install-
 
 ## ⚠️ The Java 21 test-runtime gotcha
 
-CI is *labelled* "Set up JDK 17" but actually installs **Java 21 (Temurin)**:
+CI runs Gradle on **Java 21 (Temurin)** while compiling app bytecode to JVM 17:
 
 ```yaml
 # .github/workflows/ci.yml
-- name: Set up JDK 17
+- name: Set up JDK 21 (compile target 17)
   uses: actions/setup-java@v5
   with:
-    java-version: '21'        #  <-- intentional, not a typo
+    java-version: '21'        # Gradle/test runtime; app bytecode still targets 17
     distribution: 'temurin'
 ```
 
@@ -96,7 +96,8 @@ If you change CI Java setup or local JDK, run the unit-test suite end-to-end bef
 | `build-and-test` | every push/PR to `main` | `assembleDebug` + `testDebugUnitTest`, uploads HTML + JUnit XML reports. |
 | `instrumented-tests` | every push/PR | Spins up `reactivecircus/android-emulator-runner` AVD api-33, runs `connectedDebugAndroidTest` for `:app` and `:sdk`. |
 | `lint` | every push/PR | `./gradlew lintDebug`, uploads HTML reports. Lint fatal set: `NewApi`, `MissingTranslation`. `InlinedApi` is intentionally **not** fatal (always-safe behind `SDK_INT` checks). |
-| `build-bundle` | push to `main` only, after `build-and-test` | `:app:bundleRelease`, uploads AAB (unsigned, since CI doesn't have the keystore). |
+| `validate-release-shas` | every push/PR | Reports which of the seven release SHA repository variables are set; malformed set values fail fast. |
+| `build-bundle` | push to `main` only, after `build-and-test` + `validate-release-shas` | Skips cleanly unless all seven SHA vars and the Gemma payload are present; then runs `:app:bundleRelease` and uploads the AAB (signed when CI signing secrets are configured). |
 
 There is also `.github/workflows/publish.yml` for SDK/shared artifact publishing on `v*` tags.
 
@@ -104,12 +105,13 @@ Dependabot is enabled for Gradle and GitHub Actions; PRs land regularly.
 
 ## Releasing
 
-Production builds are signed locally — see `RELEASE.md` for the keystore flow. Quick summary:
+Production builds can be signed locally or by CI when signing secrets are configured — see `RELEASE.md` for the keystore and model-SHA flow. Quick summary:
 
 1. Drop `keystore.properties` (with `storeFile`, `storePassword`, `keyAlias`, `keyPassword`) at the repo root.
-2. `./gradlew :app:bundleRelease` produces `app/build/outputs/bundle/release/app-release.aab`.
-3. Upload to Play Console with the `:gemma_model` asset pack.
-4. Tag the commit `vX.Y.Z` to trigger SDK publishing.
+2. Compute the Gemma, PaddleOCR, and EmbeddingGemma SHA-256 values and pass the seven `-P*Sha256` properties documented in `RELEASE.md`.
+3. `./gradlew :app:bundleRelease` produces `app/build/outputs/bundle/release/app-release.aab`.
+4. Upload to Play Console with the `:gemma_model`, `:embeddinggemma_model`, and `:paddleocr_model` install-time asset packs.
+5. Tag the commit `vX.Y.Z` to trigger SDK publishing and optional GitHub Release AAB attachment.
 
 R8/proguard rules: `app/proguard-rules.pro`, `sdk/consumer-rules.pro`, `shared/consumer-rules.pro`.
 

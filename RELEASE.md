@@ -1,8 +1,9 @@
 # Releasing Mindlayer to Google Play
 
 This document is the end-to-end flow for cutting a release build, signing it
-locally, and uploading it to the Play Console. **All signing happens on your
-local machine** — CI only produces an unsigned debug bundle and runs tests.
+locally or in CI, and uploading it to the Play Console. Local signing remains
+the default for Play uploads; CI can build and attach a signed AAB when the
+release model payloads, SHA variables, and Android signing secrets are present.
 
 ---
 
@@ -123,8 +124,8 @@ This is the file you upload to Play. It is:
 
 * **Signed** with your release key (because `keystore.properties` is present).
 * **Minified and shrunk** via R8 using `app/proguard-rules.pro`.
-* **Packaged with the Gemma AI-Pack** (install-time delivery, declared in
-  `app/build.gradle.kts` via `assetPacks += listOf(":gemma_model")`).
+* **Packaged with install-time AI packs** declared in `app/build.gradle.kts`:
+  `:gemma_model`, `:embeddinggemma_model`, and `:paddleocr_model`.
 
 > ⚠️ The Gemma `.litertlm`, PaddleOCR `.tflite`/dictionary files, and
 > EmbeddingGemma artifacts are **not** checked into git. For a Play Store
@@ -132,6 +133,30 @@ This is the file you upload to Play. It is:
 > modules before running `:app:bundleRelease`. Release builds require all seven
 > `-P*Sha256` properties for the exact files being bundled; debug builds keep
 > advisory model-hash behavior for local development.
+
+### 2.2.1 Pre-release model artefact storage
+
+Model binaries are stored outside git because they are large release artefacts,
+not source files. Before a local or CI release build, retrieve the vetted
+artefacts from the project's private model artefact store and place them at the
+paths shown in the PowerShell snippet above. Compute SHA-256 over the exact
+bytes being bundled, then set these repository variables for CI release jobs:
+
+* `MODEL_SHA256`
+* `PADDLEOCR_DET_SHA256`
+* `PADDLEOCR_REC_SHA256`
+* `PADDLEOCR_CLS_SHA256`
+* `PADDLEOCR_DICT_SHA256`
+* `EMBEDDING_MODEL_SHA256`
+* `EMBEDDING_TOKENIZER_SHA256`
+
+`.github/workflows/ci.yml` runs `validate-release-shas` first; if any variable
+is missing it reports which ones are unset and skips `build-bundle` cleanly.
+`publish.yml` uses the same seven variables for the tag-driven `release-aab`
+job. Configure `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+`ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD` as repository secrets only when
+CI should attach a signed AAB; otherwise CI may produce unsigned smoke-test
+artifacts that must not be uploaded to Play.
 
 ### 2.3 (Optional) Build a signed universal APK for side-loading
 
