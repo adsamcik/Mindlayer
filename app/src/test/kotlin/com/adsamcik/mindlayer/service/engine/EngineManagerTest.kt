@@ -298,6 +298,38 @@ class EngineManagerTest {
     }
 
     @Test
+    fun `initialize records chat accelerator decision`() = runTest {
+        File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME).writeText("fake-model")
+        stubActivityManager()
+        LiteRtAcceleratorResolver.resetForTesting()
+
+        val mockEngine = mockk<Engine>(relaxed = true) {
+            every { initialize() } returns Unit
+        }
+        val mgr = EngineManager(context, logRepository)
+        mgr.engineFactory = { _ -> mockEngine }
+
+        try {
+            mgr.initialize(preferredBackend = "CPU")
+
+            val decision = LiteRtAcceleratorResolver.latestDecision("chat")
+            assertNotNull(decision)
+            assertEquals("CPU", decision?.backend)
+            assertEquals("REQUESTED_CPU", decision?.reason)
+            verify {
+                logRepository.logBackendDecision(
+                    featureName = "chat",
+                    backend = "CPU",
+                    reason = "REQUESTED_CPU",
+                    attempted = listOf("CPU" to "selected"),
+                )
+            }
+        } finally {
+            LiteRtAcceleratorResolver.resetForTesting()
+        }
+    }
+
+    @Test
     fun `initial state - lastGpuFailureReason is null`() {
         val mgr = EngineManager(context)
         assertNull(mgr.lastGpuFailureReason)

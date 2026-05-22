@@ -103,7 +103,7 @@ class EngineInitQueueTest {
         every { engineManager.isInitialized } answers { ready.get() }
         // Make initialize block long enough that all 8 callers see
         // !isInitialized before the slot finishes.
-        coEvery { engineManager.awaitReady() } coAnswers {
+        coEvery { engineManager.awaitReady(any()) } coAnswers {
             delay(200)
             ready.set(true)
             EngineState.Ready
@@ -140,7 +140,7 @@ class EngineInitQueueTest {
     fun `subsequent call after init succeeds`() = runBlocking {
         val ready = AtomicBoolean(false)
         every { engineManager.isInitialized } answers { ready.get() }
-        coEvery { engineManager.awaitReady() } coAnswers {
+        coEvery { engineManager.awaitReady(any()) } coAnswers {
             delay(100)
             ready.set(true)
             EngineState.Ready

@@ -17,6 +17,7 @@ import com.adsamcik.mindlayer.service.engine.DeferredStore
 import com.adsamcik.mindlayer.service.engine.EngineManager
 import com.adsamcik.mindlayer.service.engine.EmbeddingCoordinator
 import com.adsamcik.mindlayer.service.engine.EmbeddingEngine
+import com.adsamcik.mindlayer.service.engine.ForegroundTracker
 import com.adsamcik.mindlayer.service.engine.InferenceOrchestrator
 import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.MemoryPressure
@@ -41,6 +42,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.security.AllowlistEntry
 import com.adsamcik.mindlayer.service.security.AllowlistStore
@@ -55,6 +59,8 @@ class MindlayerMlService : Service() {
         private const val NOTIFICATION_CHANNEL_ID = "mindlayer_inference"
         private const val NOTIFICATION_ID = 1
         private const val LOG_CLEANUP_INTERVAL_MS = 24L * 60 * 60 * 1000
+        private const val OCR_SESSION_SWEEP_INTERVAL_MS = 60_000L
+        private const val EMERGENCY_DRAIN_TIMEOUT_MS = 2_000L
 
         const val STATE_IDLE = "idle"
         const val STATE_LOADING = "loading"
@@ -134,6 +140,7 @@ class MindlayerMlService : Service() {
     private lateinit var logRepository: LogRepository
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val applyPressureMutex = Mutex()
 
     @Volatile
     var serviceState: String = STATE_IDLE
@@ -254,6 +261,10 @@ class MindlayerMlService : Service() {
         val ocrRecognitionDispatcher = com.adsamcik.mindlayer.service.engine.OcrRecognitionDispatcher(
             engine = paddleOcrEngine,
             llmExtractor = ocrLlmExtractor,
+            foregroundTracker = object : ForegroundTracker {
+                override fun enterForeground() = this@MindlayerMlService.enterForeground()
+                override fun exitForeground() = this@MindlayerMlService.exitForeground()
+            },
         )
         ocrSessionManager = OcrSessionManager(
             engine = paddleOcrEngine,
@@ -294,6 +305,7 @@ class MindlayerMlService : Service() {
         thermalMonitor.start()
         observeMemoryPressure()
         observeThermalPolicy()
+        scheduleOcrSessionSweep()
         // F-022: schedule the documented 7-day log-retention cleanup.
         // Without it, logs accumulate forever which is undesirable on a
         // low-storage device. Implementation lives in `scheduleLogCleanup()`
@@ -442,6 +454,24 @@ class MindlayerMlService : Service() {
     }
 
     internal suspend fun applyMemoryPressure(level: MemoryPressure) {
+        if (level != MemoryPressure.EMERGENCY) {
+            applyPressureMutex.withLock {
+                applyMemoryPressureLocked(level)
+            }
+            return
+        }
+        if (!applyPressureMutex.tryLock()) {
+            MindlayerLog.i(TAG, "Skipping duplicate EMERGENCY memory-pressure pass")
+            return
+        }
+        try {
+            applyMemoryPressureLocked(level)
+        } finally {
+            applyPressureMutex.unlock()
+        }
+    }
+
+    private suspend fun applyMemoryPressureLocked(level: MemoryPressure) {
         if (level < MemoryPressure.CRITICAL) {
             sessionManager.applyMemoryPressure(level)
             return
@@ -449,7 +479,17 @@ class MindlayerMlService : Service() {
 
         if (level == MemoryPressure.EMERGENCY) {
             if (::ocrSessionManager.isInitialized) {
-                ocrSessionManager.drainForMemoryPressure()
+                val drained = withTimeoutOrNull(EMERGENCY_DRAIN_TIMEOUT_MS) {
+                    ocrSessionManager.drainForMemoryPressure()
+                    true
+                } == true
+                if (!drained) {
+                    MindlayerLog.w(
+                        TAG,
+                        "OCR drain timed out after ${EMERGENCY_DRAIN_TIMEOUT_MS}ms; cancelling in-flight OCR",
+                    )
+                    ocrSessionManager.cancelAllForMemoryPressure()
+                }
             }
             unloadPaddleOcrForMemoryPressure()
             unloadEmbeddingForMemoryPressure()
@@ -469,6 +509,17 @@ class MindlayerMlService : Service() {
         unloadEmbeddingForMemoryPressure()
         unloadPaddleOcrForMemoryPressure()
         sessionManager.applyMemoryPressure(level)
+    }
+
+    private fun scheduleOcrSessionSweep(intervalMs: Long = OCR_SESSION_SWEEP_INTERVAL_MS) {
+        serviceScope.launch {
+            while (isActive) {
+                delay(intervalMs)
+                if (::ocrSessionManager.isInitialized) {
+                    ocrSessionManager.sweepIdleAndExpired()
+                }
+            }
+        }
     }
 
     private suspend fun unloadEmbeddingForMemoryPressure() {
