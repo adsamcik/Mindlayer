@@ -792,7 +792,7 @@ class InferenceOrchestrator(
                         logRepository?.log(LogEntry(
                             timestampMs = System.currentTimeMillis(),
                             category = LogCategory.INFERENCE,
-                            event = LogEvent.TOOL_CALL,
+                            event = LogEvent.TOOL_CALL.key,
                             requestId = meta.requestId,
                             sessionId = meta.sessionId,
                             // F-044: build JSON via the kotlinx-serialization
@@ -1084,7 +1084,7 @@ class InferenceOrchestrator(
                 logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
                     timestampMs = System.currentTimeMillis(),
                     category = com.adsamcik.mindlayer.service.logging.LogCategory.SECURITY,
-                    event = com.adsamcik.mindlayer.service.logging.LogEvent.TOOL_CALL_REJECTED,
+                    event = com.adsamcik.mindlayer.service.logging.LogEvent.TOOL_CALL_REJECTED.key,
                     requestId = meta.requestId,
                     sessionId = meta.sessionId,
                     extraJson = toolMetadata.toString(),
@@ -1102,7 +1102,7 @@ class InferenceOrchestrator(
                 logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
                     timestampMs = System.currentTimeMillis(),
                     category = com.adsamcik.mindlayer.service.logging.LogCategory.SECURITY,
-                    event = com.adsamcik.mindlayer.service.logging.LogEvent.TOOL_CALL_REJECTED,
+                    event = com.adsamcik.mindlayer.service.logging.LogEvent.TOOL_CALL_REJECTED.key,
                     requestId = meta.requestId,
                     sessionId = meta.sessionId,
                     extraJson = toolMetadata.toString(),

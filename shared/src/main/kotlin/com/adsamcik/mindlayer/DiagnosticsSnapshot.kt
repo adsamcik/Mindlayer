@@ -28,7 +28,7 @@ import kotlinx.parcelize.Parcelize
  * [recentErrorCount] are scoped to the caller's UID — same anti-enumeration
  * property as `getStatus`. Self-UID dashboard sees aggregate counts.
  *
- * @property schemaVersion Wire-stable parcelable schema version. `1`.
+ * @property schemaVersion Wire-stable parcelable schema version. `2`.
  * @property capturedAtMs Wall-clock millis when the snapshot was taken.
  * @property service Re-export of [ServiceStatus] — the same struct
  *   returned by [IMindlayerService.getStatus]. Provided here so dashboard
@@ -55,8 +55,61 @@ data class DiagnosticsSnapshot(
     val recentInferenceCount: Int,
     val recentErrorCount: Int,
     val recentlyCompletedTrackedCount: Int,
+    val ocr: OcrDiagnostics = OcrDiagnostics(),
+    val embedding: EmbeddingDiagnostics = EmbeddingDiagnostics(),
+    val acceleratorDecisions: Map<String, AcceleratorDecisionSnapshot> = emptyMap(),
+    val deferredCounters: Map<String, DeferredCounters> = mapOf(
+        "chat" to DeferredCounters(),
+        "embedding" to DeferredCounters(),
+    ),
 ) : Parcelable {
     companion object {
-        const val CURRENT_SCHEMA_VERSION: Int = 1
+        const val CURRENT_SCHEMA_VERSION: Int = 2
     }
 }
+
+@Parcelize
+data class OcrDiagnostics(
+    val currentBackend: String? = null,
+    val sessionsActive: Int = 0,
+    val sessionsFinalized: Int = 0,
+    val framesProcessed: Int = 0,
+    val framesRejected: Int = 0,
+    val framesDropped: Int = 0,
+    val lastFinalizedAt: Long? = null,
+    val lastBackendReadyAt: Long? = null,
+) : Parcelable
+
+@Parcelize
+data class EmbeddingDiagnostics(
+    val modelLoaded: Boolean = false,
+    val modelId: String? = null,
+    val currentBackend: String? = null,
+    val batchesProcessed: Int = 0,
+    val vectorsGenerated: Int = 0,
+    val lastBackendReadyAt: Long? = null,
+) : Parcelable
+
+@Parcelize
+data class AcceleratorDecisionSnapshot(
+    val feature: String,
+    val backend: String,
+    val reason: String,
+    val attempted: List<AcceleratorAttemptSnapshot> = emptyList(),
+    val timestampMs: Long,
+) : Parcelable
+
+@Parcelize
+data class AcceleratorAttemptSnapshot(
+    val backend: String,
+    val reason: String,
+) : Parcelable
+
+@Parcelize
+data class DeferredCounters(
+    val submitted: Int = 0,
+    val completed: Int = 0,
+    val fetched: Int = 0,
+    val cancelled: Int = 0,
+    val expired: Int = 0,
+) : Parcelable

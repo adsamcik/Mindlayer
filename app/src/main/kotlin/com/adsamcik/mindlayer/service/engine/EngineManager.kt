@@ -375,7 +375,7 @@ class EngineManager(
                 logRepository?.log(com.adsamcik.mindlayer.service.logging.LogEntry(
                     timestampMs = System.currentTimeMillis(),
                     category = com.adsamcik.mindlayer.service.logging.LogCategory.ENGINE,
-                    event = com.adsamcik.mindlayer.service.logging.LogEvent.ENGINE_FALLBACK,
+                    event = com.adsamcik.mindlayer.service.logging.LogEvent.ENGINE_FALLBACK.key,
                     backend = name,
                     errorMessage = safeDetail,
                 ))
