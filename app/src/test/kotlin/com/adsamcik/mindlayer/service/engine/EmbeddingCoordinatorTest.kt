@@ -79,7 +79,7 @@ class EmbeddingCoordinatorTest {
     @Test fun `cancelEmbed unknown is safe and fetch cancelled row round trips`() = runTest {
         assertEquals(com.adsamcik.mindlayer.CancelResult.UNKNOWN, coordinator.cancelEmbed(1, "missing"))
         val handle = store.createEmbeddingBatch(1, "cancelled", 1)!!
-        store.completeCancelled(handle.requestId, 1)
+        store.completeEmbeddingCancelled(handle.requestId, 1)
         assertEquals(DeferredResult.CANCELLED, coordinator.fetchEmbeddingBatchResult(1, "cancelled").status)
     }
 

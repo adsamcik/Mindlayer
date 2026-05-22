@@ -679,6 +679,8 @@ class ServiceBinder(
         if (orphaned.isNotEmpty()) {
             MindlayerLog.i(TAG, "Released ${orphaned.size} session(s) for disconnected registration")
         }
+        ocrSessionManager.closeAllForUid(registration.ownerUid)
+        embeddingCoordinator?.cancelAllForUid(registration.ownerUid)
     }
 
     /**
@@ -701,6 +703,8 @@ class ServiceBinder(
         if (orphaned.isNotEmpty()) {
             MindlayerLog.i(TAG, "Released ${orphaned.size} session(s) for uid=$uid")
         }
+        ocrSessionManager.closeAllForUid(uid)
+        embeddingCoordinator?.cancelAllForUid(uid)
     }
 
     private fun closeAllOwnedByRevokedUid(uid: Int) {
@@ -718,6 +722,8 @@ class ServiceBinder(
         if (revoked.isNotEmpty()) {
             MindlayerLog.i(TAG, "Revoked ${revoked.size} session(s) for uid=$uid")
         }
+        ocrSessionManager.closeAllForUid(uid)
+        embeddingCoordinator?.cancelAllForUid(uid)
     }
 
     // ---- Session management ------------------------------------------------
@@ -1410,10 +1416,11 @@ class ServiceBinder(
 
             scope.launch(Dispatchers.IO) {
                 var terminalStatus = DeferredResult.FAILED
+                var completionApplied = false
                 try {
                     val collected = collectDeferredPipe(readEnd)
                     terminalStatus = collected.status
-                    when (collected.status) {
+                    completionApplied = when (collected.status) {
                         DeferredResult.READY -> requireDeferredStore().completeReady(requestId, uid, collected.text, collected.metrics)
                         DeferredResult.CANCELLED -> requireDeferredStore().completeCancelled(requestId, uid)
                         else -> requireDeferredStore().completeFailed(
@@ -1423,25 +1430,35 @@ class ServiceBinder(
                             collected.errorCodeName ?: MindlayerErrorCode.nameOf(collected.errorCodeInt.ifBlankCode()),
                         )
                     }
-                    logRepository?.logDeferredComplete(requestId, meta.sessionId, terminalStatus)
-                    mlHealthRecorder?.recordDeferredCompletion()
+                    if (completionApplied) {
+                        logRepository?.logDeferredComplete(requestId, meta.sessionId, terminalStatus)
+                        mlHealthRecorder?.recordDeferredCompletion()
+                    } else {
+                        MindlayerLog.i(TAG, "Dropping late deferred completion for requestId=$requestId")
+                    }
                 } catch (t: Throwable) {
                     releaseSlot()
                     val label = t.safeLabel()
                     terminalStatus = DeferredResult.FAILED
-                    runCatching {
+                    completionApplied = runCatching {
                         requireDeferredStore().completeFailed(
                             requestId,
                             uid,
                             MindlayerErrorCode.INTERNAL,
                             MindlayerErrorCode.nameOf(MindlayerErrorCode.INTERNAL) ?: label,
                         )
+                    }.getOrDefault(false)
+                    if (completionApplied) {
+                        logRepository?.logDeferredComplete(requestId, meta.sessionId, terminalStatus)
+                    } else {
+                        MindlayerLog.i(TAG, "Dropping late deferred failure for requestId=$requestId")
                     }
-                    logRepository?.logDeferredComplete(requestId, meta.sessionId, terminalStatus)
                 } finally {
                     releaseSlot()
                     try { readEnd.close() } catch (_: Exception) { }
-                    evictionRegistry.notifyDeferredComplete(uid, requestId, terminalStatus)
+                    if (completionApplied) {
+                        evictionRegistry.notifyDeferredComplete(uid, requestId, terminalStatus)
+                    }
                 }
             }
             handedOff = true
@@ -2415,7 +2432,7 @@ class ServiceBinder(
                 sessionId = sanitizeLogField(sessionId),
                 throwable = null,
             )
-            return ocrSessionManager.rejectFrame(uid, sessionId, meta)
+            throw typedBinderException(MindlayerErrorCode.INVALID_REQUEST, "Invalid OCR MediaPart: ${t.safeLabel()}")
         }
         if (!ocrSessionManager.isOwner(uid, sessionId)) {
             try { frame.source.close() } catch (_: Throwable) { /* fine */ }
@@ -2439,7 +2456,7 @@ class ServiceBinder(
                 sessionId = sanitizeLogField(sessionId),
                 throwable = null,
             )
-            return ocrSessionManager.rejectFrame(uid, sessionId, meta)
+            throw e
         } catch (t: Throwable) {
             try { frame.source.close() } catch (_: Throwable) { /* fine */ }
             MindlayerLog.w(

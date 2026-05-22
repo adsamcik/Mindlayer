@@ -136,6 +136,20 @@ class DeferredStoreTest {
     }
 
     @Test
+    fun `fetch marks FAILED terminal result fetched and does not replay`() = runTest {
+        val s = store()
+        s.create(uid = 1, requestId = "failed", meta = meta("failed"), mediaCount = 0)
+        assertTrue(s.completeFailed("failed", uid = 1, errorCode = MindlayerErrorCode.INTERNAL, errorName = "INTERNAL"))
+
+        val first = s.fetch(uid = 1, requestId = "failed")
+        assertEquals(DeferredResult.FAILED, first.status)
+        assertNotNull(dao.snapshot("failed")?.fetchedAtMs)
+
+        val second = s.fetch(uid = 1, requestId = "failed")
+        assertEquals(DeferredResult.NOT_FOUND_OR_NOT_OWNED, second.status)
+    }
+
+    @Test
     fun `fetch expired entry returns EXPIRED before prune (M-D1)`() = runTest {
         val s = store(ttlMs = 1_000L)
         now = 1_000L
@@ -164,6 +178,19 @@ class DeferredStoreTest {
         val snap = dao.snapshot("a")
         assertEquals(DeferredResult.CANCELLED, snap?.statusCode)
         assertEquals(CancelResult.ALREADY_FINISHED, s.cancel(uid = 1, requestId = "a"))
+    }
+
+    @Test
+    fun `late completion after cancel does not overwrite CANCELLED`() = runTest {
+        val s = store()
+        s.create(uid = 1, requestId = "race", meta = meta("race"), mediaCount = 0)
+
+        assertEquals(CancelResult.CANCELLED, s.cancel(uid = 1, requestId = "race"))
+        assertFalse(s.completeReady("race", uid = 1, text = "late", metrics = null))
+
+        val snap = dao.snapshot("race")
+        assertEquals(DeferredResult.CANCELLED, snap?.statusCode)
+        assertNull(snap?.resultText)
     }
 
     @Test

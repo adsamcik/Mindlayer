@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -139,5 +140,18 @@ class ServiceBinderEmbeddingTest {
         assertEquals(0L, caps.maxEmbeddingInputBytes)
         assertEquals(emptyList<String>(), caps.embeddingModelIds)
         assertEquals(emptyList<Int>(), caps.embeddingDims)
+    }
+
+    @Test
+    @Config(sdk = [26])
+    fun `embedBatchShm rejects API 26 with NOT_SUPPORTED before coordinator call`() {
+        val ex = assertThrows(SecurityException::class.java) {
+            binder.embedBatchShm(listOf(EmbeddingRequest(text = "x")))
+        }
+        assertEquals(
+            com.adsamcik.mindlayer.shared.MindlayerErrorCode.NOT_SUPPORTED,
+            com.adsamcik.mindlayer.shared.MindlayerErrorCode.codeFromWireMessage(ex.message),
+        )
+        io.mockk.coVerify(exactly = 0) { coordinator.embedBatchShm(any(), any(), any()) }
     }
 }

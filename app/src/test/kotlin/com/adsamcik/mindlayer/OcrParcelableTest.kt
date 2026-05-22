@@ -168,7 +168,8 @@ class OcrParcelableTest {
         assertEquals(2, OcrFrameAck.STATUS_DROPPED_BUSY)
         assertEquals(3, OcrFrameAck.STATUS_REJECTED_QUALITY)
         assertEquals(4, OcrFrameAck.STATUS_REJECTED_FINALIZED)
-        assertEquals(4, OcrFrameAck.ALL_STATUSES.size)
+        assertEquals(6, OcrFrameAck.STATUS_REJECTED_STREAM_NOT_ATTACHED)
+        assertEquals(5, OcrFrameAck.ALL_STATUSES.size)
     }
 
     // ── OcrSessionState ──────────────────────────────────────────────────

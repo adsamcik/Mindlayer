@@ -11,6 +11,7 @@ import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.SessionInfo
 import com.adsamcik.mindlayer.ToolResult
 import com.adsamcik.mindlayer.service.engine.DeviceTier
+import com.adsamcik.mindlayer.service.engine.EmbeddingCoordinator
 import com.adsamcik.mindlayer.service.engine.EngineManager
 import com.adsamcik.mindlayer.service.engine.EngineState
 import com.adsamcik.mindlayer.service.engine.InitFailure
@@ -169,6 +170,7 @@ class ServiceBinderTest {
     private fun newBinder(
         exporter: DiagnosticExporter,
         ocrSessionManager: OcrSessionManager = OcrSessionManager(),
+        embeddingCoordinator: EmbeddingCoordinator? = null,
     ): ServiceBinder =
         ServiceBinder(
             service = service,
@@ -191,6 +193,7 @@ class ServiceBinderTest {
             },
             rateLimiter = rateLimiter,
             ocrSessionManager = ocrSessionManager,
+            embeddingCoordinator = embeddingCoordinator,
         )
 
     @After
@@ -303,6 +306,29 @@ class ServiceBinderTest {
 
         verify(exactly = 1) { orchestrator.closeAllOwnedBy(ownerTokens[0]) }
         verify(exactly = 0) { orchestrator.closeAllOwnedBy(ownerTokens[1]) }
+    }
+
+    @Test
+    fun `registration binder death cleans up OCR sessions and embedding jobs for uid`() {
+        val uid = 12_345
+        mockkStatic(Binder::class)
+        every { Binder.getCallingUid() } returns uid
+        val death = CapturingSlot<IBinder.DeathRecipient>()
+        val token = mockClientToken(death)
+        val ocr = mockk<OcrSessionManager>(relaxed = true) {
+            every { closeAllForUid(any()) } returns Unit
+        }
+        val embedding = mockk<EmbeddingCoordinator>(relaxed = true) {
+            every { cancelAllForUid(any()) } returns Unit
+        }
+        every { orchestrator.closeAllOwnedBy(any()) } returns emptyList()
+        val localBinder = newBinder(diagnosticExporter, ocrSessionManager = ocr, embeddingCoordinator = embedding)
+
+        localBinder.registerClient(token)
+        death.captured.binderDied()
+
+        verify(exactly = 1) { ocr.closeAllForUid(uid) }
+        verify(exactly = 1) { embedding.cancelAllForUid(uid) }
     }
 
     @Test
