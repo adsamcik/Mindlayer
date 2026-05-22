@@ -18,6 +18,7 @@ androidxTestExtJunit = "1.2.1"
 composeBom = "2026.04.01"
 material3 = "1.5.0-alpha18"
 activityCompose = "1.10.1"
+cameraXCore = "1.6.1"
 lifecycleCompose = "2.10.0"
 navigationCompose = "2.9.8"
 sqlcipher = "4.15.0"
@@ -42,6 +43,7 @@ compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 compose-material3 = { module = "androidx.compose.material3:material3", version.ref = "material3" }
 compose-material-icons-core = { module = "androidx.compose.material:material-icons-core" }
 activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
+camerax-core = { module = "androidx.camera:camera-core", version.ref = "cameraXCore" }
 lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycleCompose" }
 lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycleCompose" }
 navigation-compose = { module = "androidx.navigation:navigation-compose", version.ref = "navigationCompose" }
