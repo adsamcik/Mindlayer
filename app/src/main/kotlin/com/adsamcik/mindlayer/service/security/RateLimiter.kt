@@ -42,6 +42,7 @@ class RateLimiter(
      * flooding attacker on the same UID.
      */
     private val rejectedBuckets = ConcurrentHashMap<Int, Bucket>()
+    private val pingBuckets = ConcurrentHashMap<Int, Bucket>()
 
     fun tryAcquire(uid: Int): Boolean = tryAcquire(uid, cost = 1.0)
 
@@ -170,9 +171,30 @@ class RateLimiter(
                     .coerceAtMost(maxRejectionsPerMinute.toDouble())
                 bucket.lastRejectionRefillMs = now
             }
+
             bucket.lastAccessMs = now
             return if (bucket.rejectionTokens >= 1.0) {
                 bucket.rejectionTokens -= 1.0
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    fun tryAcquirePing(uid: Int): Boolean {
+        val bucket = pingBuckets.getOrPut(uid) { Bucket(capacity = DEFAULT_PING_RPM.toDouble()) }
+        synchronized(bucket) {
+            val now = timeSource()
+            val elapsed = now - bucket.lastRefillMs
+            if (elapsed > 0) {
+                val refill = elapsed * DEFAULT_PING_RPM / 60_000.0
+                bucket.tokens = (bucket.tokens + refill).coerceAtMost(DEFAULT_PING_RPM.toDouble())
+                bucket.lastRefillMs = now
+            }
+            bucket.lastAccessMs = now
+            return if (bucket.tokens >= 1.0) {
+                bucket.tokens -= 1.0
                 true
             } else {
                 false
@@ -237,6 +259,7 @@ class RateLimiter(
          * for a flooder to drive disk I/O.
          */
         const val DEFAULT_REJECT_RPM = 6
+        const val DEFAULT_PING_RPM = 30
         /**
          * F-040: hard cap on simultaneous inferences across all UIDs. Set
          * to 4 × per-UID cap so up to four typical first-party clients

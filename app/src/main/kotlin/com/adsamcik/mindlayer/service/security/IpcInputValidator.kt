@@ -48,6 +48,8 @@ object IpcInputValidator {
     // ── Identifier budgets ────────────────────────────────────────────────
     const val MAX_ID_LEN = 64
     private val ID_PATTERN = Regex("^[A-Za-z0-9_-]{1,$MAX_ID_LEN}$")
+    const val MAX_EMBEDDING_REQUEST_ID_LEN = 160
+    private val EMBEDDING_REQUEST_ID_PATTERN = Regex("^[A-Za-z0-9._-]{1,$MAX_EMBEDDING_REQUEST_ID_LEN}$")
 
     // ── String budgets (UTF-16 code units, i.e. .length) ──────────────────
     const val MAX_SYSTEM_PROMPT_LEN = 32 * 1024
@@ -127,6 +129,16 @@ object IpcInputValidator {
     fun validateOptionalId(value: String?, label: String) {
         if (value == null) return
         validateId(value, label)
+    }
+
+    fun validateEmbeddingRequestId(value: String) {
+        require(value.isNotEmpty()) { "embedding requestId must not be empty" }
+        require(value.length <= MAX_EMBEDDING_REQUEST_ID_LEN) {
+            "embedding requestId too long (${value.length} > $MAX_EMBEDDING_REQUEST_ID_LEN)"
+        }
+        require(EMBEDDING_REQUEST_ID_PATTERN.matches(value) && !value.contains("..")) {
+            "embedding requestId must match $EMBEDDING_REQUEST_ID_PATTERN and not contain '..' (got: <redacted:${value.length}>)"
+        }
     }
 
     fun validateRequestMeta(meta: RequestMeta) {

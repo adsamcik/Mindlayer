@@ -14,7 +14,7 @@ abstract class DeferredDatabase : RoomDatabase() {
     abstract fun deferredDao(): DeferredDao
 
     companion object {
-        private const val DB_NAME = "mindlayer-deferred.db"
+        internal const val DB_NAME = "mindlayer-deferred.db"
         @Volatile private var INSTANCE: DeferredDatabase? = null
 
         val MIGRATION_2_3: Migration = object : Migration(2, 3) {
