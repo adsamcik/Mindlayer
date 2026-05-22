@@ -18,7 +18,8 @@ import kotlinx.parcelize.Parcelize
  * @property schemaVersion Wire-stable. Currently `1`.
  * @property frameId Echo of [OcrFrameMeta.frameId] for correlation.
  * @property status One of [STATUS_ACCEPTED], [STATUS_DROPPED_BUSY],
- *   [STATUS_REJECTED_QUALITY], [STATUS_REJECTED_FINALIZED]. Unknown
+ *   [STATUS_REJECTED_QUALITY], [STATUS_REJECTED_FINALIZED],
+ *   [STATUS_REJECTED_STREAM_NOT_ATTACHED]. Unknown
  *   values (from a newer service to an older SDK) should be treated
  *   as "not accepted" and observable via the async pipe events.
  * @property queueDepth Service-side pending frames after this push (after
@@ -59,12 +60,20 @@ data class OcrFrameAck(
          */
         const val STATUS_REJECTED_FINALIZED: Int = 4
 
+        /**
+         * Session has no OCR event stream attached yet. Caller must invoke
+         * streamOcrEvents before pushing frames so recognition events cannot
+         * be silently lost.
+         */
+        const val STATUS_REJECTED_STREAM_NOT_ATTACHED: Int = 6
+
         /** All currently-known status values. */
         val ALL_STATUSES: Set<Int> = setOf(
             STATUS_ACCEPTED,
             STATUS_DROPPED_BUSY,
             STATUS_REJECTED_QUALITY,
             STATUS_REJECTED_FINALIZED,
+            STATUS_REJECTED_STREAM_NOT_ATTACHED,
         )
     }
 }
