@@ -161,6 +161,7 @@ class OcrSessionManager(
         width: Int,
         height: Int,
     ): OcrFrameAck = runBlocking {
+        sweepIdleAndExpired()
         val sessionForLock = requireOwnedSession(uid, sessionId)
         sessionForLock.mutex.withLock {
             val intake = preparePushIntake(uid, sessionId, meta) ?: return@withLock rejectFinalized(meta)
@@ -245,14 +246,17 @@ class OcrSessionManager(
         uid: Int,
         sessionId: String,
         meta: OcrFrameMeta,
-    ): OcrFrameAck = runBlocking {
-        val sessionForLock = requireOwnedSession(uid, sessionId)
-        sessionForLock.mutex.withLock {
-            val intake = preparePushIntake(uid, sessionId, meta) ?: return@withLock rejectFinalized(meta)
-            intake.earlyAck?.let { return@withLock it }
-            val session = intake.session
-            recordAcceptedFrame(session, intake.now, dhash = null)
-            OcrFrameAck(frameId = meta.frameId, status = OcrFrameAck.STATUS_ACCEPTED, queueDepth = session.pendingQueueDepth, retryAfterMs = 0L)
+    ): OcrFrameAck {
+        sweepIdleAndExpired()
+        return runBlocking {
+            val sessionForLock = requireOwnedSession(uid, sessionId)
+            sessionForLock.mutex.withLock {
+                val intake = preparePushIntake(uid, sessionId, meta) ?: return@withLock rejectFinalized(meta)
+                intake.earlyAck?.let { return@withLock it }
+                val session = intake.session
+                recordAcceptedFrame(session, intake.now, dhash = null)
+                OcrFrameAck(frameId = meta.frameId, status = OcrFrameAck.STATUS_ACCEPTED, queueDepth = session.pendingQueueDepth, retryAfterMs = 0L)
+            }
         }
     }
 
@@ -455,6 +459,7 @@ class OcrSessionManager(
 
     /** Mark the session as finalizing, drain jobs, and emit terminal events. */
     suspend fun finalize(uid: Int, sessionId: String) {
+        sweepIdleAndExpired()
         val session = requireOwnedSession(uid, sessionId)
         session.mutex.withLock {
             if (session.phase == OcrSessionState.PHASE_FINALIZED) return
@@ -475,6 +480,7 @@ class OcrSessionManager(
 
     /** Close + remove a session. Idempotent. */
     suspend fun close(uid: Int, sessionId: String) {
+        sweepIdleAndExpired()
         val session = sessions[sessionId] ?: return
         if (session.uid != uid) {
             throw IllegalStateException("Session not owned by uid=$uid")
@@ -536,6 +542,18 @@ class OcrSessionManager(
     suspend fun drainForMemoryPressure() {
         sessions.entries.toList().forEach { cleanupSession(it.key, it.value, cancelJobs = true) }
         recognitionDispatcher?.drainForMemoryPressure()
+    }
+
+    fun cancelAllForMemoryPressure() {
+        sessions.entries.toList().forEach { (id, session) ->
+            if (sessions.remove(id, session)) {
+                session.phase = OcrSessionState.PHASE_CLOSED
+                session.activeJobs.forEach { it.cancel() }
+                session.activeJobs.clear()
+                (session.eventWriter as? OcrTokenStreamWriter)?.runCatching { close() }
+            }
+        }
+        recognitionDispatcher?.cancelAllForMemoryPressure()
     }
 
     suspend fun shutdown() {

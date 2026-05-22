@@ -14,6 +14,8 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.verify
 import io.mockk.unmockkAll
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -126,6 +128,25 @@ class SessionManagerTest {
         handle.lastAccessedElapsedMs = lastAccessedElapsedMs
         handle.clientPriorityHint = clientPriorityHint
         return handle
+    }
+
+    @Test
+    fun `createSession returns engine initializing on synthetic init timeout without joining init job`() = runTest {
+        every { engineManager.isInitialized } returns false
+        coEvery { engineManager.initialize(any(), any()) } coAnswers { awaitCancellation() }
+        coEvery { engineManager.awaitReady(any()) } returns EngineState.Failed(
+            InitFailure.NativeError("init timeout"),
+        )
+
+        val startedNs = System.nanoTime()
+        val error = assertThrows(EngineNotReadyException::class.java) {
+            createDefaultSession()
+        }
+        val elapsedMs = (System.nanoTime() - startedNs) / 1_000_000L
+
+        assertEquals(200L, error.retryAfterMs)
+        assertTrue("createSession should not join a wedged init job (elapsed=${elapsedMs}ms)", elapsedMs < 1_000L)
+        coVerify(exactly = 1) { engineManager.awaitReady(any()) }
     }
 
     // ---- Priority calculation ----------------------------------------------
@@ -286,7 +307,10 @@ class SessionManagerTest {
         // background init invocation passes through the right backend/token
         // values.
         every { engineManager.isInitialized } returns false
-        coEvery { engineManager.awaitReady() } returns EngineState.Ready
+        coEvery { engineManager.awaitReady(any()) } returns EngineState.Ready
+        coEvery {
+            engineManager.initialize(preferredBackend = "CPU", maxTokens = 2048)
+        } returns mockEngine
 
         val id = sessionManager.createSession(
             SessionConfig(
