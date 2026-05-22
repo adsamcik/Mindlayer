@@ -5,6 +5,7 @@ import com.adsamcik.mindlayer.OcrFrameMeta
 import com.adsamcik.mindlayer.OcrLimits
 import com.adsamcik.mindlayer.OcrSessionConfig
 import com.adsamcik.mindlayer.OcrSessionState
+import com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.Runs
@@ -66,10 +67,16 @@ class OcrSessionManagerTest {
         outputSchemaJson = """{"type":"object"}""",
     )
 
-    private fun meta(frameId: Long, hint: Int = OcrFrameMeta.QUALITY_GOOD) = OcrFrameMeta(
+    private fun meta(
+        frameId: Long,
+        hint: Int = OcrFrameMeta.QUALITY_GOOD,
+        rotationDegrees: Int = 0,
+        regionJson: String? = null,
+    ) = OcrFrameMeta(
         frameId = frameId,
         captureTimeMs = 0L,
-        rotationDegrees = 0,
+        rotationDegrees = rotationDegrees,
+        regionJson = regionJson,
         qualityHint = hint,
     )
 
@@ -212,13 +219,46 @@ class OcrSessionManagerTest {
         val dispatcher = dispatcherMock()
         val m = mgr(lim = limits(maxFramesPerSession = 1), recognitionDispatcher = dispatcher)
         val sid = m.createSession(100, config())
+        assertTrue(m.attachEventWriter(100, sid, mockk<OcrTokenStreamWriter>(relaxed = true)))
         val ack = m.pushFrame(100, sid, meta(1L), textLikeFrame(seed = 1), 64, 64)
 
         assertEquals(OcrFrameAck.STATUS_ACCEPTED, ack.status)
         verify(exactly = 1) {
-            dispatcher.submit(sid, 1L, any(), 64, 64, any(), null, any())
-            dispatcher.finalizeAsync(sid, null)
+            dispatcher.submit(sid, 1L, any(), 64, 64, any(), any(), any())
+            dispatcher.finalizeAsync(sid, any())
         }
+    }
+
+    @Test fun `pushFrame rejects when recognition stream is not attached`() {
+        val dispatcher = dispatcherMock()
+        val m = mgr(recognitionDispatcher = dispatcher)
+        val sid = m.createSession(100, config())
+
+        val ack = m.pushFrame(100, sid, meta(1L), textLikeFrame(seed = 1), 64, 64)
+
+        assertEquals(OcrFrameAck.STATUS_REJECTED_STREAM_NOT_ATTACHED, ack.status)
+        verify(exactly = 0) { dispatcher.submit(any(), any(), any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test fun `applyFrameMetadata rotates before applying normalized ROI crop`() {
+        val frame = byteArrayOf(
+            1, 2, 3,
+            4, 5, 6,
+        )
+        val transformed = mgr().applyFrameMetadata(
+            meta = meta(
+                frameId = 1L,
+                rotationDegrees = 90,
+                regionJson = """{"x":0.0,"y":0.0,"w":0.5,"h":1.0}""",
+            ),
+            yPlane = frame,
+            width = 3,
+            height = 2,
+        )
+
+        assertEquals(1, transformed.width)
+        assertEquals(3, transformed.height)
+        assertEquals(listOf(4.toByte(), 5.toByte(), 6.toByte()), transformed.yPlane.toList())
     }
 
     @Test fun `finalize schedules terminal event once`() {

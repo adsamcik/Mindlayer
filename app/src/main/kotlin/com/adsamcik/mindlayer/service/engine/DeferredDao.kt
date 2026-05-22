@@ -45,8 +45,8 @@ interface DeferredDao {
     @Query("UPDATE deferred_inference SET fetchedAtMs = :nowMs WHERE requestId = :requestId AND uid = :uid")
     suspend fun markFetched(requestId: String, uid: Int, nowMs: Long): Int
 
-    @Query("UPDATE deferred_inference SET statusCode = :status, resultText = :text, metricsJson = :metricsJson, errorCodeInt = :errorCodeInt, errorCodeName = :errorCodeName, completedAtMs = :completedAtMs, expiresAtMs = :expiresAtMs, truncated = :truncated, blob_path = :blobPath, blob_bytes = :blobBytes, per_item_metadata_json = :perItemMetadataJson WHERE requestId = :requestId")
-    suspend fun complete(requestId: String, status: Int, text: String?, metricsJson: String?, errorCodeInt: Int, errorCodeName: String?, completedAtMs: Long, expiresAtMs: Long, truncated: Boolean, blobPath: String? = null, blobBytes: Long? = null, perItemMetadataJson: String? = null): Int
+    @Query("UPDATE deferred_inference SET statusCode = :status, resultText = :text, metricsJson = :metricsJson, errorCodeInt = :errorCodeInt, errorCodeName = :errorCodeName, completedAtMs = :completedAtMs, expiresAtMs = :expiresAtMs, truncated = :truncated, blob_path = :blobPath, blob_bytes = :blobBytes, per_item_metadata_json = :perItemMetadataJson WHERE requestId = :requestId AND uid = :uid AND kind = :kind AND statusCode = :running")
+    suspend fun complete(requestId: String, uid: Int, kind: String, status: Int, text: String?, metricsJson: String?, errorCodeInt: Int, errorCodeName: String?, completedAtMs: Long, expiresAtMs: Long, truncated: Boolean, blobPath: String? = null, blobBytes: Long? = null, perItemMetadataJson: String? = null, running: Int = DeferredResult.STILL_RUNNING): Int
 
     /**
      * All completed entries (READY/FAILED/CANCELLED) for [uid] that the
@@ -54,8 +54,8 @@ interface DeferredDao {
      * `subscribeEvictionNotices` to re-fire deferred-completion callbacks
      * for results that landed while the client's binder was dead.
      */
-    @Query("SELECT * FROM deferred_inference WHERE uid = :uid AND statusCode != :running AND fetchedAtMs IS NULL ORDER BY completedAtMs ASC")
-    suspend fun completedPendingForUid(uid: Int, running: Int = DeferredResult.STILL_RUNNING): List<DeferredEntity>
+    @Query("SELECT * FROM deferred_inference WHERE uid = :uid AND kind = :kind AND statusCode != :running AND fetchedAtMs IS NULL ORDER BY completedAtMs ASC")
+    suspend fun completedPendingForUid(uid: Int, kind: String, running: Int = DeferredResult.STILL_RUNNING): List<DeferredEntity>
 
     @Query("UPDATE deferred_inference SET statusCode = :cancelled, completedAtMs = :nowMs, expiresAtMs = :expiresAtMs WHERE requestId = :requestId AND uid = :uid AND statusCode = :running")
     suspend fun cancelRunning(requestId: String, uid: Int, nowMs: Long, expiresAtMs: Long, cancelled: Int = DeferredResult.CANCELLED, running: Int = DeferredResult.STILL_RUNNING): Int

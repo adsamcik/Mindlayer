@@ -214,7 +214,7 @@ class EmbeddingCoordinator(
             } catch (ce: CancellationException) {
                 deleteOrphanBlobQuietly(blobFile)
                 blobFile = null
-                deferredStore.completeCancelled(requestId, uid)
+                deferredStore.completeEmbeddingCancelled(requestId, uid)
                 throw ce
             } catch (t: Throwable) {
                 MindlayerLog.w(TAG, "Deferred embedding failed: ${t.safeLabel()}", requestId = requestId, throwable = null)
@@ -278,6 +278,20 @@ class EmbeddingCoordinator(
         val job = activeJobs.remove(key(uid, requestId)) ?: return CancelResult.UNKNOWN
         job.cancel()
         return CancelResult.CANCELLED
+    }
+
+    fun cancelAllForUid(uid: Int) {
+        val prefix = "$uid:"
+        val keys = activeJobs.keys.filter { it.startsWith(prefix) }
+        keys.forEach { activeJobs.remove(it)?.cancel() }
+        blobDir(uid).listFiles()?.forEach { file ->
+            if (file.isFile && (file.name.endsWith(".bin") || file.name.contains(".tmp-"))) {
+                runCatching { file.delete() }
+            }
+        }
+        if (keys.isNotEmpty()) {
+            MindlayerLog.i(TAG, "Cancelled ${keys.size} embedding job(s) for uid=$uid")
+        }
     }
 
     private suspend fun <T> withTracked(uid: Int, requestId: String, block: suspend () -> T): T {

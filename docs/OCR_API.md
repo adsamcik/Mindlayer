@@ -94,9 +94,12 @@ Find a profile by integer mode via `OcrProfile.forMode(int)`.
    - `STATUS_DROPPED_BUSY (2)` — rate-limit token bucket exhausted;
      retry after `retryAfterMs`.
    - `STATUS_REJECTED_QUALITY (3)` — service-side presort rejected.
-   - `STATUS_REJECTED_FINALIZED (4)` — session is finalizing/closed.
-   - `STATUS_REJECTED_OVERSIZED (5)` — payload exceeded
-     `MAX_FRAME_BYTES`; caller must downscale or switch to SHM.
+    - `STATUS_REJECTED_FINALIZED (4)` — session is finalizing/closed.
+    - `STATUS_REJECTED_OVERSIZED (5)` — payload exceeded
+      `MAX_FRAME_BYTES`; caller must downscale or switch to SHM.
+    - `STATUS_REJECTED_STREAM_NOT_ATTACHED (6)` — the service rejected
+      the frame because `streamOcrEvents` has not attached yet. Attach the
+      event stream before pushing frames; otherwise OCR events could be lost.
 3. **Poll** — `session.state()` returns `OcrSessionState` with
    counters + phase. Phase machine: `PHASE_ACTIVE → PHASE_FINALIZING
    → PHASE_FINALIZED → PHASE_CLOSED`.

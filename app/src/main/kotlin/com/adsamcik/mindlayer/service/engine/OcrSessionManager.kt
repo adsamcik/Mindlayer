@@ -11,6 +11,12 @@ import com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.runBlocking
@@ -161,8 +167,25 @@ class OcrSessionManager(
             intake.earlyAck?.let { return@withLock it }
             val session = intake.session
 
+            if (recognitionDispatcher != null && !session.streamAttached) {
+                session.framesRejected++
+                return@withLock OcrFrameAck(
+                    frameId = meta.frameId,
+                    status = OcrFrameAck.STATUS_REJECTED_STREAM_NOT_ATTACHED,
+                    queueDepth = session.pendingQueueDepth,
+                    retryAfterMs = 0L,
+                )
+            }
+
+            val transformed = try {
+                applyFrameMetadata(meta, yPlane, width, height)
+            } catch (_: IllegalArgumentException) {
+                session.framesRejected++
+                return@withLock OcrFrameAck(frameId = meta.frameId, status = OcrFrameAck.STATUS_REJECTED_QUALITY, queueDepth = session.pendingQueueDepth, retryAfterMs = 0L)
+            }
+
             val score = try {
-                OcrFrameQualityPresort.score(yPlane, width, height, session.lastAcceptedDHash)
+                OcrFrameQualityPresort.score(transformed.yPlane, transformed.width, transformed.height, session.lastAcceptedDHash)
             } catch (e: IllegalArgumentException) {
                 session.framesRejected++
                 return@withLock OcrFrameAck(frameId = meta.frameId, status = OcrFrameAck.STATUS_REJECTED_QUALITY, queueDepth = session.pendingQueueDepth, retryAfterMs = 0L)
@@ -177,9 +200,9 @@ class OcrSessionManager(
                 recognitionDispatcher?.submit(
                     sessionId = sessionId,
                     frameId = meta.frameId,
-                    yPlane = yPlane,
-                    width = width,
-                    height = height,
+                    yPlane = transformed.yPlane,
+                    width = transformed.width,
+                    height = transformed.height,
                     config = OcrEngineConfig(),
                     writer = session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter,
                     writerMutex = session.mutex,
@@ -333,6 +356,85 @@ class OcrSessionManager(
         // Recognition dispatch happens after this method returns the AIDL ack,
         // keeping frame intake synchronous and inference asynchronous.
         return false
+    }
+
+    internal data class TransformedFrame(
+        val yPlane: ByteArray,
+        val width: Int,
+        val height: Int,
+    )
+
+    internal fun applyFrameMetadata(
+        meta: OcrFrameMeta,
+        yPlane: ByteArray,
+        width: Int,
+        height: Int,
+    ): TransformedFrame {
+        require(width > 0 && height > 0 && yPlane.size == width * height) {
+            "Invalid Y-plane dimensions"
+        }
+        val rotated = rotateYPlane(yPlane, width, height, meta.rotationDegrees)
+        return cropNormalized(rotated, meta.regionJson)
+    }
+
+    private fun rotateYPlane(yPlane: ByteArray, width: Int, height: Int, rotation: Int): TransformedFrame {
+        return when (rotation) {
+            0 -> TransformedFrame(yPlane, width, height)
+            90 -> {
+                val out = ByteArray(yPlane.size)
+                for (y in 0 until height) {
+                    for (x in 0 until width) {
+                        val nx = height - 1 - y
+                        val ny = x
+                        out[ny * height + nx] = yPlane[y * width + x]
+                    }
+                }
+                TransformedFrame(out, height, width)
+            }
+            180 -> {
+                val out = ByteArray(yPlane.size)
+                for (i in yPlane.indices) out[yPlane.lastIndex - i] = yPlane[i]
+                TransformedFrame(out, width, height)
+            }
+            270 -> {
+                val out = ByteArray(yPlane.size)
+                for (y in 0 until height) {
+                    for (x in 0 until width) {
+                        val nx = y
+                        val ny = width - 1 - x
+                        out[ny * height + nx] = yPlane[y * width + x]
+                    }
+                }
+                TransformedFrame(out, height, width)
+            }
+            else -> throw IllegalArgumentException("Unsupported rotationDegrees=$rotation")
+        }
+    }
+
+    private fun cropNormalized(frame: TransformedFrame, regionJson: String?): TransformedFrame {
+        if (regionJson.isNullOrBlank()) return frame
+        val obj = runCatching { json.parseToJsonElement(regionJson).jsonObject }
+            .getOrElse { throw IllegalArgumentException("Invalid OCR regionJson") }
+        fun value(name: String): Double = obj[name]?.jsonPrimitive?.doubleOrNull
+            ?: throw IllegalArgumentException("Missing OCR region field $name")
+        val x = value("x")
+        val y = value("y")
+        val w = value("w")
+        val h = value("h")
+        require(x in 0.0..1.0 && y in 0.0..1.0 && w > 0.0 && h > 0.0 && x + w <= 1.0 && y + h <= 1.0) {
+            "OCR region must be normalized"
+        }
+        val left = floor(x * frame.width).toInt().coerceIn(0, frame.width - 1)
+        val top = floor(y * frame.height).toInt().coerceIn(0, frame.height - 1)
+        val right = ceil((x + w) * frame.width).toInt().coerceIn(left + 1, frame.width)
+        val bottom = ceil((y + h) * frame.height).toInt().coerceIn(top + 1, frame.height)
+        val outWidth = right - left
+        val outHeight = bottom - top
+        val out = ByteArray(outWidth * outHeight)
+        for (row in 0 until outHeight) {
+            System.arraycopy(frame.yPlane, (top + row) * frame.width + left, out, row * outWidth, outWidth)
+        }
+        return TransformedFrame(out, outWidth, outHeight)
     }
 
     /** Read-only snapshot of session state. */
@@ -593,6 +695,7 @@ class OcrSessionManager(
     companion object {
         private const val TAG = "OcrSessionManager"
         const val DEFAULT_IDLE_TIMEOUT_MS = 30_000L
+        private val json = Json { ignoreUnknownKeys = true }
 
         /**
          * Limits the service advertises by default for OCR sessions on

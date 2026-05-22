@@ -77,6 +77,8 @@ internal class FakeDeferredDao : DeferredDao {
 
     override suspend fun complete(
         requestId: String,
+        uid: Int,
+        kind: String,
         status: Int,
         text: String?,
         metricsJson: String?,
@@ -88,8 +90,10 @@ internal class FakeDeferredDao : DeferredDao {
         blobPath: String?,
         blobBytes: Long?,
         perItemMetadataJson: String?,
+        running: Int,
     ): Int {
         val r = rows[requestId] ?: return 0
+        if (r.uid != uid || r.kind != kind || r.statusCode != running) return 0
         rows[requestId] = r.copy(
             statusCode = status,
             resultText = text,
@@ -106,9 +110,9 @@ internal class FakeDeferredDao : DeferredDao {
         return 1
     }
 
-    override suspend fun completedPendingForUid(uid: Int, running: Int): List<DeferredEntity> =
+    override suspend fun completedPendingForUid(uid: Int, kind: String, running: Int): List<DeferredEntity> =
         rows.values
-            .filter { it.uid == uid && it.statusCode != running && it.fetchedAtMs == null }
+            .filter { it.uid == uid && it.kind == kind && it.statusCode != running && it.fetchedAtMs == null }
             .sortedBy { it.completedAtMs ?: Long.MAX_VALUE }
 
     override suspend fun cancelRunning(

@@ -1,7 +1,10 @@
 package com.adsamcik.mindlayer.service.security
 
+import android.os.ParcelFileDescriptor
+import com.adsamcik.mindlayer.MediaPart
 import com.adsamcik.mindlayer.OcrFrameMeta
 import com.adsamcik.mindlayer.OcrSessionConfig
+import io.mockk.mockk
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -231,6 +234,24 @@ class IpcInputValidatorOcrTest {
     @Test fun `validateOcrFrameMeta rejects newer schemaVersion`() {
         assertThrows(IllegalArgumentException::class.java) {
             IpcInputValidator.validateOcrFrameMeta(goodMeta(schemaVersion = 2))
+        }
+    }
+
+    @Test fun `validateImageTransfer rejects raw Y-plane above OCR cap`() {
+        val part = MediaPart(
+            requestId = "ocr-raw",
+            kind = MediaPart.KIND_IMAGE,
+            mimeType = IpcInputValidator.OCR_RAW_Y_PLANE_MIME,
+            source = mockk<ParcelFileDescriptor>(relaxed = true),
+            isSharedMemory = false,
+            payloadBytes = 32_000_000L,
+            width = 8_000,
+            height = 4_000,
+            rowStride = 8_000,
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            IpcInputValidator.validateImageTransfer(part, maxMediaBytes = 100 * 1024 * 1024)
         }
     }
 }
