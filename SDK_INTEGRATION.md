@@ -342,13 +342,19 @@ Bump version in `build.gradle.kts` root `publishVersion` before releasing.
 ## Requirements
 
 - **Mindlayer service app** must be installed on the device
-- **Same signing key** for service and client apps (signature permission)
+- **Trusted first-party signing**: same signing key, or an Android 12+
+  `knownSigner` certificate registered by the Mindlayer service
 - **Android 8.0+** (minSdk 26)
-- **Model file** must be deployed (via Play AI Pack or manual push)
+- **Model files** must be deployed (via Play AI Packs or manual staging)
 
-## Deferred async inference (push + pull)
+## Deferred async inference (push primary, polling fallback)
 
-Release criterion #7 is supported through the deferred API. Use `chatDeferred(...)` to submit work, keep the returned `DeferredHandle.requestId`, and either listen to `deferredCompletions()` or poll `fetchDeferredResult(requestId)` later.
+Release criterion #7 is supported through the deferred API. Use
+`chatDeferred(...)` to submit work, keep the returned
+`DeferredHandle.requestId`, then prefer the push completion stream
+`deferredCompletions()`. Poll `fetchDeferredResult(requestId)` only as a
+fallback for old service versions, recovered processes, or UIs that cannot keep
+a collector active.
 
 ```kotlin
 val handle = mindlayer.chatDeferred(sessionId, "Summarize this later")
@@ -364,6 +370,84 @@ mindlayer.deferredCompletions().collect { notice ->
 Results are stored by the service until acknowledged or expired. Defaults: 16 in-flight deferred requests per UID, 64 completed/pending-fetch results per UID, 1 MiB accumulated result text per UID, and 24 hour TTL. Prompt text is never persisted in the deferred store; model result text is persisted intentionally for retrieval and is encrypted at rest with SQLCipher.
 
 Failure modes are returned in `DeferredResult.status`: `STILL_RUNNING`, `NOT_FOUND_OR_NOT_OWNED` (also used for cross-UID anti-enumeration), `EXPIRED`, `FAILED`, or `CANCELLED`. New SDKs check `ServiceCapabilities.FEATURE_DEFERRED_INFERENCE`; if an older service does not advertise it, deferred calls throw `MindlayerErrorCode.NOT_SUPPORTED`.
+
+## OCR
+
+Mindlayer OCR is a multi-frame session API for receipts, documents, ID cards,
+whiteboards, and screen captures. The API and event stream are wired, but the
+service currently keeps `FEATURE_OCR_SESSION` dark because
+`OcrFeatureFlags.IS_PRODUCTION_READY=false`; production callers must degrade
+when the capability is absent.
+
+### Quick start
+
+```kotlin
+val session = mindlayer.ocrSession(OcrProfile.Receipt) { maxFrames = 30 }
+val ack = session.pushFrame(meta, yPlaneBytes, width, height)
+session.finalize()
+```
+
+### Capability check
+
+The SDK's OCR methods call an internal `requireOcrCapability()` guard and throw
+a typed `MindlayerException` with `FEATURE_NOT_SUPPORTED` when the connected
+service does not advertise OCR. Check explicitly when enabling UI:
+
+```kotlin
+val caps = mindlayer.getCapabilities()
+if (!caps.supports(ServiceCapabilities.FEATURE_OCR_SESSION)) {
+    showOcrUnavailable()
+    return
+}
+```
+
+### Inputs: Y-plane vs encoded bytes
+
+- `session.pushFrame(meta, yPlane, width, height, rowStride, pixelStride)` is
+  the preferred camera path. It sends a defensive copy of the luminance plane
+  and preserves stride metadata.
+- `session.pushEncodedFrame(meta, bytes, mimeType)` accepts pre-encoded
+  JPEG/PNG/WEBP bytes from non-CameraX pipelines.
+- Payloads at or below the Binder-sized `MAX_FRAME_BYTES` guard are sent inline;
+  larger frames should be downscaled or routed through the SharedMemory-backed
+  media helpers.
+
+### Event stream
+
+Attach `session.events` before pushing frames so no events are lost. If a frame
+arrives first, the service returns
+`OcrFrameAck.STATUS_REJECTED_STREAM_NOT_ATTACHED`.
+
+```kotlin
+session.events.collect { event ->
+    when (event) {
+        is OcrEvent.FrameProcessing -> showProgress(event.frameId)
+        is OcrEvent.FrameDroppedBusy -> throttle(event.retryAfterMs)
+        is OcrEvent.ResultFinalized -> renderJson(event.fullJson)
+        is OcrEvent.Error -> showError(event.code, event.message)
+        else -> Unit
+    }
+}
+```
+
+### Error handling and finalize semantics
+
+Synchronous intake failures are returned as `OcrFrameAck` statuses. AIDL
+failures become typed `MindlayerException`s through the SDK chokepoint. Stream
+failures are surfaced as `OcrEvent.Error` before the flow terminates.
+
+`session.finalize()` transitions the service session into a drain state:
+accepted in-flight frames complete, later pushes are rejected with
+`STATUS_REJECTED_FINALIZED`, and the event stream emits
+`OcrEvent.ResultFinalized` followed by `DONE`/pipe close.
+
+### CameraX helper
+
+Add `com.adsamcik.mindlayer:sdk-camerax:<version>` for
+`OcrImageAnalyzer`, an `ImageAnalysis.Analyzer` that copies the Y-plane,
+runs optional client-side presort, pushes accepted frames, and closes each
+`ImageProxy` immediately. The adapter is `compileOnly` against CameraX; the
+host app supplies its CameraX version.
 
 ## Embeddings
 
