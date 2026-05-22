@@ -131,7 +131,7 @@ class DiagnosticExporterTest {
                 id = 1,
                 timestampMs = 10000L,
                 category = LogCategory.INFERENCE,
-                event = LogEvent.REQUEST_COMPLETE,
+                event = LogEvent.REQUEST_COMPLETE.key,
                 sessionId = "s1",
                 requestId = "r1",
                 backend = "GPU",
@@ -140,6 +140,7 @@ class DiagnosticExporterTest {
                 tokensPerSec = 25.0f,
             ),
         )
+        coEvery { logDao.getByEvents(any()) } returns representativeObservabilityRows()
         coEvery { logDao.totalInferenceCount() } returns 42
         coEvery { logDao.averageTokensPerSec() } returns 30.5f
         coEvery { logDao.totalTokensGenerated() } returns 10_000L
@@ -184,6 +185,44 @@ class DiagnosticExporterTest {
     fun `export contains uptimeMs field`() = runTest {
         val json = exportJson()
         assertEquals(300_000L, json["uptimeMs"]!!.jsonPrimitive.long)
+    }
+
+    @Test
+    fun `export uses schema v2 and includes observability diagnostics`() = runTest {
+        val json = exportJson()
+
+        assertEquals(2, json["schemaVersion"]!!.jsonPrimitive.int)
+
+        val ocr = json["ocr"]!!.jsonObject
+        assertEquals("CPU", ocr["currentBackend"]!!.jsonPrimitive.content)
+        assertEquals(3, ocr["framesProcessed"]!!.jsonPrimitive.int)
+        assertEquals(2, ocr["framesRejected"]!!.jsonPrimitive.int)
+        assertEquals(1, ocr["framesDropped"]!!.jsonPrimitive.int)
+        assertEquals(1, ocr["sessionsFinalized"]!!.jsonPrimitive.int)
+        assertEquals(12_000L, ocr["lastFinalizedAt"]!!.jsonPrimitive.long)
+
+        val embedding = json["embedding"]!!.jsonObject
+        assertTrue(embedding["modelLoaded"]!!.jsonPrimitive.boolean)
+        assertEquals("GPU", embedding["currentBackend"]!!.jsonPrimitive.content)
+        assertEquals("embeddinggemma-300m", embedding["modelId"]!!.jsonPrimitive.content)
+        assertEquals(1, embedding["batchesProcessed"]!!.jsonPrimitive.int)
+        assertEquals(4, embedding["vectorsGenerated"]!!.jsonPrimitive.int)
+
+        val decisions = json["acceleratorDecisions"]!!.jsonObject
+        assertEquals("GPU", decisions["chat"]!!.jsonObject["backend"]!!.jsonPrimitive.content)
+        assertEquals("CPU", decisions["ocr"]!!.jsonObject["backend"]!!.jsonPrimitive.content)
+        assertEquals(
+            2,
+            decisions["embeddings"]!!.jsonObject["attempted"]!!.jsonArray.size,
+        )
+
+        val deferred = json["deferredCounters"]!!.jsonObject
+        assertEquals(1, deferred["chat"]!!.jsonObject["submitted"]!!.jsonPrimitive.int)
+        assertEquals(1, deferred["chat"]!!.jsonObject["completed"]!!.jsonPrimitive.int)
+        assertEquals(1, deferred["chat"]!!.jsonObject["fetched"]!!.jsonPrimitive.int)
+        assertEquals(1, deferred["embedding"]!!.jsonObject["submitted"]!!.jsonPrimitive.int)
+        assertEquals(1, deferred["embedding"]!!.jsonObject["cancelled"]!!.jsonPrimitive.int)
+        assertEquals(1, deferred["embedding"]!!.jsonObject["expired"]!!.jsonPrimitive.int)
     }
 
     // ---- Engine section -----------------------------------------------------
@@ -434,7 +473,7 @@ class DiagnosticExporterTest {
         val entry = logs[0].jsonObject
         assertEquals(10000L, entry["timestamp"]!!.jsonPrimitive.long)
         assertEquals(LogCategory.INFERENCE, entry["category"]!!.jsonPrimitive.content)
-        assertEquals(LogEvent.REQUEST_COMPLETE, entry["event"]!!.jsonPrimitive.content)
+        assertEquals(LogEvent.REQUEST_COMPLETE.key, entry["event"]!!.jsonPrimitive.content)
         assertEquals("s1", entry["sessionId"]!!.jsonPrimitive.content)
         assertEquals("r1", entry["requestId"]!!.jsonPrimitive.content)
         assertEquals("GPU", entry["backend"]!!.jsonPrimitive.content)
@@ -449,7 +488,7 @@ class DiagnosticExporterTest {
             LogEntry(
                 timestampMs = 999L,
                 category = LogCategory.ENGINE,
-                event = LogEvent.ENGINE_INIT,
+                event = LogEvent.ENGINE_INIT.key,
             ),
         )
 
@@ -479,7 +518,7 @@ class DiagnosticExporterTest {
             LogEntry(
                 timestampMs = 1L,
                 category = LogCategory.ERROR,
-                event = LogEvent.GENERAL_ERROR,
+                event = LogEvent.GENERAL_ERROR.key,
                 thermalBand = "HOT",
                 errorMessage = "OutOfMemoryError",
             ),
@@ -499,7 +538,7 @@ class DiagnosticExporterTest {
             LogEntry(
                 timestampMs = 2L,
                 category = LogCategory.ERROR,
-                event = LogEvent.REQUEST_ERROR,
+                event = LogEvent.REQUEST_ERROR.key,
                 errorMessage = longLabel,
             ),
         )
@@ -518,7 +557,7 @@ class DiagnosticExporterTest {
             LogEntry(
                 timestampMs = 3L,
                 category = LogCategory.ERROR,
-                event = LogEvent.REQUEST_ERROR,
+                event = LogEvent.REQUEST_ERROR.key,
                 errorMessage = leaked,
             ),
         )
@@ -620,9 +659,74 @@ class DiagnosticExporterTest {
     fun `export contains all top-level sections`() = runTest {
         val json = exportJson()
         val expected = listOf("timestamp", "version", "engine", "thermal", "memory",
-            "sessions", "recentLogs", "stats", "uptimeMs")
+            "sessions", "recentLogs", "stats", "uptimeMs", "schemaVersion",
+            "ocr", "embedding", "acceleratorDecisions", "deferredCounters")
         for (key in expected) {
             assertTrue("Missing key: $key", json.containsKey(key))
         }
     }
+
+    private fun representativeObservabilityRows(): List<LogEntry> = listOf(
+        LogEntry(
+            timestampMs = 10_000L,
+            category = LogCategory.ENGINE,
+            event = LogEvent.OCR_BACKEND_READY.key,
+            backend = "CPU",
+            durationMs = 40L,
+            extraJson = """{"bundleId":"paddleocr"}""",
+        ),
+        LogEntry(
+            timestampMs = 11_000L,
+            category = LogCategory.OCR,
+            event = LogEvent.OCR_FRAME_PROCESSED.key,
+        ),
+        LogEntry(
+            timestampMs = 12_000L,
+            category = LogCategory.OCR,
+            event = LogEvent.OCR_SESSION_FINALIZED.key,
+            extraJson = """{"framesAccepted":2,"framesRejected":2,"framesDropped":1}""",
+        ),
+        LogEntry(
+            timestampMs = 13_000L,
+            category = LogCategory.EMBEDDING,
+            event = LogEvent.EMBEDDING_BACKEND_READY.key,
+            backend = "GPU",
+            extraJson = """{"modelId":"embeddinggemma-300m"}""",
+        ),
+        LogEntry(
+            timestampMs = 14_000L,
+            category = LogCategory.EMBEDDING,
+            event = LogEvent.EMBEDDING_BATCH_COMPLETE.key,
+            backend = "GPU",
+            durationMs = 80L,
+            extraJson = """{"modelId":"embeddinggemma-300m","batchSize":4,"vectorCount":4}""",
+        ),
+        backendDecisionRow(15_000L, "chat", "GPU", "preferred"),
+        backendDecisionRow(16_000L, "embeddings", "GPU", "preferred"),
+        backendDecisionRow(17_000L, "ocr", "CPU", "thermal"),
+        deferredRow(18_000L, LogEvent.DEFERRED_SUBMIT.key, "chat", "req-chat"),
+        deferredRow(19_000L, LogEvent.DEFERRED_COMPLETE.key, "chat", "req-chat"),
+        deferredRow(20_000L, LogEvent.DEFERRED_FETCH.key, "chat", "req-chat"),
+        deferredRow(21_000L, LogEvent.DEFERRED_SUBMIT.key, "embedding", "emb-1"),
+        deferredRow(22_000L, LogEvent.DEFERRED_CANCEL.key, "embedding", "emb-1"),
+        deferredRow(23_000L, LogEvent.DEFERRED_EXPIRED.key, "embedding", "emb-2"),
+    )
+
+    private fun backendDecisionRow(timestampMs: Long, feature: String, backend: String, reason: String): LogEntry =
+        LogEntry(
+            timestampMs = timestampMs,
+            category = LogCategory.ENGINE,
+            event = LogEvent.BACKEND_DECISION.key,
+            backend = backend,
+            extraJson = """{"feature":"$feature","reason":"$reason","attempted":[{"backend":"GPU","reason":"preferred"},{"backend":"CPU","reason":"fallback"}]}""",
+        )
+
+    private fun deferredRow(timestampMs: Long, event: String, kind: String, requestId: String): LogEntry =
+        LogEntry(
+            timestampMs = timestampMs,
+            category = LogCategory.INFERENCE,
+            event = event,
+            requestId = requestId,
+            extraJson = """{"kind":"$kind"}""",
+        )
 }

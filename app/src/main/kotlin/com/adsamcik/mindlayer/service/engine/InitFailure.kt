@@ -40,7 +40,7 @@ package com.adsamcik.mindlayer.service.engine
  *
  * **Logging:** the variant is also logged via
  * [com.adsamcik.mindlayer.service.logging.LogRepository.logInitFailureCategorized]
- * under [com.adsamcik.mindlayer.service.logging.LogEvent.INIT_FAILURE_CATEGORIZED].
+ * under [com.adsamcik.mindlayer.service.logging.LogEvent.INIT_FAILURE_CATEGORIZED.key].
  * The `safeLabel` strings in [BackendUnavailable] and [NativeError]
  * MUST be produced by [com.adsamcik.mindlayer.service.logging.safeLabel]
  * (F-006) so prompt fragments embedded in native exception messages

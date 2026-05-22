@@ -93,45 +93,57 @@ class LogRepository(
     fun droppedLogCount(): Long = droppedCount.get()
 
     // Convenience builders
-    fun logDeferredSubmit(requestId: String, sessionId: String, mediaCount: Int) {
+    fun logDeferredSubmit(requestId: String, sessionId: String, mediaCount: Int, kind: String = "chat") {
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
-            event = LogEvent.DEFERRED_SUBMIT,
+            event = LogEvent.DEFERRED_SUBMIT.key,
             requestId = requestId,
             sessionId = sessionId,
-            extraJson = logExtraJson { put("mediaCount", mediaCount) },
+            extraJson = logExtraJson {
+                put("kind", kind)
+                put("mediaCount", mediaCount)
+            },
         ))
     }
 
-    fun logDeferredComplete(requestId: String, sessionId: String?, statusCode: Int) {
+    fun logDeferredComplete(requestId: String, sessionId: String?, statusCode: Int, kind: String = "chat") {
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
-            event = LogEvent.DEFERRED_COMPLETE,
+            event = LogEvent.DEFERRED_COMPLETE.key,
             requestId = requestId,
             sessionId = sessionId,
-            extraJson = logExtraJson { put("status", statusCode) },
+            extraJson = logExtraJson {
+                put("kind", kind)
+                put("status", statusCode)
+            },
         ))
     }
 
-    fun logDeferredFetch(requestId: String, statusCode: Int) {
+    fun logDeferredFetch(requestId: String, statusCode: Int, kind: String = "chat") {
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
-            event = LogEvent.DEFERRED_FETCH,
+            event = LogEvent.DEFERRED_FETCH.key,
             requestId = requestId,
-            extraJson = logExtraJson { put("status", statusCode) },
+            extraJson = logExtraJson {
+                put("kind", kind)
+                put("status", statusCode)
+            },
         ))
     }
 
-    fun logDeferredCancel(requestId: String, outcome: Int) {
+    fun logDeferredCancel(requestId: String, outcome: Int, kind: String = "chat") {
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
-            event = LogEvent.DEFERRED_CANCEL,
+            event = LogEvent.DEFERRED_CANCEL.key,
             requestId = requestId,
-            extraJson = logExtraJson { put("outcome", outcome) },
+            extraJson = logExtraJson {
+                put("kind", kind)
+                put("outcome", outcome)
+            },
         ))
     }
 
@@ -143,19 +155,20 @@ class LogRepository(
      * `DeferredResult.EXPIRED` (instead of `NOT_FOUND_OR_NOT_OWNED`) for
      * the same row.
      */
-    fun logDeferredExpired(requestId: String) {
+    fun logDeferredExpired(requestId: String, kind: String = "chat") {
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
-            event = LogEvent.DEFERRED_EXPIRED,
+            event = LogEvent.DEFERRED_EXPIRED.key,
             requestId = requestId,
+            extraJson = logExtraJson { put("kind", kind) },
         ))
     }
     fun logInferenceStart(requestId: String, sessionId: String, backend: String) {
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
-            event = LogEvent.REQUEST_START,
+            event = LogEvent.REQUEST_START.key,
             requestId = requestId,
             sessionId = sessionId,
             backend = backend,
@@ -169,7 +182,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
-            event = LogEvent.REQUEST_COMPLETE,
+            event = LogEvent.REQUEST_COMPLETE.key,
             requestId = requestId, sessionId = sessionId, backend = backend,
             durationMs = durationMs, tokensGenerated = tokensGenerated,
             tokensPerSec = tokensPerSec, prefillTokensPerSec = prefillTps,
@@ -180,7 +193,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.ERROR,
-            event = LogEvent.REQUEST_ERROR,
+            event = LogEvent.REQUEST_ERROR.key,
             requestId = requestId, sessionId = sessionId,
             errorMessage = sanitizeErrorClass(errorMessage),
         ))
@@ -190,7 +203,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.THERMAL,
-            event = LogEvent.BAND_CHANGE,
+            event = LogEvent.BAND_CHANGE.key,
             thermalBand = toBand, backend = backend,
             extraJson = logExtraJson {
                 put("from", fromBand)
@@ -203,7 +216,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.SESSION,
-            event = LogEvent.SESSION_CREATED,
+            event = LogEvent.SESSION_CREATED.key,
             sessionId = sessionId, backend = backend,
             extraJson = logExtraJson { put("maxTokens", maxTokens) },
         ))
@@ -213,7 +226,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.SESSION,
-            event = LogEvent.SESSION_DESTROYED,
+            event = LogEvent.SESSION_DESTROYED.key,
             sessionId = sessionId,
         ))
     }
@@ -222,7 +235,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.SESSION,
-            event = LogEvent.SESSION_EVICTED,
+            event = LogEvent.SESSION_EVICTED.key,
             sessionId = sessionId,
             extraJson = logExtraJson { put("reason", reason) },
         ))
@@ -243,7 +256,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.MEMORY,
-            event = LogEvent.EVICTION_TRIGGERED,
+            event = LogEvent.EVICTION_TRIGGERED.key,
             extraJson = buildJsonObject {
                 put("trigger", JsonPrimitive(trigger))
                 put("evicted", JsonPrimitive(evictedCount))
@@ -256,7 +269,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.MEMORY,
-            event = LogEvent.PRESSURE_CHANGE,
+            event = LogEvent.PRESSURE_CHANGE.key,
             memoryAvailableMb = availableMb,
             memoryUsedMb = totalMb - availableMb,
             extraJson = logExtraJson { put("pressure", pressure) },
@@ -268,7 +281,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.ENGINE,
-            event = LogEvent.ENGINE_INIT,
+            event = LogEvent.ENGINE_INIT.key,
             backend = backend, durationMs = durationMs,
             extraJson = logExtraJson { put("modelFile", modelFile) },
         ))
@@ -278,7 +291,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.ENGINE,
-            event = LogEvent.OCR_BACKEND_READY,
+            event = LogEvent.OCR_BACKEND_READY.key,
             backend = backend,
             durationMs = durationMs,
             extraJson = logExtraJson { put("bundleId", bundleId) },
@@ -289,10 +302,49 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.ENGINE,
-            event = LogEvent.OCR_BACKEND_SHUTDOWN,
+            event = LogEvent.OCR_BACKEND_SHUTDOWN.key,
             backend = backend,
             durationMs = durationMs,
             extraJson = logExtraJson { put("bundleId", bundleId) },
+        ))
+    }
+
+    fun logEmbeddingBackendReady(backend: String, modelId: String, durationMs: Long) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.EMBEDDING,
+            event = LogEvent.EMBEDDING_BACKEND_READY.key,
+            backend = backend,
+            durationMs = durationMs,
+            extraJson = logExtraJson { put("modelId", modelId) },
+        ))
+    }
+
+    fun logEmbeddingBackendShutdown(backend: String, modelId: String?, durationMs: Long? = null) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.EMBEDDING,
+            event = LogEvent.EMBEDDING_BACKEND_SHUTDOWN.key,
+            backend = backend,
+            durationMs = durationMs,
+            extraJson = logExtraJson {
+                modelId?.let { put("modelId", it) }
+            },
+        ))
+    }
+
+    fun logEmbeddingBatchComplete(backend: String, modelId: String, batchSize: Int, vectorCount: Int, durationMs: Long) {
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.EMBEDDING,
+            event = LogEvent.EMBEDDING_BATCH_COMPLETE.key,
+            backend = backend,
+            durationMs = durationMs,
+            extraJson = logExtraJson {
+                put("modelId", modelId)
+                put("batchSize", batchSize)
+                put("vectorCount", vectorCount)
+            },
         ))
     }
 
@@ -306,7 +358,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.ENGINE,
-            event = LogEvent.BACKEND_DECISION,
+            event = LogEvent.BACKEND_DECISION.key,
             backend = backend,
             extraJson = buildJsonObject {
                 put("feature", JsonPrimitive(featureName))
@@ -327,7 +379,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.ENGINE,
-            event = LogEvent.ENGINE_SHUTDOWN,
+            event = LogEvent.ENGINE_SHUTDOWN.key,
             backend = backend,
         ))
     }
@@ -370,7 +422,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.ENGINE,
-            event = LogEvent.INIT_FAILURE_CATEGORIZED,
+            event = LogEvent.INIT_FAILURE_CATEGORIZED.key,
             backend = backend,
             errorMessage = label,
             extraJson = buildJsonObject {
@@ -393,7 +445,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.SECURITY,
-            event = LogEvent.SECURITY_DECISION,
+            event = LogEvent.SECURITY_DECISION.key,
             extraJson = buildJsonObject {
                 put("action", JsonPrimitive(action))
                 put("pkg", JsonPrimitive(packageName))
@@ -412,7 +464,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
-            event = LogEvent.USER_MESSAGE,
+            event = LogEvent.USER_MESSAGE.key,
             requestId = requestId,
             sessionId = sessionId,
             extraJson = logExtraJson { put("tokenCount", tokenCount) },
@@ -428,7 +480,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
-            event = LogEvent.MODEL_RESPONSE,
+            event = LogEvent.MODEL_RESPONSE.key,
             requestId = requestId,
             sessionId = sessionId,
             extraJson = logExtraJson { put("tokenCount", tokenCount) },
@@ -440,7 +492,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
-            event = LogEvent.REQUEST_CANCEL,
+            event = LogEvent.REQUEST_CANCEL.key,
             requestId = requestId,
             sessionId = sessionId,
         ))
@@ -450,7 +502,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.SECURITY,
-            event = LogEvent.RATE_LIMIT_REJECT,
+            event = LogEvent.RATE_LIMIT_REJECT.key,
             requestId = requestId,
             sessionId = sessionId,
             extraJson = logExtraJson {
@@ -465,7 +517,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.SECURITY,
-            event = LogEvent.ALLOWLIST_PENDING_RECORDED,
+            event = LogEvent.ALLOWLIST_PENDING_RECORDED.key,
             extraJson = logExtraJson {
                 put("uid", uid)
                 put("pkg", packageName)
@@ -478,7 +530,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.ENGINE,
-            event = LogEvent.FGS_PROMOTED,
+            event = LogEvent.FGS_PROMOTED.key,
             extraJson = logExtraJson { put("activeInferenceCount", activeInferenceCount) },
         ))
     }
@@ -487,7 +539,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.ENGINE,
-            event = LogEvent.FGS_DEMOTED,
+            event = LogEvent.FGS_DEMOTED.key,
             extraJson = logExtraJson { put("activeInferenceCount", activeInferenceCount) },
         ))
     }
@@ -496,7 +548,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.ENGINE,
-            event = LogEvent.BACKEND_SWITCH,
+            event = LogEvent.BACKEND_SWITCH.key,
             backend = toBackend,
             extraJson = logExtraJson {
                 put("from", fromBackend)
@@ -510,7 +562,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.SECURITY,
-            event = LogEvent.BINDER_DEATH_CLIENT,
+            event = LogEvent.BINDER_DEATH_CLIENT.key,
             extraJson = logExtraJson {
                 put("uid", uid)
                 registrationId?.let { put("registrationId", it) }
@@ -522,7 +574,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.SECURITY,
-            event = LogEvent.BINDER_DEATH_SELF,
+            event = LogEvent.BINDER_DEATH_SELF.key,
             extraJson = logExtraJson { put("uid", uid) },
         ))
     }
@@ -531,7 +583,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.SECURITY,
-            event = LogEvent.CRASH_LOOP_THROTTLE,
+            event = LogEvent.CRASH_LOOP_THROTTLE.key,
             extraJson = logExtraJson {
                 put("uid", uid)
                 put("cooldownEndsAtMs", cooldownEndsAtMs)
@@ -543,7 +595,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
-            event = LogEvent.STREAM_FRAME_TOO_LARGE,
+            event = LogEvent.STREAM_FRAME_TOO_LARGE.key,
             extraJson = logExtraJson {
                 put("frameBytes", frameBytes)
                 put("maxFrameBytes", maxFrameBytes)
@@ -555,7 +607,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
-            event = LogEvent.STREAM_BACKPRESSURE,
+            event = LogEvent.STREAM_BACKPRESSURE.key,
             durationMs = timeoutMs,
         ))
     }
@@ -564,7 +616,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.SESSION,
-            event = LogEvent.SESSION_QUOTA_EXCEEDED,
+            event = LogEvent.SESSION_QUOTA_EXCEEDED.key,
             sessionId = sessionId,
             extraJson = logExtraJson {
                 ownerUid?.let { put("uid", it) }
@@ -579,7 +631,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
-            event = LogEvent.TOOL_CALL_EXIT,
+            event = LogEvent.TOOL_CALL_EXIT.key,
             requestId = requestId,
             sessionId = sessionId,
             extraJson = logExtraJson {
@@ -593,7 +645,7 @@ class LogRepository(
         log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.INFERENCE,
-            event = LogEvent.TOOL_CALL_TIMEOUT,
+            event = LogEvent.TOOL_CALL_TIMEOUT.key,
             requestId = requestId,
             sessionId = sessionId,
             durationMs = timeoutMs,

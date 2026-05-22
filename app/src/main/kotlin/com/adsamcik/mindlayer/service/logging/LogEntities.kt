@@ -40,66 +40,85 @@ object LogCategory {
     const val MEMORY = "MEMORY"
     const val ENGINE = "ENGINE"
     const val ERROR = "ERROR"
+    const val OCR = "OCR"
+    const val EMBEDDING = "EMBEDDING"
+    const val IPC = "IPC"
+    const val AUTH = "AUTH"
     // F-056: audit trail for approve / deny / revoke / cert-rotation
     // events. Surfaced in dashboard logs for the user to inspect.
     const val SECURITY = "SECURITY"
 }
 
-object LogEvent {
+enum class LogEvent(val key: String) {
     // Inference
-    const val REQUEST_START = "request_start"
-    const val REQUEST_COMPLETE = "request_complete"
-    const val REQUEST_CANCEL = "request_cancel"
-    const val REQUEST_ERROR = "request_error"
-    const val TOOL_CALL = "tool_call"
-    const val TOOL_CALL_EXIT = "tool_call_exit"
-    const val TOOL_CALL_TIMEOUT = "tool_call_timeout"
-    const val STREAM_FRAME_TOO_LARGE = "stream_frame_too_large"
-    const val STREAM_BACKPRESSURE = "stream_backpressure"
+    REQUEST_START("request_start"),
+    REQUEST_COMPLETE("request_complete"),
+    REQUEST_CANCEL("request_cancel"),
+    REQUEST_ERROR("request_error"),
+    TOOL_CALL("tool_call"),
+    TOOL_CALL_EXIT("tool_call_exit"),
+    TOOL_CALL_TIMEOUT("tool_call_timeout"),
+    STREAM_FRAME_TOO_LARGE("stream_frame_too_large"),
+    STREAM_BACKPRESSURE("stream_backpressure"),
     // F-036: model fabricated an unknown tool name OR emitted oversized
     // arguments; the orchestrator dropped/truncated the call. Logged
     // under LogCategory.SECURITY so the dashboard surfaces it.
-    const val TOOL_CALL_REJECTED = "tool_call_rejected"
-    const val USER_MESSAGE = "user_message"
-    const val MODEL_RESPONSE = "model_response"
-    const val DEFERRED_SUBMIT = "deferred_submit"
-    const val DEFERRED_COMPLETE = "deferred_complete"
-    const val DEFERRED_FETCH = "deferred_fetch"
-    const val DEFERRED_CANCEL = "deferred_cancel"
-    const val DEFERRED_EXPIRED = "deferred_expired"
+    TOOL_CALL_REJECTED("tool_call_rejected"),
+    USER_MESSAGE("user_message"),
+    MODEL_RESPONSE("model_response"),
+    DEFERRED_SUBMIT("deferred_submit"),
+    DEFERRED_COMPLETE("deferred_complete"),
+    DEFERRED_FETCH("deferred_fetch"),
+    DEFERRED_CANCEL("deferred_cancel"),
+    DEFERRED_EXPIRED("deferred_expired"),
     // Thermal
-    const val BAND_CHANGE = "band_change"
-    const val BACKEND_SWITCH = "backend_switch"
+    BAND_CHANGE("band_change"),
+    BACKEND_SWITCH("backend_switch"),
     // Session
-    const val SESSION_CREATED = "session_created"
-    const val SESSION_DESTROYED = "session_destroyed"
-    const val SESSION_EVICTED = "session_evicted"
-    const val SESSION_QUOTA_EXCEEDED = "session_quota_exceeded"
+    SESSION_CREATED("session_created"),
+    SESSION_DESTROYED("session_destroyed"),
+    SESSION_EVICTED("session_evicted"),
+    SESSION_QUOTA_EXCEEDED("session_quota_exceeded"),
     // Memory
-    const val PRESSURE_CHANGE = "pressure_change"
-    const val EVICTION_TRIGGERED = "eviction_triggered"
+    PRESSURE_CHANGE("pressure_change"),
+    EVICTION_TRIGGERED("eviction_triggered"),
     // Engine
-    const val ENGINE_INIT = "engine_init"
-    const val ENGINE_SHUTDOWN = "engine_shutdown"
-    const val OCR_BACKEND_READY = "ocr_backend_ready"
-    const val OCR_BACKEND_SHUTDOWN = "ocr_backend_shutdown"
-    const val ENGINE_FALLBACK = "engine_fallback"
-    const val BACKEND_DECISION = "backend_decision"
-    const val FGS_PROMOTED = "fgs_promoted"
-    const val FGS_DEMOTED = "fgs_demoted"
+    ENGINE_INIT("engine_init"),
+    ENGINE_INIT_SUCCESS("engine_init_success"),
+    ENGINE_SHUTDOWN("engine_shutdown"),
+    OCR_BACKEND_READY("ocr_backend_ready"),
+    OCR_BACKEND_SHUTDOWN("ocr_backend_shutdown"),
+    OCR_FRAME_PROCESSED("ocr_frame_processed"),
+    OCR_FRAME_REJECTED("ocr_frame_rejected"),
+    OCR_SESSION_FINALIZED("ocr_session_finalized"),
+    EMBEDDING_BACKEND_READY("embedding_backend_ready"),
+    EMBEDDING_BACKEND_SHUTDOWN("embedding_backend_shutdown"),
+    EMBEDDING_BATCH_COMPLETE("embedding_batch_complete"),
+    ENGINE_FALLBACK("engine_fallback"),
+    BACKEND_DECISION("backend_decision"),
+    FGS_PROMOTED("fgs_promoted"),
+    FGS_DEMOTED("fgs_demoted"),
     // F-077: typed init-failure category. The variant name lands in
     // `extraJson` under "failureCategory"; the optional safeLabel goes
     // in `errorMessage` (already F-006-clean — class-name-only). The
     // dashboard reads the latest row to render variant-specific
     // remediation copy.
-    const val INIT_FAILURE_CATEGORIZED = "init_failure_categorized"
+    INIT_FAILURE_CATEGORIZED("init_failure_categorized"),
     // Error
-    const val GENERAL_ERROR = "general_error"
+    GENERAL_ERROR("general_error"),
     // Security
-    const val SECURITY_DECISION = "security_decision"
-    const val RATE_LIMIT_REJECT = "rate_limit_reject"
-    const val ALLOWLIST_PENDING_RECORDED = "allowlist_pending_recorded"
-    const val BINDER_DEATH_CLIENT = "binder_death_client"
-    const val BINDER_DEATH_SELF = "binder_death_self"
-    const val CRASH_LOOP_THROTTLE = "crash_loop_throttle"
+    SECURITY_DECISION("security_decision"),
+    RATE_LIMIT_REJECT("rate_limit_reject"),
+    ALLOWLIST_PENDING_RECORDED("allowlist_pending_recorded"),
+    BINDER_DEATH_CLIENT("binder_death_client"),
+    BINDER_DEATH_SELF("binder_death_self"),
+    CRASH_LOOP_THROTTLE("crash_loop_throttle");
+
+    override fun toString(): String = key
+
+    companion object {
+        private val byKey: Map<String, LogEvent> = entries.associateBy(LogEvent::key)
+
+        fun fromKey(key: String): LogEvent? = byKey[key]
+    }
 }
