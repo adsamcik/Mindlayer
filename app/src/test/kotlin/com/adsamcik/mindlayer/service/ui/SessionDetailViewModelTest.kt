@@ -71,7 +71,7 @@ class SessionDetailViewModelTest {
             LogEntry(
                 timestampMs = 1_000L,
                 category = LogCategory.SESSION,
-                event = LogEvent.SESSION_CREATED,
+                event = LogEvent.SESSION_CREATED.key,
                 sessionId = sessionId,
                 backend = "gpu",
             ),
@@ -80,7 +80,7 @@ class SessionDetailViewModelTest {
             LogEntry(
                 timestampMs = 2_000L,
                 category = LogCategory.INFERENCE,
-                event = LogEvent.REQUEST_COMPLETE,
+                event = LogEvent.REQUEST_COMPLETE.key,
                 sessionId = sessionId,
                 requestId = "req-1",
                 backend = "gpu",
@@ -93,7 +93,7 @@ class SessionDetailViewModelTest {
             LogEntry(
                 timestampMs = 3_000L,
                 category = LogCategory.INFERENCE,
-                event = LogEvent.REQUEST_COMPLETE,
+                event = LogEvent.REQUEST_COMPLETE.key,
                 sessionId = sessionId,
                 requestId = "req-2",
                 backend = "gpu",
@@ -106,7 +106,7 @@ class SessionDetailViewModelTest {
             LogEntry(
                 timestampMs = 4_000L,
                 category = LogCategory.INFERENCE,
-                event = LogEvent.REQUEST_START,
+                event = LogEvent.REQUEST_START.key,
                 sessionId = sessionId,
             ),
         )
@@ -146,7 +146,7 @@ class SessionDetailViewModelTest {
             LogEntry(
                 timestampMs = 100L,
                 category = LogCategory.SESSION,
-                event = LogEvent.SESSION_CREATED,
+                event = LogEvent.SESSION_CREATED.key,
                 sessionId = sessionId,
             ),
         )
@@ -154,7 +154,7 @@ class SessionDetailViewModelTest {
             LogEntry(
                 timestampMs = 200L,
                 category = LogCategory.SESSION,
-                event = LogEvent.SESSION_DESTROYED,
+                event = LogEvent.SESSION_DESTROYED.key,
                 sessionId = sessionId,
             ),
         )
@@ -183,7 +183,7 @@ class SessionDetailViewModelTest {
             LogEntry(
                 timestampMs = 100L,
                 category = LogCategory.SECURITY,
-                event = LogEvent.TOOL_CALL_REJECTED,
+                event = LogEvent.TOOL_CALL_REJECTED.key,
                 extraJson = """{"len":17,"reason":"unknown_tool","hash8":"0123abcd","secret":"raw"}""",
             ),
         )
@@ -193,6 +193,50 @@ class SessionDetailViewModelTest {
         assertTrue(detail.contains("hash8") && detail.contains("0123abcd"))
         assertFalse(detail.contains("secret"))
         assertFalse(detail.contains("raw"))
+    }
+
+    @Test
+    fun `buildEventDetail renders safe backend and embedding extras`() {
+        val backendDecision = buildEventDetail(
+            LogEntry(
+                timestampMs = 100L,
+                category = LogCategory.ENGINE,
+                event = LogEvent.BACKEND_DECISION.key,
+                backend = "GPU",
+                extraJson = """{"feature":"ocr","reason":"thermal","attempted":[{"backend":"GPU","reason":"hot"},{"backend":"CPU","reason":"fallback"}],"secret":"raw"}""",
+            ),
+        )
+        assertTrue(backendDecision.contains("feature=ocr"))
+        assertTrue(backendDecision.contains("reason=thermal"))
+        assertTrue(backendDecision.contains("GPU:hot -> CPU:fallback"))
+        assertFalse(backendDecision.contains("secret"))
+        assertFalse(backendDecision.contains("raw"))
+
+        val ocrReady = buildEventDetail(
+            LogEntry(
+                timestampMs = 200L,
+                category = LogCategory.ENGINE,
+                event = LogEvent.OCR_BACKEND_READY.key,
+                backend = "CPU",
+                extraJson = """{"bundleId":"paddleocr","text":"must-not-render"}""",
+            ),
+        )
+        assertTrue(ocrReady.contains("bundle=paddleocr"))
+        assertFalse(ocrReady.contains("must-not-render"))
+
+        val embeddingBatch = buildEventDetail(
+            LogEntry(
+                timestampMs = 300L,
+                category = LogCategory.EMBEDDING,
+                event = LogEvent.EMBEDDING_BATCH_COMPLETE.key,
+                backend = "GPU",
+                extraJson = """{"modelId":"embeddinggemma-300m","batchSize":2,"vectorCount":2,"text":"private"}""",
+            ),
+        )
+        assertTrue(embeddingBatch.contains("model=embeddinggemma-300m"))
+        assertTrue(embeddingBatch.contains("batch=2"))
+        assertTrue(embeddingBatch.contains("vectors=2"))
+        assertFalse(embeddingBatch.contains("private"))
     }
 
     @Test

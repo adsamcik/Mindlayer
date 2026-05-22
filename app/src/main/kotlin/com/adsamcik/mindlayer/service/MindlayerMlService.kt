@@ -297,7 +297,7 @@ class MindlayerMlService : Service() {
         logRepository.log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.ENGINE,
-            event = LogEvent.ENGINE_INIT,
+            event = LogEvent.ENGINE_INIT.key,
             extraJson = """{"lifecycle":"onCreate"}""",
         ))
 
@@ -416,7 +416,7 @@ class MindlayerMlService : Service() {
         logRepository.log(LogEntry(
             timestampMs = System.currentTimeMillis(),
             category = LogCategory.MEMORY,
-            event = LogEvent.PRESSURE_CHANGE,
+            event = LogEvent.PRESSURE_CHANGE.key,
             extraJson = """{"trimLevel":$level}""",
         ))
 
@@ -427,7 +427,7 @@ class MindlayerMlService : Service() {
             logRepository.log(LogEntry(
                 timestampMs = System.currentTimeMillis(),
                 category = LogCategory.MEMORY,
-                event = LogEvent.PRESSURE_CHANGE,
+                event = LogEvent.PRESSURE_CHANGE.key,
                 extraJson = "{\"trimLevel\":$level,\"engineUnload\":\"ordered_emergency\"}",
             ))
             serviceScope.launch { applyMemoryPressure(MemoryPressure.EMERGENCY) }

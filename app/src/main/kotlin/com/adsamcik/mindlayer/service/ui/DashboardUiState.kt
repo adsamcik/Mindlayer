@@ -58,6 +58,7 @@ data class DashboardUiState(
     val backend: String = "NONE",
     val gpuFailureReason: String? = null,
     val acceleratorDecision: AcceleratorDecisionUi? = null,
+    val acceleratorDecisions: List<AcceleratorDecisionUi> = emptyList(),
     /**
      * F-077: typed structured signal for the most recent
      * [com.adsamcik.mindlayer.service.engine.EngineManager.initialize]

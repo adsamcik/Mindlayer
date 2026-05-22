@@ -3,8 +3,11 @@ package com.adsamcik.mindlayer.service.logging
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -42,7 +45,7 @@ class LogDaoTest {
     private fun entry(
         timestampMs: Long = 1000L,
         category: String = LogCategory.INFERENCE,
-        event: String = LogEvent.REQUEST_COMPLETE,
+        event: String = LogEvent.REQUEST_COMPLETE.key,
         sessionId: String? = null,
         requestId: String? = null,
         backend: String? = null,
@@ -128,12 +131,14 @@ class LogDaoTest {
     }
 
     @Test
-    fun `getBySession filters correctly`() = runTest {
-        dao.insert(entry(sessionId = "sess-A", timestampMs = 100))
-        dao.insert(entry(sessionId = "sess-B", timestampMs = 200))
-        dao.insert(entry(sessionId = "sess-A", timestampMs = 300))
+    fun `getBySession filters correctly`() = runBlocking {
+        val results = withContext(Dispatchers.IO) {
+            dao.insert(entry(sessionId = "sess-A", timestampMs = 100))
+            dao.insert(entry(sessionId = "sess-B", timestampMs = 200))
+            dao.insert(entry(sessionId = "sess-A", timestampMs = 300))
 
-        val results = dao.getBySession("sess-A")
+            dao.getBySession("sess-A")
+        }
         assertEquals(2, results.size)
         assertTrue(results.all { it.sessionId == "sess-A" })
     }
@@ -155,19 +160,19 @@ class LogDaoTest {
 
     @Test
     fun `totalInferenceCount counts only INFERENCE request_complete entries`() = runTest {
-        dao.insert(entry(category = LogCategory.INFERENCE, event = LogEvent.REQUEST_COMPLETE))
-        dao.insert(entry(category = LogCategory.INFERENCE, event = LogEvent.REQUEST_COMPLETE))
-        dao.insert(entry(category = LogCategory.INFERENCE, event = LogEvent.REQUEST_START))
-        dao.insert(entry(category = LogCategory.ERROR, event = LogEvent.REQUEST_COMPLETE))
+        dao.insert(entry(category = LogCategory.INFERENCE, event = LogEvent.REQUEST_COMPLETE.key))
+        dao.insert(entry(category = LogCategory.INFERENCE, event = LogEvent.REQUEST_COMPLETE.key))
+        dao.insert(entry(category = LogCategory.INFERENCE, event = LogEvent.REQUEST_START.key))
+        dao.insert(entry(category = LogCategory.ERROR, event = LogEvent.REQUEST_COMPLETE.key))
 
         assertEquals(2, dao.totalInferenceCount())
     }
 
     @Test
     fun `averageTokensPerSec computes correctly across entries`() = runTest {
-        dao.insert(entry(tokensPerSec = 10.0f, event = LogEvent.REQUEST_COMPLETE))
-        dao.insert(entry(tokensPerSec = 20.0f, event = LogEvent.REQUEST_COMPLETE))
-        dao.insert(entry(tokensPerSec = 30.0f, event = LogEvent.REQUEST_COMPLETE))
+        dao.insert(entry(tokensPerSec = 10.0f, event = LogEvent.REQUEST_COMPLETE.key))
+        dao.insert(entry(tokensPerSec = 20.0f, event = LogEvent.REQUEST_COMPLETE.key))
+        dao.insert(entry(tokensPerSec = 30.0f, event = LogEvent.REQUEST_COMPLETE.key))
 
         val avg = dao.averageTokensPerSec()!!
         assertEquals(20.0f, avg, 0.01f)
@@ -175,9 +180,9 @@ class LogDaoTest {
 
     @Test
     fun `averageTokensPerSec ignores entries without tokensPerSec`() = runTest {
-        dao.insert(entry(tokensPerSec = 10.0f, event = LogEvent.REQUEST_COMPLETE))
-        dao.insert(entry(tokensPerSec = null, event = LogEvent.REQUEST_COMPLETE))
-        dao.insert(entry(tokensPerSec = 30.0f, event = LogEvent.REQUEST_COMPLETE))
+        dao.insert(entry(tokensPerSec = 10.0f, event = LogEvent.REQUEST_COMPLETE.key))
+        dao.insert(entry(tokensPerSec = null, event = LogEvent.REQUEST_COMPLETE.key))
+        dao.insert(entry(tokensPerSec = 30.0f, event = LogEvent.REQUEST_COMPLETE.key))
 
         val avg = dao.averageTokensPerSec()!!
         assertEquals(20.0f, avg, 0.01f)
@@ -194,9 +199,9 @@ class LogDaoTest {
 
     @Test
     fun `averageInferenceDurationMs computes correctly`() = runTest {
-        dao.insert(entry(durationMs = 1000, event = LogEvent.REQUEST_COMPLETE))
-        dao.insert(entry(durationMs = 2000, event = LogEvent.REQUEST_COMPLETE))
-        dao.insert(entry(durationMs = 3000, event = LogEvent.REQUEST_COMPLETE))
+        dao.insert(entry(durationMs = 1000, event = LogEvent.REQUEST_COMPLETE.key))
+        dao.insert(entry(durationMs = 2000, event = LogEvent.REQUEST_COMPLETE.key))
+        dao.insert(entry(durationMs = 3000, event = LogEvent.REQUEST_COMPLETE.key))
 
         val avg = dao.averageInferenceDurationMs()!!
         assertEquals(2000.0f, avg, 0.01f)
@@ -204,9 +209,9 @@ class LogDaoTest {
 
     @Test
     fun `averageInferenceDurationMs only includes request_complete events`() = runTest {
-        dao.insert(entry(durationMs = 1000, event = LogEvent.REQUEST_COMPLETE))
-        dao.insert(entry(durationMs = 9999, event = LogEvent.REQUEST_START))
-        dao.insert(entry(durationMs = 3000, event = LogEvent.REQUEST_COMPLETE))
+        dao.insert(entry(durationMs = 1000, event = LogEvent.REQUEST_COMPLETE.key))
+        dao.insert(entry(durationMs = 9999, event = LogEvent.REQUEST_START.key))
+        dao.insert(entry(durationMs = 3000, event = LogEvent.REQUEST_COMPLETE.key))
 
         val avg = dao.averageInferenceDurationMs()!!
         assertEquals(2000.0f, avg, 0.01f)
@@ -226,12 +231,12 @@ class LogDaoTest {
 
     @Test
     fun `thermalBandDistribution groups and counts correctly`() = runTest {
-        dao.insert(entry(category = LogCategory.THERMAL, event = LogEvent.BAND_CHANGE, thermalBand = "COOL"))
-        dao.insert(entry(category = LogCategory.THERMAL, event = LogEvent.BAND_CHANGE, thermalBand = "COOL"))
-        dao.insert(entry(category = LogCategory.THERMAL, event = LogEvent.BAND_CHANGE, thermalBand = "WARM"))
-        dao.insert(entry(category = LogCategory.THERMAL, event = LogEvent.BAND_CHANGE, thermalBand = "HOT"))
+        dao.insert(entry(category = LogCategory.THERMAL, event = LogEvent.BAND_CHANGE.key, thermalBand = "COOL"))
+        dao.insert(entry(category = LogCategory.THERMAL, event = LogEvent.BAND_CHANGE.key, thermalBand = "COOL"))
+        dao.insert(entry(category = LogCategory.THERMAL, event = LogEvent.BAND_CHANGE.key, thermalBand = "WARM"))
+        dao.insert(entry(category = LogCategory.THERMAL, event = LogEvent.BAND_CHANGE.key, thermalBand = "HOT"))
         // Non-THERMAL entry with thermalBand should be excluded
-        dao.insert(entry(category = LogCategory.INFERENCE, event = LogEvent.BAND_CHANGE, thermalBand = "COOL"))
+        dao.insert(entry(category = LogCategory.INFERENCE, event = LogEvent.BAND_CHANGE.key, thermalBand = "COOL"))
 
         val dist = dao.thermalBandDistribution()
         val map = dist.associate { it.thermalBand to it.count }
@@ -268,6 +273,55 @@ class LogDaoTest {
         dao.insert(entry())
 
         assertEquals(3, dao.totalCount())
+    }
+
+    @Test
+    fun `latestInitFailure clears after successful recovery event`() = runTest {
+        dao.insert(entry(
+            timestampMs = 100,
+            category = LogCategory.ENGINE,
+            event = LogEvent.INIT_FAILURE_CATEGORIZED.key,
+            extraJson = """{"failureCategory":"NativeError"}""",
+        ))
+        assertEquals(100L, dao.latestInitFailure()?.timestampMs)
+
+        dao.insert(entry(
+            timestampMs = 200,
+            category = LogCategory.ENGINE,
+            event = LogEvent.OCR_BACKEND_READY.key,
+            backend = "CPU",
+        ))
+
+        assertNull(dao.latestInitFailure())
+    }
+
+    @Test
+    fun `latestBackendDecisionByFeature returns independent latest rows`() = runTest {
+        dao.insert(entry(
+            timestampMs = 100,
+            category = LogCategory.ENGINE,
+            event = LogEvent.BACKEND_DECISION.key,
+            backend = "CPU",
+            extraJson = """{"feature":"chat","reason":"fallback","attempted":[]}""",
+        ))
+        dao.insert(entry(
+            timestampMs = 200,
+            category = LogCategory.ENGINE,
+            event = LogEvent.BACKEND_DECISION.key,
+            backend = "GPU",
+            extraJson = """{"feature":"ocr","reason":"preferred","attempted":[]}""",
+        ))
+        dao.insert(entry(
+            timestampMs = 300,
+            category = LogCategory.ENGINE,
+            event = LogEvent.BACKEND_DECISION.key,
+            backend = "NPU",
+            extraJson = """{"feature":"chat","reason":"thermal","attempted":[]}""",
+        ))
+
+        assertEquals("NPU", dao.latestBackendDecisionByFeature("chat")?.backend)
+        assertEquals("GPU", dao.latestBackendDecisionByFeature("ocr")?.backend)
+        assertNull(dao.latestBackendDecisionByFeature("embeddings"))
     }
 
     // --- empty database defaults ---
