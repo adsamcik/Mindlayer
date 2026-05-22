@@ -1035,7 +1035,7 @@ class ServiceBinderTest {
         }
     }
 
-    // ---- H2: rate-limit before allowlist; rejection bucket caps recordPending
+    // ---- H2: allowlist before main rate-limit; rejection bucket caps recordPending
 
     @Test
     fun `un-allowlisted UID hammered N times triggers bounded recordPending count`() {
@@ -1120,10 +1120,10 @@ class ServiceBinderTest {
         }
     }
 
-    // ---- M7: rate-limit token consumed before allowlist check --------------
+    // ---- M7: allowlist rejection does not consume main rate-limit ----------
 
     @Test
-    fun `authorizeCall consumes rate-limit token even for allowlist-rejected callers`() {
+    fun `authorizeCall records pending without consuming main rate-limit for allowlist-rejected callers`() {
         mockkStatic(Binder::class)
         every { Binder.getCallingUid() } returns 1001
 
@@ -1132,11 +1132,9 @@ class ServiceBinderTest {
         every { mockAllowlist.isAllowed(any(), any()) } returns false
 
         val mockRateLimiter = mockk<RateLimiter>(relaxed = true)
-        // F-064 added per-method cost weighting; production now calls
-        // `tryAcquire(uid, cost)` (the 2-arg variant). Stub both shapes
-        // so any code path is covered, and verify the 2-arg form below.
         every { mockRateLimiter.tryAcquire(any()) } returns true
         every { mockRateLimiter.tryAcquire(any(), any()) } returns true
+        every { mockRateLimiter.tryAcquireRejection(any()) } returns true
 
         val testBinder = ServiceBinder(
             service = service,
@@ -1163,12 +1161,9 @@ class ServiceBinderTest {
             } catch (e: SecurityException) {
                 // expected
             }
-            // F-064: production now uses the cost-weighted overload
-            // `tryAcquire(uid, cost)` for every authorizeCall path. Verify
-            // the 2-arg form was reached for this UID even when the
-            // allowlist gate rejects downstream — the M7 invariant is
-            // 'rate-limit consumed before allowlist check'.
-            verify { mockRateLimiter.tryAcquire(1001, any()) }
+            verify(exactly = 0) { mockRateLimiter.tryAcquire(1001, any()) }
+            verify { mockRateLimiter.tryAcquireRejection(1001) }
+            verify { mockAllowlist.recordPending("test.caller", "testsig", "Test Caller") }
         } finally {
             io.mockk.unmockkStatic(Binder::class)
         }

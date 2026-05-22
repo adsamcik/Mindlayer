@@ -111,6 +111,20 @@ class ServiceBinderEmbeddingTest {
         verify(exactly = 4) { rateLimiter.tryAcquire(42, 0.1) }
     }
 
+    @Test fun `embedding result requestIds are validated at binder boundary`() {
+        val bad = "bad/../id"
+
+        assertThrows(SecurityException::class.java) { binder.fetchEmbeddingBatchResult(bad) }
+        assertThrows(SecurityException::class.java) { binder.cancelEmbeddingBatch(bad) }
+        assertThrows(SecurityException::class.java) { binder.acknowledgeEmbeddingBatchResult(bad) }
+        assertThrows(SecurityException::class.java) { binder.cancelEmbed(bad) }
+
+        io.mockk.coVerify(exactly = 0) { coordinator.fetchEmbeddingBatchResult(any(), any()) }
+        io.mockk.coVerify(exactly = 0) { coordinator.cancelEmbeddingBatch(any(), any()) }
+        io.mockk.coVerify(exactly = 0) { coordinator.acknowledgeEmbeddingBatchResult(any(), any()) }
+        verify(exactly = 0) { coordinator.cancelEmbed(any(), any()) }
+    }
+
     @Test fun `self uid bypasses external rate limit`() {
         every { Binder.getCallingUid() } returns Process.myUid()
         binder.embed(EmbeddingRequest(text = "x"))
