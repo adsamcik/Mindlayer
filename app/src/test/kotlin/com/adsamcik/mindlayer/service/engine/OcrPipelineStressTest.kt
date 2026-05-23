@@ -1,18 +1,29 @@
 package com.adsamcik.mindlayer.service.engine
 
+import android.os.Binder
+import com.adsamcik.mindlayer.MediaPart
 import com.adsamcik.mindlayer.OcrFrameAck
 import com.adsamcik.mindlayer.OcrFrameMeta
 import com.adsamcik.mindlayer.OcrLimits
 import com.adsamcik.mindlayer.OcrSessionConfig
 import com.adsamcik.mindlayer.OcrSessionState
+import com.adsamcik.mindlayer.service.MindlayerMlService
+import com.adsamcik.mindlayer.service.ServiceBinder
 import com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPoolExhaustedException
+import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
+import com.adsamcik.mindlayer.service.security.AllowlistStore
+import com.adsamcik.mindlayer.service.security.CallerIdentity
+import com.adsamcik.mindlayer.service.security.RateLimiter
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
+import io.mockk.mockkStatic
+import io.mockk.unmockkStatic
 import io.mockk.verify
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -22,8 +33,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
-import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -36,9 +47,9 @@ import org.robolectric.annotation.Config
  *
  *  - **A. SHM pool exhaustion** — pins
  *    [MediaPartYPlaneExtractor.extractY] propagation of
- *    [SharedMemoryPoolExhaustedException]; an `@Ignore`d sibling
- *    documents the typed `TRANSIENT_RESOURCE_EXHAUSTED` wire mapping
- *    that `ServiceBinder.pushOcrFrame` does not yet emit.
+ *    [SharedMemoryPoolExhaustedException] and the typed
+ *    `TRANSIENT_RESOURCE_EXHAUSTED` wire mapping emitted by
+ *    `ServiceBinder.pushOcrFrame`.
  *  - **B. 1000-frame single-session stress** — drive [OcrSessionManager]
  *    1000 frames and assert no bookkeeping field grows unboundedly.
  *    Conservative ceilings, not equalities.
@@ -46,8 +57,8 @@ import org.robolectric.annotation.Config
  *    `{full,center,corner}`, asserting post-transform dimensions that
  *    actually flow to `engine.recognise()` via a real dispatcher.
  *
- * Production code is untouched. The SHM→typed-wire gap is recorded in
- * the PR body for parent triage.
+ * The SHM→typed-wire contract is covered here so OCR frame intake keeps
+ * the same retryable resource-exhaustion semantics as inference media intake.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -113,6 +124,37 @@ class OcrPipelineStressTest {
     private fun managerWith(dispatcher: OcrRecognitionDispatcher): OcrSessionManager =
         OcrSessionManager(limits = stressLimits(), recognitionDispatcher = dispatcher)
 
+    private fun serviceBinderForOcrTest(
+        ocr: OcrSessionManager,
+        pool: SharedMemoryPool,
+    ): ServiceBinder {
+        var nowMs = 0L
+        return ServiceBinder(
+            service = mockk<MindlayerMlService>(relaxed = true),
+            engineManager = mockk(relaxed = true),
+            orchestrator = mockk(relaxed = true),
+            diagnosticExporter = mockk<DiagnosticExporter>(relaxed = true),
+            thermalMonitor = mockk(relaxed = true),
+            memoryBudget = mockk(relaxed = true),
+            context = mockk(relaxed = true),
+            callerVerifier = { _, _ -> CallerIdentity("com.test.ocr", "deadbeef", "OCR Test") },
+            allowlistStore = mockk<AllowlistStore>(relaxed = true) {
+                every { isDenied(any(), any()) } returns false
+                every { isAllowed(any(), any()) } returns true
+            },
+            rateLimiter = RateLimiter(
+                maxRequestsPerMinute = 60_000,
+                maxConcurrent = 1_000,
+                timeSource = {
+                    nowMs += 1_000L
+                    nowMs
+                },
+            ),
+            ocrSessionManager = ocr,
+            sharedMemoryPool = pool,
+        )
+    }
+
     /** Reflectively pull the internal `OcrSession` so we can introspect
      * the live bookkeeping fields that have no public accessor. */
     private fun internalSession(
@@ -170,7 +212,7 @@ class OcrPipelineStressTest {
             )
             val e = thrown as SharedMemoryPoolExhaustedException
             // retryAfterMs preserved → binder can surface it as the
-            // typed wire hint once the catch block is added.
+            // typed wire retry hint.
             assertEquals(250L, e.retryAfterMs)
             assertTrue(
                 "exception message must carry retryAfterMs hint, was '${e.message}'",
@@ -183,27 +225,70 @@ class OcrPipelineStressTest {
     }
 
     /**
-     * Aspirational — disabled because `ServiceBinder.pushOcrFrame`
-     * catches [SharedMemoryPoolExhaustedException] under a generic
-     * `catch (t: Throwable)` and downgrades to `REJECTED_QUALITY`,
-     * losing the typed wire code documented for sibling paths (see
-     * ServiceBinder.kt lines 1112 / 1259 / 1395 for the pattern
-     * `generate` / `submitInference` / multimodal already use).
-     * Re-enable once `pushOcrFrame` adds an explicit
-     * `catch (e: SharedMemoryPoolExhaustedException)` block.
+     * Regression: `ServiceBinder.pushOcrFrame` must not downgrade SHM pool
+     * exhaustion to a quality rejection. The SDK needs the same typed,
+     * retryable wire code that sibling inference paths emit.
      */
     @Test
-    @Ignore("Blocked on OCR error-contract gap — see class KDoc + PR body")
     fun `pushOcrFrame translates SHM pool exhaustion to typed TRANSIENT_RESOURCE_EXHAUSTED`() {
-        // Assertion shape (kept here so the gap-closing PR can copy it):
-        //
-        //   val thrown = assertThrows(SecurityException::class.java) {
-        //       binder.pushOcrFrame(sessionId, frame, meta)
-        //   }
-        //   val code = MindlayerErrorCode.codeFromWireMessage(thrown.message)
-        //   assertEquals(MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED, code)
-        //   val body = MindlayerErrorCode.messageFromWireMessage(thrown.message)
-        //   assertTrue(body!!.contains("retryAfterMs="))
+        val uid = 7_001
+        val sessionId = "ocr-shm-exhausted-session"
+        val exhausted = SharedMemoryPoolExhaustedException(
+            reason = "global_count_cap",
+            currentCount = 8,
+            currentBytes = 32L * 1024 * 1024,
+            retryAfterMs = 250L,
+        )
+        val pool = mockk<SharedMemoryPool>()
+        every { pool.stageImage(any(), any()) } throws exhausted
+
+        val ocr = mockk<OcrSessionManager>(relaxed = true)
+        every { ocr.isOwner(uid, sessionId) } returns true
+        every { ocr.rejectFrame(any(), any(), any()) } returns OcrFrameAck(
+            frameId = 1L,
+            status = OcrFrameAck.STATUS_REJECTED_QUALITY,
+        )
+
+        val binder = serviceBinderForOcrTest(ocr, pool)
+        mockkStatic(Binder::class)
+        every { Binder.getCallingUid() } returns uid
+
+        val pipe = android.os.ParcelFileDescriptor.createPipe()
+        try {
+            val frame = MediaPart(
+                requestId = "ocr-shm-exhaustion",
+                kind = MediaPart.KIND_IMAGE,
+                mimeType = "image/jpeg",
+                source = pipe[0],
+                isSharedMemory = false,
+                payloadBytes = 1024L,
+                width = 64,
+                height = 64,
+                pixelFormat = 0,
+                rowStride = 64,
+            )
+            val thrown = assertThrows(SecurityException::class.java) {
+                binder.pushOcrFrame(
+                    sessionId,
+                    frame,
+                    OcrFrameMeta(frameId = 1L, captureTimeMs = 0L),
+                )
+            }
+            assertEquals(
+                MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
+                MindlayerErrorCode.codeFromWireMessage(thrown.message),
+            )
+            val body = MindlayerErrorCode.messageFromWireMessage(thrown.message)
+            assertTrue(
+                "typed wire body must preserve retryAfterMs hint, was: $body",
+                body?.contains("retryAfterMs=250") == true,
+            )
+            verify(exactly = 0) { ocr.rejectFrame(any(), any(), any()) }
+        } finally {
+            runCatching { pipe[1].close() }
+            runCatching { pipe[0].close() }
+            unmockkStatic(Binder::class)
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════

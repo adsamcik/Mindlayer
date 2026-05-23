@@ -2470,6 +2470,19 @@ class ServiceBinder(
                 throwable = null,
             )
             throw e
+        } catch (e: com.adsamcik.mindlayer.service.ipc.SharedMemoryPoolExhaustedException) {
+            try { frame.source.close() } catch (_: Throwable) { /* fine */ }
+            MindlayerLog.w(
+                TAG,
+                "OCR Y-plane extraction resource exhausted: ${e.safeLabel()}",
+                requestId = scopedKey,
+                sessionId = sanitizeLogField(sessionId),
+                throwable = null,
+            )
+            throw typedBinderException(
+                MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
+                "shm_pool_exhausted reason=${e.reason} retryAfterMs=${e.retryAfterMs}",
+            )
         } catch (t: Throwable) {
             try { frame.source.close() } catch (_: Throwable) { /* fine */ }
             MindlayerLog.w(
