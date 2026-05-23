@@ -407,6 +407,62 @@ val validateLitertAbis by tasks.registering {
     }
 }
 
+val aidlContractDriftCheck by tasks.registering {
+    group = "verification"
+    description = "Fails if :app and :sdk AIDL contracts differ byte-for-byte."
+
+    val appAidlDir = rootProject.layout.projectDirectory.dir("app/src/main/aidl/com/adsamcik/mindlayer")
+    val sdkAidlDir = rootProject.layout.projectDirectory.dir("sdk/src/main/aidl/com/adsamcik/mindlayer")
+
+    inputs.dir(appAidlDir)
+        .withPropertyName("appAidlContracts")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.dir(sdkAidlDir)
+        .withPropertyName("sdkAidlContracts")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    val markerFile = layout.buildDirectory.file("aidl-contract-drift-check/success.txt")
+    outputs.file(markerFile)
+
+    doLast {
+        val appDir = appAidlDir.asFile
+        val sdkDir = sdkAidlDir.asFile
+
+        fun aidlFiles(dir: File): List<String> = dir.listFiles { file ->
+            file.isFile && file.extension == "aidl"
+        }?.map { it.name }?.sorted().orEmpty()
+
+        val appFiles = aidlFiles(appDir)
+        val sdkFiles = aidlFiles(sdkDir)
+        if (appFiles != sdkFiles) {
+            val onlyInApp = (appFiles - sdkFiles).sorted()
+            val onlyInSdk = (sdkFiles - appFiles).sorted()
+            throw GradleException(
+                buildString {
+                    appendLine(":app and :sdk AIDL file sets differ.")
+                    appendLine("  Only in app: ${onlyInApp.ifEmpty { listOf("<none>") }}")
+                    append("  Only in sdk: ${onlyInSdk.ifEmpty { listOf("<none>") }}")
+                },
+            )
+        }
+
+        appFiles.forEach { fileName ->
+            val appFile = appDir.resolve(fileName)
+            val sdkFile = sdkDir.resolve(fileName)
+            val appBytes = appFile.readBytes()
+            val sdkBytes = sdkFile.readBytes()
+            if (!appBytes.contentEquals(sdkBytes)) {
+                throw GradleException(
+                    "AIDL contract drift in $fileName: app/src/main/aidl and sdk/src/main/aidl copies must be byte-identical.",
+                )
+            }
+        }
+
+        markerFile.get().asFile.apply { parentFile.mkdirs() }.writeText(
+            "checked=${appFiles.joinToString(",")}\n",
+        )
+    }
+}
+
 android {
     namespace = "com.adsamcik.mindlayer.service"
     compileSdk = 36
@@ -564,6 +620,10 @@ android {
     }
 }
 
+tasks.named("preBuild") {
+    dependsOn(aidlContractDriftCheck)
+}
+
 androidComponents {
     beforeVariants(selector().withBuildType("release")) { variantBuilder ->
         (variantBuilder as com.android.build.api.variant.HasUnitTestBuilder).enableUnitTest = true
@@ -615,6 +675,8 @@ tasks.withType<Test> {
 }
 
 dependencies {
+    lintChecks(project(":lint-checks"))
+
     implementation(project(":shared"))
     implementation(libs.litertlm.android)
     implementation(libs.litert)
