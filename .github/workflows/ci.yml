@@ -172,8 +172,77 @@ jobs:
           disable-animations: false
           script: echo "Generated AVD snapshot for caching."
 
+      - name: Provision AI Pack assets
+        id: ai-pack
+        if: ${{ vars.PADDLEOCR_DET_SHA256 != '' && vars.PADDLEOCR_REC_SHA256 != '' && vars.PADDLEOCR_CLS_SHA256 != '' && vars.PADDLEOCR_DICT_SHA256 != '' }}
+        shell: bash
+        env:
+          PADDLEOCR_DET_SHA256: ${{ vars.PADDLEOCR_DET_SHA256 }}
+          PADDLEOCR_REC_SHA256: ${{ vars.PADDLEOCR_REC_SHA256 }}
+          PADDLEOCR_CLS_SHA256: ${{ vars.PADDLEOCR_CLS_SHA256 }}
+          PADDLEOCR_DICT_SHA256: ${{ vars.PADDLEOCR_DICT_SHA256 }}
+        run: |
+          set -euo pipefail
+          declare -A hashes=(
+            [PADDLEOCR_DET_SHA256]="${PADDLEOCR_DET_SHA256}"
+            [PADDLEOCR_REC_SHA256]="${PADDLEOCR_REC_SHA256}"
+            [PADDLEOCR_CLS_SHA256]="${PADDLEOCR_CLS_SHA256}"
+            [PADDLEOCR_DICT_SHA256]="${PADDLEOCR_DICT_SHA256}"
+          )
+          for name in "${!hashes[@]}"; do
+            if [[ ! "${hashes[$name]}" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::${name} repository variable must be a lowercase 64-character SHA-256 digest"
+              exit 1
+            fi
+          done
+
+          asset_dir="paddleocr_model/src/main/assets"
+          det_file="${asset_dir}/paddleocr-ppocrv5-mobile-det.tflite"
+          rec_file="${asset_dir}/paddleocr-ppocrv5-mobile-rec.tflite"
+          cls_file="${asset_dir}/paddleocr-ppocrv5-mobile-cls.tflite"
+          dict_file="${asset_dir}/paddleocr-ppocrv5-mobile-dict.txt"
+          manifest_file="${asset_dir}/paddleocr_model_integrity.json"
+          required_files=("${det_file}" "${rec_file}" "${dict_file}" "${manifest_file}")
+          missing=()
+          for path in "${required_files[@]}"; do
+            [[ -s "$path" ]] || missing+=("$path")
+          done
+          if (( ${#missing[@]} != 0 )); then
+            echo "have-pack=false" >> "$GITHUB_OUTPUT"
+            printf '::notice title=AI Pack absent::PaddleOCR production coexistence test will assumeTrue-skip — missing: %s\n' "${missing[*]}"
+            exit 0
+          fi
+
+          declare -A expected_by_path=(
+            ["${det_file}"]="${PADDLEOCR_DET_SHA256}"
+            ["${rec_file}"]="${PADDLEOCR_REC_SHA256}"
+            ["${dict_file}"]="${PADDLEOCR_DICT_SHA256}"
+          )
+          for path in "${!expected_by_path[@]}"; do
+            actual="$(sha256sum "$path" | awk '{print $1}')"
+            if [[ "$actual" != "${expected_by_path[$path]}" ]]; then
+              echo "::error::${path} SHA-256 does not match its repository variable"
+              exit 1
+            fi
+          done
+          if [[ -s "${cls_file}" ]]; then
+            actual="$(sha256sum "${cls_file}" | awk '{print $1}')"
+            if [[ "$actual" != "${PADDLEOCR_CLS_SHA256}" ]]; then
+              echo "::error::${cls_file} SHA-256 does not match PADDLEOCR_CLS_SHA256"
+              exit 1
+            fi
+          else
+            echo "::notice title=AI Pack optional classifier absent::Continuing with det/rec/dict PaddleOCR bundle."
+          fi
+          echo "have-pack=true" >> "$GITHUB_OUTPUT"
+
       - name: Run instrumented tests
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2
+        env:
+          PADDLEOCR_DET_SHA256: ${{ vars.PADDLEOCR_DET_SHA256 }}
+          PADDLEOCR_REC_SHA256: ${{ vars.PADDLEOCR_REC_SHA256 }}
+          PADDLEOCR_CLS_SHA256: ${{ vars.PADDLEOCR_CLS_SHA256 }}
+          PADDLEOCR_DICT_SHA256: ${{ vars.PADDLEOCR_DICT_SHA256 }}
         with:
           api-level: ${{ matrix.api-level }}
           arch: ${{ matrix.arch }}
@@ -181,7 +250,26 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: ./gradlew :app:connectedDebugAndroidTest :sdk:connectedDebugAndroidTest --no-daemon
+          script: |
+            if [[ "${{ steps.ai-pack.outputs.have-pack }}" == "true" ]]; then
+              ./gradlew \
+                :paddleocr_model:assembleDebug \
+                --no-daemon \
+                -PpaddleOcrDetSha256="${PADDLEOCR_DET_SHA256}" \
+                -PpaddleOcrRecSha256="${PADDLEOCR_REC_SHA256}" \
+                -PpaddleOcrClsSha256="${PADDLEOCR_CLS_SHA256}" \
+                -PpaddleOcrDictSha256="${PADDLEOCR_DICT_SHA256}"
+              ./gradlew \
+                :app:connectedDebugAndroidTest \
+                :sdk:connectedDebugAndroidTest \
+                --no-daemon \
+                -PpaddleOcrDetSha256="${PADDLEOCR_DET_SHA256}" \
+                -PpaddleOcrRecSha256="${PADDLEOCR_REC_SHA256}" \
+                -PpaddleOcrClsSha256="${PADDLEOCR_CLS_SHA256}" \
+                -PpaddleOcrDictSha256="${PADDLEOCR_DICT_SHA256}"
+            else
+              ./gradlew :app:connectedDebugAndroidTest :sdk:connectedDebugAndroidTest --no-daemon
+            fi
 
       - name: Upload instrumented test reports
         if: always()
