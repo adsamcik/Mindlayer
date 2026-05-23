@@ -74,4 +74,153 @@
     <string name="session_id_label">Session ID</string>
     <string name="session_request_label">Request %1$s</string>
     <string name="session_diagnostics_title">Session Diagnostics</string>
-    <string name="session_history_counts">%1$s requests · %2$s tokens</string></resources>
+    <string name="session_history_counts">%1$s requests · %2$s tokens</string>
+
+    <!-- Common UI labels shared across multiple dashboard screens. -->
+    <string name="common_back">Back</string>
+    <string name="common_retry">Retry</string>
+
+    <!-- Dashboard: connection / freshness / health badge labels. -->
+    <string name="dashboard_connection_connecting">CONNECTING</string>
+    <string name="dashboard_connection_connected">CONNECTED</string>
+    <string name="dashboard_connection_disconnected">DISCONNECTED</string>
+    <string name="dashboard_freshness_unknown">UNKNOWN</string>
+    <string name="dashboard_freshness_fresh">FRESH</string>
+    <string name="dashboard_freshness_stale_label">STALE</string>
+
+    <!-- Dashboard: service health headline copy used in the hero banner and status section. -->
+    <string name="dashboard_health_service_disconnected">Service disconnected</string>
+    <string name="dashboard_health_status_polling_failed">Status polling failed</string>
+    <string name="dashboard_health_connecting_to_service">Connecting to service</string>
+    <string name="dashboard_health_engine_not_ready">Engine not ready</string>
+    <string name="dashboard_health_service_needs_attention">Service needs attention</string>
+    <string name="dashboard_health_service_ready">Service ready</string>
+
+    <!-- Dashboard: service health detail messages. -->
+    <string name="dashboard_health_detail_disconnected_with_sample">No live binder connection. Last good status sample %1$s.</string>
+    <string name="dashboard_health_detail_disconnected_no_sample">No live binder connection and no successful status sample yet.</string>
+    <string name="dashboard_health_detail_polling_failed">Binder is up, but live polling is failing. Check recent logs and reconnect the service if this persists.</string>
+    <string name="dashboard_health_detail_stale_with_sample">Last successful status sample %1$s. Values on screen may be stale.</string>
+    <string name="dashboard_health_detail_waiting_first_sample">Waiting for the first successful runtime sample.</string>
+    <string name="dashboard_health_detail_no_loaded_model">Binder is reachable, but the latest runtime sample does not report a loaded model or active backend.</string>
+    <string name="dashboard_health_detail_thermal_critical">Thermal guard reached CRITICAL. Expect throttling or backend changes at request boundaries.</string>
+    <string name="dashboard_health_detail_thermal_hot">Thermal band is HOT. Prefer shorter bursts or a cooler backend.</string>
+    <string name="dashboard_health_detail_memory_elevated">Memory pressure is elevated. Session capacity and prefill reliability may degrade.</string>
+    <string name="dashboard_health_detail_ok">Binder, engine, and runtime samples are arriving normally.</string>
+
+    <!-- Dashboard: test inference badge labels. -->
+    <string name="dashboard_test_badge_running">RUNNING</string>
+    <string name="dashboard_test_badge_idle">IDLE</string>
+    <string name="dashboard_test_badge_pass">PASS</string>
+    <string name="dashboard_test_badge_warn">WARN</string>
+    <string name="dashboard_test_badge_fail">FAIL</string>
+    <string name="dashboard_test_badge_ready">READY</string>
+
+    <!-- Dashboard: accessibility content descriptions. -->
+    <string name="dashboard_a11y_service_health">Service health</string>
+    <string name="dashboard_a11y_service_health_alert">Service health alert</string>
+    <string name="dashboard_a11y_service_health_state">Service health %1$s</string>
+    <string name="dashboard_a11y_loaded_model">Loaded model</string>
+    <string name="dashboard_a11y_thermal_status">Thermal status</string>
+    <string name="dashboard_a11y_thermal_band_state">Thermal band %1$s</string>
+    <string name="dashboard_a11y_memory_pressure">Memory pressure</string>
+    <string name="dashboard_a11y_memory_pressure_state">Memory pressure %1$s</string>
+    <string name="dashboard_a11y_headroom_percent">Headroom %1$s percent</string>
+    <string name="dashboard_a11y_telemetry_unavailable_on_device">Telemetry unavailable on this device</string>
+    <string name="dashboard_a11y_headroom_not_reported">Headroom not reported</string>
+    <string name="dashboard_a11y_no_active_sessions">No active sessions</string>
+    <string name="dashboard_a11y_session_history">Session history</string>
+    <string name="dashboard_a11y_navigate_to_session_history">Navigate to session history</string>
+    <string name="dashboard_a11y_recent_logs">Recent logs</string>
+    <string name="dashboard_a11y_navigate_to_recent_logs">Navigate to recent logs</string>
+    <string name="dashboard_a11y_card_section">%1$s section</string>
+    <string name="dashboard_a11y_memory_pressure_available_mb">%1$s. %2$s megabytes available</string>
+    <string name="dashboard_a11y_thermal_band_with_headroom">%1$s. %2$s</string>
+
+    <!-- Dashboard: card titles and inline labels. -->
+    <string name="dashboard_card_service_status_title">Service Status</string>
+    <string name="dashboard_card_test_inference_title">Test Inference</string>
+    <string name="dashboard_card_active_sessions_title">Active Sessions (%1$d)</string>
+    <string name="dashboard_engine_loaded">LOADED</string>
+    <string name="dashboard_engine_not_ready_badge">NOT READY</string>
+    <string name="dashboard_backend_none" translatable="false">NONE</string>
+    <string name="dashboard_label_backend">Backend</string>
+    <string name="dashboard_label_init_time">Init time</string>
+    <string name="dashboard_label_uptime">Uptime</string>
+    <string name="dashboard_label_sampled">Sampled</string>
+    <string name="dashboard_value_dash" translatable="false">—</string>
+    <string name="dashboard_init_time_seconds" translatable="false">%1$.1fs</string>
+    <string name="dashboard_sampled_never">never</string>
+    <string name="dashboard_callout_runtime_no_model">Runtime sample does not show a loaded model. Earlier test output is historical.</string>
+    <string name="dashboard_callout_engine_not_ready">Engine not ready — last test output is historical until you rerun after recovery.</string>
+    <string name="dashboard_test_button_running">Running…</string>
+    <string name="dashboard_test_button_run">Run Test</string>
+    <string name="dashboard_test_waiting_for_output">Waiting for output…</string>
+    <string name="dashboard_thermal_telemetry_unavailable">Telemetry unavailable</string>
+    <string name="dashboard_thermal_headroom_not_reported">Headroom not reported</string>
+    <string name="dashboard_active_sessions_waiting">Waiting for the first live session sample…</string>
+    <string name="dashboard_active_sessions_disconnected">Session list unavailable while the service is disconnected.</string>
+    <string name="dashboard_accelerator_decision">%1$s selected %2$s: %3$s</string>
+    <string name="dashboard_accelerator_decision_with_attempts">%1$s selected %2$s: %3$s (%4$s)</string>
+
+    <!-- Dashboard: crash-loop watchdog throttle banner (F-074). -->
+    <plurals name="dashboard_throttle_cooldown">
+        <item quantity="one">Service throttled — cooling down (%1$ds) after %2$d recent crash.</item>
+        <item quantity="other">Service throttled — cooling down (%1$ds) after %2$d recent crashes.</item>
+    </plurals>
+    <plurals name="dashboard_throttle_retrying">
+        <item quantity="one">Service throttled after %1$d recent crash — retrying soon.</item>
+        <item quantity="other">Service throttled after %1$d recent crashes — retrying soon.</item>
+    </plurals>
+
+    <!-- Session detail screen labels and summary table. -->
+    <string name="session_detail_loading_title">Loading session timeline</string>
+    <string name="session_detail_loading_message_with_id">Fetching log entries for %1$s.</string>
+    <string name="session_detail_loading_message">Fetching log entries from the diagnostics database.</string>
+    <string name="session_detail_error_title">Couldn\'t load session</string>
+    <string name="session_detail_a11y_load_error">Session load error</string>
+    <string name="session_detail_empty_title">No events recorded</string>
+    <string name="session_detail_empty_message">No retained log entries were found for this session.</string>
+    <string name="session_detail_a11y_no_events">No session events</string>
+    <string name="session_detail_a11y_summary">Session summary</string>
+    <string name="session_summary_started">Started</string>
+    <string name="session_summary_last_event">Last event</string>
+    <string name="session_summary_backend">Backend</string>
+    <string name="session_summary_duration">Duration</string>
+    <string name="session_summary_completed_requests">Completed requests</string>
+    <string name="session_summary_generated_tokens">Generated tokens</string>
+    <string name="session_summary_avg_tokens_per_sec">Average tok/s</string>
+    <string name="session_summary_log_entries">Log entries</string>
+    <string name="session_detail_invalid_route">The requested session route is missing a valid session ID. Return to Session History and open the session again.</string>
+
+    <!-- Session history screen. -->
+    <string name="session_history_subtitle_loading">Loading session index…</string>
+    <string name="session_history_subtitle_load_failure">Load failure</string>
+    <string name="session_history_subtitle_count">%1$d sessions</string>
+    <string name="session_history_loading_title">Loading session diagnostics</string>
+    <string name="session_history_error_title">Couldn\'t load session diagnostics</string>
+    <string name="session_history_a11y_load_error">Session history load error</string>
+    <string name="session_history_empty_title">No sessions recorded yet</string>
+    <string name="session_history_empty_message">Run a test inference or wait for a client request to populate diagnostic sessions.</string>
+    <string name="session_history_a11y_empty">No session history</string>
+    <string name="session_history_label_created">Created</string>
+    <string name="session_history_label_last_active">Last active</string>
+
+    <!-- Recent logs screen. -->
+    <string name="recent_logs_subtitle_loading">Loading diagnostics log…</string>
+    <string name="recent_logs_subtitle_load_failure">Load failure</string>
+    <string name="recent_logs_subtitle_count">%1$s log entries</string>
+    <string name="recent_logs_loading_title">Loading system logs</string>
+    <string name="recent_logs_loading_message">Reading retained diagnostics entries from the local log database.</string>
+    <string name="recent_logs_error_title">Couldn\'t load system logs</string>
+    <string name="recent_logs_a11y_load_error">System logs load error</string>
+    <string name="recent_logs_empty_title">No log entries recorded yet</string>
+    <string name="recent_logs_empty_message">Run a test inference or wait for a client request to generate diagnostic log entries.</string>
+    <string name="recent_logs_a11y_empty">No log entries</string>
+
+    <!-- Allowlist install source labels (resolveInstallSource fallbacks). -->
+    <string name="allowlist_install_source_unknown_old_api">unknown / sideload (API&lt;30)</string>
+    <string name="allowlist_install_source_unknown">unknown / sideload</string>
+    <string name="allowlist_install_source_not_found">unknown (package not found)</string>
+    <string name="allowlist_install_source_permission_denied">unknown (permission denied)</string>
+</resources>

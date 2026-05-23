@@ -1,5 +1,6 @@
 package com.adsamcik.mindlayer.service.ui
 
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.compose.foundation.clickable
@@ -64,15 +65,18 @@ internal fun formatCertHash(sha: String): String {
 }
 
 /** Resolves the install source for [packageName], or returns a fallback string. */
-private fun resolveInstallSource(pm: PackageManager, packageName: String): String {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return "unknown / sideload (API<30)"
+private fun resolveInstallSource(context: Context, packageName: String): String {
+    val pm = context.packageManager
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+        return context.getString(R.string.allowlist_install_source_unknown_old_api)
+    }
     return try {
         pm.getInstallSourceInfo(packageName).initiatingPackageName
-            ?: "unknown / sideload"
+            ?: context.getString(R.string.allowlist_install_source_unknown)
     } catch (_: PackageManager.NameNotFoundException) {
-        "unknown (package not found)"
+        context.getString(R.string.allowlist_install_source_not_found)
     } catch (_: SecurityException) {
-        "unknown (permission denied)"
+        context.getString(R.string.allowlist_install_source_permission_denied)
     }
 }
 
@@ -253,7 +257,7 @@ private fun PendingRow(
     val context = LocalContext.current
 
     val installSource = remember(entry.packageName) {
-        resolveInstallSource(context.packageManager, entry.packageName)
+        resolveInstallSource(context, entry.packageName)
     }
 
     if (showDialog) {
@@ -358,7 +362,7 @@ private fun ApproveDenyButtons(
                     ButtonDefaults.outlinedButtonColors()
                 },
             ) {
-                Text(if (isCertRotation) "Approve replacement" else "Approve")
+                Text(if (isCertRotation) stringResource(R.string.allowlist_approve_replacement) else stringResource(R.string.allowlist_approve))
             }
         }
     }

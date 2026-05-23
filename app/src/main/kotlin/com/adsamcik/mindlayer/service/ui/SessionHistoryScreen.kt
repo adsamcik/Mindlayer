@@ -77,9 +77,9 @@ fun SessionHistoryScreen(
                     Column {
                         Text(stringResource(R.string.session_diagnostics_title))
                         val subtitle = when {
-                            state.isLoading -> "Loading session index…"
-                            state.errorMessage != null -> "Load failure"
-                            else -> "${state.sessions.size} sessions"
+                            state.isLoading -> stringResource(R.string.session_history_subtitle_loading)
+                            state.errorMessage != null -> stringResource(R.string.session_history_subtitle_load_failure)
+                            else -> stringResource(R.string.session_history_subtitle_count, state.sessions.size)
                         }
                         Text(
                             text = subtitle,
@@ -92,7 +92,7 @@ fun SessionHistoryScreen(
                     IconButton(onClick = onBack) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
+                            contentDescription = stringResource(R.string.common_back),
                         )
                     }
                 },
@@ -111,36 +111,36 @@ fun SessionHistoryScreen(
             when {
                 state.isLoading -> {
                     HistoryStatusPane(
-                        title = "Loading session diagnostics",
+                        title = stringResource(R.string.session_history_loading_title),
                         showProgress = true,
                     )
                 }
 
                 state.errorMessage != null -> {
                     HistoryStatusPane(
-                        title = "Couldn't load session diagnostics",
+                        title = stringResource(R.string.session_history_error_title),
                         message = state.errorMessage,
                         icon = {
                             Icon(
                                 imageVector = Icons.Filled.Warning,
-                                contentDescription = "Session history load error",
+                                contentDescription = stringResource(R.string.session_history_a11y_load_error),
                                 tint = MaterialTheme.colorScheme.error,
                                 modifier = Modifier.size(40.dp),
                             )
                         },
-                        actionLabel = "Retry",
+                        actionLabel = stringResource(R.string.common_retry),
                         onAction = onRetry,
                     )
                 }
 
                 state.sessions.isEmpty() -> {
                     HistoryStatusPane(
-                        title = "No sessions recorded yet",
-                        message = "Run a test inference or wait for a client request to populate diagnostic sessions.",
+                        title = stringResource(R.string.session_history_empty_title),
+                        message = stringResource(R.string.session_history_empty_message),
                         icon = {
                             Icon(
                                 imageVector = Icons.Filled.Info,
-                                contentDescription = "No session history",
+                                contentDescription = stringResource(R.string.session_history_a11y_empty),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(40.dp),
                             )
@@ -202,8 +202,8 @@ private fun SessionCard(item: SessionHistoryItem, onClick: () -> Unit) {
             }
 
             Spacer(modifier = Modifier.height(10.dp))
-            HistoryLabelValue(icon = Icons.Filled.DateRange, label = "Created", value = item.createdLabel)
-            HistoryLabelValue(icon = null, label = "Last active", value = item.lastActiveLabel)
+            HistoryLabelValue(icon = Icons.Filled.DateRange, label = stringResource(R.string.session_history_label_created), value = item.createdLabel)
+            HistoryLabelValue(icon = null, label = stringResource(R.string.session_history_label_last_active), value = item.lastActiveLabel)
 
             Spacer(modifier = Modifier.height(10.dp))
             Text(
@@ -307,7 +307,7 @@ private fun HistoryStatusPane(
                 FilledTonalButton(onClick = onAction) {
                     Icon(
                         imageVector = Icons.Filled.Refresh,
-                        contentDescription = "Retry",
+                        contentDescription = stringResource(R.string.common_retry),
                         modifier = Modifier.size(18.dp),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
