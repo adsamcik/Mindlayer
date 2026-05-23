@@ -98,24 +98,70 @@ class MlHealthRecorder @VisibleForTesting internal constructor(
 
     private val json = Json { ignoreUnknownKeys = true }
 
+    // Hot-path cache of the on-disk counters. The on-disk snapshot is the
+    // source of truth (so values survive process death); these AtomicLongs
+    // are seeded from disk in `init` and kept in sync on every write so
+    // intra-process reads avoid a file round-trip.
     private val deferredSubmitCount = AtomicLong(0)
     private val deferredCompletionCount = AtomicLong(0)
 
-    fun recordDeferredSubmit() { deferredSubmitCount.incrementAndGet() }
-
-    fun recordDeferredCompletion() { deferredCompletionCount.incrementAndGet() }
-
-    fun deferredSubmits(): Long = deferredSubmitCount.get()
-
-    fun deferredCompletions(): Long = deferredCompletionCount.get()
-
     init {
         baseDir.mkdirs()
+        // Seed the in-memory cache from disk so a fresh recorder reflects
+        // counters accumulated by a previous process.
+        val seed = readStateUnlocked()
+        deferredSubmitCount.set(seed.deferredSubmits)
+        deferredCompletionCount.set(seed.deferredCompletions)
     }
+
+    /**
+     * Increments the deferred-submit diagnostic counter and persists the
+     * new value atomically under the file lock so it survives process
+     * death. The on-disk snapshot is the source of truth; the in-memory
+     * [AtomicLong] cache is updated to match.
+     */
+    fun recordDeferredSubmit() {
+        withFileLock {
+            val s = readStateLocked()
+            val next = s.deferredSubmits + 1
+            writeStateLocked(s.copy(deferredSubmits = next))
+            deferredSubmitCount.set(next)
+        }
+    }
+
+    /**
+     * Increments the deferred-completion diagnostic counter and persists
+     * the new value atomically. See [recordDeferredSubmit] for the
+     * cache/source-of-truth contract.
+     */
+    fun recordDeferredCompletion() {
+        withFileLock {
+            val s = readStateLocked()
+            val next = s.deferredCompletions + 1
+            writeStateLocked(s.copy(deferredCompletions = next))
+            deferredCompletionCount.set(next)
+        }
+    }
+
+    /**
+     * Returns the persisted deferred-submit count. Reads the latest disk
+     * state via [peek] so the dashboard sees writes from `:ml` on every
+     * call (atomic-rename guarantees a torn read is impossible).
+     */
+    fun deferredSubmits(): Long = peek().deferredSubmits
+
+    /** See [deferredSubmits]. */
+    fun deferredCompletions(): Long = peek().deferredCompletions
 
     /**
      * Snapshot of the persisted state. Exposed via [peek] so the
      * dashboard can render the throttle UI without going through AIDL.
+     *
+     * `deferredSubmits` / `deferredCompletions` are diagnostic counters
+     * for the deferred-task pipeline, persisted on every record so they
+     * survive `:ml` process death. They are intentionally untouched by
+     * the decay path in [recordHealthyBoot] — they are not crash-loop
+     * state.
      */
     data class Snapshot(
         val lastBootAt: Long,
@@ -123,9 +169,11 @@ class MlHealthRecorder @VisibleForTesting internal constructor(
         val deathCount: Int,
         val lastResetAt: Long,
         val lastCleanShutdownAt: Long,
+        val deferredSubmits: Long = 0L,
+        val deferredCompletions: Long = 0L,
     ) {
         companion object {
-            val EMPTY = Snapshot(0L, 0L, 0, 0L, 0L)
+            val EMPTY = Snapshot(0L, 0L, 0, 0L, 0L, 0L, 0L)
         }
     }
 
@@ -178,6 +226,9 @@ class MlHealthRecorder @VisibleForTesting internal constructor(
                     deathCount = deathCount,
                     lastResetAt = lastResetAt,
                 ),
+                // deferredSubmits / deferredCompletions are intentionally
+                // omitted from the copy — they are diagnostic counters,
+                // not crash-loop state, and must survive the boot decay.
             )
         }
     }
@@ -246,7 +297,10 @@ class MlHealthRecorder @VisibleForTesting internal constructor(
     /**
      * Snapshot read for the dashboard / UI. Unlocked by design — atomic
      * rename guarantees the reader sees either the pre-write or
-     * post-write JSON, never a half-written file.
+     * post-write JSON, never a half-written file. Also serves as the
+     * read path for [deferredSubmits] / [deferredCompletions] so a
+     * cross-process reader (the main-process dashboard) always sees the
+     * latest counter written by `:ml`.
      */
     fun peek(): Snapshot = readStateUnlocked()
 
@@ -283,6 +337,8 @@ class MlHealthRecorder @VisibleForTesting internal constructor(
                 deathCount = obj.intField("deathCount"),
                 lastResetAt = obj.longField("lastResetAt"),
                 lastCleanShutdownAt = obj.longField("lastCleanShutdownAt"),
+                deferredSubmits = obj.longField("deferredSubmits"),
+                deferredCompletions = obj.longField("deferredCompletions"),
             )
         } catch (_: Throwable) {
             Snapshot.EMPTY
@@ -296,6 +352,8 @@ class MlHealthRecorder @VisibleForTesting internal constructor(
             put("deathCount", state.deathCount)
             put("lastResetAt", state.lastResetAt)
             put("lastCleanShutdownAt", state.lastCleanShutdownAt)
+            put("deferredSubmits", state.deferredSubmits)
+            put("deferredCompletions", state.deferredCompletions)
         }
         atomicWrite(stateFile, obj.toString())
     }
