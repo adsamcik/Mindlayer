@@ -75,6 +75,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -168,74 +169,86 @@ private fun formatSampleTime(timestampMs: Long?, nowMs: Long, fallback: String):
 private fun modelDisplayName(modelId: String): String =
     modelId.substringAfterLast('/').substringAfterLast('\\')
 
-private fun connectionLabel(connectionState: DashboardConnectionState): String = when (connectionState) {
-    DashboardConnectionState.CONNECTING -> "CONNECTING"
-    DashboardConnectionState.CONNECTED -> "CONNECTED"
-    DashboardConnectionState.DISCONNECTED -> "DISCONNECTED"
+private fun connectionLabel(connectionState: DashboardConnectionState): Int = when (connectionState) {
+    DashboardConnectionState.CONNECTING -> R.string.dashboard_connection_connecting
+    DashboardConnectionState.CONNECTED -> R.string.dashboard_connection_connected
+    DashboardConnectionState.DISCONNECTED -> R.string.dashboard_connection_disconnected
 }
 
-private fun freshnessLabel(freshness: DashboardFreshness): String = when (freshness) {
-    DashboardFreshness.UNKNOWN -> "UNKNOWN"
-    DashboardFreshness.FRESH -> "FRESH"
-    DashboardFreshness.STALE -> "STALE"
+private fun freshnessLabel(freshness: DashboardFreshness): Int = when (freshness) {
+    DashboardFreshness.UNKNOWN -> R.string.dashboard_freshness_unknown
+    DashboardFreshness.FRESH -> R.string.dashboard_freshness_fresh
+    DashboardFreshness.STALE -> R.string.dashboard_freshness_stale_label
 }
 
+@Composable
 private fun healthHeadline(state: DashboardUiState, health: DashboardHealthLevel): String = when {
-    state.connectionState == DashboardConnectionState.DISCONNECTED -> "Service disconnected"
-    state.statusErrorMessage != null && state.connectionState == DashboardConnectionState.CONNECTED -> {
-        "Status polling failed"
-    }
+    state.connectionState == DashboardConnectionState.DISCONNECTED ->
+        stringResource(R.string.dashboard_health_service_disconnected)
+    state.statusErrorMessage != null && state.connectionState == DashboardConnectionState.CONNECTED ->
+        stringResource(R.string.dashboard_health_status_polling_failed)
 
-    health == DashboardHealthLevel.CONNECTING -> "Connecting to service"
-    !state.isEngineLoaded || state.backend.equals("NONE", ignoreCase = true) -> "Engine not ready"
-    health == DashboardHealthLevel.DEGRADED -> "Service needs attention"
-    else -> "Service ready"
+    health == DashboardHealthLevel.CONNECTING ->
+        stringResource(R.string.dashboard_health_connecting_to_service)
+    !state.isEngineLoaded || state.backend.equals("NONE", ignoreCase = true) ->
+        stringResource(R.string.dashboard_health_engine_not_ready)
+    health == DashboardHealthLevel.DEGRADED ->
+        stringResource(R.string.dashboard_health_service_needs_attention)
+    else -> stringResource(R.string.dashboard_health_service_ready)
 }
 
+@Composable
 private fun healthDetail(state: DashboardUiState, nowMs: Long): String = when {
     state.connectionState == DashboardConnectionState.DISCONNECTED -> {
         state.lastStatusUpdateMs?.let {
-            "No live binder connection. Last good status sample ${formatRelativeTimestamp(it, nowMs)}."
-        } ?: "No live binder connection and no successful status sample yet."
+            stringResource(
+                R.string.dashboard_health_detail_disconnected_with_sample,
+                formatRelativeTimestamp(it, nowMs),
+            )
+        } ?: stringResource(R.string.dashboard_health_detail_disconnected_no_sample)
     }
 
     state.statusErrorMessage != null && state.connectionState == DashboardConnectionState.CONNECTED -> {
-        "Binder is up, but live polling is failing. Check recent logs and reconnect the service if this persists."
+        stringResource(R.string.dashboard_health_detail_polling_failed)
     }
 
     state.statusFreshness(nowMs) == DashboardFreshness.STALE -> {
         state.lastStatusUpdateMs?.let {
-            "Last successful status sample ${formatRelativeTimestamp(it, nowMs)}. Values on screen may be stale."
-        } ?: "Waiting for the first successful runtime sample."
+            stringResource(
+                R.string.dashboard_health_detail_stale_with_sample,
+                formatRelativeTimestamp(it, nowMs),
+            )
+        } ?: stringResource(R.string.dashboard_health_detail_waiting_first_sample)
     }
 
     !state.isEngineLoaded || state.backend.equals("NONE", ignoreCase = true) -> {
-        "Binder is reachable, but the latest runtime sample does not report a loaded model or active backend."
+        stringResource(R.string.dashboard_health_detail_no_loaded_model)
     }
 
     state.thermalBand.equals("CRITICAL", ignoreCase = true) -> {
-        "Thermal guard reached CRITICAL. Expect throttling or backend changes at request boundaries."
+        stringResource(R.string.dashboard_health_detail_thermal_critical)
     }
 
     state.thermalBand.equals("HOT", ignoreCase = true) -> {
-        "Thermal band is HOT. Prefer shorter bursts or a cooler backend."
+        stringResource(R.string.dashboard_health_detail_thermal_hot)
     }
 
     state.memoryPressure.equals("EMERGENCY", ignoreCase = true) ||
         state.memoryPressure.equals("CRITICAL", ignoreCase = true) -> {
-        "Memory pressure is elevated. Session capacity and prefill reliability may degrade."
+        stringResource(R.string.dashboard_health_detail_memory_elevated)
     }
 
-    else -> "Binder, engine, and runtime samples are arriving normally."
+    else -> stringResource(R.string.dashboard_health_detail_ok)
 }
 
+@Composable
 private fun testBadgeLabel(state: DashboardUiState): String = when {
-    state.isTestRunning -> "RUNNING"
-    state.testStatus.isBlank() -> "IDLE"
-    state.testStatusTone == DashboardMessageTone.SUCCESS -> "PASS"
-    state.testStatusTone == DashboardMessageTone.WARNING -> "WARN"
-    state.testStatusTone == DashboardMessageTone.ERROR -> "FAIL"
-    else -> "READY"
+    state.isTestRunning -> stringResource(R.string.dashboard_test_badge_running)
+    state.testStatus.isBlank() -> stringResource(R.string.dashboard_test_badge_idle)
+    state.testStatusTone == DashboardMessageTone.SUCCESS -> stringResource(R.string.dashboard_test_badge_pass)
+    state.testStatusTone == DashboardMessageTone.WARNING -> stringResource(R.string.dashboard_test_badge_warn)
+    state.testStatusTone == DashboardMessageTone.ERROR -> stringResource(R.string.dashboard_test_badge_fail)
+    else -> stringResource(R.string.dashboard_test_badge_ready)
 }
 
 private fun accessibilityBandLabel(value: String): String =
@@ -319,6 +332,7 @@ private fun DashboardHero(state: DashboardUiState) {
     val healthTint = healthColor(health)
     val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.3f
     val showBanner = health == DashboardHealthLevel.DEGRADED || health == DashboardHealthLevel.ERROR
+    val serviceHealthLabel = stringResource(R.string.dashboard_a11y_service_health)
 
     Column(
         modifier = Modifier
@@ -340,22 +354,22 @@ private fun DashboardHero(state: DashboardUiState) {
                 color = MaterialTheme.colorScheme.primary,
             )
             if (!showBanner) {
-                Row(
-                    modifier = Modifier.semantics(mergeDescendants = true) {
-                        contentDescription = "Service health"
-                        stateDescription = accessibilityBandLabel(health.name)
-                    },
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        text = health.name,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = healthTint,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    StatusDot(healthTint, description = "Service health ${health.name.lowercase()}")
-                }
+                    Row(
+                        modifier = Modifier.semantics(mergeDescendants = true) {
+                            contentDescription = serviceHealthLabel
+                            stateDescription = accessibilityBandLabel(health.name)
+                        },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            text = health.name,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = healthTint,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        StatusDot(healthTint, description = stringResource(R.string.dashboard_a11y_service_health_state, health.name.lowercase()))
+                    }
             }
         }
 
@@ -376,7 +390,7 @@ private fun DashboardHero(state: DashboardUiState) {
                 ) {
                     Icon(
                         imageVector = Icons.Filled.Warning,
-                        contentDescription = "Service health alert",
+                        contentDescription = stringResource(R.string.dashboard_a11y_service_health_alert),
                         modifier = Modifier.size(20.dp),
                         tint = healthTint,
                     )
@@ -399,7 +413,7 @@ private fun DashboardHero(state: DashboardUiState) {
                     StatusDot(
                         color = healthTint,
                         pulse = true,
-                        description = "Service health ${health.name.lowercase()}",
+                        description = stringResource(R.string.dashboard_a11y_service_health_state, health.name.lowercase()),
                     )
                 }
             }
@@ -418,7 +432,7 @@ private fun DashboardHero(state: DashboardUiState) {
                 leadingIcon = {
                     Icon(
                         imageVector = Icons.Filled.Build,
-                        contentDescription = "Loaded model",
+                        contentDescription = stringResource(R.string.dashboard_a11y_loaded_model),
                         modifier = Modifier.size(AssistChipDefaults.IconSize),
                     )
                 },
@@ -441,14 +455,15 @@ private fun StatusSection(state: DashboardUiState) {
         else -> DashboardMessageTone.WARNING
     }
 
-    DashboardCard(title = "Service Status", icon = Icons.Filled.Info) {
+    DashboardCard(title = stringResource(R.string.dashboard_card_service_status_title), icon = Icons.Filled.Info) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            val serviceHealthLabel = stringResource(R.string.dashboard_a11y_service_health)
             // Health headline row
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .semantics(mergeDescendants = true) {
-                        contentDescription = "Service health"
+                        contentDescription = serviceHealthLabel
                         stateDescription = accessibilityBandLabel(health.name)
                     },
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -474,7 +489,7 @@ private fun StatusSection(state: DashboardUiState) {
                 StatusDot(
                     healthTint,
                     pulse = health == DashboardHealthLevel.DEGRADED || health == DashboardHealthLevel.ERROR,
-                    description = "Service health ${health.name.lowercase()}",
+                    description = stringResource(R.string.dashboard_a11y_service_health_state, health.name.lowercase()),
                 )
             }
 
@@ -483,13 +498,17 @@ private fun StatusSection(state: DashboardUiState) {
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Badge(connectionLabel(state.connectionState), connectionColor(state.connectionState))
+                Badge(stringResource(connectionLabel(state.connectionState)), connectionColor(state.connectionState))
                 Badge(
-                    text = if (state.isEngineLoaded) "LOADED" else "NOT READY",
+                    text = if (state.isEngineLoaded) {
+                        stringResource(R.string.dashboard_engine_loaded)
+                    } else {
+                        stringResource(R.string.dashboard_engine_not_ready_badge)
+                    },
                     color = toneColor(engineTone),
                 )
                 if (freshness == DashboardFreshness.STALE) {
-                    Badge("STALE", freshnessColor(freshness))
+                    Badge(stringResource(R.string.dashboard_freshness_stale_label), freshnessColor(freshness))
                 }
             }
 
@@ -507,11 +526,18 @@ private fun StatusSection(state: DashboardUiState) {
                 val secs = state.throttleCooldownSecondsRemaining
                 val deathCount = state.recentDeathCount
                 val message = if (secs > 0) {
-                    "Service throttled — cooling down (${secs}s) " +
-                        "after $deathCount recent crash${if (deathCount == 1) "" else "es"}."
+                    pluralStringResource(
+                        R.plurals.dashboard_throttle_cooldown,
+                        deathCount,
+                        secs,
+                        deathCount,
+                    )
                 } else {
-                    "Service throttled after $deathCount recent crash" +
-                        "${if (deathCount == 1) "" else "es"} — retrying soon."
+                    pluralStringResource(
+                        R.plurals.dashboard_throttle_retrying,
+                        deathCount,
+                        deathCount,
+                    )
                 }
                 DiagnosticCallout(
                     message = message,
@@ -528,20 +554,27 @@ private fun StatusSection(state: DashboardUiState) {
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    LabelValue("Backend", state.backend.ifBlank { "NONE" })
                     LabelValue(
-                        "Init time",
-                        if (state.initTimeSeconds > 0f) "%.1fs".format(state.initTimeSeconds) else "—",
+                        stringResource(R.string.dashboard_label_backend),
+                        state.backend.ifBlank { stringResource(R.string.dashboard_backend_none) },
+                    )
+                    LabelValue(
+                        stringResource(R.string.dashboard_label_init_time),
+                        if (state.initTimeSeconds > 0f) {
+                            stringResource(R.string.dashboard_init_time_seconds, state.initTimeSeconds)
+                        } else {
+                            stringResource(R.string.dashboard_value_dash)
+                        },
                     )
                 }
                 Column(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    LabelValue("Uptime", formatUptime(state.uptimeMs))
+                    LabelValue(stringResource(R.string.dashboard_label_uptime), formatUptime(state.uptimeMs))
                     LabelValue(
-                        "Sampled",
-                        formatSampleTime(state.lastStatusUpdateMs, nowMs, "never"),
+                        stringResource(R.string.dashboard_label_sampled),
+                        formatSampleTime(state.lastStatusUpdateMs, nowMs, stringResource(R.string.dashboard_sampled_never)),
                     )
                 }
             }
@@ -550,16 +583,31 @@ private fun StatusSection(state: DashboardUiState) {
                 state.acceleratorDecision?.let(::listOf).orEmpty()
             }
             acceleratorDecisions.forEach { decision ->
+                val attempts = decision.attemptedSummary.takeIf { it.isNotBlank() }
                 DiagnosticCallout(
-                    message = "${decision.featureName} selected ${decision.backend}: ${decision.reason}" +
-                        decision.attemptedSummary.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty(),
+                    message = if (attempts != null) {
+                        stringResource(
+                            R.string.dashboard_accelerator_decision_with_attempts,
+                            decision.featureName,
+                            decision.backend,
+                            decision.reason,
+                            attempts,
+                        )
+                    } else {
+                        stringResource(
+                            R.string.dashboard_accelerator_decision,
+                            decision.featureName,
+                            decision.backend,
+                            decision.reason,
+                        )
+                    },
                     tone = DashboardMessageTone.INFO,
                 )
             }
 
             if (!state.isEngineLoaded || state.backend.equals("NONE", ignoreCase = true)) {
                 DiagnosticCallout(
-                    message = "Runtime sample does not show a loaded model. Earlier test output is historical.",
+                    message = stringResource(R.string.dashboard_callout_runtime_no_model),
                     tone = DashboardMessageTone.WARNING,
                 )
             }
@@ -661,20 +709,28 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
     val isHot = state.thermalBand.equals("HOT", ignoreCase = true) ||
         state.thermalBand.equals("CRITICAL", ignoreCase = true)
     val telemetryBlind = !state.thermalTelemetryAvailable
-    val headroomDescription = state.headroom?.let { "Headroom ${"%.0f".format(it * 100)} percent" }
+    val headroomDescription = state.headroom?.let {
+        stringResource(R.string.dashboard_a11y_headroom_percent, "%.0f".format(it * 100))
+    }
         ?: if (telemetryBlind) {
-            "Telemetry unavailable on this device"
+            stringResource(R.string.dashboard_a11y_telemetry_unavailable_on_device)
         } else {
-            "Headroom not reported"
+            stringResource(R.string.dashboard_a11y_headroom_not_reported)
         }
+    val thermalStatusLabel = stringResource(R.string.dashboard_a11y_thermal_status)
+    val thermalCombined = stringResource(
+        R.string.dashboard_a11y_thermal_band_with_headroom,
+        accessibilityBandLabel(state.thermalBand),
+        headroomDescription,
+    )
 
     ElevatedCard(modifier = modifier) {
         Column(
             modifier = Modifier
                 .padding(12.dp)
                 .semantics(mergeDescendants = true) {
-                    contentDescription = "Thermal status"
-                    stateDescription = "${accessibilityBandLabel(state.thermalBand)}. $headroomDescription"
+                    contentDescription = thermalStatusLabel
+                    stateDescription = thermalCombined
                 },
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -688,7 +744,7 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                StatusDot(tint, description = "Thermal band ${state.thermalBand.lowercase()}")
+                StatusDot(tint, description = stringResource(R.string.dashboard_a11y_thermal_band_state, state.thermalBand.lowercase()))
                 Text(
                     text = state.thermalBand.uppercase(),
                     style = MaterialTheme.typography.titleSmall,
@@ -727,9 +783,9 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
                 // conservative duty-cycle policy.
                 Text(
                     text = if (telemetryBlind) {
-                        "Telemetry unavailable"
+                        stringResource(R.string.dashboard_thermal_telemetry_unavailable)
                     } else {
-                        "Headroom not reported"
+                        stringResource(R.string.dashboard_thermal_headroom_not_reported)
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
@@ -766,15 +822,20 @@ private fun MemoryMiniCard(state: DashboardUiState, modifier: Modifier = Modifie
     }
     val isElevated = state.memoryPressure.equals("CRITICAL", ignoreCase = true) ||
         state.memoryPressure.equals("EMERGENCY", ignoreCase = true)
+    val memoryPressureLabel = stringResource(R.string.dashboard_a11y_memory_pressure)
+    val memoryStateDescription = stringResource(
+        R.string.dashboard_a11y_memory_pressure_available_mb,
+        accessibilityBandLabel(state.memoryPressure),
+        formatWholeNumber(state.availableRamMb),
+    )
 
     ElevatedCard(modifier = modifier) {
         Column(
             modifier = Modifier
                 .padding(12.dp)
                 .semantics(mergeDescendants = true) {
-                    contentDescription = "Memory pressure"
-                    stateDescription =
-                        "${accessibilityBandLabel(state.memoryPressure)}. ${formatWholeNumber(state.availableRamMb)} megabytes available"
+                    contentDescription = memoryPressureLabel
+                    stateDescription = memoryStateDescription
                 },
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -799,7 +860,7 @@ private fun MemoryMiniCard(state: DashboardUiState, modifier: Modifier = Modifie
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                StatusDot(tint, description = "Memory pressure ${state.memoryPressure.lowercase()}")
+                StatusDot(tint, description = stringResource(R.string.dashboard_a11y_memory_pressure_state, state.memoryPressure.lowercase()))
                 Text(
                     text = state.memoryPressure.uppercase(),
                     style = MaterialTheme.typography.titleSmall,
@@ -862,7 +923,7 @@ private fun ActiveSessionsCard(state: DashboardUiState) {
     val nowMs = System.currentTimeMillis()
 
     DashboardCard(
-        title = "Active Sessions (${state.activeSessions.size})",
+        title = stringResource(R.string.dashboard_card_active_sessions_title, state.activeSessions.size),
         icon = Icons.Filled.Person,
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -870,7 +931,7 @@ private fun ActiveSessionsCard(state: DashboardUiState) {
                 state.connectionState == DashboardConnectionState.CONNECTING &&
                     state.activeSessions.isEmpty() -> {
                     DiagnosticCallout(
-                        message = "Waiting for the first live session sample…",
+                        message = stringResource(R.string.dashboard_active_sessions_waiting),
                         tone = DashboardMessageTone.INFO,
                     )
                 }
@@ -878,7 +939,7 @@ private fun ActiveSessionsCard(state: DashboardUiState) {
                 state.connectionState == DashboardConnectionState.DISCONNECTED &&
                     state.activeSessions.isEmpty() -> {
                     DiagnosticCallout(
-                        message = "Session list unavailable while the service is disconnected.",
+                        message = stringResource(R.string.dashboard_active_sessions_disconnected),
                         tone = DashboardMessageTone.WARNING,
                     )
                 }
@@ -893,7 +954,7 @@ private fun ActiveSessionsCard(state: DashboardUiState) {
                     ) {
                         Icon(
                             imageVector = Icons.Filled.Info,
-                            contentDescription = "No active sessions",
+                            contentDescription = stringResource(R.string.dashboard_a11y_no_active_sessions),
                             modifier = Modifier.size(28.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                         )
@@ -911,7 +972,7 @@ private fun ActiveSessionsCard(state: DashboardUiState) {
                             textAlign = TextAlign.Center,
                         )
                         Text(
-                            text = stringResource(R.string.dashboard_last_sampled, formatSampleTime(state.lastStatusUpdateMs, nowMs, "never")),
+                            text = stringResource(R.string.dashboard_last_sampled, formatSampleTime(state.lastStatusUpdateMs, nowMs, stringResource(R.string.dashboard_sampled_never))),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                             textAlign = TextAlign.Center,
@@ -1054,14 +1115,14 @@ private fun ActivityNavigationCard(
                 leadingContent = {
                     Icon(
                         imageVector = Icons.Filled.DateRange,
-                        contentDescription = "Session history",
+                        contentDescription = stringResource(R.string.dashboard_a11y_session_history),
                         tint = MaterialTheme.colorScheme.primary,
                     )
                 },
                 trailingContent = {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = "Navigate to session history",
+                        contentDescription = stringResource(R.string.dashboard_a11y_navigate_to_session_history),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 },
@@ -1089,14 +1150,14 @@ private fun ActivityNavigationCard(
                 leadingContent = {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.List,
-                        contentDescription = "Recent logs",
+                        contentDescription = stringResource(R.string.dashboard_a11y_recent_logs),
                         tint = MaterialTheme.colorScheme.primary,
                     )
                 },
                 trailingContent = {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = "Navigate to recent logs",
+                        contentDescription = stringResource(R.string.dashboard_a11y_navigate_to_recent_logs),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 },
@@ -1119,7 +1180,7 @@ private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Un
         else -> state.testStatusTone
     }
 
-    DashboardCard(title = "Test Inference", icon = Icons.Filled.PlayArrow) {
+    DashboardCard(title = stringResource(R.string.dashboard_card_test_inference_title), icon = Icons.Filled.PlayArrow) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1138,7 +1199,7 @@ private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Un
                         )
                         Spacer(Modifier.width(8.dp))
                     }
-                    Text(if (state.isTestRunning) "Running…" else "Run Test")
+                    Text(if (state.isTestRunning) stringResource(R.string.dashboard_test_button_running) else stringResource(R.string.dashboard_test_button_run))
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Badge(text = testBadgeLabel(state), color = toneColor(displayTone))
@@ -1167,7 +1228,7 @@ private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Un
 
             AnimatedVisibility(visible = state.shouldHighlightTestResult(nowMs)) {
                 DiagnosticCallout(
-                    message = "Engine not ready — last test output is historical until you rerun after recovery.",
+                    message = stringResource(R.string.dashboard_callout_engine_not_ready),
                     tone = DashboardMessageTone.WARNING,
                 )
             }
@@ -1194,7 +1255,7 @@ private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Un
                             fontWeight = FontWeight.SemiBold,
                         )
                         Text(
-                            text = if (hasOutput) state.testOutput else "Waiting for output…",
+                            text = if (hasOutput) state.testOutput else stringResource(R.string.dashboard_test_waiting_for_output),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .then(
@@ -1265,7 +1326,7 @@ private fun DashboardCard(
                 if (icon != null) {
                     Icon(
                         imageVector = icon,
-                        contentDescription = "$title section",
+                        contentDescription = stringResource(R.string.dashboard_a11y_card_section, title),
                         modifier = Modifier.size(18.dp),
                         tint = MaterialTheme.colorScheme.primary,
                     )
@@ -1299,7 +1360,7 @@ private fun LabelValue(label: String, value: String) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            text = value.ifBlank { "—" },
+            text = value.ifBlank { stringResource(R.string.dashboard_value_dash) },
             modifier = Modifier.weight(1f),
             style = MindlayerType.Mono.LabelMedium,
             fontWeight = FontWeight.Medium,

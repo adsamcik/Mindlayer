@@ -20,8 +20,10 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.adsamcik.mindlayer.service.R
 import com.adsamcik.mindlayer.service.logging.LogDatabase
 import com.adsamcik.mindlayer.service.logging.LogRepository
+import androidx.compose.ui.res.stringResource
 
 /**
  * F-029: ComponentActivity is sufficient for biometric auth now that AndroidX
@@ -127,7 +129,7 @@ class MainActivity : ComponentActivity() {
                                     SessionDetailScreen(
                                         state = SessionDetailUiState(
                                             isLoading = false,
-                                            errorMessage = "The requested session route is missing a valid session ID. Return to Session History and open the session again.",
+                                            errorMessage = stringResource(R.string.session_detail_invalid_route),
                                         ),
                                         onBack = { navController.popBackStack() },
                                     )

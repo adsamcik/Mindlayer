@@ -122,7 +122,7 @@ fun SessionDetailScreen(
                     IconButton(onClick = onBack) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
+                            contentDescription = stringResource(R.string.common_back),
                         )
                     }
                 },
@@ -141,11 +141,11 @@ fun SessionDetailScreen(
             when {
                 state.isLoading -> {
                     DetailStatusPane(
-                        title = "Loading session timeline",
+                        title = stringResource(R.string.session_detail_loading_title),
                         message = if (state.displayId.isNotBlank()) {
-                            "Fetching log entries for ${state.displayId}."
+                            stringResource(R.string.session_detail_loading_message_with_id, state.displayId)
                         } else {
-                            "Fetching log entries from the diagnostics database."
+                            stringResource(R.string.session_detail_loading_message)
                         },
                         showProgress = true,
                     )
@@ -153,30 +153,30 @@ fun SessionDetailScreen(
 
                 state.errorMessage != null -> {
                     DetailStatusPane(
-                        title = "Couldn't load session",
+                        title = stringResource(R.string.session_detail_error_title),
                         message = state.errorMessage,
                         icon = {
                             Icon(
                                 imageVector = Icons.Filled.Warning,
-                                contentDescription = "Session load error",
+                                contentDescription = stringResource(R.string.session_detail_a11y_load_error),
                                 tint = MaterialTheme.colorScheme.error,
                                 modifier = Modifier.size(40.dp),
                             )
                         },
-                        actionLabel = state.sessionId.takeIf { it.isNotBlank() }?.let { "Retry" },
+                        actionLabel = state.sessionId.takeIf { it.isNotBlank() }?.let { stringResource(R.string.common_retry) },
                         onAction = onRetry,
                     )
                 }
 
                 state.events.isEmpty() -> {
                     DetailStatusPane(
-                        title = "No events recorded",
+                        title = stringResource(R.string.session_detail_empty_title),
                         message = state.emptyMessage
-                            ?: "No retained log entries were found for this session.",
+                            ?: stringResource(R.string.session_detail_empty_message),
                         icon = {
                             Icon(
                                 imageVector = Icons.Filled.Info,
-                                contentDescription = "No session events",
+                                contentDescription = stringResource(R.string.session_detail_a11y_no_events),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(40.dp),
                             )
@@ -218,7 +218,7 @@ private fun SummaryCard(state: SessionDetailUiState) {
             ) {
                 Icon(
                     imageVector = Icons.Filled.DateRange,
-                    contentDescription = "Session summary",
+                    contentDescription = stringResource(R.string.session_detail_a11y_summary),
                     tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(16.dp),
                 )
@@ -246,24 +246,24 @@ private fun SummaryCard(state: SessionDetailUiState) {
             Spacer(Modifier.height(8.dp))
             HorizontalDivider()
             Spacer(Modifier.height(8.dp))
-            SummaryLabelValue(label = "Started", value = state.startedLabel.ifBlank { "—" })
-            SummaryLabelValue(label = "Last event", value = state.lastEventLabel.ifBlank { "—" })
-            SummaryLabelValue(label = "Backend", value = state.backend ?: "—")
-            SummaryLabelValue(label = "Duration", value = state.durationLabel.ifBlank { "—" })
+            SummaryLabelValue(label = stringResource(R.string.session_summary_started), value = state.startedLabel.ifBlank { stringResource(R.string.dashboard_value_dash) })
+            SummaryLabelValue(label = stringResource(R.string.session_summary_last_event), value = state.lastEventLabel.ifBlank { stringResource(R.string.dashboard_value_dash) })
+            SummaryLabelValue(label = stringResource(R.string.session_summary_backend), value = state.backend ?: stringResource(R.string.dashboard_value_dash))
+            SummaryLabelValue(label = stringResource(R.string.session_summary_duration), value = state.durationLabel.ifBlank { stringResource(R.string.dashboard_value_dash) })
             SummaryLabelValue(
-                label = "Completed requests",
+                label = stringResource(R.string.session_summary_completed_requests),
                 value = formatWholeNumber(state.inferenceCount),
             )
             SummaryLabelValue(
-                label = "Generated tokens",
+                label = stringResource(R.string.session_summary_generated_tokens),
                 value = formatWholeNumber(state.totalTokens),
             )
             SummaryLabelValue(
-                label = "Average tok/s",
-                value = state.avgTokensPerSec.ifBlank { "—" },
+                label = stringResource(R.string.session_summary_avg_tokens_per_sec),
+                value = state.avgTokensPerSec.ifBlank { stringResource(R.string.dashboard_value_dash) },
             )
             SummaryLabelValue(
-                label = "Log entries",
+                label = stringResource(R.string.session_summary_log_entries),
                 value = formatWholeNumber(state.eventCount),
             )
         }
