@@ -84,7 +84,71 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
 
+      - name: Check if version already published
+        id: probe-packages
+        run: |
+          set -euo pipefail
+
+          package_version_names() {
+            local package_name="$1"
+            local endpoint="/users/${GITHUB_OWNER}/packages/maven/${package_name}/versions"
+            local response
+
+            # --paginate checks every page; --jq emits one version name per line and fails on invalid JSON.
+            if response="$(gh api --paginate "$endpoint" --jq '.[].name' 2>&1)"; then
+              printf '%s\n' "$response"
+              return 0
+            fi
+
+            if grep -Eq 'HTTP 404|"status": ?"404"' <<<"$response"; then
+              return 1
+            fi
+
+            printf '::error::Failed to query package %s: %s\n' "$package_name" "$response" >&2
+            return 2
+          }
+
+          should_publish() {
+            local label="$1"
+            local package_name="$2"
+            local output_name="$3"
+            local result_var="$4"
+            local version_names
+
+            if version_names="$(package_version_names "$package_name")"; then
+              if grep -Fxq "$PUBLISH_VERSION" <<<"$version_names"; then
+                echo "::notice::${label} $PUBLISH_VERSION already published — skipping"
+                echo "${output_name}=false" >> "$GITHUB_OUTPUT"
+                printf -v "$result_var" '%s' 'false'
+              else
+                echo "${output_name}=true" >> "$GITHUB_OUTPUT"
+                printf -v "$result_var" '%s' 'true'
+              fi
+            else
+              local status=$?
+              if [[ "$status" -eq 1 ]]; then
+                echo "::notice::${label} package does not exist yet — publishing $PUBLISH_VERSION"
+                echo "${output_name}=true" >> "$GITHUB_OUTPUT"
+                printf -v "$result_var" '%s' 'true'
+              else
+                exit "$status"
+              fi
+            fi
+          }
+
+          should_publish "shared" "com.adsamcik.mindlayer.shared" "publish-shared" publish_shared
+          should_publish "sdk" "com.adsamcik.mindlayer.sdk" "publish-sdk" publish_sdk
+
+          if [[ "$publish_shared" == "false" && "$publish_sdk" == "false" ]]; then
+            echo "::notice::All SDK Maven packages for $PUBLISH_VERSION are already published — publish steps will be skipped"
+          fi
+        env:
+          GITHUB_OWNER: ${{ github.repository_owner }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_VERSION: ${{ steps.version.outputs.version }}
+
       - name: Publish shared to GitHub Packages
+        if: steps.probe-packages.outputs.publish-shared == 'true'
         run: ./gradlew :shared:publishReleasePublicationToGitHubPackagesRepository --no-daemon -PpublishVersion="$PUBLISH_VERSION"
         env:
           GITHUB_OWNER: ${{ github.repository_owner }}
@@ -92,6 +156,7 @@ jobs:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
 
       - name: Publish SDK to GitHub Packages
+        if: steps.probe-packages.outputs.publish-sdk == 'true'
         run: ./gradlew :sdk:publishReleasePublicationToGitHubPackagesRepository --no-daemon -PpublishVersion="$PUBLISH_VERSION"
         env:
           GITHUB_OWNER: ${{ github.repository_owner }}
