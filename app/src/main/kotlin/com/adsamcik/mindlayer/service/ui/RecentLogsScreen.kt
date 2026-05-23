@@ -86,9 +86,9 @@ fun RecentLogsScreen(
                     Column {
                         Text(stringResource(R.string.recent_logs_title))
                         val subtitle = when {
-                            state.isLoading -> "Loading diagnostics log…"
-                            state.errorMessage != null -> "Load failure"
-                            else -> "${formatWholeNumber(state.logs.size)} log entries"
+                            state.isLoading -> stringResource(R.string.recent_logs_subtitle_loading)
+                            state.errorMessage != null -> stringResource(R.string.recent_logs_subtitle_load_failure)
+                            else -> stringResource(R.string.recent_logs_subtitle_count, formatWholeNumber(state.logs.size))
                         }
                         Text(
                             text = subtitle,
@@ -101,7 +101,7 @@ fun RecentLogsScreen(
                     IconButton(onClick = onBack) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
+                            contentDescription = stringResource(R.string.common_back),
                         )
                     }
                 },
@@ -116,8 +116,8 @@ fun RecentLogsScreen(
             state.isLoading -> {
                 RecentLogsStatusPane(
                     modifier = Modifier.padding(innerPadding),
-                    title = "Loading system logs",
-                    message = "Reading retained diagnostics entries from the local log database.",
+                    title = stringResource(R.string.recent_logs_loading_title),
+                    message = stringResource(R.string.recent_logs_loading_message),
                     showProgress = true,
                 )
             }
@@ -125,17 +125,17 @@ fun RecentLogsScreen(
             state.errorMessage != null -> {
                 RecentLogsStatusPane(
                     modifier = Modifier.padding(innerPadding),
-                    title = "Couldn't load system logs",
+                    title = stringResource(R.string.recent_logs_error_title),
                     message = state.errorMessage,
                     icon = {
                         Icon(
                             imageVector = Icons.Filled.Warning,
-                            contentDescription = "System logs load error",
+                            contentDescription = stringResource(R.string.recent_logs_a11y_load_error),
                             tint = MaterialTheme.colorScheme.error,
                             modifier = Modifier.size(40.dp),
                         )
                     },
-                    actionLabel = "Retry",
+                    actionLabel = stringResource(R.string.common_retry),
                     onAction = onRetry,
                 )
             }
@@ -143,12 +143,12 @@ fun RecentLogsScreen(
             state.logs.isEmpty() -> {
                 RecentLogsStatusPane(
                     modifier = Modifier.padding(innerPadding),
-                    title = "No log entries recorded yet",
-                    message = "Run a test inference or wait for a client request to generate diagnostic log entries.",
+                    title = stringResource(R.string.recent_logs_empty_title),
+                    message = stringResource(R.string.recent_logs_empty_message),
                     icon = {
                         Icon(
                             imageVector = Icons.Filled.Info,
-                            contentDescription = "No log entries",
+                            contentDescription = stringResource(R.string.recent_logs_a11y_empty),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(40.dp),
                         )
@@ -211,7 +211,7 @@ private fun RecentLogsStatusPane(
                 FilledTonalButton(onClick = onAction) {
                     Icon(
                         imageVector = Icons.Filled.Refresh,
-                        contentDescription = "Retry",
+                        contentDescription = stringResource(R.string.common_retry),
                         modifier = Modifier.size(18.dp),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
