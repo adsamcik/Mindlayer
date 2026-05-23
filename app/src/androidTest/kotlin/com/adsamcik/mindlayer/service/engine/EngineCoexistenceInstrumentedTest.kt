@@ -1,8 +1,11 @@
 package com.adsamcik.mindlayer.service.engine
 
+import android.graphics.Bitmap
+import android.graphics.Color
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.SdkSuppress
+import com.adsamcik.mindlayer.service.engine.util.OcrGroundTruthFixtures
 import com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -37,15 +40,17 @@ import java.io.File
  *     session.
  *   - OcrSessionManager + OcrTokenStreamWriter end-to-end intake
  *     -> recognition -> event emission pipeline.
+ *   - When PaddleOCR AI Pack assets are provisioned, the production
+ *     backend loads real models and runs recognise() on a Canvas fixture
+ *     frame in the same process as the LiteRT embedding backend.
  *
  * # What this test does NOT cover
  *
- * The full 8-step LITERT_COEXISTENCE.md checklist (real native
- * delegate creation, GPU/NPU contention, OpenCL discovery, libLiteRt
- * symbol resolution) requires actual model bytes + a device with
- * the right SoC. This in-process smoke test catches the classloader
- * + Kotlin glue regressions; the device-level part is documented in
- * the doc + tracked as a pre-release validation milestone.
+ * GPU/NPU contention, OpenCL discovery, and SoC-specific delegate
+ * behavior still require target devices with the right hardware. Local
+ * runs without provisioned model bytes skip the production recognise path;
+ * the fake-runner path keeps classloader + Kotlin glue coverage on every
+ * CI run.
  */
 @RunWith(AndroidJUnit4::class)
 @SdkSuppress(minSdkVersion = 27)
@@ -179,8 +184,8 @@ class EngineCoexistenceInstrumentedTest {
      * Loads the **real** PaddleOCR PP-OCRv5 mobile AI Pack assets through
      * the production [LiteRtPaddleOcrBackend] constructor (not
      * `forTesting`) and verifies the back-to-back init + state-bleed
-     * scenario actually exercises native LiteRT delegate creation in a
-     * three-runtime process.
+     * scenario actually exercises native LiteRT delegate creation and a
+     * single recognise() call in a three-runtime process.
      *
      * CI emulator runs cover this path when the model SHA repository
      * variables are configured and the artifacts are provisioned (see the
@@ -218,6 +223,8 @@ class EngineCoexistenceInstrumentedTest {
         val embeddingBackend = LiteRtEmbeddingBackend(context, memoryHeadroomBytes = 0L)
         embeddingBackend.shutdown()
 
+        val fixtures = OcrGroundTruthFixtures.all()
+        val fixture = fixtures.first { it.truth.isNotEmpty() }
         val paddleBackend = LiteRtPaddleOcrBackend(context, memoryHeadroomBytes = 0L)
         try {
             paddleBackend.initialize(bundle!!, "CPU")
@@ -229,8 +236,61 @@ class EngineCoexistenceInstrumentedTest {
             assertEquals("NONE", paddleBackend.activeBackend)
             paddleBackend.initialize(bundle, "CPU")
             assertTrue(paddleBackend.isInitialized)
+
+            val result = paddleBackend.recognise(
+                yPlane = fixture.bitmap.toYPlane(),
+                width = fixture.bitmap.width,
+                height = fixture.bitmap.height,
+                config = OcrEngineConfig(
+                    emitBoundingBoxes = true,
+                    maxLines = COEXISTENCE_RECOGNISE_MAX_LINES,
+                ),
+            )
+            assertRecogniseResultShape(result)
         } finally {
             paddleBackend.shutdown()
+            fixtures.forEach { fixture ->
+                if (!fixture.bitmap.isRecycled) fixture.bitmap.recycle()
+            }
+        }
+    }
+
+    private fun Bitmap.toYPlane(): ByteArray {
+        val out = ByteArray(width * height)
+        var offset = 0
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val color = getPixel(x, y)
+                val luma = (
+                    Color.red(color) * 299 +
+                        Color.green(color) * 587 +
+                        Color.blue(color) * 114 +
+                        500
+                    ) / 1000
+                out[offset++] = luma.coerceIn(0, 255).toByte()
+            }
+        }
+        return out
+    }
+
+    private fun assertRecogniseResultShape(result: OcrEngineOutput) {
+        assertEquals("CPU", result.backend)
+        assertTrue(
+            "recognise() returned too many lines",
+            result.lines.size <= COEXISTENCE_RECOGNISE_MAX_LINES,
+        )
+        assertTrue("detDurationMs must be non-negative", result.detDurationMs >= 0L)
+        assertTrue("recDurationMs must be non-negative", result.recDurationMs >= 0L)
+        assertTrue("clsDurationMs must be non-negative", result.clsDurationMs >= 0L)
+        assertTrue("totalDurationMs must be non-negative", result.totalDurationMs >= 0L)
+        result.lines.forEach { line ->
+            val box = line.boundingBox
+            assertNotNull("Bounding boxes should be emitted when requested", box)
+            assertEquals("Bounding boxes must be quadrilaterals", 8, box?.size)
+            assertTrue(
+                "Bounding box coordinates must be finite normalized values",
+                box?.all { coordinate -> coordinate.isFinite() && coordinate in 0f..1f } == true,
+            )
         }
     }
 
@@ -245,5 +305,9 @@ class EngineCoexistenceInstrumentedTest {
         override fun runOrientation(input: FloatArray): FloatArray? = floatArrayOf(1f, 0f)
         override fun runRecognition(input: FloatArray): FloatArray = FloatArray(3)
         override fun close() = Unit
+    }
+
+    private companion object {
+        private const val COEXISTENCE_RECOGNISE_MAX_LINES = 8
     }
 }
