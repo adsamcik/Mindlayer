@@ -182,11 +182,12 @@ class EngineCoexistenceInstrumentedTest {
      * scenario actually exercises native LiteRT delegate creation in a
      * three-runtime process.
      *
-     * Skipped via [assumeTrue] when the AI Pack manifest is not bundled
-     * with the test APK — local developer runs see this as "ignored",
-     * while CI emulator runs that install the `paddleocr_model` AAB cover
-     * the production code path. Mirrors the
-     * `LITERT_COEXISTENCE.md` step-8 device checklist case.
+     * CI emulator runs cover this path when the model SHA repository
+     * variables are configured and the artifacts are provisioned (see the
+     * `.github/workflows/ci.yml` `instrumented-tests` job and ROADMAP.md
+     * Phase 6 #4). Local developer runs without the bundle on disk see
+     * [assumeTrue] skip the test. Mirrors the `LITERT_COEXISTENCE.md`
+     * step-8 device checklist case.
      *
      * The [forTesting]-based test above (the FakeRunner path) is what
      * keeps the dispatcher / Kotlin glue covered on every CI run.
@@ -196,16 +197,18 @@ class EngineCoexistenceInstrumentedTest {
     fun paddleocr_production_backend_loads_real_ai_pack_assets() = runBlocking {
         val assetList = context.assets.list("")?.toList().orEmpty()
         assumeTrue(
-            "PaddleOCR AI Pack manifest not bundled (paddleocr_model_integrity.json missing); " +
-                "production coexistence path covered by the device-validation matrix only.",
+            "PaddleOCR AI Pack manifest not mirrored into the test APK; configure " +
+                "PADDLEOCR_* repository variables and provision the bundle to cover " +
+                "ROADMAP.md Phase 6 #4 on CI.",
             assetList.contains("paddleocr_model_integrity.json"),
         )
 
         val bundles = PaddleOcrModelRegistry.discoverBundles(context)
         val bundle = PaddleOcrModelRegistry.getDefaultBundle(bundles)
         assumeTrue(
-            "AI Pack manifest present but bundle resolution returned null; " +
-                "device matrix covers the on-disk vs install-time AAB extraction.",
+            "PaddleOCR AI Pack manifest present but det/rec/dict assets were not " +
+                "resolved; CI/local runs without the provisioned bundle skip the " +
+                "production coexistence path.",
             bundle != null,
         )
 

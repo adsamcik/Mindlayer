@@ -502,6 +502,29 @@ android {
 
     assetPacks += listOf(":gemma_model", ":embeddinggemma_model", ":paddleocr_model")
 
+    sourceSets {
+        getByName("androidTest") {
+            val paddleOcrAssetsDir = rootProject.file("paddleocr_model/src/main/assets")
+            val requiredPaddleOcrAssets = listOf(
+                "paddleocr_model_integrity.json",
+                "paddleocr-ppocrv5-mobile-det.tflite",
+                "paddleocr-ppocrv5-mobile-rec.tflite",
+                "paddleocr-ppocrv5-mobile-dict.txt",
+            )
+            val hasRequiredPaddleOcrAssets = requiredPaddleOcrAssets.all { name ->
+                paddleOcrAssetsDir.resolve(name).let { it.isFile && it.length() > 0L }
+            }
+            if (hasRequiredPaddleOcrAssets) {
+                // Mirror the install-time AI Pack into the test APK so the
+                // production coexistence smoke can exercise real assets on CI
+                // when the SHA-gated bundle is provisioned. The orientation
+                // classifier is optional; detection, recognition, dictionary,
+                // and the manifest are required before we append this source.
+                assets.directories.add(paddleOcrAssetsDir.absolutePath)
+            }
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
