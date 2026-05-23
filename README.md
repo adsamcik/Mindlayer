@@ -120,6 +120,10 @@ The Gemma 4 E2B model (~2.4GB) is delivered via **Play for On-device AI** as an 
 
 Production builds for the Play Store are **signed locally**. See [`RELEASE.md`](RELEASE.md) for the full keystore setup, `:app:bundleRelease` flow, R8 troubleshooting, and Play Console upload steps.
 
+## Roadmap
+
+What's done, what's next, and what's gated on device validation lives in [`docs/ROADMAP.md`](docs/ROADMAP.md). It's the single source of truth for outstanding work — OCR `IS_PRODUCTION_READY` flip criteria, model artifact pipeline, the ICDAR2015 numeric validation harness, and the Phase 7/8 polish backlog.
+
 ## License
 
 Copyright © 2026 adsamcik
