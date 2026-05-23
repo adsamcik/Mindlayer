@@ -20,14 +20,18 @@ Mindlayer's full **architecture is production-ready** through Phase 5:
   flipped to `IS_PRODUCTION_READY = true` in 2026-05-20.
 - **OCR** (PaddleOCR PP-OCRv5 mobile via base LiteRT) — fully wired, real
   postprocessor, full SDK transport, lifecycle, and finalization.
-  **`OcrFeatureFlags.IS_PRODUCTION_READY` is still `false`** — gated on
-  device validation per the criteria in [§ Phase 6](#phase-6--device-gated)
-  below.
+  **`OcrFeatureFlags.IS_PRODUCTION_READY` is still `false`** — Phase 6
+  test harness + CI plumbing landed in PRs #106 + #107 (2026-05-23);
+  flip is now gated on **provisioning model SHA repo vars + shipping a
+  first-party OCR driver app**, not on a real device. See
+  [§ Phase 6](#phase-6--asset-provisioning--product-gated) below.
 
-What's left is mostly **work that requires a real device** (or a real model
-artifact pipeline) and a small set of UX/product polish items. None of it
-blocks the architectural claims of the SDK — it blocks the public-release
-claim for OCR specifically.
+What's left is mostly **operational** (provision model artefacts in CI
+`vars.*`, run the AI-Pack-enabled instrumented lane, measure the
+synthetic-corpus floors) plus a **product gate** (first-party OCR
+driver app) and a small set of UX/product polish items. None of it
+blocks the architectural claims of the SDK — it blocks the
+public-release claim for OCR specifically.
 
 If you want the full per-PR landing record of Phases 1-5, see
 `CHANGELOG.md` plus the session-state plan files in the AI-assistant
@@ -117,10 +121,21 @@ workflow (not in the repo, by design).
 
 ---
 
-## Phase 6 — Device-gated
+## Phase 6 — Asset-provisioning + product gated
 
-These items can't be completed by an automated agent fleet. They need a
-real Android device, a real model bundle, and operational sign-off.
+Phase 6 items #3 and #4 are now **emulator-CI ready** (harness + plumbing
+landed in PRs #106 + #107, 2026-05-23). The remaining work to flip
+`OcrFeatureFlags.IS_PRODUCTION_READY = true` is:
+
+1. **Provision model SHA repository variables in GitHub Actions**
+   (`vars.MODEL_SHA256`, `vars.PADDLEOCR_*_SHA256`,
+   `vars.EMBEDDING_*_SHA256`) and the actual `.tflite` payloads on the
+   build runner.
+2. **Ship a first-party OCR driver app** in production (product/release
+   decision; not a CI gate).
+
+Both are out of scope for an automated agent fleet — they need
+operational sign-off and an external model-hosting decision.
 
 ### 1. OCR `IS_PRODUCTION_READY = true` flip
 
@@ -128,21 +143,28 @@ real Android device, a real model bundle, and operational sign-off.
 
 The flag is a one-line atomic commit. The gating criteria are:
 
-- **3-stack coexistence validated on real device.** The 8-step
-  checklist in `docs/LITERT_COEXISTENCE.md` has to pass with LiteRT-LM
-  0.12 (chat) + base-LiteRT 2.1.5 (embeddings) + base-LiteRT 2.1.5
-  (OCR) loaded in the same `:ml` process. Mitigations in place today:
-  OCR is CPU-locked via `LiteRtAcceleratorResolver`
-  (`OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED`), and embeddings use
-  NPU/GPU only when the SoC allowlist + native-library probe agrees.
+- **3-stack coexistence validated on emulator** *(harness landed,
+  PR #106 — provision assets to actually run)*. CI's `instrumented-tests
+  (33)/(34)` lanes mirror the `paddleocr_model` AI Pack assets into the
+  `:app` androidTest APK when the model SHA repo vars are set, so
+  `EngineCoexistenceInstrumentedTest.paddleocr_production_backend_loads_real_ai_pack_assets`
+  exercises the production `LiteRtPaddleOcrBackend` on the API 33/34
+  emulator matrix. The 8-step checklist in `docs/LITERT_COEXISTENCE.md`
+  remains the canonical reference; emulator (x86_64 + swiftshader) is
+  sufficient for the CPU-only shipping configuration because OCR is
+  CPU-locked via `LiteRtAcceleratorResolver`
+  (`OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED`). GPU/NPU coexistence
+  remains real-device-gated and is deferred to Phase 8.
+- **Numeric OCR validation on emulator** *(harness landed, PR #107 —
+  provision assets to actually run)*.
+  `OcrNumericValidationInstrumentedTest` drives the production backend
+  against a deterministic 20-image synthetic Canvas corpus and asserts
+  recall/precision/F1 ≥ 0.70 (lenient v1 floor; tune up after the first
+  real-asset green CI measurement, ICDAR2015 corpus is a follow-up).
 - **First-party OCR driver app exists.** Same posture embeddings
   shipped under in Phase D #4 — flip the production-ready flag only
   when a first-party caller is in production (so we own the end-to-end
-  user experience before opening it up).
-- **Numeric OCR validation on at least one shipped device.** Synthetic
-  ZXing fixtures + `DbPostProcessorTest.recall@0.5 IoU ≥ 0.9` cover
-  the CI side; real-device ICDAR2015 (or equivalent) is the device
-  gate (see § 3 below).
+  user experience before opening it up). **Still required.**
 
 When all three are green, flip:
 
@@ -167,8 +189,13 @@ Pre-release artifacts are intentionally **not in git** (size + license):
 | `paddleocr-ppocrv5-mobile-cls.tflite` (optional) | `:paddleocr_model` | `-PpaddleocrClsSha256=<hex>` |
 | `paddleocr-ppocrv5-mobile-dict.txt` | `:paddleocr_model` | `-PpaddleocrDictSha256=<hex>` |
 
-CI's `build-bundle` job skips cleanly when any SHA var is unset. Release
-process is documented in `RELEASE.md`. Outstanding work:
+CI's `build-bundle` job skips cleanly when any SHA var is unset. The
+`instrumented-tests` job's "Provision AI Pack assets" step (added in
+PR #106) does the same: when the `.tflite` files and integrity manifest
+are present on the runner, the production coexistence + numeric
+validation tests run end-to-end; otherwise both `assumeTrue`-skip.
+
+Release process is documented in `RELEASE.md`. Outstanding work:
 
 - Set the seven SHA variables in GitHub Actions `vars.*` for the
   `release-aab` job to actually attach a signed AAB on `v*` tags.
@@ -176,35 +203,41 @@ process is documented in `RELEASE.md`. Outstanding work:
   where the build pipeline fetches them from) — currently out of repo
   by design, but the fetch mechanism is undocumented.
 
-### 3. `@RequiresDevice` numeric OCR validation harness
+### 3. Numeric OCR validation harness — *delivered, awaiting assets*
 
-PR #103 (Cluster F) shipped synthetic ZXing fixtures with
-`recall@0.5 IoU ≥ 0.9` on a small set of generated images. Phase 6 work:
+**Status:** Test harness landed in PR #107 (2026-05-23).
+`OcrNumericValidationInstrumentedTest` ships a deterministic synthetic
+corpus (20 Canvas-drawn images, no binary assets in git), runs on the
+API 33/34 emulator matrix via `@SdkSuppress(minSdkVersion = 33)`, and
+`assumeTrue`-skips when the AI Pack manifest is absent.
 
-- Bundle (or `assumeTrue`-gate) an ICDAR2015 mini-corpus (~50-100
-  representative images).
-- Wire as `@RequiresDevice` (or `@SdkSuppress(minSdkVersion = 33)` with
-  asset-bundle precondition) so it only runs on the CI emulator matrix
-  when the corpus is available.
-- Numeric thresholds: recall ≥ 0.85, precision ≥ 0.80, F1 ≥ 0.82 on
-  the chosen corpus subset. (Tune per actual measurements.)
-- Failure modes: clearly print which polygons missed + per-frame
-  metrics, so regressions are easy to diagnose.
+Remaining work — none of this blocks the flag flip on a CI lane with
+assets provisioned, but is worth doing afterwards:
 
-### 4. Three-stack coexistence smoke instrumented test (real assets)
+- Measure recall/precision/F1 on the synthetic corpus once the AI Pack
+  is provisioned, bump the floors from the lenient v1 0.70 to the
+  ROADMAP target (recall ≥ 0.85, precision ≥ 0.80, F1 ≥ 0.82) if the
+  measurements support it.
+- Add an opt-in ICDAR2015 mini-corpus (~50-100 representative images),
+  gated behind a separate asset bundle so the synthetic corpus stays
+  the always-on gate and ICDAR is the strict-mode gate.
 
-`EngineCoexistenceInstrumentedTest.paddleocr_production_backend_loads_real_ai_pack_assets`
-is `assumeTrue`-gated on `paddleocr_model_integrity.json` and skips on
-CI today. Phase 6 work:
+### 4. Three-stack coexistence smoke with real AI Pack assets — *delivered, awaiting assets*
 
-- Confirm whether CI's instrumented `(33)` + `(34)` runners have the
-  AI Pack assets installed (they may not — currently the test no-ops).
-- If not, decide: keep `assumeTrue`-gated and only run on a real
-  device, or build a CI lane that installs the AI Pack alongside the
-  emulator.
-- Extend the smoke beyond "loads back-to-back without state bleed" to
-  include actual `recognise()` of a fixture frame against the real
-  detector, to prove GPU/NPU contention isn't catastrophic.
+**Status:** Plumbing landed in PR #106 (2026-05-23). The
+`instrumented-tests` job now provisions the `paddleocr_model` AI Pack
+assets into the `:app` androidTest APK when the model SHA repo vars
+are set; otherwise the existing `assumeTrue` skip stays in effect, so
+CI without assets is unaffected. `:paddleocr_model:assembleDebug`
+runs before tests to refresh the integrity manifest.
+
+Remaining work:
+
+- Once assets are provisioned in CI, extend the coexistence smoke
+  beyond "loads back-to-back without state bleed" to include actual
+  `recognise()` of a fixture frame against the real detector
+  (`OcrNumericValidationInstrumentedTest` partially covers this on the
+  synthetic-corpus side).
 
 ---
 
