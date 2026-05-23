@@ -85,6 +85,8 @@ afterEvaluate {
 }
 
 dependencies {
+    lintChecks(project(":lint-checks"))
+
     api(project(":shared"))  // 'api' so consumers get shared types transitively
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
