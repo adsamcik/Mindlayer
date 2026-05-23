@@ -6,6 +6,13 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+### Added
+- **`docs/ROADMAP.md`** — single source of truth for outstanding work
+  across Phases 6-8 (device-gated `IS_PRODUCTION_READY` flip criteria,
+  real model artifact pipeline, ICDAR2015 numeric validation harness,
+  Phase 7 product polish backlog, Phase 8 speculative items).
+  Cross-linked from `README.md`.
+
 ### Fixed
 - **`MediaTransfer` SharedMemory path on targetSdk 30+** — `fromBitmap` /
   `fromAudioBytes` previously used reflection to call the hidden non-SDK
