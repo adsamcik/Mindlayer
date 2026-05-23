@@ -440,14 +440,14 @@ private val PreviewEvents = listOf(
         category = "INFERENCE",
         event = "Model response",
         requestIdLabel = "req-9f2a…81c4",
-        detail = "I'm Gemma, a large language model created by Google DeepMind. I'm designed to be helpful, harmless, and honest. I can assist with a wide variety of tasks including answering questions, writing, analysis, and more.",
+        detail = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip.",
     ),
     SessionEventItem(
         timestampLabel = "14:32:00.100",
         category = "INFERENCE",
         event = "User message",
         requestIdLabel = "req-9f2a…81c4",
-        detail = "Hello! What are you? Can you tell me about yourself?",
+        detail = "Lorem ipsum — placeholder preview text only.",
     ),
 )
 
