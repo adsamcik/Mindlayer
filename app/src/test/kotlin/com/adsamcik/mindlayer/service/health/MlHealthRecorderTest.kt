@@ -251,4 +251,102 @@ class MlHealthRecorderTest {
     }
 
     private fun recorderLastDeath(r: MlHealthRecorder): Long = r.peek().lastDeathAt
+
+    // ---- Deferred-counter persistence ------------------------------------
+
+    @Test
+    fun `deferred_submit_counter_survives_recorder_recreation`() {
+        val first = newRecorder()
+        repeat(5) { first.recordDeferredSubmit() }
+        assertEquals(5L, first.deferredSubmits())
+
+        // Drop the first recorder and instantiate a new one on the same
+        // directory — emulates `:ml` process death + restart.
+        val second = newRecorder()
+        assertEquals(5L, second.deferredSubmits())
+        assertEquals(5L, second.peek().deferredSubmits)
+    }
+
+    @Test
+    fun `deferred_completion_counter_survives_recorder_recreation`() {
+        val first = newRecorder()
+        repeat(7) { first.recordDeferredCompletion() }
+        assertEquals(7L, first.deferredCompletions())
+
+        val second = newRecorder()
+        assertEquals(7L, second.deferredCompletions())
+        assertEquals(7L, second.peek().deferredCompletions)
+    }
+
+    @Test
+    fun `recordHealthyBoot_preserves_deferred_counters`() {
+        val recorder = newRecorder()
+        repeat(3) { recorder.recordDeferredSubmit() }
+        repeat(2) { recorder.recordDeferredCompletion() }
+
+        recorder.recordHealthyBoot()
+
+        assertEquals(3L, recorder.deferredSubmits())
+        assertEquals(2L, recorder.deferredCompletions())
+
+        // Survives a fresh recorder too.
+        val next = newRecorder()
+        assertEquals(3L, next.deferredSubmits())
+        assertEquals(2L, next.deferredCompletions())
+    }
+
+    @Test
+    fun `recordHealthyBoot_with_decay_preserves_deferred_counters`() {
+        val recorder = newRecorder()
+        recorder.recordHealthyBoot()
+
+        // Build up some crash-loop state so the decay path is actually exercised.
+        repeat(MlHealthRecorder.DEATH_COUNT_THRESHOLD) {
+            advance(1_000L)
+            recorder.recordAbnormalDeath()
+        }
+        repeat(4) { recorder.recordDeferredSubmit() }
+        repeat(6) { recorder.recordDeferredCompletion() }
+        assertEquals(MlHealthRecorder.DEATH_COUNT_THRESHOLD, recorder.peek().deathCount)
+
+        // Advance past the decay threshold so the next boot zeroes the
+        // crash-loop counter.
+        advance(MlHealthRecorder.HEALTHY_UPTIME_DECAY_MS + 1_000L)
+
+        val nextBoot = newRecorder()
+        nextBoot.recordHealthyBoot()
+
+        // Crash-loop state decayed...
+        assertEquals(0, nextBoot.peek().deathCount)
+        // ...but diagnostic counters are untouched.
+        assertEquals(4L, nextBoot.deferredSubmits())
+        assertEquals(6L, nextBoot.deferredCompletions())
+    }
+
+    @Test
+    fun `legacy snapshot without deferred fields parses with zero counters`() {
+        // Hand-craft a JSON shape from a pre-existing version of the file
+        // (no deferredSubmits / deferredCompletions keys). The longField
+        // helper must default missing keys to 0L so the read path stays
+        // backward-compatible.
+        val legacy = """
+            {
+              "lastBootAt": 12345,
+              "lastDeathAt": 0,
+              "deathCount": 0,
+              "lastResetAt": 0,
+              "lastCleanShutdownAt": 0
+            }
+        """.trimIndent()
+        File(dir, "abnormal_deaths.json").writeText(legacy)
+
+        val recorder = newRecorder()
+        assertEquals(0L, recorder.deferredSubmits())
+        assertEquals(0L, recorder.deferredCompletions())
+        // Recording on top of a legacy file works and persists correctly.
+        recorder.recordDeferredSubmit()
+        assertEquals(1L, recorder.deferredSubmits())
+        val reloaded = newRecorder()
+        assertEquals(1L, reloaded.deferredSubmits())
+    }
 }
