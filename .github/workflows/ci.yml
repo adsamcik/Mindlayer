@@ -251,7 +251,7 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: |
-            if [[ "${{ steps.ai-pack.outputs.have-pack }}" == "true" ]]; then
+            if [ "${{ steps.ai-pack.outputs.have-pack }}" = "true" ]; then
               ./gradlew \
                 :paddleocr_model:assembleDebug \
                 --no-daemon \

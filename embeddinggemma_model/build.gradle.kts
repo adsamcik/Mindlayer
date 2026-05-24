@@ -33,38 +33,57 @@ val embeddingTokenizerSha256 = project.findProperty("embeddingTokenizerSha256")?
 val sha256Pattern = Regex("^[0-9a-f]{64}$")
 val manifestFile = layout.projectDirectory.file("src/main/assets/embedding_model_integrity.json")
 
+// Hoist execution-time values to configuration time so the configuration
+// cache can capture them as plain captured locals rather than live
+// `project`/`gradle` references (Gradle 9 forbids Task.project at
+// execution time when the configuration cache is enabled).
+val moduleVersion = project.version.toString().takeUnless { it == "unspecified" } ?: "0.0.0"
+val releaseTaskRequested = gradle.startParameter.taskNames.any {
+    it.contains("Release", ignoreCase = false) && !it.contains("UnitTest", ignoreCase = false)
+}
+
 val generateEmbeddingModelIntegrityManifest by tasks.registering {
     group = "verification"
     description = "Writes the embedding_model_integrity.json asset from -PembeddingModelSha256 / -PembeddingTokenizerSha256."
-    // Declare the SHA properties as task inputs so Gradle invalidates the
-    // cached manifest whenever any of them change. Without this the
-    // task's outputs.file(manifestFile) snapshot would keep a stale
-    // zero-hashes manifest even after `-PembeddingModelSha256=...` is
-    // passed. Mirrors paddleocr_model/build.gradle.kts.
+    // All values that the doLast action needs are declared here as task inputs.
+    // This ensures Gradle's UP-TO-DATE checks work correctly, AND it allows the
+    // doLast lambda to read every value via `inputs.properties[key]` rather than
+    // capturing script-scope variables — which would be "Gradle script object
+    // references" that the configuration cache cannot serialize (Gradle 9+).
+    // Mirrors paddleocr_model/build.gradle.kts.
     inputs.property("embeddingModelSha256", embeddingModelSha256)
     inputs.property("embeddingTokenizerSha256", embeddingTokenizerSha256)
-    inputs.property("releaseTaskRequested", gradle.startParameter.taskNames.any {
-        it.contains("Release", ignoreCase = false) && !it.contains("UnitTest", ignoreCase = false)
-    })
+    inputs.property("releaseTaskRequested", releaseTaskRequested)
+    inputs.property("moduleVersion", moduleVersion)
+    inputs.property("modelFileName", modelFileName)
+    inputs.property("tokenizerFileName", tokenizerFileName)
     outputs.file(manifestFile)
     doLast {
-        val releaseRequested = gradle.startParameter.taskNames.any {
-            it.contains("Release", ignoreCase = false) && !it.contains("UnitTest", ignoreCase = false)
-        }
-        if (releaseRequested) {
-            if (!sha256Pattern.matches(embeddingModelSha256)) {
+        // Read all values via inputs.properties so this lambda captures nothing
+        // from the build-script scope — satisfying the Gradle 9 config-cache
+        // requirement that execution-time actions must not hold script references.
+        val props = inputs.properties
+        val sha256Re = Regex("^[0-9a-f]{64}$")
+        val modelSha256 = props["embeddingModelSha256"] as String
+        val tokenizerSha256 = props["embeddingTokenizerSha256"] as String
+        val releaseReq = props["releaseTaskRequested"] as Boolean
+        val version = props["moduleVersion"] as String
+        val modelFn = props["modelFileName"] as String
+        val tokenizerFn = props["tokenizerFileName"] as String
+
+        if (releaseReq) {
+            if (!sha256Re.matches(modelSha256)) {
                 throw GradleException("Release embedding AI-pack builds require -PembeddingModelSha256=<64 hex>")
             }
-            if (!sha256Pattern.matches(embeddingTokenizerSha256)) {
+            if (!sha256Re.matches(tokenizerSha256)) {
                 throw GradleException("Release embedding AI-pack builds require -PembeddingTokenizerSha256=<64 hex>")
             }
         }
-        val modelSha = embeddingModelSha256.takeIf { sha256Pattern.matches(it) }
+        val modelSha = modelSha256.takeIf { sha256Re.matches(it) }
             ?: "0".repeat(64)
-        val tokenizerSha = embeddingTokenizerSha256.takeIf { sha256Pattern.matches(it) }
+        val tokenizerSha = tokenizerSha256.takeIf { sha256Re.matches(it) }
             ?: "0".repeat(64)
-        val version = project.version.toString().takeUnless { it == "unspecified" } ?: "0.0.0"
-        val file = manifestFile.asFile
+        val file = outputs.files.singleFile
         file.parentFile.mkdirs()
         file.writeText(
             """
@@ -73,12 +92,12 @@ val generateEmbeddingModelIntegrityManifest by tasks.registering {
               "version": "$version",
               "models": [
                 {
-                  "filename": "$modelFileName",
+                  "filename": "$modelFn",
                   "sha256": "$modelSha",
                   "role": "weights"
                 },
                 {
-                  "filename": "$tokenizerFileName",
+                  "filename": "$tokenizerFn",
                   "sha256": "$tokenizerSha",
                   "role": "tokenizer"
                 }

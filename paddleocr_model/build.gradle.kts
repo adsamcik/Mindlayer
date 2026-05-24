@@ -41,31 +41,57 @@ val paddleOcrDictSha256 = project.findProperty("paddleOcrDictSha256")?.toString(
 val sha256Pattern = Regex("^[0-9a-f]{64}$")
 val manifestFile = layout.projectDirectory.file("src/main/assets/paddleocr_model_integrity.json")
 
+// Hoist execution-time values to configuration time so the configuration
+// cache can capture them as plain captured locals rather than live
+// `project`/`gradle` references (Gradle 9 forbids Task.project at
+// execution time when the configuration cache is enabled).
+val moduleVersion = project.version.toString().takeUnless { it == "unspecified" } ?: "0.0.0"
+val releaseTaskRequested = gradle.startParameter.taskNames.any {
+    it.contains("Release", ignoreCase = false) && !it.contains("UnitTest", ignoreCase = false)
+}
+
 val generatePaddleOcrModelIntegrityManifest by tasks.registering {
     group = "verification"
     description = "Writes paddleocr_model_integrity.json from the four -PpaddleOcr*Sha256 properties."
-    // Declare the four SHA properties as task inputs so Gradle invalidates
-    // the cached manifest whenever any of them change. Without this the
-    // task's outputs.file(manifestFile) snapshot would keep a stale
-    // zero-hashes manifest even after `-PpaddleOcr*Sha256=...` is passed.
+    // All values that the doLast action needs are declared here as task inputs.
+    // This ensures Gradle's UP-TO-DATE checks work correctly, AND it allows the
+    // doLast lambda to read every value via `inputs.properties[key]` rather than
+    // capturing script-scope variables — which would be "Gradle script object
+    // references" that the configuration cache cannot serialize (Gradle 9+).
     inputs.property("paddleOcrDetSha256", paddleOcrDetSha256)
     inputs.property("paddleOcrRecSha256", paddleOcrRecSha256)
     inputs.property("paddleOcrClsSha256", paddleOcrClsSha256)
     inputs.property("paddleOcrDictSha256", paddleOcrDictSha256)
-    inputs.property("releaseTaskRequested", gradle.startParameter.taskNames.any {
-        it.contains("Release", ignoreCase = false) && !it.contains("UnitTest", ignoreCase = false)
-    })
+    inputs.property("releaseTaskRequested", releaseTaskRequested)
+    inputs.property("moduleVersion", moduleVersion)
+    inputs.property("detFileName", detFileName)
+    inputs.property("recFileName", recFileName)
+    inputs.property("clsFileName", clsFileName)
+    inputs.property("dictFileName", dictFileName)
     outputs.file(manifestFile)
     doLast {
-        val releaseRequested = gradle.startParameter.taskNames.any {
-            it.contains("Release", ignoreCase = false) && !it.contains("UnitTest", ignoreCase = false)
-        }
-        if (releaseRequested) {
+        // Read all values via inputs.properties so this lambda captures nothing
+        // from the build-script scope — satisfying the Gradle 9 config-cache
+        // requirement that execution-time actions must not hold script references.
+        val props = inputs.properties
+        val sha256Re = Regex("^[0-9a-f]{64}$")
+        val detSha256 = props["paddleOcrDetSha256"] as String
+        val recSha256 = props["paddleOcrRecSha256"] as String
+        val clsSha256 = props["paddleOcrClsSha256"] as String
+        val dictSha256 = props["paddleOcrDictSha256"] as String
+        val releaseReq = props["releaseTaskRequested"] as Boolean
+        val version = props["moduleVersion"] as String
+        val detFn = props["detFileName"] as String
+        val recFn = props["recFileName"] as String
+        val clsFn = props["clsFileName"] as String
+        val dictFn = props["dictFileName"] as String
+
+        if (releaseReq) {
             val missing = buildList {
-                if (!sha256Pattern.matches(paddleOcrDetSha256)) add("paddleOcrDetSha256")
-                if (!sha256Pattern.matches(paddleOcrRecSha256)) add("paddleOcrRecSha256")
-                if (!sha256Pattern.matches(paddleOcrClsSha256)) add("paddleOcrClsSha256")
-                if (!sha256Pattern.matches(paddleOcrDictSha256)) add("paddleOcrDictSha256")
+                if (!sha256Re.matches(detSha256)) add("paddleOcrDetSha256")
+                if (!sha256Re.matches(recSha256)) add("paddleOcrRecSha256")
+                if (!sha256Re.matches(clsSha256)) add("paddleOcrClsSha256")
+                if (!sha256Re.matches(dictSha256)) add("paddleOcrDictSha256")
             }
             if (missing.isNotEmpty()) {
                 throw GradleException(
@@ -74,13 +100,12 @@ val generatePaddleOcrModelIntegrityManifest by tasks.registering {
             }
         }
 
-        val detSha = paddleOcrDetSha256.takeIf { sha256Pattern.matches(it) } ?: "0".repeat(64)
-        val recSha = paddleOcrRecSha256.takeIf { sha256Pattern.matches(it) } ?: "0".repeat(64)
-        val clsSha = paddleOcrClsSha256.takeIf { sha256Pattern.matches(it) } ?: "0".repeat(64)
-        val dictSha = paddleOcrDictSha256.takeIf { sha256Pattern.matches(it) } ?: "0".repeat(64)
-        val version = project.version.toString().takeUnless { it == "unspecified" } ?: "0.0.0"
+        val detSha = detSha256.takeIf { sha256Re.matches(it) } ?: "0".repeat(64)
+        val recSha = recSha256.takeIf { sha256Re.matches(it) } ?: "0".repeat(64)
+        val clsSha = clsSha256.takeIf { sha256Re.matches(it) } ?: "0".repeat(64)
+        val dictSha = dictSha256.takeIf { sha256Re.matches(it) } ?: "0".repeat(64)
 
-        val file = manifestFile.asFile
+        val file = outputs.files.singleFile
         file.parentFile.mkdirs()
         file.writeText(
             """
@@ -94,22 +119,22 @@ val generatePaddleOcrModelIntegrityManifest by tasks.registering {
               },
               "models": [
                 {
-                  "filename": "$detFileName",
+                  "filename": "$detFn",
                   "sha256": "$detSha",
                   "role": "detection"
                 },
                 {
-                  "filename": "$recFileName",
+                  "filename": "$recFn",
                   "sha256": "$recSha",
                   "role": "recognition"
                 },
                 {
-                  "filename": "$clsFileName",
+                  "filename": "$clsFn",
                   "sha256": "$clsSha",
                   "role": "orientation"
                 },
                 {
-                  "filename": "$dictFileName",
+                  "filename": "$dictFn",
                   "sha256": "$dictSha",
                   "role": "dictionary"
                 }
