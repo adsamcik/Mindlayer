@@ -247,7 +247,7 @@ class LiteRtPaddleOcrBackend internal constructor(
                 .mapIndexed { index, value -> if (index == 0) value.removePrefix("\uFEFF") else value }
                 .toList()
         }
-        require(chars.size in 100..10_000) { "PaddleOCR dictionary size ${chars.size} outside 100..10000: $path" }
+        require(chars.size in 100..50_000) { "PaddleOCR dictionary size ${chars.size} outside 100..50000: $path" }
         return chars
     }
 

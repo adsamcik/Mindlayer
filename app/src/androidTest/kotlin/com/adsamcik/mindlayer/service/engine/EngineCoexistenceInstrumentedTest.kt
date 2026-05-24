@@ -60,7 +60,7 @@ class EngineCoexistenceInstrumentedTest {
 
     /**
      * Seeds a 128-line stub dictionary that satisfies the PR #1 length-sanity
-     * guard (`require(chars.size in 100..10_000)` in `LiteRtPaddleOcrBackend`).
+     * guard (`require(chars.size in 100..50_000)` in `LiteRtPaddleOcrBackend`).
      * Tokens are deterministic to keep CTC fixtures stable.
      */
     private fun stubDictText(): String = (0 until 128).joinToString(separator = "\n") { "tok$it" }
