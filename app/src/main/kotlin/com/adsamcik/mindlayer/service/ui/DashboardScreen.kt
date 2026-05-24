@@ -127,6 +127,7 @@ private fun backendColor(backend: String): Color = when (backend.uppercase()) {
 @Composable
 private fun healthColor(level: DashboardHealthLevel): Color = when (level) {
     DashboardHealthLevel.CONNECTING -> MaterialTheme.colorScheme.secondary
+    DashboardHealthLevel.IDLE -> MaterialTheme.colorScheme.secondary
     DashboardHealthLevel.HEALTHY -> MaterialTheme.colorScheme.primary
     DashboardHealthLevel.DEGRADED -> MindlayerColors.Warning.color
     DashboardHealthLevel.ERROR -> MaterialTheme.colorScheme.error
@@ -190,15 +191,15 @@ private fun healthHeadline(state: DashboardUiState, health: DashboardHealthLevel
 
     health == DashboardHealthLevel.CONNECTING ->
         stringResource(R.string.dashboard_health_connecting_to_service)
-    !state.isEngineLoaded || state.backend.equals("NONE", ignoreCase = true) ->
-        stringResource(R.string.dashboard_health_engine_not_ready)
+    health == DashboardHealthLevel.IDLE ->
+        stringResource(R.string.dashboard_health_engine_idle)
     health == DashboardHealthLevel.DEGRADED ->
         stringResource(R.string.dashboard_health_service_needs_attention)
     else -> stringResource(R.string.dashboard_health_service_ready)
 }
 
 @Composable
-private fun healthDetail(state: DashboardUiState, nowMs: Long): String = when {
+private fun healthDetail(state: DashboardUiState, nowMs: Long, health: DashboardHealthLevel): String = when {
     state.connectionState == DashboardConnectionState.DISCONNECTED -> {
         state.lastStatusUpdateMs?.let {
             stringResource(
@@ -221,8 +222,8 @@ private fun healthDetail(state: DashboardUiState, nowMs: Long): String = when {
         } ?: stringResource(R.string.dashboard_health_detail_waiting_first_sample)
     }
 
-    !state.isEngineLoaded || state.backend.equals("NONE", ignoreCase = true) -> {
-        stringResource(R.string.dashboard_health_detail_no_loaded_model)
+    health == DashboardHealthLevel.IDLE -> {
+        stringResource(R.string.dashboard_health_detail_engine_idle)
     }
 
     state.thermalBand.equals("CRITICAL", ignoreCase = true) -> {
@@ -452,6 +453,7 @@ private fun StatusSection(state: DashboardUiState) {
     val engineTone = when {
         state.isEngineLoaded -> DashboardMessageTone.SUCCESS
         state.connectionState == DashboardConnectionState.DISCONNECTED -> DashboardMessageTone.ERROR
+        health == DashboardHealthLevel.IDLE -> DashboardMessageTone.NEUTRAL
         else -> DashboardMessageTone.WARNING
     }
 
@@ -480,7 +482,7 @@ private fun StatusSection(state: DashboardUiState) {
                         color = healthTint,
                     )
                     Text(
-                        text = healthDetail(state, nowMs),
+                        text = healthDetail(state, nowMs, health),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -500,10 +502,10 @@ private fun StatusSection(state: DashboardUiState) {
             ) {
                 Badge(stringResource(connectionLabel(state.connectionState)), connectionColor(state.connectionState))
                 Badge(
-                    text = if (state.isEngineLoaded) {
-                        stringResource(R.string.dashboard_engine_loaded)
-                    } else {
-                        stringResource(R.string.dashboard_engine_not_ready_badge)
+                    text = when {
+                        state.isEngineLoaded -> stringResource(R.string.dashboard_engine_loaded)
+                        health == DashboardHealthLevel.IDLE -> stringResource(R.string.dashboard_engine_idle_badge)
+                        else -> stringResource(R.string.dashboard_engine_not_ready_badge)
                     },
                     color = toneColor(engineTone),
                 )
@@ -606,9 +608,13 @@ private fun StatusSection(state: DashboardUiState) {
             }
 
             if (!state.isEngineLoaded || state.backend.equals("NONE", ignoreCase = true)) {
+                val isIdle = state.lastInitFailure == null
                 DiagnosticCallout(
-                    message = stringResource(R.string.dashboard_callout_runtime_no_model),
-                    tone = DashboardMessageTone.WARNING,
+                    message = stringResource(
+                        if (isIdle) R.string.dashboard_callout_runtime_idle
+                        else R.string.dashboard_callout_runtime_no_model,
+                    ),
+                    tone = if (isIdle) DashboardMessageTone.INFO else DashboardMessageTone.WARNING,
                 )
             }
 

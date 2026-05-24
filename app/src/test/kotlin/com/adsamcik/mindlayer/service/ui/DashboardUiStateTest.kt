@@ -1,5 +1,6 @@
 package com.adsamcik.mindlayer.service.ui
 
+import com.adsamcik.mindlayer.service.engine.InitFailure
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -65,7 +66,7 @@ class DashboardUiStateTest {
         )
 
         assertEquals(
-            DashboardHealthLevel.DEGRADED,
+            DashboardHealthLevel.IDLE,
             DashboardUiState(
                 connectionState = DashboardConnectionState.CONNECTED,
                 isStatusLoading = false,
@@ -103,6 +104,69 @@ class DashboardUiStateTest {
         assertEquals("Runtime is connected, model loaded, and GPU backend is active.", readiness.detail)
         assertEquals("READY", readiness.pillLabel)
         assertEquals(DashboardMessageTone.SUCCESS, readiness.tone)
+    }
+
+    @Test
+    fun serviceHealth_engineNotLoadedButOtherwiseHealthy_returnsIdle() {
+        val nowMs = 20_000L
+
+        val health = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+            isEngineLoaded = false,
+            backend = "GPU",
+        ).serviceHealth(nowMs)
+
+        assertEquals(DashboardHealthLevel.IDLE, health)
+    }
+
+    @Test
+    fun serviceHealth_engineNotLoadedAndStaleStatus_returnsDegraded() {
+        val nowMs = 20_000L
+
+        val health = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 7_000,
+            isEngineLoaded = false,
+            backend = "GPU",
+        ).serviceHealth(nowMs)
+
+        assertEquals(DashboardHealthLevel.DEGRADED, health)
+    }
+
+    @Test
+    fun serviceHealth_engineNotLoadedAndInitFailure_returnsDegraded() {
+        val nowMs = 20_000L
+
+        val health = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+            isEngineLoaded = false,
+            backend = "GPU",
+            lastInitFailure = InitFailure.ModelMissing,
+        ).serviceHealth(nowMs)
+
+        assertEquals(DashboardHealthLevel.DEGRADED, health)
+    }
+
+    @Test
+    fun runtimeReadiness_engineNotLoaded_returnsIdleSummary() {
+        val nowMs = 20_000L
+
+        val readiness = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000,
+            isEngineLoaded = false,
+            backend = "GPU",
+        ).runtimeReadiness(nowMs)
+
+        assertEquals("Engine idle", readiness.headline)
+        assertEquals("IDLE", readiness.pillLabel)
+        assertEquals(DashboardMessageTone.INFO, readiness.tone)
     }
 
     @Test
@@ -158,13 +222,13 @@ class DashboardUiStateTest {
             isEngineLoaded = false,
             backend = "GPU",
         ).runtimeReadiness(nowMs)
-        assertEquals("Waiting for model load", modelLoading.headline)
+        assertEquals("Engine idle", modelLoading.headline)
         assertEquals(
-            "Connected, but the model is not loaded yet. Wait for runtime initialization to finish.",
+            "The engine loads on first use. Tap Run test inference to load it now.",
             modelLoading.detail,
         )
-        assertEquals("WAITING", modelLoading.pillLabel)
-        assertEquals(DashboardMessageTone.WARNING, modelLoading.tone)
+        assertEquals("IDLE", modelLoading.pillLabel)
+        assertEquals(DashboardMessageTone.INFO, modelLoading.tone)
     }
 
     @Test
