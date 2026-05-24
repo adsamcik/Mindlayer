@@ -556,7 +556,24 @@ android {
         buildConfig = true
     }
 
-    assetPacks += listOf(":gemma_model", ":embeddinggemma_model", ":paddleocr_model")
+    // Selective AI Asset Pack bundling for dev iteration.
+    // Defaults preserve current release/CI behavior (all packs bundled).
+    // Override per-pack to build a small code-only APK and sideload models via
+    // `tools/dev-models/push-models.ps1` (see `docs/DEV_MODELS.md`). Sideloaded
+    // files are read from `/data/local/tmp/` by the runtime registries on
+    // debuggable builds only.
+    val bundledAssetPacks = buildList {
+        fun bundle(prop: String, pack: String) {
+            val enabled = providers.gradleProperty(prop)
+                .map { it.toBoolean() }
+                .getOrElse(true)
+            if (enabled) add(pack)
+        }
+        bundle("mindlayer.bundleGemma", ":gemma_model")
+        bundle("mindlayer.bundleEmbeddings", ":embeddinggemma_model")
+        bundle("mindlayer.bundlePaddleocr", ":paddleocr_model")
+    }
+    assetPacks += bundledAssetPacks
 
     sourceSets {
         getByName("androidTest") {
