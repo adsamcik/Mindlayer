@@ -17,6 +17,7 @@ enum class DashboardFreshness {
 
 enum class DashboardHealthLevel {
     CONNECTING,
+    IDLE, // Service is reachable and healthy; the engine has not started yet.
     HEALTHY,
     DEGRADED,
     ERROR,
@@ -175,13 +176,14 @@ data class DashboardUiState(
         serviceThrottled -> DashboardHealthLevel.ERROR
         statusErrorMessage != null -> DashboardHealthLevel.ERROR
         statusFreshness(nowMs) == DashboardFreshness.STALE -> DashboardHealthLevel.DEGRADED
-        !isEngineLoaded || backend.equals("NONE", ignoreCase = true) -> DashboardHealthLevel.DEGRADED
+        lastInitFailure != null -> DashboardHealthLevel.DEGRADED
         thermalBand.equals("CRITICAL", ignoreCase = true) ||
             memoryPressure.equals("EMERGENCY", ignoreCase = true) -> DashboardHealthLevel.ERROR
 
         thermalBand.equals("HOT", ignoreCase = true) ||
             memoryPressure.equals("CRITICAL", ignoreCase = true) -> DashboardHealthLevel.DEGRADED
 
+        !isEngineLoaded || backend.equals("NONE", ignoreCase = true) -> DashboardHealthLevel.IDLE
         else -> DashboardHealthLevel.HEALTHY
     }
 
@@ -248,22 +250,12 @@ data class DashboardUiState(
                 )
             }
 
-            !isEngineLoaded -> {
+            !isEngineLoaded || backend.equals("NONE", ignoreCase = true) -> {
                 RuntimeReadinessSummary(
-                    headline = "Waiting for model load",
-                    detail = "Connected, but the model is not loaded yet. " +
-                        "Wait for runtime initialization to finish.",
-                    pillLabel = "WAITING",
-                    tone = DashboardMessageTone.WARNING,
-                )
-            }
-
-            backend.equals("NONE", ignoreCase = true) -> {
-                RuntimeReadinessSummary(
-                    headline = "Waiting for backend",
-                    detail = "Connected, but no GPU, CPU, or NPU backend is active yet.",
-                    pillLabel = "WAITING",
-                    tone = DashboardMessageTone.WARNING,
+                    headline = "Engine idle",
+                    detail = "The engine loads on first use. Tap Run test inference to load it now.",
+                    pillLabel = "IDLE",
+                    tone = DashboardMessageTone.INFO,
                 )
             }
 
