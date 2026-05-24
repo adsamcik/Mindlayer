@@ -121,7 +121,7 @@ class EngineManagerInitFailureTest {
     @Test
     fun `LowMemoryException categorises lastInitFailure as LowMemory`() = runTest {
         writeModelFile()
-        stubAvailMem(50L * 1024 * 1024) // 50 MB, far below 512 MB requirement
+        stubAvailMem(50L * 1024 * 1024) // 50 MB, far below the 1 GB runway floor
 
         val mgr = EngineManager(context, logRepository)
         try {

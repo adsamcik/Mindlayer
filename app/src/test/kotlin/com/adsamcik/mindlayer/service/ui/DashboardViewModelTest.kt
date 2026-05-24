@@ -86,6 +86,54 @@ class DashboardViewModelTest {
         assertFalse(rendered.contains("NativeEngine"))
     }
 
+    @Test
+    fun `test inference failure decodes typed wire error to human-readable label`() = runTest {
+        // F-079: ServiceBinder.typedBinderException wraps every typed
+        // code as SecurityException("MLERR:<code>:<message>") because
+        // Binder only marshals a small whitelist of RuntimeException
+        // subclasses faithfully. The dashboard must decode the prefix
+        // so users see "LOW_MEMORY: ..." instead of a bare
+        // "SecurityException".
+        val wire = "MLERR:4003:Insufficient memory: availMb=2348 requiredMb=2980"
+        val service = Proxy.newProxyInstance(
+            IMindlayerService::class.java.classLoader,
+            arrayOf(IMindlayerService::class.java),
+        ) { _, method, _ ->
+            when (method.name) {
+                "asBinder" -> Binder()
+                "prewarmAndAwait" -> throw SecurityException(wire)
+                else -> null
+            }
+        } as IMindlayerService
+        val viewModel = DashboardViewModel()
+        viewModel.setServiceForTest(service)
+        viewModel.markReadyForTest()
+
+        viewModel.runTestInference()
+
+        val state = viewModel.uiState.awaitState {
+            shadowOf(Looper.getMainLooper()).idle()
+            !it.isTestRunning && it.testStatus.startsWith("Test inference failed")
+        }
+        val rendered = state.testStatus + "\n" + state.testOutput
+        assertTrue(
+            "Should render typed code name, not 'SecurityException'. Got: $rendered",
+            rendered.contains("LOW_MEMORY"),
+        )
+        assertTrue(
+            "Should preserve diagnostic numbers from wire message. Got: $rendered",
+            rendered.contains("availMb=2348") && rendered.contains("requiredMb=2980"),
+        )
+        assertFalse(
+            "Should hide the raw wire-format prefix from the user. Got: $rendered",
+            rendered.contains("MLERR:"),
+        )
+        assertFalse(
+            "Should hide the carrier class name. Got: $rendered",
+            rendered.contains("SecurityException"),
+        )
+    }
+
     private fun testService(calls: MutableList<String>): IMindlayerService {
         return Proxy.newProxyInstance(
             IMindlayerService::class.java.classLoader,
