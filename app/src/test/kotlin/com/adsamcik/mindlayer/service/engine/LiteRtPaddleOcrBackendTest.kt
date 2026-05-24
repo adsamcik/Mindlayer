@@ -283,7 +283,7 @@ class LiteRtPaddleOcrBackendTest {
     }
 
     @Test fun dictionaryTooLongFails() = runTest {
-        File(bundle.dictionaryPath).writeText((0..10_000).joinToString("\n") { "tok$it" })
+        File(bundle.dictionaryPath).writeText((0..50_000).joinToString("\n") { "tok$it" })
         val ex = runCatching { backend().initialize(bundle, "CPU") }.exceptionOrNull()
         assertTrue("expected IllegalArgumentException, got $ex", ex is IllegalArgumentException)
     }
