@@ -11,15 +11,18 @@ import com.google.ai.edge.litert.CompiledModel
  *
  * # I/O shape contract
  *
- * EmbeddingGemma's exported `.tflite` (the seq2048 generic Mixed
- * Precision variant from `huggingface.co/litert-community/embeddinggemma-300m`)
- * expects, by exported signature index order:
- *   - input 0: `input_ids`       — int32, shape `[1, 2048]`
- *   - input 1: `attention_mask`  — int32, shape `[1, 2048]`
- *   - output 0: `sentence_embedding` — float32, shape `[1, 768]`
+ * EmbeddingGemma on `huggingface.co/litert-community/embeddinggemma-300m`
+ * ships in two on-device signature shapes that this runner supports:
+ *   - **standard 2-input** (`input_ids` + `attention_mask`): seq2048 variants
+ *     exported with both tensors visible
+ *   - **mixed-precision 1-input** (`input_ids` only): the
+ *     `embeddinggemma-300M_seq2048_mixed-precision.tflite` variant bakes
+ *     attention_mask handling into the graph and uses the pad token (0)
+ *     to detect padding
  *
- * The runner trusts this ordering. If a future model variant reorders
- * the signature, this is the single place to add a name-based lookup.
+ * Both surface a single `[1, 768]` float32 output (`sentence_embedding`).
+ * [runEmbedding] adapts to the actual `inputBuffers.size` rather than
+ * hardcoding 2 — see F-079b in the code below.
  */
 internal class RealLiteRtRunner private constructor(
     private val compiledModel: CompiledModel,
@@ -30,8 +33,20 @@ internal class RealLiteRtRunner private constructor(
         try {
             val outputBuffers = compiledModel.createOutputBuffers()
             try {
+                // LiteRT-community ships EmbeddingGemma in two on-device
+                // signature shapes:
+                //   * standard 2-input: [input_ids, attention_mask]
+                //   * mixed-precision 1-input: [input_ids] — the variant
+                //     bakes attention_mask handling into the graph and
+                //     uses pad-token (0) positions to detect padding.
+                // Both surface the same [1, 2048] int32 input shape and
+                // a single [1, 768] float32 output; differ only in input
+                // count. Adapt rather than crash so we work across model
+                // variants without an integrity-manifest schema bump.
                 inputBuffers[0].writeInt(inputIds)
-                inputBuffers[1].writeInt(attentionMask)
+                if (inputBuffers.size >= 2) {
+                    inputBuffers[1].writeInt(attentionMask)
+                }
                 compiledModel.run(inputBuffers, outputBuffers)
                 return outputBuffers[0].readFloat()
             } finally {
