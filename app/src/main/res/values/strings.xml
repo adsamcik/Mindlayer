@@ -93,6 +93,7 @@
     <string name="dashboard_health_status_polling_failed">Status polling failed</string>
     <string name="dashboard_health_connecting_to_service">Connecting to service</string>
     <string name="dashboard_health_engine_not_ready">Engine not ready</string>
+    <string name="dashboard_health_engine_idle">Engine idle</string>
     <string name="dashboard_health_service_needs_attention">Service needs attention</string>
     <string name="dashboard_health_service_ready">Service ready</string>
 
@@ -103,6 +104,7 @@
     <string name="dashboard_health_detail_stale_with_sample">Last successful status sample %1$s. Values on screen may be stale.</string>
     <string name="dashboard_health_detail_waiting_first_sample">Waiting for the first successful runtime sample.</string>
     <string name="dashboard_health_detail_no_loaded_model">Binder is reachable, but the latest runtime sample does not report a loaded model or active backend.</string>
+    <string name="dashboard_health_detail_engine_idle">Service is ready. The engine loads on first use — tap Run test inference to load it now.</string>
     <string name="dashboard_health_detail_thermal_critical">Thermal guard reached CRITICAL. Expect throttling or backend changes at request boundaries.</string>
     <string name="dashboard_health_detail_thermal_hot">Thermal band is HOT. Prefer shorter bursts or a cooler backend.</string>
     <string name="dashboard_health_detail_memory_elevated">Memory pressure is elevated. Session capacity and prefill reliability may degrade.</string>
@@ -143,6 +145,7 @@
     <string name="dashboard_card_active_sessions_title">Active Sessions (%1$d)</string>
     <string name="dashboard_engine_loaded">LOADED</string>
     <string name="dashboard_engine_not_ready_badge">NOT READY</string>
+    <string name="dashboard_engine_idle_badge">IDLE</string>
     <string name="dashboard_backend_none" translatable="false">NONE</string>
     <string name="dashboard_label_backend">Backend</string>
     <string name="dashboard_label_init_time">Init time</string>
@@ -152,6 +155,7 @@
     <string name="dashboard_init_time_seconds" translatable="false">%1$.1fs</string>
     <string name="dashboard_sampled_never">never</string>
     <string name="dashboard_callout_runtime_no_model">Runtime sample does not show a loaded model. Earlier test output is historical.</string>
+    <string name="dashboard_callout_runtime_idle">Engine is not loaded yet. Tap Run test inference to warm it up.</string>
     <string name="dashboard_callout_engine_not_ready">Engine not ready — last test output is historical until you rerun after recovery.</string>
     <string name="dashboard_test_button_running">Running…</string>
     <string name="dashboard_test_button_run">Run Test</string>
