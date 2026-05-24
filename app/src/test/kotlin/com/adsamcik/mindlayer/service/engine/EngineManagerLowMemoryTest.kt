@@ -108,9 +108,10 @@ class EngineManagerLowMemoryTest {
     }
 
     @Test
-    fun `initialize throws LowMemoryException when availMem is below model + 512MB`() = runTest {
-        // 50 MB available — far below 4 KB model + 512 MB headroom = ~512 MB required
-        stubAvailMem(availBytes = 50L * 1024 * 1024)
+    fun `initialize throws LowMemoryException when availMem is below model + 256MB on small device`() = runTest {
+        // 50 MB available, 4 GB total — small-device path applies.
+        // 50 MB < 4 KB model + 256 MB headroom = ~256 MB required → refuse.
+        stubMemInfo(availBytes = 50L * 1024 * 1024, totalBytes = 4L * 1024 * 1024 * 1024)
 
         val mgr = EngineManager(context)
         try {
@@ -119,19 +120,23 @@ class EngineManagerLowMemoryTest {
         } catch (e: LowMemoryException) {
             // 50 * 1024 * 1024 / 1024 / 1024 == 50
             assertEquals("availMb should match availMem/1MiB", 50L, e.availMb)
-            // (4096 + 512 * 1024 * 1024) / 1024 / 1024 == 512
-            assertEquals("requiredMb should be model + 512", 512L, e.requiredMb)
+            // (4096 + 256 * 1024 * 1024) / 1024 / 1024 == 256
+            assertEquals("requiredMb should be model + 256 (new headroom)", 256L, e.requiredMb)
             assertTrue(
                 "exception message should embed both numbers",
-                e.message!!.contains("availMb=50") && e.message!!.contains("requiredMb=512"),
+                e.message!!.contains("availMb=50") && e.message!!.contains("requiredMb=256"),
             )
         }
     }
 
     @Test
     fun `initialize does not throw LowMemoryException when availMem comfortably exceeds required`() = runTest {
-        // 4 GB available — well above 4 KB model + 512 MB headroom
-        stubAvailMem(availBytes = 4L * 1024 * 1024 * 1024)
+        // 4 GB available, 4 GB total — small-device path, well above
+        // 4 KB model + 256 MB headroom.
+        stubMemInfo(
+            availBytes = 4L * 1024 * 1024 * 1024,
+            totalBytes = 4L * 1024 * 1024 * 1024,
+        )
 
         val mgr = EngineManager(context).apply {
             // Replace native engine with a no-op so we don't reach LiteRT-LM
@@ -151,10 +156,64 @@ class EngineManagerLowMemoryTest {
         }
     }
 
-    private fun stubAvailMem(availBytes: Long) {
+    /**
+     * F-079: large-device path. Reproduces the Samsung Galaxy S24 Ultra
+     * failure mode (12 GB total, ~2.3 GB `availMem` because Linux uses
+     * ~2 GB as reclaimable page cache). The legacy single-band check
+     * refused engine init here; the new heuristic admits it because
+     * `availMb` is above the 1 GB runway floor and `totalMb` has room
+     * for the model plus a 1 GB system reserve.
+     */
+    @Test
+    fun `initialize allows load on 12GB device with 2_3GB availMem (S24 scenario)`() = runTest {
+        stubMemInfo(
+            availBytes = 2348L * 1024 * 1024,
+            totalBytes = 12L * 1024 * 1024 * 1024,
+        )
+
+        val mgr = EngineManager(context).apply {
+            engineFactory = { mockk(relaxed = true) }
+        }
+
+        try {
+            mgr.initialize(preferredBackend = "CPU")
+        } catch (e: LowMemoryException) {
+            fail(
+                "Did not expect LowMemoryException for 12 GB device with 2.3 GB " +
+                    "availMem (large-device cache-reclaim path); got $e",
+            )
+        } catch (_: Throwable) {
+            // Other failures from the relaxed engine mock are acceptable.
+        }
+    }
+
+    /**
+     * F-079: large-device path with too little availMem. Even with 12 GB
+     * total, if `availMem` drops below the 1 GB runway floor the gate
+     * MUST refuse — there isn't enough breathing room to start the load
+     * without immediate OOM-kill pressure.
+     */
+    @Test
+    fun `initialize throws LowMemoryException on 12GB device when availMem below 1GB floor`() = runTest {
+        stubMemInfo(
+            availBytes = 512L * 1024 * 1024,
+            totalBytes = 12L * 1024 * 1024 * 1024,
+        )
+
+        val mgr = EngineManager(context)
+        try {
+            mgr.initialize(preferredBackend = "CPU")
+            fail("Expected LowMemoryException for 512 MB availMem on 12 GB device")
+        } catch (e: LowMemoryException) {
+            assertEquals(512L, e.availMb)
+        }
+    }
+
+    private fun stubMemInfo(availBytes: Long, totalBytes: Long) {
         val slot = slot<ActivityManager.MemoryInfo>()
         every { activityManager.getMemoryInfo(capture(slot)) } answers {
             slot.captured.availMem = availBytes
+            slot.captured.totalMem = totalBytes
             Unit
         }
     }

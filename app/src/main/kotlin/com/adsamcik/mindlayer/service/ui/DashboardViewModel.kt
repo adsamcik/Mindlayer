@@ -18,6 +18,7 @@ import com.adsamcik.mindlayer.service.logging.LogDao
 import com.adsamcik.mindlayer.service.logging.LogDatabase
 import com.adsamcik.mindlayer.service.logging.LogEntry
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import com.adsamcik.mindlayer.shared.StreamEvent
 import com.adsamcik.mindlayer.shared.StreamHeader
 import kotlinx.coroutines.Dispatchers
@@ -577,11 +578,12 @@ class DashboardViewModel : ViewModel() {
                 }
 
             } catch (e: Exception) {
+                val rendered = e.toInferenceErrorMessage()
                 _uiState.update {
                     it.copy(
                         isTestRunning = false,
-                        testStatus = "Test inference failed: ${e.safeLabel()}",
-                        testOutput = e.safeLabel(),
+                        testStatus = "Test inference failed: $rendered",
+                        testOutput = rendered,
                         testStatusTone = DashboardMessageTone.ERROR,
                         lastTestCompletedAtMs = System.currentTimeMillis(),
                     )
@@ -606,8 +608,45 @@ class DashboardViewModel : ViewModel() {
     }
 
     private fun Throwable.toDashboardMessage(): String {
-        val summary = message?.lineSequence()?.firstOrNull()?.trim().orEmpty()
-        return summary.ifBlank { javaClass.simpleName }
+        val raw = message?.lineSequence()?.firstOrNull()?.trim().orEmpty()
+        val typed = decodeTypedWireMessage(raw)
+        return typed ?: raw.ifBlank { javaClass.simpleName }
+    }
+
+    /**
+     * F-079: defense-in-depth renderer for the test-inference catch
+     * block. Typed binder exceptions (`MLERR:<code>:<message>`) are
+     * decoded to a human-readable `<NAME>: <message>` so users see e.g.
+     * `LOW_MEMORY: Insufficient memory: availMb=2348 requiredMb=2980`
+     * instead of a bare `SecurityException` (every typed code rides as
+     * `SecurityException` on the wire — `ServiceBinder.typedBinderException`).
+     *
+     * For *untyped* exceptions we deliberately fall back to
+     * `safeLabel()` (class name only). The inference path may bubble
+     * up `RuntimeException`s whose `message` embeds LiteRT-LM internal
+     * class names or native-engine state; exposing those verbatim was
+     * the regression covered by
+     * `DashboardViewModelTest.test inference failure renders safe label
+     * without LiteRT stack frames`.
+     */
+    private fun Throwable.toInferenceErrorMessage(): String {
+        val raw = message?.lineSequence()?.firstOrNull()?.trim().orEmpty()
+        return decodeTypedWireMessage(raw) ?: safeLabel()
+    }
+
+    /**
+     * Returns `"<NAME>: <message>"` for a `MLERR:<code>:<message>` wire
+     * string, or `null` if [raw] is not a typed wire message. The wire
+     * message text is intentionally operator-safe — it embeds error
+     * codes and diagnostic numbers only, never prompt or output text
+     * (see `MindlayerErrorCode.wireMessage` callers in
+     * `ServiceBinder.kt`).
+     */
+    private fun decodeTypedWireMessage(raw: String): String? {
+        val code = MindlayerErrorCode.codeFromWireMessage(raw) ?: return null
+        val name = MindlayerErrorCode.nameOf(code) ?: "ERROR_$code"
+        val msg = MindlayerErrorCode.messageFromWireMessage(raw).orEmpty()
+        return if (msg.isBlank()) name else "$name: $msg"
     }
 
     private data class DashboardStatusSample(
