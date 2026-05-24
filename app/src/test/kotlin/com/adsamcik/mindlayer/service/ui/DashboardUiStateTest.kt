@@ -315,7 +315,10 @@ class DashboardUiStateTest {
     }
 
     @Test
-    fun `test inference readiness blocks unloaded engine and missing backend`() {
+    fun `test inference readiness does NOT block when engine is not loaded (chicken-and-egg fix)`() {
+        // The button is the only affordance that triggers engine initialization via
+        // prewarmAndAwait. Blocking it on isEngineLoaded==false made it impossible to
+        // ever load the engine from the dashboard on a fresh install.
         val nowMs = 20_000L
         val unloaded = DashboardUiState(
             connectionState = DashboardConnectionState.CONNECTED,
@@ -332,16 +335,10 @@ class DashboardUiStateTest {
             backend = "NONE",
         )
 
-        assertEquals(
-            "Connected, but the model is not loaded yet.",
-            unloaded.testReadinessIssue(nowMs),
-        )
-        assertFalse(unloaded.canRunTestInference(nowMs))
-        assertEquals(
-            "Connected, but no GPU, CPU, or NPU backend is active yet.",
-            noBackend.testReadinessIssue(nowMs),
-        )
-        assertFalse(noBackend.canRunTestInference(nowMs))
+        assertNull(unloaded.testReadinessIssue(nowMs))
+        assertTrue(unloaded.canRunTestInference(nowMs))
+        assertNull(noBackend.testReadinessIssue(nowMs))
+        assertTrue(noBackend.canRunTestInference(nowMs))
     }
 
     @Test

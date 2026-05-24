@@ -158,11 +158,6 @@ data class DashboardUiState(
             "Status is stale. Refresh before running a test."
         }
 
-        !isEngineLoaded -> "Connected, but the model is not loaded yet."
-        backend.equals("NONE", ignoreCase = true) -> {
-            "Connected, but no GPU, CPU, or NPU backend is active yet."
-        }
-
         else -> null
     }
 
