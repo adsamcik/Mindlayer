@@ -2,7 +2,7 @@
 agp = "9.2.1"
 lint = "32.2.1"
 kotlin = "2.3.21"
-ksp = "2.3.8"
+ksp = "2.3.9"
 coreKtx = "1.18.0"
 coroutines = "1.11.0"
 serialization = "1.11.0"
