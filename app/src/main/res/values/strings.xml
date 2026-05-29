@@ -168,6 +168,10 @@
     <string name="dashboard_test_embeddings_subtitle">Asks EmbeddingGemma to embed two sentences and verifies the vectors are distinguishable.</string>
     <string name="dashboard_test_embedding_button_run">Test embeddings</string>
     <string name="dashboard_test_embedding_button_running">Embedding…</string>
+    <string name="dashboard_test_ocr_label">OCR</string>
+    <string name="dashboard_test_ocr_subtitle">Renders a small PNG with the words “Hello world 1234” and runs it through the PaddleOCR session pipeline.</string>
+    <string name="dashboard_test_ocr_button_run">Test OCR</string>
+    <string name="dashboard_test_ocr_button_running">OCR…</string>
     <string name="dashboard_thermal_telemetry_unavailable">Telemetry unavailable</string>
     <string name="dashboard_thermal_headroom_not_reported">Headroom not reported</string>
     <string name="dashboard_active_sessions_waiting">Waiting for the first live session sample…</string>

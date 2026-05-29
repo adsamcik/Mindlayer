@@ -148,6 +148,13 @@ data class DashboardUiState(
      * separate from the chat engine and can run concurrently.
      */
     val embeddingTest: EngineTestState = EngineTestState(),
+    /**
+     * OCR verification state — independent of chat + embeddings.
+     * Exercises the PaddleOCR engine via the
+     * [com.adsamcik.mindlayer.IMindlayerService.createOcrSession]
+     * + ``pushOcrFrame`` + ``finalizeOcrSession`` session lifecycle.
+     */
+    val ocrTest: EngineTestState = EngineTestState(),
 ) {
     fun statusFreshness(nowMs: Long = System.currentTimeMillis()): DashboardFreshness =
         freshnessOf(lastStatusUpdateMs, nowMs, STATUS_STALE_AFTER_MS)
@@ -207,6 +214,27 @@ data class DashboardUiState(
     }
 
     fun canRunEmbeddingTest(): Boolean = embeddingTestReadinessIssue() == null
+
+    /**
+     * Returns the reason OCR verification can't run right now, or null
+     * when the OCR ``Test`` button should be enabled. Same loose policy
+     * as [embeddingTestReadinessIssue]: OCR has its own engine
+     * (``PaddleOcrEngine``) which is independent of chat warmup.
+     */
+    fun ocrTestReadinessIssue(): String? = when {
+        ocrTest.isRunning -> "An OCR test is already running."
+        connectionState == DashboardConnectionState.CONNECTING -> {
+            "Service is connecting. Wait for the binder to attach before testing."
+        }
+
+        connectionState == DashboardConnectionState.DISCONNECTED -> {
+            "Reconnect the service before running a test."
+        }
+
+        else -> null
+    }
+
+    fun canRunOcrTest(): Boolean = ocrTestReadinessIssue() == null
 
     fun serviceHealth(nowMs: Long = System.currentTimeMillis()): DashboardHealthLevel = when {
         connectionState == DashboardConnectionState.CONNECTING || isStatusLoading -> {

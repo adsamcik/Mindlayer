@@ -277,6 +277,7 @@ fun DashboardScreen(
     state: DashboardUiState,
     onTestInference: () -> Unit = {},
     onTestEmbeddings: () -> Unit = {},
+    onTestOcr: () -> Unit = {},
     onNavigateToHistory: () -> Unit = {},
     onNavigateToLogs: () -> Unit = {},
     logRepository: LogRepository? = null,
@@ -324,7 +325,7 @@ fun DashboardScreen(
                 item { CardEnterAnimation(2) { ThermalMemoryRow(state) } }
                 item { CardEnterAnimation(3) { ActiveSessionsCard(state) } }
                 item { CardEnterAnimation(4) { ActivityNavigationCard(onNavigateToHistory, onNavigateToLogs) } }
-                item { CardEnterAnimation(5) { TestInferenceCard(state, onTestInference, onTestEmbeddings) } }
+                item { CardEnterAnimation(5) { TestInferenceCard(state, onTestInference, onTestEmbeddings, onTestOcr) } }
                 item {
                     CardEnterAnimation(6) {
                         AllowedAppsCard(
@@ -1230,12 +1231,15 @@ private fun TestInferenceCard(
     state: DashboardUiState,
     onTestInference: () -> Unit,
     onTestEmbeddings: () -> Unit,
+    onTestOcr: () -> Unit,
 ) {
     DashboardCard(title = stringResource(R.string.dashboard_card_test_inference_title), icon = Icons.Filled.PlayArrow) {
         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
             ChatEngineRow(state, onTestInference)
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             EmbeddingEngineRow(state, onTestEmbeddings)
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            OcrEngineRow(state, onTestOcr)
         }
     }
 }
@@ -1367,6 +1371,83 @@ private fun EmbeddingEngineRow(state: DashboardUiState, onTestEmbeddings: () -> 
                         stringResource(R.string.dashboard_test_embedding_button_running)
                     } else {
                         stringResource(R.string.dashboard_test_embedding_button_run)
+                    },
+                )
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Badge(text = engineTestBadgeLabel(test), color = toneColor(displayTone))
+                test.lastCompletedAtMs?.let { ts ->
+                    if (!test.isRunning) {
+                        Text(
+                            text = formatRelativeTimestamp(ts, nowMs),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
+                }
+            }
+        }
+
+        if (test.status.isNotBlank()) {
+            DiagnosticCallout(message = test.status, tone = displayTone)
+        }
+
+        val hasOutput = test.output.isNotBlank()
+        if (hasOutput || test.isRunning) {
+            EngineOutputBox(
+                output = test.output,
+                hasOutput = hasOutput,
+                darkTheme = darkTheme,
+            )
+        }
+    }
+}
+
+@Composable
+private fun OcrEngineRow(state: DashboardUiState, onTestOcr: () -> Unit) {
+    val nowMs = System.currentTimeMillis()
+    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.3f
+    val test = state.ocrTest
+    val displayTone = when {
+        test.isRunning -> DashboardMessageTone.INFO
+        test.status.isBlank() -> DashboardMessageTone.NEUTRAL
+        else -> test.tone
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            text = stringResource(R.string.dashboard_test_ocr_label),
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = stringResource(R.string.dashboard_test_ocr_subtitle),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FilledTonalButton(
+                onClick = onTestOcr,
+                enabled = state.canRunOcrTest(),
+            ) {
+                if (test.isRunning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(
+                    if (test.isRunning) {
+                        stringResource(R.string.dashboard_test_ocr_button_running)
+                    } else {
+                        stringResource(R.string.dashboard_test_ocr_button_run)
                     },
                 )
             }
