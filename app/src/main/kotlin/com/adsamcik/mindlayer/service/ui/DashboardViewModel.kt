@@ -361,7 +361,11 @@ class DashboardViewModel : ViewModel() {
 
     private companion object {
         const val TEST_INFERENCE_PREWARM_BACKEND = "GPU"
-        const val TEST_INFERENCE_PREWARM_TIMEOUT_MS = 30_000L
+        // Emulator first-load of a 2.4 GB .litertlm with the software GPU
+        // backend routinely takes 60-90s; real devices finish in seconds.
+        // Budget 3 minutes so the verification UX doesn't bail out before
+        // the engine has had a chance to come up on slow hardware.
+        const val TEST_INFERENCE_PREWARM_TIMEOUT_MS = 180_000L
     }
 
     private val testJson = Json { ignoreUnknownKeys = true }
@@ -411,7 +415,7 @@ class DashboardViewModel : ViewModel() {
                 testService = svc
 
                 _uiState.update {
-                    it.copy(testStatus = "Warming engine for test inference")
+                    it.copy(testStatus = "Warming engine — first load can take 1–2 min on emulators")
                 }
                 val activeBackend = withContext(Dispatchers.IO) {
                     svc.prewarmAndAwait(
