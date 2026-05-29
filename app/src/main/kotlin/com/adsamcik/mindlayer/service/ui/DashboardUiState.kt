@@ -236,6 +236,38 @@ data class DashboardUiState(
 
     fun canRunOcrTest(): Boolean = ocrTestReadinessIssue() == null
 
+    /**
+     * Whether the "Verify all engines" button on the welcome card
+     * should be enabled. Disabled while ANY of the three engines is
+     * already running a test (so the orchestrator's sequencing isn't
+     * fighting a manual single-engine run).
+     */
+    fun canRunAllVerifications(): Boolean =
+        !isTestRunning && !embeddingTest.isRunning && !ocrTest.isRunning &&
+            connectionState == DashboardConnectionState.CONNECTED
+
+    val isAnyTestRunning: Boolean
+        get() = isTestRunning || embeddingTest.isRunning || ocrTest.isRunning
+
+    /**
+     * Summarises the verification state across all three engines for
+     * the dashboard's welcome card pill / colour. Returns a tone +
+     * a string-resource id the UI can resolve to localised copy.
+     */
+    fun verifyAllSummaryTone(): DashboardMessageTone {
+        if (isAnyTestRunning) return DashboardMessageTone.INFO
+        val toneOf = { test: EngineTestState -> test.tone.takeIf { test.lastCompletedAtMs != null } }
+        val chatTone = if (lastTestCompletedAtMs != null) testStatusTone else null
+        val tones = listOfNotNull(chatTone, toneOf(embeddingTest), toneOf(ocrTest))
+        if (tones.isEmpty()) return DashboardMessageTone.NEUTRAL
+        return when {
+            tones.any { it == DashboardMessageTone.ERROR } -> DashboardMessageTone.ERROR
+            tones.any { it == DashboardMessageTone.WARNING } -> DashboardMessageTone.WARNING
+            tones.all { it == DashboardMessageTone.SUCCESS } -> DashboardMessageTone.SUCCESS
+            else -> DashboardMessageTone.NEUTRAL
+        }
+    }
+
     fun serviceHealth(nowMs: Long = System.currentTimeMillis()): DashboardHealthLevel = when {
         connectionState == DashboardConnectionState.CONNECTING || isStatusLoading -> {
             DashboardHealthLevel.CONNECTING

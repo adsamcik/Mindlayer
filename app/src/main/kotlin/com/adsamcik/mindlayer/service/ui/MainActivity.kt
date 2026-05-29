@@ -90,6 +90,7 @@ class MainActivity : ComponentActivity() {
                                     onTestInference = { dashboardViewModel.runTestInference() },
                                     onTestEmbeddings = { dashboardViewModel.runEmbeddingTest() },
                                     onTestOcr = { dashboardViewModel.runOcrTest(context) },
+                                    onRunAllVerifications = { dashboardViewModel.runAllVerifications(context) },
                                     onNavigateToHistory = {
                                         navController.navigate(SessionHistoryNavigation.HistoryRoute)
                                     },

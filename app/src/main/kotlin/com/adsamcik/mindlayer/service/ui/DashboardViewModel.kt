@@ -1046,8 +1046,9 @@ class DashboardViewModel : ViewModel() {
             }
 
             // Prefer the finalized JSON snapshot if it carried recognizable text.
-            val recognized = if (!finalizedJson.isNullOrBlank()) {
-                finalizedJson!!.takeIf { it.length < 2_000 } ?: finalizedJson!!.take(2_000) + "…"
+            val finalizedSnapshot = finalizedJson
+            val recognized = if (!finalizedSnapshot.isNullOrBlank()) {
+                finalizedSnapshot.takeIf { it.length < 2_000 } ?: (finalizedSnapshot.take(2_000) + "…")
             } else {
                 recognizedLines.joinToString(separator = "\n")
             }
@@ -1086,6 +1087,45 @@ class DashboardViewModel : ViewModel() {
             return file
         } finally {
             bitmap.recycle()
+        }
+    }
+
+    // ---- All-engines verification --------------------------------------------
+
+    /**
+     * Sequentially exercise all three engines (embeddings, OCR, chat) so a
+     * dashboard user can prove the on-device AI stack is healthy with a
+     * single tap. Order is fastest-first so the user sees green badges
+     * accumulate while the slow chat warmup runs last.
+     *
+     * Runs are sequential to avoid loading three multi-GB models
+     * simultaneously and tripping the service's memory budget. Each step
+     * is already a no-op if the corresponding engine is mid-run, so
+     * the user can also still poke the individual buttons.
+     */
+    fun runAllVerifications(context: Context) {
+        viewModelScope.launch {
+            runEmbeddingTest()
+            awaitEmbeddingTestComplete()
+
+            runOcrTest(context)
+            awaitOcrTestComplete()
+
+            runTestInference()
+            // Don't await chat — the dashboard already shows its progress
+            // and the user can move on while the LLM warms up.
+        }
+    }
+
+    private suspend fun awaitEmbeddingTestComplete() {
+        while (_uiState.value.embeddingTest.isRunning && viewModelScope.isActive) {
+            delay(250)
+        }
+    }
+
+    private suspend fun awaitOcrTestComplete() {
+        while (_uiState.value.ocrTest.isRunning && viewModelScope.isActive) {
+            delay(250)
         }
     }
 
