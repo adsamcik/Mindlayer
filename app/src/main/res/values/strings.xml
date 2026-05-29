@@ -45,7 +45,9 @@
     <string name="allowlist_revoke_body">This will immediately block %1$s from accessing on-device LLM.</string>
     <string name="allowlist_revoke_package">Revoke %1$s</string>
     <string name="allowlist_revoke">Revoke</string>
-    <string name="dashboard_app_title" translatable="false">Mindlayer</string>
+    <string name="dashboard_app_title" translatable="false">MindLayer</string>
+    <string name="dashboard_brand_mind" translatable="false">Mind</string>
+    <string name="dashboard_brand_layer" translatable="false">Layer</string>
     <string name="dashboard_gpu_init_failed">⚠ GPU init failed: %1$s</string>
     <string name="dashboard_thermal">Thermal</string>
     <string name="dashboard_headroom">Headroom</string>

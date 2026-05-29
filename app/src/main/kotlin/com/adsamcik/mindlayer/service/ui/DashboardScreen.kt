@@ -10,6 +10,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -75,7 +76,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -100,6 +103,7 @@ private val CategorySession = Color(0xFF2E7D32)
 private val CategoryMemory = Color(0xFF7B1FA2)
 private val CategoryError = Color(0xFFC62828)
 private val CategoryDefault = Color(0xFF616161)
+private const val HeaderSeparatorAspectRatio = 443f / 1181f
 
 @Composable
 private fun thermalColor(band: String): Color = MindlayerColors.Thermal.color(band)
@@ -346,14 +350,7 @@ private fun DashboardHero(state: DashboardUiState) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = stringResource(R.string.dashboard_app_title),
-                style = MaterialTheme.typography.headlineLarge.copy(
-                    letterSpacing = 1.2.sp,
-                ),
-                fontWeight = FontWeight.ExtraBold,
-                color = MaterialTheme.colorScheme.primary,
-            )
+            DashboardWordmark(Modifier.weight(1f, fill = false))
             if (!showBanner) {
                     Row(
                         modifier = Modifier.semantics(mergeDescendants = true) {
@@ -439,6 +436,47 @@ private fun DashboardHero(state: DashboardUiState) {
                 },
             )
         }
+    }
+}
+
+@Composable
+private fun DashboardWordmark(modifier: Modifier = Modifier) {
+    val headlineStyle = MaterialTheme.typography.headlineLarge.copy(
+       letterSpacing = 0.sp,
+    )
+    val separatorHeight = with(LocalDensity.current) { headlineStyle.fontSize.toDp() }
+    val wordmarkLabel = stringResource(R.string.dashboard_app_title)
+    val mindText = stringResource(R.string.dashboard_brand_mind)
+    val layerText = stringResource(R.string.dashboard_brand_layer)
+
+    Row(
+       modifier = modifier.semantics(mergeDescendants = true) {
+           contentDescription = wordmarkLabel
+       },
+       verticalAlignment = Alignment.CenterVertically,
+       horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+       Text(
+           text = mindText,
+           style = headlineStyle,
+           fontWeight = FontWeight.ExtraBold,
+           color = MaterialTheme.colorScheme.primary,
+           maxLines = 1,
+       )
+       Image(
+           painter = painterResource(R.drawable.ic_mindlayer_header_separator),
+           contentDescription = null,
+           modifier = Modifier
+               .height(separatorHeight)
+               .width(separatorHeight * HeaderSeparatorAspectRatio),
+       )
+       Text(
+           text = layerText,
+           style = headlineStyle,
+           fontWeight = FontWeight.ExtraBold,
+           color = MaterialTheme.colorScheme.primary,
+           maxLines = 1,
+       )
     }
 }
 
