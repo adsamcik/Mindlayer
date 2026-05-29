@@ -8,6 +8,7 @@ import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.adsamcik.mindlayer.EmbeddingRequest
 import com.adsamcik.mindlayer.EngineInfo
 import com.adsamcik.mindlayer.RequestMeta
 import com.adsamcik.mindlayer.ServiceStatus
@@ -609,6 +610,126 @@ class DashboardViewModel : ViewModel() {
         statusPollingJob?.cancel()
         logPollingJob?.cancel()
         super.onCleared()
+    }
+
+    // ---- Embedding verification ------------------------------------------------
+
+    /**
+     * Runs a deterministic two-sample embedding smoke test:
+     * 1. Embed sentence A via AIDL.
+     * 2. Embed sentence B via AIDL.
+     * 3. Verify both vectors are non-trivial, L2-normalised, and have
+     *    cosine similarity strictly < 0.99 (distinguishable).
+     *
+     * Independent of [runTestInference] — the embedding engine has its
+     * own backend and can run while a chat test is in-flight. Uses the
+     * same fixtures as [com.adsamcik.mindlayer.service.engine.EmbeddingEndToEndInstrumentedTest]
+     * so the dashboard surface and the instrumented contract test exercise
+     * the same code path.
+     */
+    fun runEmbeddingTest() {
+        _uiState.value.embeddingTestReadinessIssue()?.let { issue ->
+            _uiState.update {
+                it.copy(embeddingTest = it.embeddingTest.copy(
+                    isRunning = false,
+                    status = issue,
+                    tone = DashboardMessageTone.WARNING,
+                ))
+            }
+            return
+        }
+
+        _uiState.update {
+            it.copy(embeddingTest = EngineTestState(
+                isRunning = true,
+                status = "Loading EmbeddingGemma — first call warms the engine",
+                tone = DashboardMessageTone.INFO,
+            ))
+        }
+
+        viewModelScope.launch {
+            try {
+                val svc = service ?: run {
+                    _uiState.update {
+                        it.copy(embeddingTest = it.embeddingTest.copy(
+                            isRunning = false,
+                            status = "Service is not connected",
+                            tone = DashboardMessageTone.ERROR,
+                            lastCompletedAtMs = System.currentTimeMillis(),
+                        ))
+                    }
+                    return@launch
+                }
+
+                val textA = "The cat sits on the mat."
+                val textB = "Quantum mechanics describes particles."
+
+                val resultA = withContext(Dispatchers.IO) {
+                    svc.embed(EmbeddingRequest(text = textA, tag = "dashboard-a"))
+                }
+                _uiState.update {
+                    it.copy(embeddingTest = it.embeddingTest.copy(
+                        status = "First embedding ready • ${resultA.dim}-D in " +
+                            "${resultA.durationMs}ms • sending second",
+                    ))
+                }
+
+                val resultB = withContext(Dispatchers.IO) {
+                    svc.embed(EmbeddingRequest(text = textB, tag = "dashboard-b"))
+                }
+
+                val vecA = resultA.vector
+                val vecB = resultB.vector
+                check(vecA.size == vecB.size) {
+                    "Embedding vector dimensions differ: A=${vecA.size}, B=${vecB.size}"
+                }
+                var cosine = 0.0
+                for (i in vecA.indices) cosine += vecA[i].toDouble() * vecB[i].toDouble()
+                val normA = kotlin.math.sqrt(vecA.fold(0.0) { acc, v -> acc + v * v })
+                val anyNonZero = vecA.any { kotlin.math.abs(it) > 1e-6f }
+                val anyNaN = vecA.any { it.isNaN() } || vecB.any { it.isNaN() }
+                val distinguishable = cosine < 0.99
+
+                val passed = anyNonZero && !anyNaN && distinguishable
+                val backend = resultA.backend
+                val output = buildString {
+                    appendLine("Dim:       ${resultA.dim}")
+                    appendLine("Backend:   $backend")
+                    appendLine("Latency:   ${resultA.durationMs}ms (A) / ${resultB.durationMs}ms (B)")
+                    appendLine("Tokens:    ${resultA.tokenCount} (A) / ${resultB.tokenCount} (B)")
+                    appendLine("\u2016A\u2016\u2082:     " + "%.4f".format(normA) + "  (expect \u2248 1.0)")
+                    append("cos(A,B):  " + "%.4f".format(cosine) + "  (expect < 0.99)")
+                }
+                val status = when {
+                    !anyNonZero -> "Vector A is all-zero — model is not returning weights"
+                    anyNaN -> "Embedding vectors contain NaN values"
+                    !distinguishable ->
+                        "Vectors look near-identical (cos=${"%.4f".format(cosine)}); model may be miscalibrated"
+                    else -> "Completed \u2022 two distinguishable ${resultA.dim}-D vectors on $backend"
+                }
+
+                _uiState.update {
+                    it.copy(embeddingTest = EngineTestState(
+                        isRunning = false,
+                        status = status,
+                        tone = if (passed) DashboardMessageTone.SUCCESS else DashboardMessageTone.WARNING,
+                        output = output,
+                        lastCompletedAtMs = System.currentTimeMillis(),
+                    ))
+                }
+            } catch (e: Exception) {
+                val rendered = e.toInferenceErrorMessage()
+                _uiState.update {
+                    it.copy(embeddingTest = it.embeddingTest.copy(
+                        isRunning = false,
+                        status = "Embedding test failed: $rendered",
+                        tone = DashboardMessageTone.ERROR,
+                        output = rendered,
+                        lastCompletedAtMs = System.currentTimeMillis(),
+                    ))
+                }
+            }
+        }
     }
 
     private fun Throwable.toDashboardMessage(): String {

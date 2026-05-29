@@ -31,6 +31,21 @@ enum class DashboardMessageTone {
     ERROR,
 }
 
+/**
+ * Per-engine verification state shown on the dashboard's engine
+ * verification card. Captures the most recent run for one engine
+ * (chat / embeddings / OCR) so the three modalities are testable
+ * independently and the UI can show a status pill + last-run output
+ * for each.
+ */
+data class EngineTestState(
+    val isRunning: Boolean = false,
+    val status: String = "",
+    val tone: DashboardMessageTone = DashboardMessageTone.NEUTRAL,
+    val output: String = "",
+    val lastCompletedAtMs: Long? = null,
+)
+
 data class AcceleratorDecisionUi(
     val featureName: String,
     val backend: String,
@@ -126,6 +141,13 @@ data class DashboardUiState(
     val isTestRunning: Boolean = false,
     val testStatusTone: DashboardMessageTone = DashboardMessageTone.NEUTRAL,
     val lastTestCompletedAtMs: Long? = null,
+    /**
+     * Embeddings verification state — independent of [isTestRunning]
+     * (which models chat). Embeddings exercise the EmbeddingGemma engine
+     * via [com.adsamcik.mindlayer.IMindlayerService.embed], which is
+     * separate from the chat engine and can run concurrently.
+     */
+    val embeddingTest: EngineTestState = EngineTestState(),
 ) {
     fun statusFreshness(nowMs: Long = System.currentTimeMillis()): DashboardFreshness =
         freshnessOf(lastStatusUpdateMs, nowMs, STATUS_STALE_AFTER_MS)
@@ -164,6 +186,27 @@ data class DashboardUiState(
 
     fun canRunTestInference(nowMs: Long = System.currentTimeMillis()): Boolean =
         testReadinessIssue(nowMs) == null
+
+    /**
+     * Returns the reason embedding verification can't run right now,
+     * or null when the embedding ``Test`` button should be enabled.
+     * Looser than [testReadinessIssue]: embeddings have their own engine
+     * and don't require the chat engine to be warm or status to be fresh.
+     */
+    fun embeddingTestReadinessIssue(): String? = when {
+        embeddingTest.isRunning -> "An embedding test is already running."
+        connectionState == DashboardConnectionState.CONNECTING -> {
+            "Service is connecting. Wait for the binder to attach before testing."
+        }
+
+        connectionState == DashboardConnectionState.DISCONNECTED -> {
+            "Reconnect the service before running a test."
+        }
+
+        else -> null
+    }
+
+    fun canRunEmbeddingTest(): Boolean = embeddingTestReadinessIssue() == null
 
     fun serviceHealth(nowMs: Long = System.currentTimeMillis()): DashboardHealthLevel = when {
         connectionState == DashboardConnectionState.CONNECTING || isStatusLoading -> {

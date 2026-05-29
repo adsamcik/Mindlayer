@@ -143,7 +143,7 @@
 
     <!-- Dashboard: card titles and inline labels. -->
     <string name="dashboard_card_service_status_title">Service Status</string>
-    <string name="dashboard_card_test_inference_title">Test Inference</string>
+    <string name="dashboard_card_test_inference_title">Engine Verification</string>
     <string name="dashboard_card_active_sessions_title">Active Sessions (%1$d)</string>
     <string name="dashboard_engine_loaded">LOADED</string>
     <string name="dashboard_engine_not_ready_badge">NOT READY</string>
@@ -162,6 +162,12 @@
     <string name="dashboard_test_button_running">Running…</string>
     <string name="dashboard_test_button_run">Run Test</string>
     <string name="dashboard_test_waiting_for_output">Waiting for output…</string>
+    <string name="dashboard_test_chat_label">Chat (LLM)</string>
+    <string name="dashboard_test_chat_subtitle">Streams Gemma 4 E2B tokens over an AIDL pipe.</string>
+    <string name="dashboard_test_embeddings_label">Embeddings</string>
+    <string name="dashboard_test_embeddings_subtitle">Asks EmbeddingGemma to embed two sentences and verifies the vectors are distinguishable.</string>
+    <string name="dashboard_test_embedding_button_run">Test embeddings</string>
+    <string name="dashboard_test_embedding_button_running">Embedding…</string>
     <string name="dashboard_thermal_telemetry_unavailable">Telemetry unavailable</string>
     <string name="dashboard_thermal_headroom_not_reported">Headroom not reported</string>
     <string name="dashboard_active_sessions_waiting">Waiting for the first live session sample…</string>

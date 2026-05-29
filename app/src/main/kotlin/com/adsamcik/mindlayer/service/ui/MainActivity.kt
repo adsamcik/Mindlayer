@@ -86,6 +86,7 @@ class MainActivity : ComponentActivity() {
                                 DashboardScreen(
                                     state = state,
                                     onTestInference = { dashboardViewModel.runTestInference() },
+                                    onTestEmbeddings = { dashboardViewModel.runEmbeddingTest() },
                                     onNavigateToHistory = {
                                         navController.navigate(SessionHistoryNavigation.HistoryRoute)
                                     },
