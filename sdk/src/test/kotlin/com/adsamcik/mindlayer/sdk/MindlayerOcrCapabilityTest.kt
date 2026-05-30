@@ -52,9 +52,32 @@ class MindlayerOcrCapabilityTest {
 
     @After fun tearDown() = unmockkAll()
 
-    @Test fun `ocrSession requires advertised OCR feature`() = runTest {
+    @Test fun `ocrRealtime requires advertised OCR feature`() = runTest {
+        assertFeatureNotSupported { mindlayer.ocrRealtime(OcrProfile.Receipt) }
+        verify(exactly = 0) { mockService.createOcrSession(any()) }
+    }
+
+    @Suppress("DEPRECATION")
+    @Test fun `deprecated ocrSession alias delegates to ocrRealtime`() = runTest {
+        // The @Deprecated alias must still gate on the OCR capability —
+        // verifies the rename hasn't broken pre-v0.10 callers.
         assertFeatureNotSupported { mindlayer.ocrSession(OcrProfile.Receipt) }
         verify(exactly = 0) { mockService.createOcrSession(any()) }
+    }
+
+    @Test fun `ocrAsync requires advertised OCR-image feature`() = runTest {
+        assertFeatureNotSupported {
+            mindlayer.ocrAsync(byteArrayOf(0x01), "image/jpeg")
+        }
+        verify(exactly = 0) { mockService.ocrImage(any(), any()) }
+    }
+
+    @Suppress("DEPRECATION")
+    @Test fun `deprecated ocrImage alias delegates to ocrAsync`() = runTest {
+        assertFeatureNotSupported {
+            mindlayer.ocrImage(byteArrayOf(0x01), "image/jpeg")
+        }
+        verify(exactly = 0) { mockService.ocrImage(any(), any()) }
     }
 
     @Test fun `ocrLimits requires advertised OCR feature`() = runTest {

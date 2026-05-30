@@ -2172,12 +2172,41 @@ class Mindlayer private constructor(
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  v0.8 multi-frame OCR — SDK DSL (Phase 1 PR D).
+    //  Public OCR API — two surfaces, one engine.
     //
-    //  Wraps the 7 AIDL OCR methods (createOcrSession / pushOcrFrame /
-    //  streamOcrEvents / getOcrSessionState / finalizeOcrSession /
-    //  closeOcrSession / getOcrLimits) behind a Kotlin-idiomatic
-    //  surface. See OcrSession / OcrProfile / OcrEvent.
+    //  • [ocrRealtime] — multi-frame streaming session. Push N frames,
+    //    finalize, read fused result. For live camera feeds where
+    //    cross-frame fusion meaningfully improves quality (receipts,
+    //    ID cards, anything you point at and re-aim).
+    //
+    //  • [ocrAsync]    — single-image, single-call. Pass JPEG/PNG/WEBP
+    //    bytes in, get a result back. For gallery pickers, sharesheet
+    //    targets, screenshots, "scan this one image" flows.
+    //
+    //  Decision rule:
+    //    – Have a live camera and the user can re-aim?  → [ocrRealtime]
+    //    – Have one final image already captured?       → [ocrAsync]
+    //    – Need a turn-key camera UI?                   → use the
+    //      ``:sdk-camera-launcher`` module — it wraps either surface
+    //      behind a single Activity-result contract so consumers never
+    //      touch CameraX or permissions directly.
+    //
+    //  Both surfaces:
+    //    – throw [MindlayerException] with [MindlayerErrorCode] codes
+    //      (FEATURE_NOT_SUPPORTED for missing capability, LOW_MEMORY /
+    //      SERVICE_UNAVAILABLE / INVALID_REQUEST for engine rejections),
+    //    – share the same on-device PaddleOCR + LiteRT engine and per-
+    //      engine mutex (concurrent calls queue rather than race),
+    //    – are gated by the same production-readiness feature flag —
+    //      ``FEATURE_OCR_SESSION`` for realtime, ``FEATURE_OCR_IMAGE_ONESHOT``
+    //      for async. They flip together.
+    //
+    //  Wire-stability note: this section is purely an SDK-side rename;
+    //  the underlying AIDL methods (createOcrSession / pushOcrFrame /
+    //  streamOcrEvents / finalizeOcrSession / closeOcrSession /
+    //  getOcrLimits / ocrImage) are unchanged. Old method names
+    //  ([ocrSession], [ocrImage]) remain as ``@Deprecated`` delegating
+    //  aliases for one minor cycle.
     // ─────────────────────────────────────────────────────────────────────
 
     /**
@@ -2203,40 +2232,71 @@ class Mindlayer private constructor(
     }
 
     /**
-     * Open a multi-frame OCR session using a built-in [OcrProfile].
+     * **Realtime OCR** — open a multi-frame OCR session using a
+     * built-in [OcrProfile].
+     *
+     * Use this when you have a live camera feed and want the service
+     * to fuse multiple frames into a single high-confidence result
+     * (cross-frame voting, K-consecutive field locking, optional
+     * barcode anchor, structured schema-shaped output). The session
+     * pipeline also runs the service-side quality presort so blurry
+     * / dark frames are rejected before reaching the engine.
      *
      * ```kotlin
-     * mindlayer.ocrSession(OcrProfile.Receipt) {
+     * mindlayer.ocrRealtime(OcrProfile.Receipt) {
      *     languageHints = listOf("en", "de-DE")
      *     maxFrames = 30
      * }.use { session ->
-     *     session.pushFrame(meta)
-     *     ...
+     *     // Attach the event stream BEFORE pushing the first frame —
+     *     // otherwise intake is rejected with STATUS_REJECTED_STREAM_NOT_ATTACHED.
+     *     val job = launch {
+     *         session.events.collect { event -> /* ... */ }
+     *     }
+     *     session.pushFrame(meta, yPlane, w, h)
+     *     // ... push more frames as the user re-aims ...
      *     session.finalize()
+     *     job.join()
      * }
      * ```
      *
-     * @param profile the OCR profile preset.
+     * # Capability
+     *
+     * Requires [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_SESSION].
+     * Throws [MindlayerException] with
+     * [com.adsamcik.mindlayer.shared.MindlayerErrorCode.FEATURE_NOT_SUPPORTED]
+     * when the connected service does not advertise the flag (e.g. the
+     * production-readiness gate is still off, the OCR model bundle is
+     * missing, or the service binary predates v0.8).
+     *
+     * @param profile the OCR profile preset (GeneralDocument / Receipt
+     *   / IdCard / Whiteboard / ScreenCapture).
      * @param configure optional builder block to override profile
-     *   defaults (schema, language hints, fps cap, etc.).
-     * @throws SecurityException with wire-prefixed message when the
-     *   service rejects the session (e.g., ``CONCURRENT_LIMIT``).
+     *   defaults (custom schema, language hints, fps cap, etc.).
+     * @throws MindlayerException with a typed error code on service
+     *   rejection (LOW_MEMORY, INVALID_REQUEST, SERVICE_UNAVAILABLE,
+     *   CONCURRENT_LIMIT).
      */
-    suspend fun ocrSession(
+    suspend fun ocrRealtime(
         profile: OcrProfile,
         configure: OcrSessionConfigBuilder.() -> Unit = {},
     ): OcrSession {
         val builder = OcrSessionConfigBuilder(profile)
         builder.configure()
-        return ocrSession(builder.build())
+        return ocrRealtime(builder.build())
     }
 
     /**
-     * Open a multi-frame OCR session with a pre-built [OcrSessionConfig].
-     * Use this when you have a serialized config (e.g. from process
-     * recovery) and don't want the builder DSL.
+     * **Realtime OCR** — open a multi-frame OCR session with a
+     * pre-built [OcrSessionConfig].
+     *
+     * Use this overload when you have a serialised config (e.g. from
+     * process recovery or persistent settings) and don't want the
+     * builder DSL. See [ocrRealtime] (with profile + DSL block) for
+     * the common case.
+     *
+     * Capability + error semantics match the DSL overload above.
      */
-    suspend fun ocrSession(config: com.adsamcik.mindlayer.OcrSessionConfig): OcrSession {
+    suspend fun ocrRealtime(config: com.adsamcik.mindlayer.OcrSessionConfig): OcrSession {
         requireOcrCapability()
         val sessionId = try {
             withContext(Dispatchers.IO) {
@@ -2251,10 +2311,11 @@ class Mindlayer private constructor(
     }
 
     /**
-     * Single-image OCR — recognise text in one encoded image and return
-     * synchronously. Convenience for callers that just have one captured
-     * image (gallery picker, sharesheet target, screenshot text
-     * extraction) and don't want session ceremony.
+     * **Async OCR** — recognise text in a single captured image and
+     * return synchronously. The natural shape for callers that have
+     * one final image already (gallery picker, sharesheet target,
+     * screenshot text-extraction, "scan this receipt" one-shot) and
+     * don't want session ceremony.
      *
      * Pass [options].`runLlmExtraction = true` (plus
      * [com.adsamcik.mindlayer.OcrImageOptions.extractionSchemaJson]) to
@@ -2286,7 +2347,7 @@ class Mindlayer private constructor(
      * @throws MindlayerException with a typed error code on service
      *   rejection (LOW_MEMORY, INVALID_REQUEST, SERVICE_UNAVAILABLE).
      */
-    suspend fun ocrImage(
+    suspend fun ocrAsync(
         bytes: ByteArray,
         mimeType: String,
         options: com.adsamcik.mindlayer.OcrImageOptions = com.adsamcik.mindlayer.OcrImageOptions(),
@@ -2310,6 +2371,65 @@ class Mindlayer private constructor(
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    //  Deprecated OCR aliases — kept for one minor cycle so existing
+    //  callers don't break on the rename. Delegate to the new names.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Open a multi-frame OCR session using a built-in [OcrProfile].
+     *
+     * @deprecated Renamed to [ocrRealtime] in v0.10 — the
+     *   "realtime / async" pair makes the live-camera vs single-image
+     *   decision explicit. Behaviour is unchanged; this overload
+     *   delegates to [ocrRealtime].
+     */
+    @Deprecated(
+        message = "Use ocrRealtime() — the new name pairs with ocrAsync() and " +
+            "makes the live-camera intent explicit. Behaviour is unchanged.",
+        replaceWith = ReplaceWith("ocrRealtime(profile, configure)"),
+        level = DeprecationLevel.WARNING,
+    )
+    suspend fun ocrSession(
+        profile: OcrProfile,
+        configure: OcrSessionConfigBuilder.() -> Unit = {},
+    ): OcrSession = ocrRealtime(profile, configure)
+
+    /**
+     * Open a multi-frame OCR session with a pre-built [OcrSessionConfig].
+     *
+     * @deprecated Renamed to [ocrRealtime] in v0.10. Behaviour is
+     *   unchanged; this overload delegates to [ocrRealtime].
+     */
+    @Deprecated(
+        message = "Use ocrRealtime() — the new name pairs with ocrAsync() and " +
+            "makes the live-camera intent explicit. Behaviour is unchanged.",
+        replaceWith = ReplaceWith("ocrRealtime(config)"),
+        level = DeprecationLevel.WARNING,
+    )
+    suspend fun ocrSession(config: com.adsamcik.mindlayer.OcrSessionConfig): OcrSession =
+        ocrRealtime(config)
+
+    /**
+     * Single-image OCR.
+     *
+     * @deprecated Renamed to [ocrAsync] in v0.10 — the
+     *   "realtime / async" pair makes the live-camera vs single-image
+     *   decision explicit. Behaviour is unchanged; this overload
+     *   delegates to [ocrAsync].
+     */
+    @Deprecated(
+        message = "Use ocrAsync() — the new name pairs with ocrRealtime() and " +
+            "makes the single-image intent explicit. Behaviour is unchanged.",
+        replaceWith = ReplaceWith("ocrAsync(bytes, mimeType, options)"),
+        level = DeprecationLevel.WARNING,
+    )
+    suspend fun ocrImage(
+        bytes: ByteArray,
+        mimeType: String,
+        options: com.adsamcik.mindlayer.OcrImageOptions = com.adsamcik.mindlayer.OcrImageOptions(),
+    ): com.adsamcik.mindlayer.OcrImageResult = ocrAsync(bytes, mimeType, options)
+
     private suspend fun requireOcrImageCapability() {
         val caps = getCapabilities()
         if (ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT !in caps.supportedFeatures) {
@@ -2318,7 +2438,7 @@ class Mindlayer private constructor(
     }
 
     private fun ocrImageNotSupported(): MindlayerException = MindlayerException(
-        message = "Connected Mindlayer service does not support single-image OCR (ocrImage)",
+        message = "Connected Mindlayer service does not support single-image OCR (ocrAsync)",
         code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.FEATURE_NOT_SUPPORTED,
     )
 
