@@ -68,6 +68,14 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        // Headless validation entry point — `adb shell am start -n
+        // com.adsamcik.mindlayer.ocrdriver/.MainActivity --ez auto_run true`
+        // connects + runs the full validation suite and dumps the report path
+        // to logcat tag `OcrDriverAuto` so CI / automation can pull it
+        // without driving the Compose UI.
+        if (intent?.getBooleanExtra("auto_run", false) == true) {
+            viewModel.connectAndRunValidationAutomated()
+        }
     }
 }
 
@@ -285,6 +293,57 @@ class DriverViewModel(application: android.app.Application) : AndroidViewModel(a
                 _ui.value = _ui.value.copy(
                     validationInProgress = false,
                     errorMessage = "Validation aborted: ${t.javaClass.simpleName}: ${t.message}",
+                )
+            }
+        }
+    }
+
+    /**
+     * Headless entry point used by `am start ... --ez auto_run true`.
+     * Connects, runs every scenario in [ValidationRunner], writes the JSON
+     * report, and logs the final report path + per-scenario outcome to
+     * logcat under tag `OcrDriverAuto` so adb-driven automation can pull
+     * the report without ever touching the Compose UI.
+     */
+    fun connectAndRunValidationAutomated() {
+        viewModelScope.launch {
+            try {
+                android.util.Log.i("OcrDriverAuto", "Auto-run: connecting…")
+                val client = com.adsamcik.mindlayer.sdk.Mindlayer.connect(getApplication())
+                mindlayer = client
+                client.awaitConnected()
+                val caps = client.getCapabilities().supportedFeatures
+                android.util.Log.i(
+                    "OcrDriverAuto",
+                    "Auto-run: connected. ocr_session=${com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_SESSION in caps}, " +
+                        "ocr_image_oneshot=${com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT in caps}",
+                )
+                val runner = ValidationRunner(getApplication(), client)
+                val report = runner.runAll()
+                val file = runner.writeReport(report)
+                android.util.Log.i(
+                    "OcrDriverAuto",
+                    "Auto-run: complete. report=${file.absolutePath} passed=${report.passed} failed=${report.failed} total=${report.total}",
+                )
+                report.scenarios.forEach { s ->
+                    android.util.Log.i(
+                        "OcrDriverAuto",
+                        "Auto-run scenario: ${s.name} ok=${s.ok} ${s.durationMs}ms note=${s.note ?: ""}",
+                    )
+                }
+                _ui.value = _ui.value.copy(
+                    scenarios = report.scenarios,
+                    validationInProgress = false,
+                    reportPath = file.absolutePath,
+                )
+            } catch (t: Throwable) {
+                android.util.Log.e(
+                    "OcrDriverAuto",
+                    "Auto-run aborted: ${t.javaClass.simpleName}: ${t.message}",
+                )
+                _ui.value = _ui.value.copy(
+                    validationInProgress = false,
+                    errorMessage = "Auto-run aborted: ${t.javaClass.simpleName}: ${t.message}",
                 )
             }
         }
