@@ -10,6 +10,16 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * Thread-safe: per-bucket state mutations are guarded by synchronizing on the
  * bucket object. The bucket map itself is a [ConcurrentHashMap].
+ *
+ * **First-call grant (F-027 refinement).** Brand-new buckets start with
+ * exactly [initialFirstCallTokens] (default `1.0`), not the full capacity
+ * and not zero. This lets the canonical first-connect flow
+ * (`bindService` → `onServiceConnected` → `registerClient`, cost ≤ 1.0)
+ * succeed without waiting for the refill cadence (~1 token/sec at the
+ * default 60 RPM), while still preventing the "burst, idle past
+ * [idleEvictMs], burst again" evasion that motivated F-027: the grant is
+ * a single token, never the full capacity, and is consumed by the first
+ * call. From there only elapsed-time refill governs, exactly as before.
  */
 class RateLimiter(
     private val maxRequestsPerMinute: Int = DEFAULT_RPM,
@@ -28,6 +38,16 @@ class RateLimiter(
      * pin even after F-061's wall-clock cap.
      */
     private val maxGlobalConcurrent: Int = DEFAULT_MAX_GLOBAL_CONCURRENT,
+    /**
+     * F-027 refinement: number of tokens granted to a brand-new (or freshly
+     * recreated after idle eviction) bucket. Default [INITIAL_FIRST_CALL_TOKENS]
+     * (`1.0`) — exactly enough for the documented `registerClient` first
+     * call. Tests pin this to `0.0` for the historical "starts empty"
+     * behaviour or to a larger value to experiment with looser cold-start
+     * policy. Never raise the production default without re-evaluating the
+     * burst-after-eviction calculation in [newEmptyBucket]'s call site.
+     */
+    private val initialFirstCallTokens: Double = INITIAL_FIRST_CALL_TOKENS,
     private val timeSource: () -> Long = { SystemClock.elapsedRealtime() },
 ) {
 
@@ -56,9 +76,19 @@ class RateLimiter(
     fun tryAcquire(uid: Int, cost: Double): Boolean {
         val effectiveCost = cost.coerceIn(MIN_COST, MAX_COST)
         evictIdleOpportunistically()
-        // F-027: brand-new buckets must NOT start full — that lets a UID
-        // burst the documented RPM, idle past the 10-min eviction, then
-        // burst again past the cap. We start at 0 and refill from there.
+        // F-027 (refined): brand-new buckets start with exactly one token
+        // ([initialFirstCallTokens] = 1.0), not the full capacity. That lets
+        // a legitimate first-connect through — the documented
+        // `bindService` → `onServiceConnected` → `registerClient` flow
+        // always costs ≤ 1.0 — while still preventing burst-after-eviction:
+        // the one-token grant amortises to the documented RPM the moment
+        // the bucket is refilled past empty by the periodic eviction
+        // sweeper, since the bucket can never accumulate beyond `capacity`
+        // regardless of age. The pre-fix behaviour ("starts at 0") was
+        // overshooting the F-027 intent — it rejected every legitimate
+        // first-call from a new UID because the refill rate at the default
+        // 60 RPM is ~1 token/sec, but `registerClient` fires within ms of
+        // `bindService` returning.
         val bucket = buckets.getOrPut(uid) { newEmptyBucket() }
         synchronized(bucket) {
             val now = timeSource()
@@ -225,7 +255,11 @@ class RateLimiter(
 
     private fun newEmptyBucket(): Bucket {
         val now = timeSource()
-        return Bucket(capacity = maxRequestsPerMinute.toDouble(), initialTokens = 0.0).also {
+        // F-027 refinement: see [INITIAL_FIRST_CALL_TOKENS] / class doc.
+        // Capped at capacity so a degenerate `maxRequestsPerMinute = 0`
+        // bucket can never start non-empty.
+        val grant = initialFirstCallTokens.coerceIn(0.0, maxRequestsPerMinute.toDouble())
+        return Bucket(capacity = maxRequestsPerMinute.toDouble(), initialTokens = grant).also {
             it.lastRefillMs = now
             it.lastAccessMs = now
         }
@@ -233,7 +267,13 @@ class RateLimiter(
 
     private fun newEmptyRejectedBucket(): Bucket {
         val now = timeSource()
-        return Bucket(capacity = maxRejectedPerMinute.toDouble(), initialTokens = 0.0).also {
+        // F-027 refinement: same one-token grant policy as the main bucket
+        // applies to the rejected-callers bucket too — a brand-new unknown
+        // caller gets exactly one bookkeeping action (so its first
+        // `recordPending` lands), but cannot burst the disk-I/O budget on
+        // cold start.
+        val grant = initialFirstCallTokens.coerceIn(0.0, maxRejectedPerMinute.toDouble())
+        return Bucket(capacity = maxRejectedPerMinute.toDouble(), initialTokens = grant).also {
             it.lastRefillMs = now
             it.lastAccessMs = now
         }
@@ -278,5 +318,18 @@ class RateLimiter(
          */
         const val MIN_COST: Double = 0.05
         const val MAX_COST: Double = 8.0
+
+        /**
+         * F-027 refinement: tokens granted to a brand-new (or freshly
+         * recreated after idle eviction) bucket so the canonical first
+         * `registerClient` call succeeds without waiting on refill cadence.
+         * Sized to exactly one nominal call (`cost = 1.0`); a first call
+         * cheaper than `1.0` leaves the remainder available for an
+         * immediate follow-up, while an opening call >`1.0` still rejects
+         * (acceptable: documented first calls are `1.0`). Raising this
+         * default would re-open the burst-after-eviction hole F-027 was
+         * written to close — tests pin lower values to lock that in.
+         */
+        const val INITIAL_FIRST_CALL_TOKENS: Double = 1.0
     }
 }
