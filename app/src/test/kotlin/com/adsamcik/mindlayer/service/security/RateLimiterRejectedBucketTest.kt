@@ -20,10 +20,10 @@ class RateLimiterRejectedBucketTest {
             maxRejectedPerMinute = RateLimiter.DEFAULT_REJECT_RPM,
             timeSource = { time },
         )
-        // Bucket is created lazily on first call (per F-027 anti-burst:
-        // empty start). Trigger creation, then advance ≥60s so it refills
-        // to capacity.
-        rl.tryAcquireRejected(uid = 1000) // creates bucket, returns false
+        // F-027 refinement: bucket is created lazily with a 1-token grant.
+        // Trigger creation (consumes the grant → returns true), then
+        // advance ≥60 s so the bucket refills to capacity.
+        rl.tryAcquireRejected(uid = 1000) // creates bucket, consumes grant
         time += 60_000L
         var successes = 0
         for (i in 0 until 10) {
@@ -90,13 +90,18 @@ class RateLimiterRejectedBucketTest {
     }
 
     @Test
-    fun `rejected bucket starts empty - flooder cannot burst on cold start`() {
+    fun `rejected bucket starts with one-token grant - flooder cannot burst on cold start`() {
         var time = 0L
         val rl = RateLimiter(
             maxRejectedPerMinute = 6,
             timeSource = { time },
         )
-        // No time elapsed yet — bucket is empty.
-        assertFalse(rl.tryAcquireRejected(1000))
+        // F-027 refinement: the rejected-callers bucket follows the same
+        // one-token grant policy as the main bucket — a brand-new unknown
+        // caller gets exactly one bookkeeping action so its first
+        // `recordPending` lands. The second attempt without refill rejects,
+        // so a flooder still cannot burst the disk-I/O budget on cold start.
+        assertTrue("first-call grant", rl.tryAcquireRejected(1000))
+        assertFalse("burst blocked - grant is one-shot", rl.tryAcquireRejected(1000))
     }
 }

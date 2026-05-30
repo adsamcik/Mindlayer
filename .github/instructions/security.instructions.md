@@ -62,6 +62,13 @@ existing allowlist as the AIDL-level gate:
 ## Rate limiting
 
 - 60 RPM token bucket + concurrent-inference semaphore, per UID (`RateLimiter.kt`).
+- Brand-new buckets start with a **one-token first-call grant**
+  (`INITIAL_FIRST_CALL_TOKENS = 1.0`), not the full capacity and not zero —
+  so the canonical `bindService` → `onServiceConnected` → `registerClient`
+  flow succeeds without waiting for the ~1 token/sec refill cadence, while
+  still preventing the original F-027 evasion (the grant is one-shot, never
+  the full capacity). Don't raise the default; tests pin it. See
+  `RateLimiter.kt` class KDoc for the rationale.
 - The dashboard's self-UID skips the rate limit so its 2 s polling doesn't burn external budgets.
 - Rate-limit rejection happens **after** identity + allowlist so timing doesn't leak allowlist state.
 
