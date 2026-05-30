@@ -120,6 +120,46 @@ object StreamEventType {
     const val OCR_RESULT_FINALIZED = "ocr_result_finalized"
 
     /**
+     * v0.9 multi-page realtime OCR — a new page accumulator opened.
+     *
+     * Emitted only when `OcrSessionConfig.optionsJson.pageBoundaries.enabled`
+     * is true. The first page is opened at the same time as the first
+     * accepted frame, so `pageIndex == 0` is always emitted at session
+     * start; subsequent `OCR_PAGE_STARTED` events fire when the boundary
+     * heuristic (Jaccard text overlap + spatial bbox shift + gyro spike,
+     * gated by an N-frame stability window) decides the camera has moved
+     * to different content.
+     *
+     * Payload: `{pageIndex: Int, triggerFrameId: Long}` where
+     * `triggerFrameId` is the frame whose recognition output caused the
+     * boundary detection to fire (or `0` for the implicit first-page
+     * open).
+     *
+     * Non-terminal; the session continues to accept frames.
+     */
+    const val OCR_PAGE_STARTED = "ocr_page_started"
+
+    /**
+     * v0.9 multi-page realtime OCR — a page accumulator was closed off.
+     *
+     * Emitted only when `OcrSessionConfig.optionsJson.pageBoundaries.enabled`
+     * is true. Fires when (a) a boundary is detected and the previous
+     * accumulator is finalized before the next [OCR_PAGE_STARTED], or
+     * (b) the session itself finalizes — the last open page is closed
+     * before [OCR_RESULT_FINALIZED] / [DONE].
+     *
+     * Payload: `{pageIndex: Int, lines: JsonArray, fullJson: JsonObject?,
+     * lineCount: Int, framesContributed: Int}`. `fullJson` is present
+     * only when `optionsJson.pageBoundaries.llmExtractPerPage` is true
+     * and the page-level LLM extraction produced output; otherwise it is
+     * `null` and the consumer relies on `lines` for raw text.
+     *
+     * Non-terminal; further [OCR_PAGE_STARTED] events may follow, and
+     * the session still concludes with one [OCR_RESULT_FINALIZED] event.
+     */
+    const val OCR_PAGE_FINALIZED = "ocr_page_finalized"
+
+    /**
      * Advisory: client should slow down `pushOcrFrame` calls. Non-terminal.
      * Payload: `{minIntervalMs: Long, reason: String}` where `reason` is
      * one of `thermal`, `queue_pressure`, `decode_lag`, `memory_pressure`.

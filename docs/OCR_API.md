@@ -430,3 +430,108 @@ factory — both exercised by the on-device coexistence test.
 - `.github/workflows/build-paddleocr-models.yml` — manual
   conversion pipeline for the four PaddleOCR PP-OCRv5 mobile
   `.tflite` artifacts.
+
+
+## Multi-page realtime (v0.9 — preview)
+
+When the camera moves to **different content within a single `ocrRealtime` session** (e.g. the user pans from page 1 of a receipt to page 2), the service detects the boundary on the server side and emits **per-page events** while still emitting a single session-end `OCR_RESULT_FINALIZED` for backward compatibility.
+
+**The feature is opt-in.** When the new `optionsJson.pageBoundaries` block is absent or has `enabled=false` (the default), behavior is **byte-identical to v0.8** and no new events are emitted. No AIDL changes are involved — the configuration rides on the existing `OcrSessionConfig.optionsJson` envelope.
+
+### Enabling page boundaries
+
+Pass a JSON envelope on `OcrSessionConfig.optionsJson`:
+
+```json
+{
+  "pageBoundaries": {
+    "enabled": true,
+    "jaccardThreshold": 0.3,
+    "spatialThreshold": 0.5,
+    "gyroThreshold": 2.0,
+    "stabilityFrames": 3,
+    "llmExtractPerPage": false,
+    "llmExtractFinal": true
+  }
+}
+```
+
+| Field | Type | Default | Range / clamp | Meaning |
+|---|---|---|---|---|
+| `enabled` | bool | `false` | — | Master switch. `false` → v0.8 behavior, no per-page events. |
+| `jaccardThreshold` | double | `0.3` | `0..1` | Token-set Jaccard below this between frames signals "different content". |
+| `spatialThreshold` | double | `0.5` | `0..2` | Manhattan distance (in normalised 0..1 frame coords) between successive bbox centroids that signals "camera pan". |
+| `gyroThreshold` | double | `2.0` | `0..50` | `gyro_max_rad_per_s` above this signals "physical motion". |
+| `stabilityFrames` | int | `3` | `1..30` | Number of *consecutive* different frames required before a boundary fires. Filters single-frame glitches (focus search, hand obscuring page). |
+| `llmExtractPerPage` | bool | `false` | — | When `true`, run the OCR LLM extractor once per page during session finalize; result is attached to that page's `OCR_PAGE_FINALIZED.fullJson`. |
+| `llmExtractFinal` | bool | `true` | — | When `true`, run the OCR LLM extractor once on the aggregated text of all pages at session finalize; result is attached to `OCR_RESULT_FINALIZED.fullJson`. When `false`, `OCR_RESULT_FINALIZED.fullJson` carries a lightweight rollup shape instead. |
+
+Out-of-range values are clamped to the listed range. Invalid types fall back to the field default — **the session is never rejected for a malformed `pageBoundaries` block**, and unknown keys are silently ignored (forward-compat). Missing or invalid `pageBoundaries` block ⇒ `enabled=false`.
+
+### Boundary detection rule
+
+Combined OR rule, gated by an N-frame stability window:
+
+```
+isDifferent     := (jaccard < jaccardThreshold)
+                OR (spatialShift > spatialThreshold)
+                OR (gyroMaxRadPerS > gyroThreshold)
+isBoundary      := isDifferent for stabilityFrames consecutive frames
+```
+
+Token normalisation: lowercase, whitespace-split, tokens of length ≤ 2 are dropped. Bounding-box centroids are taken over the frame's recognised line bboxes (normalised to 0..1 frame coords). After a boundary fires, the consecutive-different counter resets — the next boundary needs a fresh stretch of `stabilityFrames`.
+
+### IMU input
+
+The detector reads gyro magnitude from a new `imu` sub-block on `OcrFrameMeta.extraJson`:
+
+```json
+{ "imu": { "gyro_max_rad_per_s": 1.23 } }
+```
+
+Missing block, missing field, negative, or non-finite values are treated as `0.0` — the gyro signal then contributes nothing to the boundary heuristic (only jaccard / spatial can fire). Reserved fields `accel_max_m_per_s2` and `capture_window_ms` are tolerated for future use.
+
+### New event types
+
+Both events use the existing pipe protocol — no AIDL changes — and ride alongside today's per-frame and session-end events:
+
+| Wire type | Direction | Payload fields | Fires |
+|---|---|---|---|
+| `ocr_page_started` | service → caller | `pageIndex: Int, triggerFrameId: Long` | Once on the first accepted frame after session creation (`triggerFrameId=0`) and once each time a boundary fires (`triggerFrameId` = the frame that closed the streak). |
+| `ocr_page_finalized` | service → caller | `pageIndex: Int, lines: JsonArray, fullJson: JsonObject\|null, lineCount: Int, framesContributed: Int` | When a page closes: eagerly on boundary fire (with `fullJson=null` if `llmExtractPerPage=false`) and once for the still-open last page at session finalize. When `llmExtractPerPage=true`, all `OCR_PAGE_FINALIZED` emissions are deferred to session finalize so each carries its own LLM extraction in `fullJson`. |
+
+`OCR_RESULT_FINALIZED` keeps its existing semantics: emitted exactly once per session, last, after all per-page events. When `enabled=true`:
+
+- `llmExtractFinal=true` ⇒ the aggregate LLM extraction is attached to `fullJson`;
+- `llmExtractFinal=false` ⇒ `fullJson` carries a rollup `{"pages":[{"index":Int,"lineCount":Int,"framesContributed":Int},…]}` so the event still has structured content even without an LLM call.
+
+### Event sequence example
+
+With `enabled=true, stabilityFrames=3`, two pages, no per-page LLM:
+
+```
+ocr_page_started        { pageIndex: 0, triggerFrameId: 0 }
+ocr_frame_processing    { frameId: 1, … }
+ocr_frame_processed     { frameId: 1, … }
+... (frames 2..4, all matching page 0) ...
+ocr_frame_processing    { frameId: 5, … }   ← first different frame
+ocr_frame_processed     { frameId: 5, … }
+... (frames 6, 7 also different) ...
+ocr_page_finalized      { pageIndex: 0, fullJson: null, lineCount: 4, framesContributed: 4 }
+ocr_page_started        { pageIndex: 1, triggerFrameId: 7 }
+... (page 1 frames) ...
+ocr_page_finalized      { pageIndex: 1, fullJson: null, lineCount: 6, framesContributed: 3 }
+ocr_result_finalized    { fullJson: "{\"pages\":[…]}" or "{…llm output…}" }
+done                    { reason: "ocr_complete" }
+```
+
+### Backward compatibility
+
+When `optionsJson.pageBoundaries` is absent or `enabled=false`:
+- no `ocr_page_started` / `ocr_page_finalized` events are emitted;
+- `ocr_result_finalized` carries the same `fullJson` shape as in v0.8;
+- the per-session memory footprint, latency, and CPU profile match v0.8 exactly.
+
+### SDK + CameraX support
+
+PR 1 (server detection) is implemented. PR 2 will add `:sdk` deserialization for the two new wire events and CameraX-side `Sensor.TYPE_GYROSCOPE` forwarding into `OcrFrameMeta.extraJson.imu`. Until PR 2 ships, callers can already drive the feature by hand-rolling the JSON envelope and listening to the raw stream.
