@@ -174,6 +174,69 @@ sealed class OcrEvent {
      * saturates so a well-behaved SDK can adapt.
      */
     data class ThrottleHint(val recommendedIntervalMs: Long) : OcrEvent()
+
+    /**
+     * v0.9 multi-page realtime OCR — a new page accumulator opened.
+     *
+     * Emitted only when [OcrSessionConfigBuilder.pageBoundaries]
+     * (or a hand-rolled ``optionsJson.pageBoundaries.enabled=true``)
+     * turns the feature on. The first page always opens implicitly at
+     * session start with [pageIndex] = 0 and [triggerFrameId] = 0;
+     * subsequent ``PageStarted`` events fire when the service-side
+     * boundary heuristic (Jaccard text overlap + spatial bbox shift +
+     * gyro spike, gated by an N-frame stability window) decides the
+     * camera moved to different content.
+     *
+     * @property pageIndex zero-based page index for this session.
+     * @property triggerFrameId the recognised frame whose output
+     *   crossed the stability threshold and caused the boundary fire;
+     *   ``0`` for the implicit first-page open.
+     */
+    data class PageStarted(val pageIndex: Int, val triggerFrameId: Long) : OcrEvent()
+
+    /**
+     * v0.9 multi-page realtime OCR — a page accumulator was closed off.
+     *
+     * Fires when a boundary causes the previous page to close (eagerly,
+     * before the next [PageStarted]) or when the session itself
+     * finalizes (the last open page is closed before
+     * [ResultFinalized] / DONE). Multiple ``PageFinalized`` events may
+     * be observed in one session — [ResultFinalized] is still emitted
+     * exactly once at the end.
+     *
+     * # Privacy
+     *
+     * [lines] and [fullJson] carry recognised text. Treat them as PII —
+     * the SDK never logs them. [toString] redacts: only [lineCount]
+     * and the LLM-extraction flag are shown.
+     *
+     * @property pageIndex zero-based page index this event closes off.
+     * @property lines the page's best per-line text in reading order.
+     *   Each entry corresponds to one detected text line — confidence
+     *   labels and bounding boxes are reserved for a follow-up typed
+     *   shape and only the raw text surfaces in v0.9.
+     * @property fullJson verbatim model-output JSON object as a string,
+     *   present only when ``optionsJson.pageBoundaries.llmExtractPerPage``
+     *   is true and the page-level LLM extraction produced output.
+     *   ``null`` otherwise — callers should fall back to [lines].
+     * @property lineCount number of entries in [lines]; matches
+     *   ``lines.size`` and is kept on the wire for cheap pre-allocation
+     *   even if the consumer ignores [lines].
+     * @property framesContributed number of accepted frames whose
+     *   recognition output rolled into this page's accumulator.
+     */
+    data class PageFinalized(
+        val pageIndex: Int,
+        val lines: List<String>,
+        val fullJson: String?,
+        val lineCount: Int,
+        val framesContributed: Int,
+    ) : OcrEvent() {
+        override fun toString(): String =
+            "PageFinalized(page=$pageIndex, lineCount=$lineCount, " +
+                "framesContributed=$framesContributed, " +
+                "fullJson=${if (fullJson == null) "null" else "<redacted:${fullJson.length}>"})"
+    }
 }
 
 /**

@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.float
@@ -176,6 +178,11 @@ object OcrTokenStreamReader {
         StreamEventType.OCR_THROTTLE_HINT -> OcrEvent.ThrottleHint(
             recommendedIntervalMs = e.payload["recommendedIntervalMs"]?.jsonPrimitive?.long ?: 0L,
         )
+        StreamEventType.OCR_PAGE_STARTED -> OcrEvent.PageStarted(
+            pageIndex = e.payload["pageIndex"]?.jsonPrimitive?.intOrNull ?: return null,
+            triggerFrameId = e.payload["triggerFrameId"]?.jsonPrimitive?.long ?: 0L,
+        )
+        StreamEventType.OCR_PAGE_FINALIZED -> parsePageFinalized(e)
         StreamEventType.DONE -> null // terminal, handled in readStream
         StreamEventType.ERROR -> {
             val codeInt = e.payload["codeInt"]?.jsonPrimitive?.intOrNull
@@ -220,5 +227,55 @@ object OcrTokenStreamReader {
             out[i] = v
         }
         return out
+    }
+
+    /**
+     * Decode an [StreamEventType.OCR_PAGE_FINALIZED] payload.
+     *
+     * Wire shape (see [com.adsamcik.mindlayer.shared.StreamEventType.OCR_PAGE_FINALIZED]):
+     * ```
+     * { pageIndex: Int,
+     *   lineCount: Int,
+     *   framesContributed: Int,
+     *   lines: [ { text: String, confidence: String, bbox?: [8 floats] }, … ],
+     *   fullJson?: JsonObject }
+     * ```
+     *
+     * The SDK surfaces only the raw line text in [OcrEvent.PageFinalized.lines]
+     * for v0.9 — the per-line confidence / bbox shape is reserved for a
+     * follow-up typed surface so the SDK doesn't have to break its
+     * sealed-class binary contract twice on the same release train.
+     *
+     * Defensive parsing:
+     *  - missing `pageIndex` ⇒ drop the event (return null);
+     *  - missing `lines` ⇒ surface an empty list (event still useful
+     *    for the `pageIndex` / `framesContributed` book-keeping);
+     *  - per-line entries that are not objects or are missing `text`
+     *    are skipped individually — they do not poison the whole event;
+     *  - `fullJson` that is not a JSON object falls back to `null`;
+     *  - missing `lineCount` / `framesContributed` default to safe `0`.
+     */
+    private fun parsePageFinalized(e: StreamEvent): OcrEvent.PageFinalized? {
+        val pageIndex = e.payload["pageIndex"]?.jsonPrimitive?.intOrNull ?: return null
+        val framesContributed = e.payload["framesContributed"]?.jsonPrimitive?.intOrNull ?: 0
+        val lines = (e.payload["lines"] as? JsonArray)?.mapNotNull { entry ->
+            (entry as? JsonObject)
+                ?.get("text")
+                ?.jsonPrimitive
+                ?.contentOrNull
+        } ?: emptyList()
+        val wireLineCount = e.payload["lineCount"]?.jsonPrimitive?.intOrNull
+            ?: lines.size
+        // fullJson is encoded as a JsonObject on the wire (not a string) to
+        // avoid the double-encoding pitfall — re-serialise here so the SDK
+        // surface stays string-typed.
+        val fullJson = (e.payload["fullJson"] as? JsonObject)?.toString()
+        return OcrEvent.PageFinalized(
+            pageIndex = pageIndex,
+            lines = lines,
+            fullJson = fullJson,
+            lineCount = wireLineCount,
+            framesContributed = framesContributed,
+        )
     }
 }
