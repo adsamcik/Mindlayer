@@ -70,6 +70,28 @@ internal object LiteRtAcceleratorResolver {
     fun latestDecision(featureName: String): AcceleratorDecision? =
         latestDecisions[featureName.lowercase()]
 
+    /**
+     * Records a decision that was not produced by [resolveBackend] — typically
+     * a runtime fallback after the initially-selected accelerator failed to
+     * compile a model. Dashboards surface the latest decision per feature, so
+     * pushing a follow-up entry here keeps the displayed "active backend" in
+     * sync with reality after a graceful downgrade (e.g. GPU → CPU).
+     */
+    fun recordDecision(
+        featureName: String,
+        backend: String,
+        reason: String,
+        attempted: List<Pair<String, String>> = emptyList(),
+    ): AcceleratorDecision {
+        val feature = featureName.lowercase()
+        require(feature in SUPPORTED_FEATURES) {
+            "Unsupported LiteRT featureName=$featureName"
+        }
+        val recorded = AcceleratorDecision(backend, reason, attempted)
+        latestDecisions[feature] = recorded
+        return recorded
+    }
+
     private fun resolveOcr(requested: String?, nativeLibraryDir: String?): AcceleratorDecision {
         val attempted = mutableListOf<Pair<String, String>>()
         return when (requested.normalizedBackend()) {
