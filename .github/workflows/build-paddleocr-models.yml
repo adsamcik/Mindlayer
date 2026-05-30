@@ -30,7 +30,29 @@ name: Build PaddleOCR PP-OCRv5 mobile .tflite models
 #   - PaddleOCR v3.5.0 (released 2026-04-21)
 #   - paddle2onnx v2.1.0 (released 2026-01-12)
 #   - onnx2tf v2.4.0 (released 2026-04-01)
+#   - onnxsim v0.6.3 (released 2026-04-29)
+#   - tf_keras v2.19.0 (released 2025-03-13)
 # Re-confirm soak compliance whenever you bump any of these.
+#
+# Why -tb tf_converter for rec: onnx2tf v2.4.0 switched its default
+# `--tflite_backend` from `tf_converter` to `flatbuffer_direct`. The new
+# backend writes TFLite directly and emits ONNX LayerNormalization as a
+# **custom** op named `ONNX_LAYERNORMALIZATION` that LiteRT 2.1.5 cannot
+# resolve at prepare time (Interpreter.invoke() throws "unresolved custom
+# op"). PP-OCRv5 mobile's transformer recognition head contains 5
+# LayerNormalization nodes, so the rec model is the only one affected.
+# Switching back to `tf_converter` routes the model through the
+# TensorFlow Lite Converter, which decomposes LayerNorm into native
+# Mean/Sub/Mul/Add/Rsqrt ops that LiteRT supports natively.
+#
+# Why onnxsim before tf_converter: paddle2onnx emits Shape→Slice→Concat
+# →Reshape chains in front of each LayerNorm node, so after onnx2tf's
+# fixed-shape rewrite the LN input shape is still dynamic
+# (unk__0,unk__1,unk__2). tf_keras' LayerNormalization layer refuses
+# dynamic shapes ("Eager execution of tf.constant with unsupported shape
+# … got `shape` (None,) with None elements"). onnxsim folds the
+# shape-arithmetic chains into static shapes, after which tf_converter
+# succeeds.
 
 on:
   workflow_dispatch:
@@ -95,14 +117,24 @@ jobs:
 
           python -m venv .venv-onnx2tf
           .venv-onnx2tf/bin/python -m pip install --upgrade pip
+          # tf_keras is required by onnx2tf's `tf_converter` backend (which
+          # we use to keep LayerNormalization native — see the "Why -tb
+          # tf_converter" comment at the top of this workflow). onnxsim
+          # folds dynamic shape arithmetic chains before tf_converter sees
+          # them. The onnx pin (1.20.1) matches what onnx2tf 2.4.0 pulls
+          # transitively; we pin it explicitly so the install is
+          # reproducible if the transitive resolution changes.
           .venv-onnx2tf/bin/python -m pip install \
             "onnx2tf==${{ inputs.onnx2tf_version }}" \
             "tensorflow==2.19.1" \
+            "tf_keras==2.19.0" \
+            "onnxsim==0.6.3" \
+            "onnx==1.20.1" \
             "protobuf==4.25.5" \
             "numpy==1.26.4"
 
           .venv-paddle2onnx/bin/python -c "import importlib.metadata as m; print('paddle2onnx=', m.version('paddle2onnx')); print('onnx=', m.version('onnx'))"
-          .venv-onnx2tf/bin/python -c "import importlib.metadata as m; print('onnx2tf=', m.version('onnx2tf')); print('onnx=', m.version('onnx')); print('tensorflow=', m.version('tensorflow'))"
+          .venv-onnx2tf/bin/python -c "import importlib.metadata as m; print('onnx2tf=', m.version('onnx2tf')); print('onnx=', m.version('onnx')); print('tensorflow=', m.version('tensorflow')); print('tf_keras=', m.version('tf_keras')); print('onnxsim=', m.version('onnxsim'))"
 
       - name: Fetch PaddleOCR PP-OCRv5 mobile artifacts
         env:
@@ -210,12 +242,24 @@ jobs:
           print(graph_input.name)
           PY
           )
+            # Simplify shape-arithmetic chains so tf_converter sees static
+            # shapes around LayerNormalization (otherwise tf_keras' LN
+            # layer refuses dynamic shapes). Safe no-op for det/cls.
+            simp_onnx="paddleocr-ppocrv5-mobile-${kind}-simp.onnx"
+            ../.venv-onnx2tf/bin/onnxsim \
+              "$fixed_onnx" "$simp_onnx" \
+              --overwrite-input-shape "${input_name}:${onnx_input_dims[$kind]}"
+            # `-tb tf_converter` decomposes LayerNormalization into native
+            # TFLite ops via the TensorFlow Lite Converter. The default
+            # `flatbuffer_direct` backend would emit an unresolvable
+            # `ONNX_LAYERNORMALIZATION` custom op for the rec head.
             ../.venv-onnx2tf/bin/onnx2tf \
-              -i "$fixed_onnx" \
+              -i "$simp_onnx" \
               -o "ppocrv5-${kind}-saved" \
+              -tb tf_converter \
               -ois "${input_name}:${onnx_input_dims[$kind]}" \
               -osd
-            generated="ppocrv5-${kind}-saved/paddleocr-ppocrv5-mobile-${kind}-fixed_float32.tflite"
+            generated="ppocrv5-${kind}-saved/paddleocr-ppocrv5-mobile-${kind}-simp_float32.tflite"
             if [ ! -f "$generated" ]; then
               echo "::error::Expected onnx2tf float32 output missing: $generated"
               find "ppocrv5-${kind}-saved" -maxdepth 2 -type f -print
@@ -223,6 +267,12 @@ jobs:
             fi
             mv "$generated" "paddleocr-ppocrv5-mobile-${kind}.tflite"
             rm -rf "ppocrv5-${kind}-saved"
+            # Guard against the regression where LayerNormalization is
+            # emitted as a custom op. LiteRT 2.1.5 cannot resolve such ops.
+            if grep -aq 'ONNX_LAYERNORMALIZATION' "paddleocr-ppocrv5-mobile-${kind}.tflite"; then
+              echo "::error::paddleocr-ppocrv5-mobile-${kind}.tflite contains ONNX_LAYERNORMALIZATION custom op (LiteRT cannot run it). Check that -tb tf_converter and onnxsim ran."
+              exit 1
+            fi
           done
           ../.venv-onnx2tf/bin/python <<'PY'
           import sys
@@ -270,6 +320,26 @@ jobs:
           done
           if [ ! -f tflite-out/paddleocr-ppocrv5-mobile-dict.txt ]; then
             echo "::error::Could not locate PP-OCRv5 character dictionary in source tree."
+            exit 1
+          fi
+          # PaddleOCR PP-OCRv5 mobile is trained with `use_space_char=True`,
+          # so the exported rec head emits classCount = (raw dict size) + 1
+          # space + 1 CTC blank = 18,385 classes for an 18,383-line raw
+          # dict. The on-device decoder
+          # (LiteRtPaddleOcrBackend.decodeRecognition) treats the dict file
+          # as the authoritative character list and computes
+          # classCount = dictionary.size + 1 (blank). Append the literal
+          # space token here so the shipped dict matches the model.
+          # The trailing line must end with '\n' to keep the file
+          # newline-terminated. We use printf to avoid shell trimming.
+          if [ -n "$(tail -c1 tflite-out/paddleocr-ppocrv5-mobile-dict.txt)" ]; then
+            printf '\n' >> tflite-out/paddleocr-ppocrv5-mobile-dict.txt
+          fi
+          printf ' \n' >> tflite-out/paddleocr-ppocrv5-mobile-dict.txt
+          # Sanity-check: last non-empty line is a literal " ".
+          last=$(awk 'NF || /^ $/' tflite-out/paddleocr-ppocrv5-mobile-dict.txt | tail -n1)
+          if [ "$last" != " " ]; then
+            echo "::error::Failed to append space token to dictionary (last line: '$last')"
             exit 1
           fi
 
