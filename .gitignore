@@ -58,6 +58,19 @@ paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-*.txt
 *.onnx
 *.onnx.data
 
+# OCR engine benchmark fixtures — see `docs/OCR_BENCHMARK.md` for
+# how to stage these locally. Excluded from git because:
+#   - `coffee-bags/` holds developer-supplied imagery that may carry
+#     PII / private brand context;
+#   - `tessdata/` holds 92 MB of Tesseract LSTM weights (eng + Latin)
+#     which are far too large for git and have their own distribution
+#     (https://github.com/tesseract-ocr/tessdata_fast).
+# `OcrEngineBenchmarkInstrumentedTest` self-skips via `assumeTrue` when
+# the fixtures are absent, so the rest of `:app:connectedAndroidTest`
+# remains green without them.
+app/src/androidTest/assets/ocr-bench/
+*.traineddata
+
 # Bundletool
 bundletool*.jar
 

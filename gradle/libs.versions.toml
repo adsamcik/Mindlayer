@@ -25,6 +25,10 @@ navigationCompose = "2.9.8"
 sqlcipher = "4.15.0"
 biometric = "1.4.0-alpha07"
 zxing = "3.5.4"
+# OCR engine benchmark — Tesseract4Android (Apache 2.0). Used by
+# `OcrEngineBenchmarkInstrumentedTest` only (androidTestImplementation).
+# NOT shipped in any production artifact. See settings.gradle.kts repo block.
+tesseract4android = "4.9.0"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
@@ -65,6 +69,8 @@ androidx-test-ext-junit = { module = "androidx.test.ext:junit", version.ref = "a
 android-tools-lint-api = { module = "com.android.tools.lint:lint-api", version.ref = "lint" }
 android-tools-lint-checks = { module = "com.android.tools.lint:lint-checks", version.ref = "lint" }
 android-tools-lint-tests = { module = "com.android.tools.lint:lint-tests", version.ref = "lint" }
+# Bench-only — see `tesseract4android` version comment above.
+tesseract4android = { module = "cz.adaptech.tesseract4android:tesseract4android", version.ref = "tesseract4android" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

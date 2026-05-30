@@ -18,6 +18,17 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // JitPack — scoped to Tesseract4Android only, for the on-device OCR
+        // engine benchmark in `:app:androidTest`. Tesseract is NOT shipped in
+        // any production artifact (only `androidTestImplementation`); the
+        // benchmark exists to compare PaddleOCR vs Tesseract on a fixture
+        // dataset and lives outside the main build graph.
+        maven {
+            url = uri("https://jitpack.io")
+            content {
+                includeGroup("cz.adaptech.tesseract4android")
+            }
+        }
     }
 }
 
