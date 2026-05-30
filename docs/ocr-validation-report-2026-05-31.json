@@ -1,0 +1,76 @@
+{
+    "reportVersion": 1,
+    "deviceModel": "Google sdk_gphone64_x86_64",
+    "sdkInt": 36,
+    "capabilitiesSubset": [
+        "ocr_barcode_anchor",
+        "ocr_bounding_boxes",
+        "ocr_image_oneshot",
+        "ocr_session"
+    ],
+    "scenarios": [
+        {
+            "name": "capability_advertise",
+            "ok": true,
+            "durationMs": 1,
+            "note": "FEATURE_OCR_SESSION + FEATURE_OCR_IMAGE_ONESHOT both advertised after engine warm-up"
+        },
+        {
+            "name": "single_image_no_llm",
+            "ok": false,
+            "durationMs": 656,
+            "note": "MindlayerException: OCR recognise failed: LiteRtException"
+        },
+        {
+            "name": "single_image_with_llm",
+            "ok": false,
+            "durationMs": 277,
+            "note": "MindlayerException: OCR recognise failed: LiteRtException"
+        },
+        {
+            "name": "single_image_bbox",
+            "ok": false,
+            "durationMs": 249,
+            "note": "MindlayerException: OCR recognise failed: LiteRtException"
+        },
+        {
+            "name": "session_lifecycle_basic",
+            "ok": true,
+            "durationMs": 640,
+            "note": "events=3 finalJsonLen=2"
+        },
+        {
+            "name": "session_stream_not_attached_rejects",
+            "ok": false,
+            "durationMs": 4,
+            "note": "MindlayerException: Rate limit exceeded"
+        },
+        {
+            "name": "session_close_idempotent",
+            "ok": false,
+            "durationMs": 3,
+            "note": "MindlayerException: Rate limit exceeded"
+        },
+        {
+            "name": "inference_facade_smoke",
+            "ok": true,
+            "durationMs": 1,
+            "note": "createSession failed at AIDL: IllegalArgumentException"
+        },
+        {
+            "name": "embeddings_capability_accuracy",
+            "ok": true,
+            "durationMs": 0,
+            "note": "FEATURE_EMBEDDINGS absent (engine missing); embedOne mapped to: MindlayerException"
+        },
+        {
+            "name": "ping_health_check",
+            "ok": true,
+            "durationMs": 0,
+            "note": "capabilities returned 19 features"
+        }
+    ],
+    "passed": 5,
+    "failed": 5,
+    "total": 10
+}
