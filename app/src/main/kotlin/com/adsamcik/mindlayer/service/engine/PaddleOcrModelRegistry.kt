@@ -2,6 +2,7 @@ package com.adsamcik.mindlayer.service.engine
 
 import android.content.Context
 import android.content.pm.ApplicationInfo
+import android.os.Build
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
 import kotlinx.serialization.json.Json
@@ -14,6 +15,7 @@ import java.io.FileInputStream
 import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Discovers installed PaddleOCR PP-OCRv5 mobile model bundles.
@@ -99,7 +101,9 @@ object PaddleOcrModelRegistry {
         // 3. Sideload — debuggable builds only.
         if (isDebuggable(context)) {
             try {
-                consider(Origin.SIDELOAD, bundleFromDir(File("/data/local/tmp"), manifest, requireIntegrity))
+                val tmp = File("/data/local/tmp")
+                warnIfSideloadInaccessible(context, tmp)
+                consider(Origin.SIDELOAD, bundleFromDir(tmp, manifest, requireIntegrity))
             } catch (_: SecurityException) {
                 // /data/local/tmp not accessible — fine, ignore.
             }
@@ -323,6 +327,34 @@ object PaddleOcrModelRegistry {
 
     internal fun isDebuggable(context: Context): Boolean =
         (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+    /**
+     * Emit a one-time warning when the legacy `/data/local/tmp` sideload
+     * scan is silently skipped on API 31+. As of Android 12, apps cannot
+     * list `/data/local/tmp` even when individual files inside are
+     * world-readable — `dir.listFiles()` returns `null`, so
+     * [bundleFromDir] returns `null` with no obvious explanation. The
+     * existing `getExternalFilesDir(null)` scan IS accessible to the
+     * app's UID; the dev tooling now targets that. See docs/DEV_MODELS.md.
+     */
+    private val sideloadInaccessibleWarned = AtomicBoolean(false)
+
+    private fun warnIfSideloadInaccessible(context: Context, dir: File) {
+        if (sideloadInaccessibleWarned.get()) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        if (!isDebuggable(context)) return
+        if (dir.listFiles() != null) return
+        if (!sideloadInaccessibleWarned.compareAndSet(false, true)) return
+        val ext = context.getExternalFilesDir(null)?.absolutePath
+            ?: "/sdcard/Android/data/<package>/files"
+        MindlayerLog.w(
+            TAG,
+            "Cannot list ${dir.absolutePath} on API ${Build.VERSION.SDK_INT} (apps lose " +
+                "directory-listing permission from Android 12 onward, even when individual " +
+                "files inside are world-readable). Push dev models to $ext instead — the " +
+                "registry already scans that path. See docs/DEV_MODELS.md.",
+        )
+    }
 
     private fun JsonObject.stringOrNull(name: String): String? =
         (this[name] as? JsonPrimitive)?.contentOrNull

@@ -21,27 +21,34 @@ iterate normally.
 # One-time per machine: where your model cache lives.
 $env:MINDLAYER_MODEL_CACHE = 'D:\mindlayer-models'
 
-# Push all three model groups to a connected debuggable device.
-.\tools\dev-models\push-models.ps1 -All
-
-# Build + install a code-only APK (the -Pmindlayer.bundle* flags
-# that strip the three AI Asset Packs are added by a sibling PR;
-# without them you still get a working build, just a fatter APK).
+# Install a code-only debug APK FIRST so the script can detect the
+# service package and target its externalFilesDir.
 .\gradlew.bat :app:installDebug `
     "-Pmindlayer.bundleGemma=false" `
     "-Pmindlayer.bundleEmbeddings=false" `
     "-Pmindlayer.bundlePaddleocr=false"
+
+# THEN push all three model groups to the service's externalFilesDir.
+.\tools\dev-models\push-models.ps1 -All
 ```
 
 That's the loop. The service finds the sideloaded files in
-`/data/local/tmp/` at startup (debuggable builds only) and loads
-them with `Origin.SIDELOAD`.
+`/sdcard/Android/data/com.adsamcik.mindlayer.service.debug/files/`
+(or `…/com.adsamcik.mindlayer.service/files/` for a release-flavour
+build) at startup, on debuggable builds only, and loads them with
+`Origin.EXTERNAL_FILES`.
+
+> **Order matters.** Install the APK first. On Android 12+ the
+> script's legacy `/data/local/tmp/` fallback path is effectively
+> dead (see [Why externalFilesDir, not /data/local/tmp/](#why-externalfilesdir-not-datalocaltmp)
+> below), so pushing before install no longer works.
 
 ## How sideload works
 
 Each model registry under
 `app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/` scans
-`/data/local/tmp/` on debuggable builds:
+the service's `getExternalFilesDir(null)` on debuggable builds. The
+push script targets the same directory:
 
 | Registry | Filename pattern | Canonical filenames |
 |---|---|---|
@@ -50,8 +57,34 @@ Each model registry under
 | `PaddleOcrModelRegistry` | exact 4-file set | `paddleocr-ppocrv5-mobile-{det,rec,cls}.tflite`, `paddleocr-ppocrv5-mobile-dict.txt` |
 
 The sideload path is gated by `BuildConfig.DEBUG`. On release `user`
-builds the registries refuse `Origin.SIDELOAD` outright; there is no
-runtime knob to override this.
+builds the registries refuse `Origin.EXTERNAL_FILES`/`Origin.SIDELOAD`
+outright; there is no runtime knob to override this.
+
+### Why externalFilesDir, not `/data/local/tmp/`
+
+Historically this tooling pushed to `/data/local/tmp/`. On Android 12
+(API 31) and later, **apps cannot list `/data/local/tmp/`** — the
+directory itself is no longer readable by app UIDs even when
+individual files inside are world-readable. Concretely:
+
+```text
+$ adb shell run-as com.adsamcik.mindlayer.service.debug \
+    ls -la /data/local/tmp/
+ls: /data/local/tmp/: Permission denied
+```
+
+`File("/data/local/tmp").listFiles()` then returns `null`, every
+registry's `bundleFromDir` / `scanDir` short-circuits, and you get
+`Discovered 0 PaddleOCR bundle(s)` with no obvious explanation.
+
+The service's `getExternalFilesDir(null)` (returned by `Context`,
+typically `/sdcard/Android/data/<pkg>/files/`) **is** readable by
+the app's own UID without any permission song-and-dance, and `adb
+push` to that path also works without root. That's now the default
+sideload target. The `/data/local/tmp/` branch is still scanned on
+debuggable builds for older Android versions, and remains the
+script's loud-warned fallback when the service isn't yet installed
+on the connected device.
 
 ## Sources
 
@@ -117,6 +150,10 @@ $env:MINDLAYER_MODEL_CACHE\
 # Two models, specific device, dry run first.
 .\tools\dev-models\push-models.ps1 -Gemma -Embeddings `
     -Device emulator-5554 -DryRun
+
+# Force the legacy /data/local/tmp/ target (API <= 30 devices,
+# or for testing the fallback branch).
+.\tools\dev-models\push-models.ps1 -Paddleocr -PreferLegacyTmp
 ```
 
 ### macOS / Linux
@@ -127,6 +164,7 @@ export MINDLAYER_MODEL_CACHE=/data/mindlayer-models
 ./tools/dev-models/push-models.sh --all
 ./tools/dev-models/push-models.sh --gemma --embeddings --dry-run
 ./tools/dev-models/push-models.sh --paddleocr --device emulator-5554
+./tools/dev-models/push-models.sh --paddleocr --prefer-legacy-tmp
 ```
 
 ### Flag reference
@@ -140,6 +178,23 @@ export MINDLAYER_MODEL_CACHE=/data/mindlayer-models
 | `-Cache <path>` | `--cache <path>` | override `$MINDLAYER_MODEL_CACHE` |
 | `-Device <serial>` | `--device <serial>` | pick a target when multiple devices attach |
 | `-DryRun` | `--dry-run` | print actions without pushing |
+| `-PreferLegacyTmp` | `--prefer-legacy-tmp` | force legacy `/data/local/tmp/` target |
+
+### How the push target is resolved
+
+1. **`-PreferLegacyTmp` / `--prefer-legacy-tmp`** → `/data/local/tmp/`,
+   no device query.
+2. **`-DryRun` / `--dry-run`** without `-PreferLegacyTmp` → assumes the
+   debug service variant is installed (most common dev case) and prints
+   `/sdcard/Android/data/com.adsamcik.mindlayer.service.debug/files/…`.
+3. **Real run**: `adb shell pm list packages` is queried for the debug
+   variant first, then the release variant. First match wins; the push
+   target is `/sdcard/Android/data/<pkg>/files/` and the script `mkdir
+   -p`s it before pushing in case the app hasn't run yet.
+4. **Neither variant installed**: loud warning, fall back to
+   `/data/local/tmp/`. This branch is effectively dead on API 31+ but
+   preserves the legacy UX for users who push before install on older
+   devices.
 
 ### Sample dry-run output
 
@@ -150,12 +205,13 @@ Mindlayer dev model sideload
   device: (auto)
   dryRun: True
   (skipping adb/device checks in dry-run mode)
+  remote: /sdcard/Android/data/com.adsamcik.mindlayer.service.debug/files  (service pkg: com.adsamcik.mindlayer.service.debug)
 
 === Gemma chat ===
 - gemma-4-E2B-it.litertlm
   sha: manifest SHA not populated (dev placeholder), skipping verification.
-  [dry-run] adb push D:\mindlayer-models\gemma-4-E2B-it.litertlm /data/local/tmp/gemma-4-E2B-it.litertlm
-  [dry-run] adb shell ls -l /data/local/tmp/gemma-4-E2B-it.litertlm
+  [dry-run] adb push D:\mindlayer-models\gemma-4-E2B-it.litertlm /sdcard/Android/data/com.adsamcik.mindlayer.service.debug/files/gemma-4-E2B-it.litertlm
+  [dry-run] adb shell ls -l /sdcard/Android/data/com.adsamcik.mindlayer.service.debug/files/gemma-4-E2B-it.litertlm
 
 Done. All requested files processed cleanly (dry-run).
 ```
@@ -193,22 +249,30 @@ boundary.
   privacy invariants forbid `INTERNET` in `:app`/`:sdk` and this
   tooling follows the same spirit.
 - **No telemetry / third-party services.** Pure local-file + `adb`.
-- **No release-artifact tampering.** It writes only to
-  `/data/local/tmp/`, never to APK contents, asset packs, or any
-  signed artifact.
+- **No release-artifact tampering.** It writes only to the service's
+  externalFilesDir (or to `/data/local/tmp/` in the legacy fallback),
+  never to APK contents, asset packs, or any signed artifact.
 - **No production-gate bypass.** Release builds (`user` build type)
-  refuse `/data/local/tmp` sideload via `BuildConfig.DEBUG`. You
-  cannot use this on a shipping build, by design.
+  refuse sideload via `BuildConfig.DEBUG`. You cannot use this on a
+  shipping build, by design.
 
 ## Security note
 
-`/data/local/tmp/` is writable by the `shell` user (the user `adb`
-acts as). On a non-debuggable `user` build, even if you push files
-there, the runtime registries will not load them — the `Origin.SIDELOAD`
-branch is compiled-out at the predicate level. This script enforces
-the same constraint client-side by refusing to push unless the
-target device reports `ro.debuggable=1` or `ro.build.type` ∈
-{`userdebug`, `eng`}.
+`/sdcard/Android/data/<pkg>/files/` (the service's `externalFilesDir`)
+is OS-managed app-private storage on modern Android — other apps
+cannot read it without `MANAGE_EXTERNAL_STORAGE`, and the system
+deletes it on uninstall. From the registry's point of view this is
+the same trust tier (`Origin.EXTERNAL_FILES`) it has always treated
+as a developer sideload location; there is **no security delta**
+compared with the legacy `/data/local/tmp/` path.
+
+The actual production gate is `BuildConfig.DEBUG`. On a non-debuggable
+`user` build, even if you push files into the service's externalFilesDir
+(or `/data/local/tmp/`), the runtime registries will not load them —
+the developer-tier `Origin` branches are compiled-out at the
+predicate level. The script enforces the same constraint client-side
+by refusing to push unless the target device reports `ro.debuggable=1`
+or `ro.build.type` ∈ {`userdebug`, `eng`}.
 
 If you need to test integrity-gated behaviour, build the AI Asset
 Pack flavour normally; sideload is for code-iteration ergonomics,

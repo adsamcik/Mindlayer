@@ -2,6 +2,7 @@ package com.adsamcik.mindlayer.service.engine
 
 import android.content.Context
 import android.content.pm.ApplicationInfo
+import android.os.Build
 import com.adsamcik.mindlayer.service.BuildConfig
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
@@ -11,6 +12,7 @@ import java.io.FileInputStream
 import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Discovers installed LLM model files on the device.
@@ -154,7 +156,9 @@ object ModelRegistry {
         // 5: Sideload — debug builds only.
         if (BuildConfig.DEBUG) {
             try {
-                scanDir(Origin.SIDELOAD, File("/data/local/tmp"))
+                val tmp = File("/data/local/tmp")
+                warnIfSideloadInaccessible(context, tmp)
+                scanDir(Origin.SIDELOAD, tmp)
             } catch (_: SecurityException) {
                 // Not accessible — ignore
             }
@@ -304,6 +308,30 @@ object ModelRegistry {
 
     private fun isDebuggable(context: Context): Boolean =
         (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+    /**
+     * One-shot warning when `/data/local/tmp` listing is denied on API
+     * 31+. See [PaddleOcrModelRegistry.warnIfSideloadInaccessible] for
+     * the full rationale; this is the mirror for the chat-model registry.
+     */
+    private val sideloadInaccessibleWarned = AtomicBoolean(false)
+
+    private fun warnIfSideloadInaccessible(context: Context, dir: File) {
+        if (sideloadInaccessibleWarned.get()) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        if (!isDebuggable(context)) return
+        if (dir.listFiles() != null) return
+        if (!sideloadInaccessibleWarned.compareAndSet(false, true)) return
+        val ext = context.getExternalFilesDir(null)?.absolutePath
+            ?: "/sdcard/Android/data/<package>/files"
+        MindlayerLog.w(
+            TAG,
+            "Cannot list ${dir.absolutePath} on API ${Build.VERSION.SDK_INT} (apps lose " +
+                "directory-listing permission from Android 12 onward, even when individual " +
+                "files inside are world-readable). Push dev models to $ext instead — the " +
+                "registry already scans that path. See docs/DEV_MODELS.md.",
+        )
+    }
 
     private data class IntegrityMetadata(
         val sha256: String,
