@@ -70,8 +70,8 @@ strictly more complex.
 |---|---|---|---|
 | Gemma chat | LiteRT-LM 0.12.0 | NPU → GPU → CPU chain in `EngineManager` | Production |
 | EmbeddingGemma | Base LiteRT 2.1.5 | GPU/CPU via `CompiledModel` (`LiteRtEmbeddingBackend`) | Scaffold — verify-on-device markers |
-| PaddleOCR PP-OCRv5 | Base LiteRT 2.1.5 | CPU-only via `LiteRtAcceleratorResolver` until coexistence validation; `CompiledModel` path remains base LiteRT 2.1.5 | Prototype — OCR acceleration locked off |
-| Chat + embeddings + OCR together | LiteRT-LM 0.12.0 + base LiteRT 2.1.5 (embeddings) + base LiteRT 2.1.5 (OCR) | Chat owns LiteRT-LM backend chain; embeddings resolve through the shared `LiteRtAcceleratorResolver`; OCR resolves CPU-only via the same resolver | Three-stack Phase 4 validation matrix |
+| PaddleOCR PP-OCRv5 | Base LiteRT 2.1.5 | GPU default via `LiteRtAcceleratorResolver` (mirrors chat: `null` → GPU; explicit `NPU` probed + GPU-fallback; explicit `CPU`/`GPU` honored); three sequential `CompiledModel`s (det + rec + cls) | Prototype — same-process coexistence unverified |
+| Chat + embeddings + OCR together | LiteRT-LM 0.12.0 + base LiteRT 2.1.5 (embeddings) + base LiteRT 2.1.5 (OCR) | Chat owns LiteRT-LM backend chain; embeddings and OCR resolve through the shared `LiteRtAcceleratorResolver` | Three-stack Phase 4 validation matrix |
 
 All three stacks share the service process. The OCR path is the
 **newest** and so the highest-risk for surfacing coexistence
@@ -153,7 +153,7 @@ LiteRT issue #5264 is directly relevant to every site that calls `CompiledModel.
 - `app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/RealPaddleOcrLiteRtRunner.kt` creates PaddleOCR detection, recognition, and optional orientation-classifier `CompiledModel`s back-to-back.
 - `app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/EngineManager.kt` creates the LiteRT-LM Gemma `Engine` with its own CPU/GPU/NPU backend surface.
 
-`LiteRtAcceleratorResolver` currently allows embeddings to preserve the existing best-effort labels (`NPU` on allowlisted SoC + native library probe, explicit `GPU`, otherwise `CPU`). OCR is explicitly CPU-only with reason `OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED` until this checklist passes on target devices.
+`LiteRtAcceleratorResolver` allows both embeddings and OCR to opt into GPU/NPU when supported. Embeddings default to NPU-when-allowlisted-and-libs-probed-else-CPU; OCR mirrors chat — `null` defaults to GPU, explicit `NPU` is probed against the SoC allowlist + native-library check and falls back to GPU on unsupported devices, explicit `CPU`/`GPU` is always honored. The three sequential `CompiledModel` instances (det + rec + cls) make OCR the highest-exposure site for issue #5264 — run the checklist above on target devices before relying on GPU/NPU OCR in production. Callers that need a conservative configuration must pass `preferredBackend = "CPU"` explicitly.
 
 ## Per-feature accelerator overrides
 

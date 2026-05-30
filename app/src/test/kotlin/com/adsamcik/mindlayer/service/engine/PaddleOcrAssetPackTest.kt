@@ -61,15 +61,29 @@ class PaddleOcrAssetPackTest {
         )
     }
 
-    @Test fun `paddleocr_model is listed in app assetPacks`() {
+    @Test fun `paddleocr_model is registered to ship in app asset packs`() {
         val appBuild = repoRoot().resolve("app/build.gradle.kts")
         val text = Files.readString(appBuild)
-        val assetPacksLine = text.lineSequence()
-            .firstOrNull { it.contains("assetPacks += listOf(") }
-            ?: error("app/build.gradle.kts does not declare any assetPacks list.")
+
+        // The selective-bundling DSL registers each pack via
+        //   bundle("mindlayer.bundle<Name>", ":<module>")
+        // inside a buildList; whitespace-tolerant regex matches the registration.
+        val registrationPattern = Regex(
+            """bundle\s*\(\s*"[^"]+"\s*,\s*":paddleocr_model"\s*\)"""
+        )
         assertTrue(
-            "app/build.gradle.kts assetPacks must include :paddleocr_model so the pack ships in the AAB.",
-            assetPacksLine.contains(":paddleocr_model"),
+            "app/build.gradle.kts must register :paddleocr_model with the selective " +
+                "asset-pack bundling DSL (bundle(\"mindlayer.bundlePaddleocr\", \":paddleocr_model\")) " +
+                "so it can ship in the AAB by default.",
+            registrationPattern.containsMatchIn(text),
+        )
+
+        // And the computed list must actually flow into android.assetPacks.
+        val attachmentPattern = Regex("""assetPacks\s*\+=\s*\w+""")
+        assertTrue(
+            "app/build.gradle.kts must append the bundled-asset-pack list to android.assetPacks " +
+                "(e.g. `assetPacks += bundledAssetPacks`) so registered packs actually ship.",
+            attachmentPattern.containsMatchIn(text),
         )
     }
 

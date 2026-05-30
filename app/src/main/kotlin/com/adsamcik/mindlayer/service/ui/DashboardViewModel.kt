@@ -4,11 +4,21 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.adsamcik.mindlayer.EmbeddingRequest
 import com.adsamcik.mindlayer.EngineInfo
+import com.adsamcik.mindlayer.MediaPart
+import com.adsamcik.mindlayer.OcrFrameAck
+import com.adsamcik.mindlayer.OcrFrameMeta
+import com.adsamcik.mindlayer.OcrSessionConfig
 import com.adsamcik.mindlayer.RequestMeta
 import com.adsamcik.mindlayer.ServiceStatus
 import com.adsamcik.mindlayer.SessionConfig
@@ -21,6 +31,7 @@ import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import com.adsamcik.mindlayer.shared.StreamEvent
 import com.adsamcik.mindlayer.shared.StreamHeader
+import com.adsamcik.mindlayer.shared.StreamEventType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -39,6 +50,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedInputStream
 import java.io.DataInputStream
 import java.io.EOFException
+import java.io.File
 import java.util.UUID
 
 /**
@@ -361,7 +373,15 @@ class DashboardViewModel : ViewModel() {
 
     private companion object {
         const val TEST_INFERENCE_PREWARM_BACKEND = "GPU"
-        const val TEST_INFERENCE_PREWARM_TIMEOUT_MS = 30_000L
+        // Emulator first-load of a 2.4 GB .litertlm with the software GPU
+        // backend routinely takes 60-90s; real devices finish in seconds.
+        // Budget 3 minutes so the verification UX doesn't bail out before
+        // the engine has had a chance to come up on slow hardware.
+        const val TEST_INFERENCE_PREWARM_TIMEOUT_MS = 180_000L
+
+        const val OCR_FIXTURE_TEXT = "Hello world 1234"
+        const val OCR_FIXTURE_WIDTH = 480
+        const val OCR_FIXTURE_HEIGHT = 140
     }
 
     private val testJson = Json { ignoreUnknownKeys = true }
@@ -411,7 +431,7 @@ class DashboardViewModel : ViewModel() {
                 testService = svc
 
                 _uiState.update {
-                    it.copy(testStatus = "Warming engine for test inference")
+                    it.copy(testStatus = "Warming engine — first load can take 1–2 min on emulators")
                 }
                 val activeBackend = withContext(Dispatchers.IO) {
                     svc.prewarmAndAwait(
@@ -605,6 +625,508 @@ class DashboardViewModel : ViewModel() {
         statusPollingJob?.cancel()
         logPollingJob?.cancel()
         super.onCleared()
+    }
+
+    // ---- Embedding verification ------------------------------------------------
+
+    /**
+     * Runs a deterministic two-sample embedding smoke test:
+     * 1. Embed sentence A via AIDL.
+     * 2. Embed sentence B via AIDL.
+     * 3. Verify both vectors are non-trivial, L2-normalised, and have
+     *    cosine similarity strictly < 0.99 (distinguishable).
+     *
+     * Independent of [runTestInference] — the embedding engine has its
+     * own backend and can run while a chat test is in-flight. Uses the
+     * same fixtures as [com.adsamcik.mindlayer.service.engine.EmbeddingEndToEndInstrumentedTest]
+     * so the dashboard surface and the instrumented contract test exercise
+     * the same code path.
+     */
+    fun runEmbeddingTest() {
+        _uiState.value.embeddingTestReadinessIssue()?.let { issue ->
+            _uiState.update {
+                it.copy(embeddingTest = it.embeddingTest.copy(
+                    isRunning = false,
+                    status = issue,
+                    tone = DashboardMessageTone.WARNING,
+                ))
+            }
+            return
+        }
+
+        _uiState.update {
+            it.copy(embeddingTest = EngineTestState(
+                isRunning = true,
+                status = "Loading EmbeddingGemma — first call warms the engine",
+                tone = DashboardMessageTone.INFO,
+            ))
+        }
+
+        viewModelScope.launch {
+            try {
+                val svc = service ?: run {
+                    _uiState.update {
+                        it.copy(embeddingTest = it.embeddingTest.copy(
+                            isRunning = false,
+                            status = "Service is not connected",
+                            tone = DashboardMessageTone.ERROR,
+                            lastCompletedAtMs = System.currentTimeMillis(),
+                        ))
+                    }
+                    return@launch
+                }
+
+                val textA = "The cat sits on the mat."
+                val textB = "Quantum mechanics describes particles."
+
+                val resultA = withContext(Dispatchers.IO) {
+                    svc.embed(EmbeddingRequest(text = textA, tag = "dashboard-a"))
+                }
+                _uiState.update {
+                    it.copy(embeddingTest = it.embeddingTest.copy(
+                        status = "First embedding ready • ${resultA.dim}-D in " +
+                            "${resultA.durationMs}ms • sending second",
+                    ))
+                }
+
+                val resultB = withContext(Dispatchers.IO) {
+                    svc.embed(EmbeddingRequest(text = textB, tag = "dashboard-b"))
+                }
+
+                val vecA = resultA.vector
+                val vecB = resultB.vector
+                check(vecA.size == vecB.size) {
+                    "Embedding vector dimensions differ: A=${vecA.size}, B=${vecB.size}"
+                }
+                var cosine = 0.0
+                for (i in vecA.indices) cosine += vecA[i].toDouble() * vecB[i].toDouble()
+                val normA = kotlin.math.sqrt(vecA.fold(0.0) { acc, v -> acc + v * v })
+                val anyNonZero = vecA.any { kotlin.math.abs(it) > 1e-6f }
+                val anyNaN = vecA.any { it.isNaN() } || vecB.any { it.isNaN() }
+                val distinguishable = cosine < 0.99
+
+                val passed = anyNonZero && !anyNaN && distinguishable
+                val backend = resultA.backend
+                val output = buildString {
+                    appendLine("Dim:       ${resultA.dim}")
+                    appendLine("Backend:   $backend")
+                    appendLine("Latency:   ${resultA.durationMs}ms (A) / ${resultB.durationMs}ms (B)")
+                    appendLine("Tokens:    ${resultA.tokenCount} (A) / ${resultB.tokenCount} (B)")
+                    appendLine("\u2016A\u2016\u2082:     " + "%.4f".format(normA) + "  (expect \u2248 1.0)")
+                    append("cos(A,B):  " + "%.4f".format(cosine) + "  (expect < 0.99)")
+                }
+                val status = when {
+                    !anyNonZero -> "Vector A is all-zero — model is not returning weights"
+                    anyNaN -> "Embedding vectors contain NaN values"
+                    !distinguishable ->
+                        "Vectors look near-identical (cos=${"%.4f".format(cosine)}); model may be miscalibrated"
+                    else -> "Completed \u2022 two distinguishable ${resultA.dim}-D vectors on $backend"
+                }
+
+                _uiState.update {
+                    it.copy(embeddingTest = EngineTestState(
+                        isRunning = false,
+                        status = status,
+                        tone = if (passed) DashboardMessageTone.SUCCESS else DashboardMessageTone.WARNING,
+                        output = output,
+                        lastCompletedAtMs = System.currentTimeMillis(),
+                    ))
+                }
+            } catch (e: Exception) {
+                val rendered = e.toInferenceErrorMessage()
+                _uiState.update {
+                    it.copy(embeddingTest = it.embeddingTest.copy(
+                        isRunning = false,
+                        status = "Embedding test failed: $rendered",
+                        tone = DashboardMessageTone.ERROR,
+                        output = rendered,
+                        lastCompletedAtMs = System.currentTimeMillis(),
+                    ))
+                }
+            }
+        }
+    }
+
+    // ---- OCR verification -----------------------------------------------------
+
+    /**
+     * Runs the OCR session lifecycle end-to-end:
+     * 1. Render a high-contrast ``Hello world 1234`` PNG fixture into
+     *    [Context.getCacheDir] so the engine sees a real, decodable
+     *    image (the in-tree instrumented test uses a synthetic
+     *    checkerboard + a mock backend; the dashboard test runs against
+     *    the real PaddleOCR engine).
+     * 2. ``svc.createOcrSession(MODE_GENERAL_DOCUMENT)``.
+     * 3. ``svc.streamOcrEvents(sessionId, writePfd)`` — pipe is opened
+     *    locally and the read end is consumed in [Dispatchers.IO].
+     * 4. ``svc.pushOcrFrame(sessionId, MediaPart(IMAGE), OcrFrameMeta)``.
+     * 5. ``svc.finalizeOcrSession`` then drain until ``ocr_result_finalized``
+     *    or ``done`` arrives.
+     * 6. ``svc.closeOcrSession`` in finally.
+     *
+     * Surfaces recognized text + frame stats to the dashboard output box.
+     */
+    fun runOcrTest(context: Context) {
+        _uiState.value.ocrTestReadinessIssue()?.let { issue ->
+            _uiState.update {
+                it.copy(ocrTest = it.ocrTest.copy(
+                    isRunning = false,
+                    status = issue,
+                    tone = DashboardMessageTone.WARNING,
+                ))
+            }
+            return
+        }
+
+        _uiState.update {
+            it.copy(ocrTest = EngineTestState(
+                isRunning = true,
+                status = "Rendering OCR fixture image",
+                tone = DashboardMessageTone.INFO,
+            ))
+        }
+
+        val cacheDir = context.cacheDir
+        viewModelScope.launch {
+            var ocrService: com.adsamcik.mindlayer.IMindlayerService? = null
+            var sessionId: String? = null
+            try {
+                val svc = service ?: run {
+                    _uiState.update {
+                        it.copy(ocrTest = it.ocrTest.copy(
+                            isRunning = false,
+                            status = "Service is not connected",
+                            tone = DashboardMessageTone.ERROR,
+                            lastCompletedAtMs = System.currentTimeMillis(),
+                        ))
+                    }
+                    return@launch
+                }
+                ocrService = svc
+
+                val fixtureFile = withContext(Dispatchers.IO) {
+                    renderOcrFixturePng(cacheDir)
+                }
+
+                _uiState.update {
+                    it.copy(ocrTest = it.ocrTest.copy(
+                        status = "Opening OCR session",
+                    ))
+                }
+                sessionId = withContext(Dispatchers.IO) {
+                    svc.createOcrSession(
+                        OcrSessionConfig(
+                            mode = OcrSessionConfig.MODE_GENERAL_DOCUMENT,
+                            outputSchemaJson = "{\"type\":\"object\"}",
+                            maxFrames = 1,
+                        ),
+                    )
+                }
+                val activeSessionId = requireNotNull(sessionId) { "Service returned a null OCR session id" }
+
+                val pipe = ParcelFileDescriptor.createReliablePipe()
+                val readEnd = pipe[0]
+                val writeEnd = pipe[1]
+
+                try {
+                    withContext(Dispatchers.IO) { svc.streamOcrEvents(activeSessionId, writeEnd) }
+                } finally {
+                    runCatching { writeEnd.close() }
+                }
+
+                val frameSource = withContext(Dispatchers.IO) {
+                    ParcelFileDescriptor.open(fixtureFile, ParcelFileDescriptor.MODE_READ_ONLY)
+                }
+                val frame = MediaPart(
+                    requestId = UUID.randomUUID().toString(),
+                    kind = MediaPart.KIND_IMAGE,
+                    mimeType = "image/png",
+                    source = frameSource,
+                    isSharedMemory = false,
+                    payloadBytes = fixtureFile.length(),
+                    width = OCR_FIXTURE_WIDTH,
+                    height = OCR_FIXTURE_HEIGHT,
+                )
+                _uiState.update {
+                    it.copy(ocrTest = it.ocrTest.copy(
+                        status = "Pushing fixture frame (${fixtureFile.length()} bytes)",
+                    ))
+                }
+                val ack = withContext(Dispatchers.IO) {
+                    svc.pushOcrFrame(
+                        activeSessionId,
+                        frame,
+                        OcrFrameMeta(
+                            frameId = 1L,
+                            captureTimeMs = System.currentTimeMillis(),
+                            rotationDegrees = 0,
+                            qualityHint = OcrFrameMeta.QUALITY_GOOD,
+                        ),
+                    )
+                }
+                if (ack.status != OcrFrameAck.STATUS_ACCEPTED) {
+                    throw IllegalStateException(
+                        "pushOcrFrame returned status=${ack.status} (expected ACCEPTED)",
+                    )
+                }
+
+                _uiState.update {
+                    it.copy(ocrTest = it.ocrTest.copy(
+                        status = "Frame accepted — finalizing session",
+                    ))
+                }
+                withContext(Dispatchers.IO) { svc.finalizeOcrSession(activeSessionId) }
+
+                _uiState.update {
+                    it.copy(ocrTest = it.ocrTest.copy(
+                        status = "Waiting for recognition result",
+                    ))
+                }
+                val drained = withContext(Dispatchers.IO) { drainOcrEvents(readEnd) }
+
+                val recognized = drained.recognizedText
+                val producedText = drained.lineCount > 0 || recognized.isNotBlank()
+                val pass = drained.finalized &&
+                    drained.frameProcessedCount > 0 &&
+                    drained.errorCount == 0 &&
+                    producedText
+                val tone = when {
+                    drained.errorCount > 0 -> DashboardMessageTone.ERROR
+                    !drained.finalized -> DashboardMessageTone.WARNING
+                    drained.frameProcessedCount == 0 -> DashboardMessageTone.WARNING
+                    !producedText -> DashboardMessageTone.WARNING
+                    else -> DashboardMessageTone.SUCCESS
+                }
+                val status = when {
+                    drained.errorCount > 0 ->
+                        "OCR pipeline returned ${drained.errorCount} error event(s) \u2014 see output"
+                    !drained.finalized ->
+                        "Session never finalized \u2014 got ${drained.totalEvents} event(s)"
+                    drained.frameProcessedCount == 0 ->
+                        "Finalized without processing any frame"
+                    !producedText ->
+                        "Pipeline OK but PaddleOCR returned 0 lines from the fixture \u2014 " +
+                            "the recognition model may not have loaded on this device " +
+                            "(check Recent Logs for native errors)"
+                    else -> "Completed \u2022 recognized ${drained.lineCount} line(s) on PaddleOCR / CPU"
+                }
+                val output = buildString {
+                    appendLine("Events:    ${drained.totalEvents} total \u2022 ${drained.frameProcessedCount} processed \u2022 ${drained.errorCount} error(s)")
+                    appendLine("Lines:     ${drained.lineCount}")
+                    appendLine("Finalized: ${drained.finalized}")
+                    if (recognized.isNotBlank()) {
+                        appendLine("\nRecognized text:")
+                        appendLine(recognized)
+                    } else if (drained.finalized && drained.frameProcessedCount > 0) {
+                        appendLine("\n(No text surfaced from the engine. The fixture is a 480x140 PNG " +
+                            "of \u201c$OCR_FIXTURE_TEXT\u201d; if PaddleOCR is healthy this should " +
+                            "produce at least one line. A LiteRtException during recognise typically " +
+                            "means the recognition .tflite model has a custom op that's not registered " +
+                            "in the runtime.)")
+                    }
+                }
+
+                _uiState.update {
+                    it.copy(ocrTest = EngineTestState(
+                        isRunning = false,
+                        status = status,
+                        tone = tone,
+                        output = output.trimEnd(),
+                        lastCompletedAtMs = System.currentTimeMillis(),
+                    ))
+                }
+            } catch (e: Exception) {
+                val rendered = e.toInferenceErrorMessage()
+                _uiState.update {
+                    it.copy(ocrTest = it.ocrTest.copy(
+                        isRunning = false,
+                        status = "OCR test failed: $rendered",
+                        tone = DashboardMessageTone.ERROR,
+                        output = rendered,
+                        lastCompletedAtMs = System.currentTimeMillis(),
+                    ))
+                }
+            } finally {
+                sessionId?.let { activeSessionId ->
+                    try {
+                        withContext(Dispatchers.IO) {
+                            ocrService?.closeOcrSession(activeSessionId)
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Aggregated result of draining the OCR event pipe. The dashboard
+     * surface only needs counts + a flattened "recognized text" view;
+     * the full structured ``ocr_field_update`` / ``ocr_result_finalized``
+     * machinery lives in [com.adsamcik.mindlayer.sdk.OcrTokenStreamReader]
+     * which the app module deliberately doesn't depend on (sdk is a
+     * test-only dependency here).
+     */
+    private data class OcrDrainResult(
+        val totalEvents: Int,
+        val frameProcessedCount: Int,
+        val errorCount: Int,
+        val finalized: Boolean,
+        val recognizedText: String,
+        val lineCount: Int,
+    )
+
+    private suspend fun drainOcrEvents(readEnd: ParcelFileDescriptor): OcrDrainResult =
+        withContext(Dispatchers.IO) {
+            val input = DataInputStream(BufferedInputStream(
+                ParcelFileDescriptor.AutoCloseInputStream(readEnd)
+            ))
+            var totalEvents = 0
+            var frameProcessedCount = 0
+            var errorCount = 0
+            var finalized = false
+            var lineCount = 0
+            val recognizedLines = mutableListOf<String>()
+            var finalizedJson: String? = null
+
+            try {
+                while (true) {
+                    val len = try {
+                        Integer.reverseBytes(input.readInt())
+                    } catch (_: EOFException) {
+                        break
+                    }
+                    if (len < 0 || len > 1_048_576) break
+                    val bytes = ByteArray(len)
+                    input.readFully(bytes)
+                    val jsonStr = bytes.decodeToString()
+                    totalEvents++
+                    try {
+                        val event = testJson.decodeFromString<StreamEvent>(jsonStr)
+                        when (event.type) {
+                            StreamEventType.OCR_FRAME_PROCESSED -> {
+                                frameProcessedCount++
+                                event.payload["line_count"]?.jsonPrimitive?.contentOrNull
+                                    ?.toIntOrNull()?.let { lineCount += it }
+                            }
+
+                            StreamEventType.OCR_FIELD_UPDATE,
+                            StreamEventType.OCR_FIELD_LOCKED -> {
+                                event.payload["top_value"]?.jsonPrimitive?.contentOrNull
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let { recognizedLines += it }
+                            }
+
+                            StreamEventType.OCR_RESULT_FINALIZED -> {
+                                finalized = true
+                                finalizedJson = event.payload["full_json"]
+                                    ?.jsonPrimitive?.contentOrNull
+                            }
+
+                            StreamEventType.DONE -> {
+                                // terminal — stop draining
+                                break
+                            }
+
+                            StreamEventType.ERROR -> {
+                                errorCount++
+                            }
+                        }
+                    } catch (_: Exception) {
+                        try {
+                            testJson.decodeFromString<StreamHeader>(jsonStr)
+                            // Header frame, ignore
+                        } catch (_: Exception) {
+                            // Unparseable — skip
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                // Stream ended mid-read; report what we have.
+            }
+
+            // Prefer the finalized JSON snapshot if it carried recognizable text.
+            val finalizedSnapshot = finalizedJson
+            val recognized = if (!finalizedSnapshot.isNullOrBlank()) {
+                finalizedSnapshot.takeIf { it.length < 2_000 } ?: (finalizedSnapshot.take(2_000) + "…")
+            } else {
+                recognizedLines.joinToString(separator = "\n")
+            }
+
+            OcrDrainResult(
+                totalEvents = totalEvents,
+                frameProcessedCount = frameProcessedCount,
+                errorCount = errorCount,
+                finalized = finalized,
+                recognizedText = recognized,
+                lineCount = lineCount,
+            )
+        }
+
+    private fun renderOcrFixturePng(cacheDir: File): File {
+        val bitmap = Bitmap.createBitmap(
+            OCR_FIXTURE_WIDTH, OCR_FIXTURE_HEIGHT, Bitmap.Config.ARGB_8888,
+        )
+        try {
+            val canvas = Canvas(bitmap)
+            canvas.drawColor(Color.WHITE)
+            val paint = Paint().apply {
+                color = Color.BLACK
+                textSize = 56f
+                isAntiAlias = true
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            // Centred-ish baseline so the entire glyph fits comfortably.
+            canvas.drawText(OCR_FIXTURE_TEXT, 24f, OCR_FIXTURE_HEIGHT * 0.65f, paint)
+            val file = File(cacheDir, "ocr-dashboard-fixture.png")
+            file.outputStream().use { out ->
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                    "Failed to encode OCR dashboard fixture PNG"
+                }
+            }
+            return file
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    // ---- All-engines verification --------------------------------------------
+
+    /**
+     * Sequentially exercise all three engines (embeddings, OCR, chat) so a
+     * dashboard user can prove the on-device AI stack is healthy with a
+     * single tap. Order is fastest-first so the user sees green badges
+     * accumulate while the slow chat warmup runs last.
+     *
+     * Runs are sequential to avoid loading three multi-GB models
+     * simultaneously and tripping the service's memory budget. Each step
+     * is already a no-op if the corresponding engine is mid-run, so
+     * the user can also still poke the individual buttons.
+     */
+    fun runAllVerifications(context: Context) {
+        viewModelScope.launch {
+            runEmbeddingTest()
+            awaitEmbeddingTestComplete()
+
+            runOcrTest(context)
+            awaitOcrTestComplete()
+
+            runTestInference()
+            // Don't await chat — the dashboard already shows its progress
+            // and the user can move on while the LLM warms up.
+        }
+    }
+
+    private suspend fun awaitEmbeddingTestComplete() {
+        while (_uiState.value.embeddingTest.isRunning && viewModelScope.isActive) {
+            delay(250)
+        }
+    }
+
+    private suspend fun awaitOcrTestComplete() {
+        while (_uiState.value.ocrTest.isRunning && viewModelScope.isActive) {
+            delay(250)
+        }
     }
 
     private fun Throwable.toDashboardMessage(): String {

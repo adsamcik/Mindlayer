@@ -15,6 +15,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -83,9 +84,13 @@ class MainActivity : ComponentActivity() {
                                 val logRepository = remember {
                                     LogRepository(LogDatabase.getInstance(this@MainActivity).logDao())
                                 }
+                                val context = LocalContext.current
                                 DashboardScreen(
                                     state = state,
                                     onTestInference = { dashboardViewModel.runTestInference() },
+                                    onTestEmbeddings = { dashboardViewModel.runEmbeddingTest() },
+                                    onTestOcr = { dashboardViewModel.runOcrTest(context) },
+                                    onRunAllVerifications = { dashboardViewModel.runAllVerifications(context) },
                                     onNavigateToHistory = {
                                         navController.navigate(SessionHistoryNavigation.HistoryRoute)
                                     },

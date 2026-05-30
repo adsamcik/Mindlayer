@@ -45,7 +45,9 @@
     <string name="allowlist_revoke_body">This will immediately block %1$s from accessing on-device LLM.</string>
     <string name="allowlist_revoke_package">Revoke %1$s</string>
     <string name="allowlist_revoke">Revoke</string>
-    <string name="dashboard_app_title" translatable="false">Mindlayer</string>
+    <string name="dashboard_app_title" translatable="false">MindLayer</string>
+    <string name="dashboard_brand_mind" translatable="false">Mind</string>
+    <string name="dashboard_brand_layer" translatable="false">Layer</string>
     <string name="dashboard_gpu_init_failed">⚠ GPU init failed: %1$s</string>
     <string name="dashboard_thermal">Thermal</string>
     <string name="dashboard_headroom">Headroom</string>
@@ -141,7 +143,7 @@
 
     <!-- Dashboard: card titles and inline labels. -->
     <string name="dashboard_card_service_status_title">Service Status</string>
-    <string name="dashboard_card_test_inference_title">Test Inference</string>
+    <string name="dashboard_card_test_inference_title">Engine Verification</string>
     <string name="dashboard_card_active_sessions_title">Active Sessions (%1$d)</string>
     <string name="dashboard_engine_loaded">LOADED</string>
     <string name="dashboard_engine_not_ready_badge">NOT READY</string>
@@ -160,6 +162,28 @@
     <string name="dashboard_test_button_running">Running…</string>
     <string name="dashboard_test_button_run">Run Test</string>
     <string name="dashboard_test_waiting_for_output">Waiting for output…</string>
+    <string name="dashboard_test_chat_label">Chat (LLM)</string>
+    <string name="dashboard_test_chat_subtitle">Streams Gemma 4 E2B tokens over an AIDL pipe.</string>
+    <string name="dashboard_test_embeddings_label">Embeddings</string>
+    <string name="dashboard_test_embeddings_subtitle">Asks EmbeddingGemma to embed two sentences and verifies the vectors are distinguishable.</string>
+    <string name="dashboard_test_embedding_button_run">Test embeddings</string>
+    <string name="dashboard_test_embedding_button_running">Embedding…</string>
+    <string name="dashboard_test_ocr_label">OCR</string>
+    <string name="dashboard_test_ocr_subtitle">Renders a small PNG with the words “Hello world 1234” and runs it through the PaddleOCR session pipeline.</string>
+    <string name="dashboard_test_ocr_button_run">Test OCR</string>
+    <string name="dashboard_test_ocr_button_running">OCR…</string>
+    <string name="dashboard_welcome_title">On-device AI</string>
+    <string name="dashboard_welcome_body">Mindlayer runs the chat language model, sentence embeddings and OCR locally on this device. Nothing leaves your phone. Tap to verify all three engines respond.</string>
+    <string name="dashboard_welcome_button_run">Verify all engines</string>
+    <string name="dashboard_welcome_button_running">Verifying…</string>
+    <string name="dashboard_welcome_state_idle">Not verified yet</string>
+    <string name="dashboard_welcome_state_running">Running…</string>
+    <string name="dashboard_welcome_state_partial">Partial</string>
+    <string name="dashboard_welcome_state_pass">All engines healthy</string>
+    <string name="dashboard_welcome_state_warn">Some engines have warnings</string>
+    <string name="dashboard_welcome_state_fail">One or more engines failed</string>
+    <string name="dashboard_advanced_show">Show advanced runtime details</string>
+    <string name="dashboard_advanced_hide">Hide advanced runtime details</string>
     <string name="dashboard_thermal_telemetry_unavailable">Telemetry unavailable</string>
     <string name="dashboard_thermal_headroom_not_reported">Headroom not reported</string>
     <string name="dashboard_active_sessions_waiting">Waiting for the first live session sample…</string>

@@ -88,16 +88,16 @@ class LiteRtPaddleOcrBackendTest {
         assertEquals(bundle.id, backend.currentBundle?.id)
     }
 
-    @Test fun `initialize with null preferredBackend defaults to CPU`() = runTest {
+    @Test fun `initialize with null preferredBackend defaults to GPU`() = runTest {
         val backend = backend()
         backend.initialize(bundle, preferredBackend = null)
-        assertEquals("CPU", backend.activeBackend)
+        assertEquals("GPU", backend.activeBackend)
     }
 
-    @Test fun `initialize with unknown preferredBackend falls back to CPU`() = runTest {
+    @Test fun `initialize with unknown preferredBackend falls back to GPU`() = runTest {
         val backend = backend()
         backend.initialize(bundle, preferredBackend = "DSP")
-        assertEquals("CPU", backend.activeBackend)
+        assertEquals("GPU", backend.activeBackend)
     }
 
     @Test fun `initialize is idempotent for same bundle`() = runTest {
@@ -112,7 +112,7 @@ class LiteRtPaddleOcrBackendTest {
         backend.initialize(bundle, "GPU")
         backend.initialize(bundle, "GPU")
         assertEquals(1, runnerCreations)
-        assertEquals("CPU", backend.activeBackend)
+        assertEquals("GPU", backend.activeBackend)
     }
 
     @Test fun `initialize reloads same bundle when backend preference changes`() = runTest {
@@ -129,10 +129,11 @@ class LiteRtPaddleOcrBackendTest {
         backend.initialize(bundle, "CPU")
         backend.initialize(bundle, "GPU")
 
-        assertEquals(listOf("CPU"), requestedBackends)
-        assertEquals("CPU", backend.activeBackend)
-        assertEquals(1, runners.size)
-        assertEquals(false, runners[0].closed)
+        assertEquals(listOf("CPU", "GPU"), requestedBackends)
+        assertEquals("GPU", backend.activeBackend)
+        assertEquals(2, runners.size)
+        assertTrue("first runner must be closed after a backend swap", runners[0].closed)
+        assertFalse("second runner must remain live", runners[1].closed)
     }
 
     @Test fun `initialize failure preserves previous ready runner`() = runTest {

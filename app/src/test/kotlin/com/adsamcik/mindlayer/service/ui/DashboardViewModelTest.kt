@@ -50,7 +50,7 @@ class DashboardViewModelTest {
             !it.isTestRunning
         }
         assertEquals(
-            listOf("prewarmAndAwait:GPU:30000", "createSession", "infer", "destroySession"),
+            listOf("prewarmAndAwait:GPU:180000", "createSession", "infer", "destroySession"),
             calls,
         )
     }
