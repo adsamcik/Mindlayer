@@ -10,8 +10,10 @@ import com.adsamcik.mindlayer.shared.StreamEventType
 import com.adsamcik.mindlayer.shared.StreamHeader
 import com.adsamcik.mindlayer.shared.StreamProtocol
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
@@ -193,6 +195,100 @@ class OcrTokenStreamWriter private constructor(
         writeEvent(StreamEventType.OCR_RESULT_FINALIZED, buildJsonObject {
             put("fullJson", fullJson)
         })
+    }
+
+    /**
+     * v0.9 multi-page realtime OCR — a new page accumulator opened.
+     *
+     * Payload: `{pageIndex, triggerFrameId}`. `triggerFrameId == 0` for
+     * the implicit first-page open at session start; subsequent
+     * boundary fires carry the frame id whose recognition output
+     * crossed the stability threshold. See [StreamEventType.OCR_PAGE_STARTED].
+     */
+    fun writePageStarted(pageIndex: Int, triggerFrameId: Long) {
+        writeEvent(StreamEventType.OCR_PAGE_STARTED, buildJsonObject {
+            put("pageIndex", pageIndex)
+            put("triggerFrameId", triggerFrameId)
+        })
+    }
+
+    /**
+     * v0.9 multi-page realtime OCR — a page accumulator was closed off.
+     *
+     * Payload: `{pageIndex, lines, fullJson, lineCount, framesContributed}`.
+     * [fullJson] is non-null only when per-page LLM extraction ran and
+     * produced output; the writer encodes it as a JSON object (it is
+     * already a `JsonElement` at call time, not a string, to avoid the
+     * double-encoding pitfall on the SDK reader side).
+     *
+     * [lines] is an array of `{text, confidence, bbox?}` objects — the
+     * `bestLines()` of the page accumulator. The text is user content;
+     * the writer faithfully encodes it as supplied (the dispatcher is
+     * the layer that gated on privacy / log-redaction).
+     *
+     * See [StreamEventType.OCR_PAGE_FINALIZED].
+     */
+    fun writePageFinalized(
+        pageIndex: Int,
+        lines: List<OcrPageLine>,
+        fullJson: JsonElement?,
+        framesContributed: Int,
+    ) {
+        writeEvent(StreamEventType.OCR_PAGE_FINALIZED, buildJsonObject {
+            put("pageIndex", pageIndex)
+            put("lineCount", lines.size)
+            put("framesContributed", framesContributed)
+            put("lines", buildJsonArray {
+                for (line in lines) {
+                    add(buildJsonObject {
+                        put("text", line.text)
+                        put("confidence", line.confidence)
+                        if (line.boundingBox != null) {
+                            require(line.boundingBox.size == BBOX_SIZE) {
+                                "boundingBox must have $BBOX_SIZE floats, got ${line.boundingBox.size}"
+                            }
+                            putJsonArray(BBOX_KEY) {
+                                line.boundingBox.forEach { add(JsonPrimitive(it)) }
+                            }
+                        }
+                    })
+                }
+            })
+            if (fullJson != null) {
+                put("fullJson", fullJson)
+            }
+        })
+    }
+
+    /**
+     * Wire shape for one line inside [writePageFinalized]. Mirrors
+     * [com.adsamcik.mindlayer.service.engine.OcrTextLine] but with the
+     * `confidence` enum already mapped to its string label so the
+     * writer stays decoupled from the engine's value class.
+     */
+    data class OcrPageLine(
+        val text: String,
+        val confidence: String,
+        val boundingBox: FloatArray? = null,
+    ) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is OcrPageLine) return false
+            if (text != other.text) return false
+            if (confidence != other.confidence) return false
+            return when {
+                boundingBox == null && other.boundingBox == null -> true
+                boundingBox == null || other.boundingBox == null -> false
+                else -> boundingBox.contentEquals(other.boundingBox)
+            }
+        }
+
+        override fun hashCode(): Int {
+            var result = text.hashCode()
+            result = 31 * result + confidence.hashCode()
+            result = 31 * result + (boundingBox?.contentHashCode() ?: 0)
+            return result
+        }
     }
 
     fun writeThrottleHint(recommendedIntervalMs: Long) {

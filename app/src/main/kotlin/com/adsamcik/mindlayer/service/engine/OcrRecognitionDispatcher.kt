@@ -14,6 +14,14 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -86,6 +94,16 @@ class OcrRecognitionDispatcher(
     private val extractionContexts = ConcurrentHashMap<String, OcrExtractionContext>()
 
     /**
+     * Per-session v0.9 multi-page realtime configuration. Absent (or
+     * [PageBoundariesConfig.DISABLED]) means the dispatcher takes the
+     * v0.8 single-document path verbatim. Populated via
+     * [attachPageBoundariesConfig] right after [registerSession] when
+     * the session manager parses a non-empty `pageBoundaries` block out
+     * of `OcrSessionConfig.optionsJson`.
+     */
+    private val pageConfigs = ConcurrentHashMap<String, PageBoundariesConfig>()
+
+    /**
      * Register the per-session structured-extraction context. Called by
      * [OcrSessionManager.createSession] right after the session record is
      * created. Idempotent — repeated calls for the same `sessionId`
@@ -97,6 +115,28 @@ class OcrRecognitionDispatcher(
         perSession.computeIfAbsent(sessionId) { SessionState() }
         extractionContexts[sessionId] = context
     }
+
+    /**
+     * Attach v0.9 page-boundary configuration for a session. Must be
+     * called AFTER [registerSession]. Idempotent — repeated calls
+     * overwrite. Passing [PageBoundariesConfig.DISABLED] (or never
+     * calling this method) keeps the v0.8 behaviour: a single session-
+     * scoped `OCR_RESULT_FINALIZED` event and no per-page events.
+     */
+    fun attachPageBoundariesConfig(sessionId: String, config: PageBoundariesConfig) {
+        pageConfigs[sessionId] = config
+    }
+
+    /**
+     * Read the effective page-boundary config for a session. Returns
+     * [PageBoundariesConfig.DISABLED] when no config was attached. The
+     * session manager uses this to decide whether to route a frame
+     * through [submit] (legacy) or [submitWithMeta] (v0.9) — the
+     * IMU sub-block in `OcrFrameMeta.extraJson` only matters in the
+     * latter case.
+     */
+    fun pageBoundariesConfig(sessionId: String): PageBoundariesConfig =
+        pageConfigs[sessionId] ?: PageBoundariesConfig.DISABLED
 
     /**
      * Submit a frame for recognition.
@@ -126,183 +166,90 @@ class OcrRecognitionDispatcher(
         config: OcrEngineConfig,
         writer: OcrTokenStreamWriter?,
         writerMutex: Mutex? = null,
+    ): Job = submitWithMeta(
+        sessionId = sessionId,
+        frameId = frameId,
+        yPlane = yPlane,
+        width = width,
+        height = height,
+        config = config,
+        writer = writer,
+        writerMutex = writerMutex,
+        extraJson = null,
+    )
+
+    /**
+     * v0.9-aware overload — same contract as [submit] but also forwards
+     * the frame's [com.adsamcik.mindlayer.OcrFrameMeta.extraJson] string
+     * so the page-boundary detector can read the IMU sub-block. Legacy
+     * callers using [submit] pass `extraJson = null` and continue to get
+     * the v0.8 single-document path.
+     */
+    fun submitWithMeta(
+        sessionId: String,
+        frameId: Long,
+        yPlane: ByteArray,
+        width: Int,
+        height: Int,
+        config: OcrEngineConfig,
+        writer: OcrTokenStreamWriter?,
+        writerMutex: Mutex? = null,
+        extraJson: String? = null,
     ): Job {
         val state = perSession.computeIfAbsent(sessionId) { SessionState() }
+        val pageConfig = pageConfigs[sessionId] ?: PageBoundariesConfig.DISABLED
         val job = scope.launch(start = CoroutineStart.LAZY) {
             foregroundTracker?.enterForeground()
             try {
-            withWriterLock(writerMutex) {
-                writer?.runCatching { writeFrameProcessing(frameId) }
-            }
-            val startedNs = System.nanoTime()
-            val output = try {
-                engine.recognise(yPlane, width, height, config)
-            } catch (t: Throwable) {
-                if (t is CancellationException) return@launch
-                MindlayerLog.w(
-                    TAG,
-                    "OCR recognise failed: ${t.safeLabel()}, frameId=$frameId",
-                    sessionId = sessionId,
-                    throwable = null,
-                )
                 withWriterLock(writerMutex) {
-                    writer?.runCatching {
-                        writeFrameProcessed(frameId, lineCount = 0, durationMs = 0)
-                    }
+                    writer?.runCatching { writeFrameProcessing(frameId) }
                 }
-                return@launch
-            }
-            val durationMs = (System.nanoTime() - startedNs) / 1_000_000L
-            withWriterLock(writerMutex) {
-                writer?.runCatching {
-                    writeFrameProcessed(frameId, lineCount = output.lines.size, durationMs = durationMs)
-                }
-
-            // Per-line fusion: each OcrTextLine.text becomes a candidate
-            // value for a synthetic per-line field. The actual evidence-
-            // package → LLM structured-extraction pipeline lives in the
-            // p2-llm-extraction track; PR #3 ships the raw OCR-text →
-            // fusion path so the wire surface is exercised.
-            for ((index, line) in output.lines.withIndex()) {
-                val fieldName = "line[$index]"
-                val obs = OcrFieldFusion.FieldObservation(
-                    value = line.text,
-                    confidence = line.confidence,
-                    frameQuality = 1.0, // No client-side score yet; Phase 2 #4 wires it.
-                    frameId = frameId,
-                )
-                val newState = state.fusion.accept(fieldName, obs)
-                writer?.runCatching {
-                    writeFieldUpdate(
-                        fieldName = fieldName,
-                        topValue = newState.topValue ?: "",
-                        confidence = newState.locked.toConfidenceString(),
-                        consecutiveAgreement = newState.consecutiveAgreement,
-                        boundingBox = line.boundingBox,
-                    )
-                }
-                if (newState.locked && !state.lockedFields.contains(fieldName)) {
-                    state.lockedFields.add(fieldName)
-                    writer?.runCatching {
-                        writeFieldLocked(fieldName, newState.topValue ?: "", line.boundingBox)
-                    }
-                }
-            }
-
-            // Barcode anchors: run ZXing on the same Y-plane. Each
-            // decoded barcode is treated as a synthetic field named
-            // `barcode[<index>]` so the fusion module + wire path
-            // are reused as-is. The structured-extraction stage
-            // (p2-llm-extraction) will mine the barcodes map from
-            // SessionState to inject GTIN / QR anchors into the
-            // schema-constrained extraction prompt.
-            //
-            // Failure-tolerant: decode() returns empty on any error;
-            // a missed barcode never propagates a failure to the
-            // session lifecycle.
-            barcodeDetector?.decode(yPlane, width, height, frameId)?.forEach { anchor ->
-                val key = "${anchor.format}|${anchor.value}"
-                val merged = state.barcodes.merge(key, anchor) { existing, fresh ->
-                    // Keep the original frame's bbox (oldest detection
-                    // is typically the highest-quality one), but record
-                    // the latest frameId for downstream weighting.
-                    existing.copy(frameId = fresh.frameId)
-                } ?: anchor
-                val fieldName = "barcode[${anchor.format}|${anchor.value.take(BARCODE_VALUE_KEY_PREFIX_CHARS)}]"
-                val obs = OcrFieldFusion.FieldObservation(
-                    value = anchor.value,
-                    confidence = OcrFieldFusion.Confidence.HIGH,
-                    frameQuality = 1.0,
-                    frameId = frameId,
-                )
-                val newState = state.fusion.accept(fieldName, obs)
-                writer?.runCatching {
-                    writeFieldUpdate(
-                        fieldName = fieldName,
-                        topValue = merged.value,
-                        confidence = newState.locked.toConfidenceString(),
-                        consecutiveAgreement = newState.consecutiveAgreement,
-                    )
-                }
-                if (newState.locked && !state.lockedFields.contains(fieldName)) {
-                    state.lockedFields.add(fieldName)
-                    writer?.runCatching {
-                        writeFieldLocked(fieldName, merged.value)
-                    }
-                }
-            }
-
-            // Structured extraction (Phase 2 #4 — p2-llm-extraction).
-            // Runs the LLM extractor on the evidence package built from
-            // this frame's recognised lines + decoded barcodes. The
-            // resulting structured fields flow through OcrFieldFusion
-            // using the same field-update/field-locked wire path as the
-            // raw-line and barcode emitters above.
-            //
-            // Strategy A — reset-per-frame KV: each frame is a fresh
-            // one-shot prompt. Cross-frame agreement happens in fusion,
-            // not in the LLM's context window.
-            //
-            // Failure-tolerant: if no extraction context is registered
-            // (legacy dispatcher-only path / unit tests), or if the
-            // extractor throws, the extraction emission is skipped and
-            // the per-line + barcode emissions above are unaffected.
-            val context = extractionContexts[sessionId]
-            if (context != null) {
-                val frameIndex = state.frameIndex.getAndIncrement()
-                val evidence = OcrEvidencePackage(
-                    sessionId = sessionId,
-                    frameId = frameId,
-                    frameIndex = frameIndex,
-                    mode = context.mode,
-                    outputSchemaJson = context.outputSchemaJson,
-                    textLines = output.lines,
-                    barcodeAnchors = state.barcodes.values.toList(),
-                    frameQuality = DEFAULT_FRAME_QUALITY,
-                )
-                val extraction = try {
-                    llmExtractor.extract(evidence)
+                val startedNs = System.nanoTime()
+                val output = try {
+                    engine.recognise(yPlane, width, height, config)
                 } catch (t: Throwable) {
-                    // Degrade silently and let the per-line emission keep
-                    // flowing. The extractor implementation owns its own
-                    // privacy-safe logging.
+                    if (t is CancellationException) return@launch
                     MindlayerLog.w(
                         TAG,
-                        "OCR LLM extraction failed: ${t.safeLabel()}",
+                        "OCR recognise failed: ${t.safeLabel()}, frameId=$frameId",
                         sessionId = sessionId,
                         throwable = null,
                     )
-                    OcrExtractionResult.EMPTY
-                }
-                if (extraction.rawJson != null) {
-                    state.lastExtractionRawJson = extraction.rawJson
-                }
-                for (field in extraction.fields) {
-                    val fieldName = "extract.${field.name}"
-                    val obs = OcrFieldFusion.FieldObservation(
-                        value = field.value,
-                        confidence = field.confidence,
-                        frameQuality = evidence.frameQuality,
-                        frameId = frameId,
-                    )
-                    val newState = state.fusion.accept(fieldName, obs)
-                    writer?.runCatching {
-                        writeFieldUpdate(
-                            fieldName = fieldName,
-                            topValue = newState.topValue ?: "",
-                            confidence = newState.locked.toConfidenceString(),
-                            consecutiveAgreement = newState.consecutiveAgreement,
-                        )
-                    }
-                    if (newState.locked && !state.lockedFields.contains(fieldName)) {
-                        state.lockedFields.add(fieldName)
+                    withWriterLock(writerMutex) {
                         writer?.runCatching {
-                            writeFieldLocked(fieldName, newState.topValue ?: "")
+                            writeFrameProcessed(frameId, lineCount = 0, durationMs = 0)
                         }
                     }
+                    return@launch
                 }
-            }
-            }
+                val durationMs = (System.nanoTime() - startedNs) / 1_000_000L
+                withWriterLock(writerMutex) {
+                    writer?.runCatching {
+                        writeFrameProcessed(frameId, lineCount = output.lines.size, durationMs = durationMs)
+                    }
+
+                    emitPerLineFusion(state, output.lines, frameId, writer)
+                    emitBarcodeAnchors(state, yPlane, width, height, frameId, writer)
+
+                    if (pageConfig.enabled) {
+                        // Page-aware path: defer LLM extraction to finalize and
+                        // run page-boundary detection here.
+                        handlePageFrame(
+                            sessionId = sessionId,
+                            state = state,
+                            pageConfig = pageConfig,
+                            frameId = frameId,
+                            lines = output.lines,
+                            extraJson = extraJson,
+                            writer = writer,
+                        )
+                    } else {
+                        // Legacy v0.8 path: per-frame LLM extraction (when a
+                        // context is attached) feeds OcrFieldFusion + the
+                        // session-end OCR_RESULT_FINALIZED.fullJson.
+                        emitPerFrameLlmExtraction(sessionId, state, output.lines, frameId, writer)
+                    }
+                }
             } finally {
                 foregroundTracker?.exitForeground()
             }
@@ -313,6 +260,241 @@ class OcrRecognitionDispatcher(
         return job
     }
 
+    // ── per-frame emitters ──────────────────────────────────────────────
+
+    /**
+     * Per-line fusion: each [OcrTextLine].text becomes a candidate value
+     * for a synthetic per-line field. Fires `OCR_FIELD_UPDATE` /
+     * `OCR_FIELD_LOCKED` events as agreement crosses the lock threshold.
+     */
+    private fun emitPerLineFusion(
+        state: SessionState,
+        lines: List<OcrTextLine>,
+        frameId: Long,
+        writer: OcrTokenStreamWriter?,
+    ) {
+        for ((index, line) in lines.withIndex()) {
+            val fieldName = "line[$index]"
+            val obs = OcrFieldFusion.FieldObservation(
+                value = line.text,
+                confidence = line.confidence,
+                frameQuality = 1.0,
+                frameId = frameId,
+            )
+            val newState = state.fusion.accept(fieldName, obs)
+            writer?.runCatching {
+                writeFieldUpdate(
+                    fieldName = fieldName,
+                    topValue = newState.topValue ?: "",
+                    confidence = newState.locked.toConfidenceString(),
+                    consecutiveAgreement = newState.consecutiveAgreement,
+                    boundingBox = line.boundingBox,
+                )
+            }
+            if (newState.locked && !state.lockedFields.contains(fieldName)) {
+                state.lockedFields.add(fieldName)
+                writer?.runCatching {
+                    writeFieldLocked(fieldName, newState.topValue ?: "", line.boundingBox)
+                }
+            }
+        }
+    }
+
+    private fun emitBarcodeAnchors(
+        state: SessionState,
+        yPlane: ByteArray,
+        width: Int,
+        height: Int,
+        frameId: Long,
+        writer: OcrTokenStreamWriter?,
+    ) {
+        barcodeDetector?.decode(yPlane, width, height, frameId)?.forEach { anchor ->
+            val key = "${anchor.format}|${anchor.value}"
+            val merged = state.barcodes.merge(key, anchor) { existing, fresh ->
+                existing.copy(frameId = fresh.frameId)
+            } ?: anchor
+            val fieldName = "barcode[${anchor.format}|${anchor.value.take(BARCODE_VALUE_KEY_PREFIX_CHARS)}]"
+            val obs = OcrFieldFusion.FieldObservation(
+                value = anchor.value,
+                confidence = OcrFieldFusion.Confidence.HIGH,
+                frameQuality = 1.0,
+                frameId = frameId,
+            )
+            val newState = state.fusion.accept(fieldName, obs)
+            writer?.runCatching {
+                writeFieldUpdate(
+                    fieldName = fieldName,
+                    topValue = merged.value,
+                    confidence = newState.locked.toConfidenceString(),
+                    consecutiveAgreement = newState.consecutiveAgreement,
+                )
+            }
+            if (newState.locked && !state.lockedFields.contains(fieldName)) {
+                state.lockedFields.add(fieldName)
+                writer?.runCatching {
+                    writeFieldLocked(fieldName, merged.value)
+                }
+            }
+        }
+    }
+
+    private suspend fun emitPerFrameLlmExtraction(
+        sessionId: String,
+        state: SessionState,
+        lines: List<OcrTextLine>,
+        frameId: Long,
+        writer: OcrTokenStreamWriter?,
+    ) {
+        val context = extractionContexts[sessionId] ?: return
+        val frameIndex = state.frameIndex.getAndIncrement()
+        val evidence = OcrEvidencePackage(
+            sessionId = sessionId,
+            frameId = frameId,
+            frameIndex = frameIndex,
+            mode = context.mode,
+            outputSchemaJson = context.outputSchemaJson,
+            textLines = lines,
+            barcodeAnchors = state.barcodes.values.toList(),
+            frameQuality = DEFAULT_FRAME_QUALITY,
+        )
+        val extraction = try {
+            llmExtractor.extract(evidence)
+        } catch (t: Throwable) {
+            MindlayerLog.w(
+                TAG,
+                "OCR LLM extraction failed: ${t.safeLabel()}",
+                sessionId = sessionId,
+                throwable = null,
+            )
+            OcrExtractionResult.EMPTY
+        }
+        if (extraction.rawJson != null) {
+            state.lastExtractionRawJson = extraction.rawJson
+        }
+        for (field in extraction.fields) {
+            val fieldName = "extract.${field.name}"
+            val obs = OcrFieldFusion.FieldObservation(
+                value = field.value,
+                confidence = field.confidence,
+                frameQuality = evidence.frameQuality,
+                frameId = frameId,
+            )
+            val newState = state.fusion.accept(fieldName, obs)
+            writer?.runCatching {
+                writeFieldUpdate(
+                    fieldName = fieldName,
+                    topValue = newState.topValue ?: "",
+                    confidence = newState.locked.toConfidenceString(),
+                    consecutiveAgreement = newState.consecutiveAgreement,
+                )
+            }
+            if (newState.locked && !state.lockedFields.contains(fieldName)) {
+                state.lockedFields.add(fieldName)
+                writer?.runCatching {
+                    writeFieldLocked(fieldName, newState.topValue ?: "")
+                }
+            }
+        }
+    }
+
+    // ── v0.9 page-boundary path ─────────────────────────────────────────
+
+    /**
+     * Run the page-boundary detector against the in-flight page state.
+     * On boundary fire: close the current page (eagerly emit
+     * `OCR_PAGE_FINALIZED` with `fullJson=null` unless `llmExtractPerPage`
+     * is on, in which case defer); open a new page; emit
+     * `OCR_PAGE_STARTED`. Always extends the active page with the new
+     * frame's lines.
+     *
+     * Must be called from within the writer mutex.
+     */
+    private fun handlePageFrame(
+        sessionId: String,
+        state: SessionState,
+        pageConfig: PageBoundariesConfig,
+        frameId: Long,
+        lines: List<OcrTextLine>,
+        extraJson: String?,
+        writer: OcrTokenStreamWriter?,
+    ) {
+        if (state.pageDetector == null) {
+            state.pageDetector = PageBoundaryDetector(pageConfig)
+        }
+        val detector = state.pageDetector!!
+        val imu = ImuFrameMetadata.parse(extraJson)
+
+        val current = state.currentPage
+        if (current == null) {
+            // First frame of the session: open page 0 implicitly.
+            val firstPage = PageAccumulator(pageIndex = 0)
+            state.currentPage = firstPage
+            state.nextPageIndex = 1
+            writer?.runCatching { writePageStarted(0, triggerFrameId = 0L) }
+            firstPage.extend(lines, frameId)
+            return
+        }
+
+        val isBoundary = detector.isBoundary(current, lines, imu)
+        if (isBoundary) {
+            // Close the current page.
+            state.closedPages.add(current)
+            if (!pageConfig.llmExtractPerPage) {
+                emitPageFinalizedEager(current, writer)
+            }
+            MindlayerLog.i(
+                TAG,
+                "OCR page ${current.pageIndex} closed: " +
+                    "${current.lineCount()} lines, ${current.framesContributed} frames",
+                sessionId = sessionId,
+            )
+
+            // Open the new page seeded with any pending diff frames
+            // (the stability streak that led up to this boundary) plus
+            // this boundary-triggering frame.
+            val newIndex = state.nextPageIndex
+            state.nextPageIndex = newIndex + 1
+            val newPage = PageAccumulator(pageIndex = newIndex)
+            state.currentPage = newPage
+            writer?.runCatching {
+                writePageStarted(newIndex, triggerFrameId = frameId)
+            }
+            for ((pendLines, pendFrameId) in state.pendingDiffFrames) {
+                newPage.extend(pendLines, pendFrameId)
+            }
+            state.pendingDiffFrames.clear()
+            newPage.extend(lines, frameId)
+        } else if (detector.consecutiveDifferentFrames > 0) {
+            // Diff-streak in progress but not yet at stabilityFrames.
+            // Buffer this frame so it doesn't pollute the prev token
+            // set; the next jaccard comparison stays against the stable
+            // pre-streak page content.
+            state.pendingDiffFrames.add(lines to frameId)
+        } else {
+            // Same-content frame. If a transient streak was building,
+            // it was just noise — flush the pending frames into the
+            // current page so no lines are lost.
+            if (state.pendingDiffFrames.isNotEmpty()) {
+                for ((pendLines, pendFrameId) in state.pendingDiffFrames) {
+                    current.extend(pendLines, pendFrameId)
+                }
+                state.pendingDiffFrames.clear()
+            }
+            current.extend(lines, frameId)
+        }
+    }
+
+    private fun emitPageFinalizedEager(page: PageAccumulator, writer: OcrTokenStreamWriter?) {
+        writer?.runCatching {
+            writePageFinalized(
+                pageIndex = page.pageIndex,
+                lines = page.bestLines().toWireLines(),
+                fullJson = null,
+                framesContributed = page.framesContributed,
+            )
+        }
+    }
+
     /**
      * Drain in-flight jobs for a session + emit the terminal
      * `ResultFinalized` event. Called by the session manager on
@@ -321,14 +503,201 @@ class OcrRecognitionDispatcher(
      * Best-effort: if any job throws, the failure is already
      * logged inside [submit] and `ResultFinalized` is emitted
      * anyway with whatever fusion state accumulated.
+     *
+     * When v0.9 page-boundary detection is enabled for the session
+     * (via [attachPageBoundariesConfig]), this also emits any
+     * outstanding `OCR_PAGE_FINALIZED` events (deferred or final-page)
+     * before the terminal result.
      */
     suspend fun finalize(sessionId: String, writer: OcrTokenStreamWriter?) {
         val state = perSession[sessionId] ?: return
         state.activeJobs.toList().forEach { it.join() }
-        val snapshot = state.fusion.snapshot()
-        val fullJson = buildResultJson(snapshot, state.lastExtractionRawJson)
-        writer?.runCatching { writeResultFinalized(fullJson) }
+        val pageConfig = pageConfigs[sessionId] ?: PageBoundariesConfig.DISABLED
+        if (pageConfig.enabled) {
+            finalizePageAware(sessionId, state, pageConfig, writer)
+        } else {
+            val snapshot = state.fusion.snapshot()
+            val fullJson = buildResultJson(snapshot, state.lastExtractionRawJson)
+            writer?.runCatching { writeResultFinalized(fullJson) }
+            writer?.runCatching { writeDone("ocr_complete") }
+        }
+    }
+
+    private suspend fun finalizePageAware(
+        sessionId: String,
+        state: SessionState,
+        pageConfig: PageBoundariesConfig,
+        writer: OcrTokenStreamWriter?,
+    ) {
+        // Flush any pending diff-streak frames into the still-open
+        // current page so finalize doesn't lose them. The streak never
+        // completed → treat them as part of the last page.
+        val openPage = state.currentPage
+        if (openPage != null && state.pendingDiffFrames.isNotEmpty()) {
+            for ((pendLines, pendFrameId) in state.pendingDiffFrames) {
+                openPage.extend(pendLines, pendFrameId)
+            }
+            state.pendingDiffFrames.clear()
+        }
+
+        val allPages = buildList {
+            addAll(state.closedPages)
+            state.currentPage?.let { add(it) }
+        }
+        val context = extractionContexts[sessionId]
+
+        // Per-page LLM extraction (when enabled). Build a map from pageIndex
+        // to the raw JSON the extractor produced. Pages whose extraction
+        // failed or whose context was missing are absent from the map and
+        // their PAGE_FINALIZED event ships with fullJson=null.
+        val perPageJson = mutableMapOf<Int, JsonElement>()
+        if (pageConfig.llmExtractPerPage && context != null) {
+            for (page in allPages) {
+                val evidence = OcrEvidencePackage(
+                    sessionId = sessionId,
+                    frameId = page.triggerFrameId,
+                    frameIndex = page.pageIndex,
+                    mode = context.mode,
+                    outputSchemaJson = context.outputSchemaJson,
+                    textLines = page.bestLines(),
+                    barcodeAnchors = state.barcodes.values.toList(),
+                    frameQuality = DEFAULT_FRAME_QUALITY,
+                )
+                val raw = try {
+                    llmExtractor.extract(evidence).rawJson
+                } catch (t: Throwable) {
+                    MindlayerLog.w(
+                        TAG,
+                        "OCR per-page LLM extraction failed: ${t.safeLabel()}, page=${page.pageIndex}",
+                        sessionId = sessionId,
+                        throwable = null,
+                    )
+                    null
+                }
+                if (raw != null) {
+                    parseJsonOrNull(raw)?.let { perPageJson[page.pageIndex] = it }
+                }
+            }
+        }
+
+        // Emit OCR_PAGE_FINALIZED events.
+        //   - llmExtractPerPage=true: emit for ALL pages here (deferred so
+        //     each page's only PAGE_FINALIZED event carries fullJson).
+        //   - llmExtractPerPage=false: closed pages were already emitted
+        //     eagerly in handlePageFrame; emit only the still-open one.
+        if (pageConfig.llmExtractPerPage) {
+            for (page in allPages) {
+                writer?.runCatching {
+                    writePageFinalized(
+                        pageIndex = page.pageIndex,
+                        lines = page.bestLines().toWireLines(),
+                        fullJson = perPageJson[page.pageIndex],
+                        framesContributed = page.framesContributed,
+                    )
+                }
+            }
+        } else {
+            state.currentPage?.let { emitPageFinalizedEager(it, writer) }
+        }
+
+        // Build OCR_RESULT_FINALIZED.fullJson:
+        //   - llmExtractFinal=true:  run the LLM once on the joined page
+        //     text with `\n\n--- page N ---\n\n` separators between pages.
+        //     Use the extractor's raw JSON. Fall back to the rollup shape
+        //     if the extractor returned no rawJson or no context exists.
+        //   - llmExtractFinal=false: emit the rollup shape verbatim.
+        val resultFullJson: String = if (pageConfig.llmExtractFinal && context != null) {
+            val aggregateLines = buildAggregateTextLines(allPages)
+            val evidence = OcrEvidencePackage(
+                sessionId = sessionId,
+                frameId = 0L,
+                frameIndex = 0,
+                mode = context.mode,
+                outputSchemaJson = context.outputSchemaJson,
+                textLines = aggregateLines,
+                barcodeAnchors = state.barcodes.values.toList(),
+                frameQuality = DEFAULT_FRAME_QUALITY,
+            )
+            val raw = try {
+                llmExtractor.extract(evidence).rawJson
+            } catch (t: Throwable) {
+                MindlayerLog.w(
+                    TAG,
+                    "OCR aggregate LLM extraction failed: ${t.safeLabel()}",
+                    sessionId = sessionId,
+                    throwable = null,
+                )
+                null
+            }
+            raw ?: buildRollupJson(allPages)
+        } else {
+            buildRollupJson(allPages)
+        }
+
+        MindlayerLog.i(
+            TAG,
+            "OCR session finalized: ${allPages.size} pages, " +
+                "${allPages.sumOf { it.lineCount() }} total lines, " +
+                "${allPages.sumOf { it.framesContributed }} total frames",
+            sessionId = sessionId,
+        )
+
+        writer?.runCatching { writeResultFinalized(resultFullJson) }
         writer?.runCatching { writeDone("ocr_complete") }
+    }
+
+    /**
+     * Build the textLines argument for the aggregate LLM extraction:
+     * each page's [PageAccumulator.bestLines] in order, with a synthetic
+     * separator line `--- page N ---` between pages (matching the
+     * `\n\n--- page N ---\n\n` text-join contract from the spec).
+     */
+    private fun buildAggregateTextLines(pages: List<PageAccumulator>): List<OcrTextLine> {
+        if (pages.isEmpty()) return emptyList()
+        val out = mutableListOf<OcrTextLine>()
+        for ((idx, page) in pages.withIndex()) {
+            if (idx > 0) {
+                out += OcrTextLine(
+                    text = "--- page ${page.pageIndex} ---",
+                    confidence = OcrFieldFusion.Confidence.HIGH,
+                )
+            }
+            out += page.bestLines()
+        }
+        return out
+    }
+
+    /**
+     * Rollup JSON used as `OCR_RESULT_FINALIZED.fullJson` when no LLM
+     * aggregate extraction runs. Shape: `{"pages":[{"index":N,
+     * "lineCount":N, "framesContributed":N}, …]}`.
+     */
+    private fun buildRollupJson(pages: List<PageAccumulator>): String {
+        val obj = buildJsonObject {
+            putJsonArray("pages") {
+                for (page in pages) {
+                    add(
+                        buildJsonObject {
+                            put("index", page.pageIndex)
+                            put("lineCount", page.lineCount())
+                            put("framesContributed", page.framesContributed)
+                        },
+                    )
+                }
+            }
+        }
+        return obj.toString()
+    }
+
+    /**
+     * Lenient parse: returns the JsonElement on success, null on any
+     * failure (the extractor handed us non-JSON or partial JSON; the
+     * wire surface uses the rollup fallback in that case).
+     */
+    private fun parseJsonOrNull(raw: String): JsonElement? = try {
+        LENIENT_JSON.parseToJsonElement(raw)
+    } catch (t: Throwable) {
+        null
     }
 
     /**
@@ -348,6 +717,7 @@ class OcrRecognitionDispatcher(
     fun closeSession(sessionId: String) {
         perSession.remove(sessionId)?.activeJobs?.forEach { it.cancel() }
         extractionContexts.remove(sessionId)
+        pageConfigs.remove(sessionId)
     }
 
     suspend fun drainForMemoryPressure() {
@@ -363,6 +733,7 @@ class OcrRecognitionDispatcher(
         }
         perSession.clear()
         extractionContexts.clear()
+        pageConfigs.clear()
     }
 
     /** Tear down everything. Idempotent. */
@@ -379,12 +750,6 @@ class OcrRecognitionDispatcher(
         snapshot: Map<String, OcrFieldFusion.FieldState>,
         lastExtractionRawJson: String?,
     ): String {
-        // Phase 2 #4: prefer the LLM extractor's last raw JSON when
-        // present (it is the schema-shaped object the caller actually
-        // asked for). Fall back to a flat fusion-snapshot dump so the
-        // wire surface keeps emitting *something* even when the
-        // extractor stays silent (NoOpOcrLlmExtractor default, or the
-        // extractor errored out on every frame).
         if (lastExtractionRawJson != null) {
             return lastExtractionRawJson
         }
@@ -403,6 +768,24 @@ class OcrRecognitionDispatcher(
     }
 
     private fun Boolean.toConfidenceString(): String = if (this) "high" else "medium"
+
+    /**
+     * Wire-shape adapter from the engine's [OcrTextLine] to the writer's
+     * nested [OcrTokenStreamWriter.OcrPageLine] DTO. Maps the confidence
+     * enum to the stringly-typed wire value.
+     */
+    private fun List<OcrTextLine>.toWireLines(): List<OcrTokenStreamWriter.OcrPageLine> =
+        map { line ->
+            OcrTokenStreamWriter.OcrPageLine(
+                text = line.text,
+                confidence = when (line.confidence) {
+                    OcrFieldFusion.Confidence.LOW -> "low"
+                    OcrFieldFusion.Confidence.MEDIUM -> "medium"
+                    OcrFieldFusion.Confidence.HIGH -> "high"
+                },
+                boundingBox = line.boundingBox,
+            )
+        }
 
     private class SessionState {
         val fusion = OcrFieldFusion()
@@ -435,6 +818,33 @@ class OcrRecognitionDispatcher(
          * fusion-snapshot fallback.
          */
         @Volatile var lastExtractionRawJson: String? = null
+
+        // ── v0.9 multi-page realtime state ──────────────────────────────
+        //
+        // All four fields stay null/empty under the legacy v0.8 path;
+        // they're initialised lazily on the first frame when
+        // `pageConfigs[sessionId].enabled == true`.
+
+        /** Page-boundary detector, lazily instantiated on first frame. */
+        var pageDetector: PageBoundaryDetector? = null
+
+        /** The currently open page (still accepting frames). */
+        var currentPage: PageAccumulator? = null
+
+        /** Pages that have been closed off by a boundary fire. */
+        val closedPages: MutableList<PageAccumulator> = mutableListOf()
+
+        /** Next pageIndex to assign to a fresh PageAccumulator. */
+        var nextPageIndex: Int = 0
+
+        /**
+         * Frames flagged "different" by the detector but not yet enough
+         * to fire a boundary. Held out of [currentPage] so prev's token
+         * set stays clean for the next jaccard comparison. On boundary
+         * fire these seed the new page; on streak break they flush into
+         * [currentPage]; on session finalize they flush into [currentPage].
+         */
+        val pendingDiffFrames: MutableList<Pair<List<OcrTextLine>, Long>> = mutableListOf()
     }
 
     private companion object {
@@ -458,5 +868,11 @@ class OcrRecognitionDispatcher(
          * presort score forward.
          */
         private const val DEFAULT_FRAME_QUALITY = 1.0
+
+        /**
+         * Lenient JSON parser used to re-wrap extractor `rawJson`
+         * strings into [JsonElement] for the page-finalized payload.
+         */
+        private val LENIENT_JSON = Json { isLenient = true; ignoreUnknownKeys = true }
     }
 }

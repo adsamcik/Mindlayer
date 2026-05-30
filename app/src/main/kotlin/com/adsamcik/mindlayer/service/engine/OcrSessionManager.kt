@@ -136,6 +136,10 @@ class OcrSessionManager(
                 outputSchemaJson = config.outputSchemaJson,
             ),
         )
+        val pageConfig = PageBoundariesConfig.parse(config.optionsJson)
+        if (pageConfig.enabled) {
+            recognitionDispatcher?.attachPageBoundariesConfig(sessionId, pageConfig)
+        }
         MindlayerLog.i(
             TAG,
             "OCR session created: uid=$uid, mode=${config.mode}, maxFrames=$effectiveMaxFrames",
@@ -198,24 +202,38 @@ class OcrSessionManager(
             }
 
             recordAcceptedFrame(session, intake.now, score.dHash).also { finalizeAfterSubmit ->
-                recognitionDispatcher?.submit(
-                    sessionId = sessionId,
-                    frameId = meta.frameId,
-                    yPlane = transformed.yPlane,
-                    width = transformed.width,
-                    height = transformed.height,
-                    config = OcrEngineConfig(),
-                    writer = session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter,
-                    writerMutex = session.mutex,
-                )?.also { job ->
-                    session.activeJobs.add(job)
-                    job.invokeOnCompletion { session.activeJobs.remove(job) }
+                val writer = session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter
+                val pageEnabled = recognitionDispatcher?.pageBoundariesConfig(sessionId)?.enabled == true
+                val job = if (pageEnabled) {
+                    recognitionDispatcher?.submitWithMeta(
+                        sessionId = sessionId,
+                        frameId = meta.frameId,
+                        yPlane = transformed.yPlane,
+                        width = transformed.width,
+                        height = transformed.height,
+                        config = OcrEngineConfig(),
+                        writer = writer,
+                        writerMutex = session.mutex,
+                        extraJson = meta.extraJson,
+                    )
+                } else {
+                    recognitionDispatcher?.submit(
+                        sessionId = sessionId,
+                        frameId = meta.frameId,
+                        yPlane = transformed.yPlane,
+                        width = transformed.width,
+                        height = transformed.height,
+                        config = OcrEngineConfig(),
+                        writer = writer,
+                        writerMutex = session.mutex,
+                    )
+                }
+                job?.also {
+                    session.activeJobs.add(it)
+                    it.invokeOnCompletion { _ -> session.activeJobs.remove(it) }
                 }
                 if (finalizeAfterSubmit) {
-                    recognitionDispatcher?.finalizeAsync(
-                        sessionId,
-                        session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter,
-                    )
+                    recognitionDispatcher?.finalizeAsync(sessionId, writer)
                 }
             }
 
