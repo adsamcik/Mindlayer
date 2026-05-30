@@ -1,3 +1,7 @@
+@file:Suppress("DEPRECATION") // Existing tests deliberately exercise the
+// ocrSession() deprecated alias to prove the rename hasn't broken pre-v0.10
+// callers. New tests should use ocrRealtime() / ocrAsync() instead.
+
 package com.adsamcik.mindlayer.sdk
 
 import android.content.Context

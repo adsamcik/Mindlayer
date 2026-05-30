@@ -12,10 +12,10 @@ import kotlinx.coroutines.flow.flow
 /**
  * Builder-style configuration for an OCR session.
  *
- * Use [Mindlayer.ocrSession] for the conventional DSL entry point:
+ * Use [Mindlayer.ocrRealtime] for the conventional DSL entry point:
  *
  * ```kotlin
- * val session = mindlayer.ocrSession(OcrProfile.Receipt) {
+ * val session = mindlayer.ocrRealtime(OcrProfile.Receipt) {
  *     // Optional overrides:
  *     languageHints = listOf("en", "de-DE")
  *     maxFrames = 30
@@ -64,7 +64,7 @@ class OcrSessionConfigBuilder internal constructor(private val profile: OcrProfi
  *
  * # Lifecycle
  *
- * Create via [Mindlayer.ocrSession]. Call [pushFrame] for each captured
+ * Create via [Mindlayer.ocrRealtime]. Call [pushFrame] for each captured
  * frame; the synchronous return is an [OcrFrameAck] indicating intake
  * outcome. Asynchronous recognition results stream via [events] (when
  * the service-side recognition path is wired — Phase 1 ships only the
