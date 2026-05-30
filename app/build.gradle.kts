@@ -465,8 +465,10 @@ val aidlContractDriftCheck by tasks.registering {
 
 android {
     namespace = "com.adsamcik.mindlayer.service"
-    compileSdk = 36
-    compileSdkMinor = 1
+    // Compose BOM 2026.05.01 pulls androidx.compose.* 1.12.0-alpha03 and
+    // material3 1.5.0-alpha20, which require compileSdk 37 via AAR
+    // metadata. minSdk and targetSdk are intentionally unchanged.
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.adsamcik.mindlayer.service"
