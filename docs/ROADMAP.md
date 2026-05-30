@@ -72,9 +72,10 @@ workflow (not in the repo, by design).
   drain with `OCR_RESULT_FINALIZED` + `DONE`, `FRAME_DROPPED` guard.
 - **Shared accelerator coordination** — `LiteRtAcceleratorResolver` with
   per-feature decisions (`featureName` ∈ `chat` / `embeddings` / `ocr`),
-  SoC allowlist, native-library probe, API-level gate. OCR currently
-  CPU-locked pending coexistence validation
-  (`OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED`).
+  SoC allowlist, native-library probe, API-level gate. OCR mirrors chat
+  (`null` → GPU; explicit `NPU` probed against SoC allowlist + native
+  libs with GPU-fallback; explicit `CPU`/`GPU` honored). Same-process
+  coexistence remains real-device-gated — see `docs/LITERT_COEXISTENCE.md`.
 
 ### SDK
 - One front door: `Mindlayer.connect()` + `MindlayerSession` for chat,
@@ -151,10 +152,9 @@ The flag is a one-line atomic commit. The gating criteria are:
   exercises the production `LiteRtPaddleOcrBackend` on the API 33/34
   emulator matrix. The 8-step checklist in `docs/LITERT_COEXISTENCE.md`
   remains the canonical reference; emulator (x86_64 + swiftshader) is
-  sufficient for the CPU-only shipping configuration because OCR is
-  CPU-locked via `LiteRtAcceleratorResolver`
-  (`OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED`). GPU/NPU coexistence
-  remains real-device-gated and is deferred to Phase 8.
+  sufficient for CPU verification, while GPU/NPU coexistence (now
+  reachable via the resolver's chat-mirror default) remains real-device-
+  gated and is tracked in Phase 8.
 - **Numeric OCR validation on emulator** *(harness landed, PR #107 —
   provision assets to actually run)*.
   `OcrNumericValidationInstrumentedTest` drives the production backend

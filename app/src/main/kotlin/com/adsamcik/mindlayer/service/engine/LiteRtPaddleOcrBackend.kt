@@ -33,7 +33,7 @@ import kotlin.math.sqrt
  * EmbeddingGemma remains tracked in `docs/LITERT_COEXISTENCE.md`.
  */
 class LiteRtPaddleOcrBackend internal constructor(
-    context: Context,
+    private val context: Context,
     private val memoryHeadroomBytes: Long = MEMORY_HEADROOM_BYTES,
     private val availableMemoryProvider: () -> Long = defaultAvailableMemoryProvider(context),
     private val runnerFactory: PaddleOcrLiteRtRunnerFactory,
@@ -210,14 +210,19 @@ class LiteRtPaddleOcrBackend internal constructor(
     }
 
     /**
-     * CPU is the production default until the LiteRT + LiteRT-LM coexistence
-     * checklist is completed for GPU/NPU on target devices. Callers can still
-     * explicitly request GPU/NPU for prototype validation.
+     * Resolves the LiteRT accelerator for the OCR pipeline. Mirrors chat:
+     * `null` defaults to GPU; explicit `NPU` is honored when SoC + native libs
+     * pass the probe and otherwise falls back to GPU; explicit `CPU`/`GPU` is
+     * always honored. `RealPaddleOcrLiteRtRunner` creates three sequential
+     * `CompiledModel` instances (det + rec + cls), so this site has the
+     * highest exposure to LiteRT issue #5264 — see
+     * `docs/LITERT_COEXISTENCE.md`.
      */
     private fun resolveBackend(preferred: String?): String =
         LiteRtAcceleratorResolver.resolveBackend(
             requested = preferred,
             featureName = "ocr",
+            nativeLibraryDir = context.applicationInfo.nativeLibraryDir,
         ).backend
 
     private fun verifyBundleFilesExist(bundle: PaddleOcrModelInfo) {

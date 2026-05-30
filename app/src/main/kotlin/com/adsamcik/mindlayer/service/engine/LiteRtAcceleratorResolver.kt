@@ -10,9 +10,15 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * This resolver does not claim exclusive GPU/NPU ownership yet; it centralises
  * the SoC/native-library/API gates and records the downgrade chain so engine
- * status surfaces can explain why a feature selected CPU/GPU/NPU. OCR remains
- * CPU-locked until the same-process coexistence checklist in
- * `docs/LITERT_COEXISTENCE.md` validates base LiteRT + LiteRT-LM together.
+ * status surfaces can explain why a feature selected CPU/GPU/NPU.
+ *
+ * OCR uses the same NPU-on-explicit-request / GPU-default-with-CPU-fallback
+ * policy as chat. The historical CPU lock (reason
+ * `OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED`) is removed; callers that need a
+ * conservative configuration must pass `preferredBackend = "CPU"` explicitly.
+ * Heightened LiteRT issue #5264 hazard from three sequential `CompiledModel`
+ * instances (det + rec + cls) is still tracked in `docs/LITERT_COEXISTENCE.md`
+ * — validate on real devices before relying on GPU/NPU OCR in production.
  */
 internal object LiteRtAcceleratorResolver {
     data class AcceleratorDecision(
@@ -52,7 +58,7 @@ internal object LiteRtAcceleratorResolver {
         }
 
         val decision = when (feature) {
-            "ocr" -> resolveOcr(requested)
+            "ocr" -> resolveOcr(requested, nativeLibraryDir)
             "embeddings" -> resolveEmbeddings(requested, nativeLibraryDir)
             "chat" -> resolveChat(requested, nativeLibraryDir)
             else -> error("unreachable")
@@ -64,18 +70,24 @@ internal object LiteRtAcceleratorResolver {
     fun latestDecision(featureName: String): AcceleratorDecision? =
         latestDecisions[featureName.lowercase()]
 
-    private fun resolveOcr(requested: String?): AcceleratorDecision {
-        val normalized = requested.normalizedBackend()
+    private fun resolveOcr(requested: String?, nativeLibraryDir: String?): AcceleratorDecision {
         val attempted = mutableListOf<Pair<String, String>>()
-        if (normalized != null && normalized != "CPU") {
-            attempted += normalized to "OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED"
+        return when (requested.normalizedBackend()) {
+            "CPU" -> decision("CPU", "REQUESTED_CPU", attempted + ("CPU" to "selected"))
+            "GPU" -> decision("GPU", "REQUESTED_GPU", attempted + ("GPU" to "selected"))
+            "NPU" -> {
+                val probe = probeNpu(nativeLibraryDir)
+                attempted += "NPU" to probe.reason
+                if (probe.supported) {
+                    decision("NPU", "REQUESTED_NPU_SUPPORTED", attempted)
+                } else {
+                    attempted += "GPU" to "selected"
+                    decision("GPU", "REQUESTED_NPU_UNSUPPORTED_GPU_FALLBACK_${probe.reason}", attempted)
+                }
+            }
+            null -> decision("GPU", "DEFAULT_GPU_THEN_CPU_CHAIN", attempted + ("GPU" to "selected"))
+            else -> decision("GPU", "UNKNOWN_REQUESTED_BACKEND_GPU_FALLBACK", attempted + ("GPU" to "selected"))
         }
-        attempted += "CPU" to "selected"
-        return AcceleratorDecision(
-            backend = "CPU",
-            reason = "OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED",
-            attempted = attempted,
-        )
     }
 
     /** Mirrors the pre-existing LiteRtEmbeddingBackend.resolveBackend behaviour byte-for-byte. */

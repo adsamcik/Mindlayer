@@ -163,4 +163,4 @@ list cert hash parity.
 - Module `:paddleocr_model` delivers the PaddleOCR PP-OCRv5 mobile assets as an install-time AI pack.
 - OCR exposes multi-frame sessions through AIDL + `OcrSession`/`OcrEvent` in the SDK, with optional CameraX integration in `:sdk-camerax`.
 - The OCR stream is wired, including `FRAME_DROPPED`, terminal `RESULT_FINALIZED`, and terminal `OcrEvent.Error`.
-- Production exposure is gated by `OcrFeatureFlags.IS_PRODUCTION_READY=false` until real-device validation signs off; OCR remains CPU-locked via `LiteRtAcceleratorResolver` until LiteRT/LiteRT-LM coexistence is validated.
+- Production exposure is gated by `OcrFeatureFlags.IS_PRODUCTION_READY=false` until real-device validation signs off; OCR defaults to GPU via `LiteRtAcceleratorResolver` (mirroring chat — `null` → GPU; explicit `NPU` probed with GPU-fallback; explicit `CPU`/`GPU` honored). LiteRT/LiteRT-LM coexistence remains real-device-gated.
