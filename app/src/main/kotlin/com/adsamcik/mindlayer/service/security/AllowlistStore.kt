@@ -19,6 +19,7 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -117,6 +118,30 @@ class AllowlistStore(
     private val deniedFile: File = File(baseDir, "denied.json")
     private val lockFile: File = File(baseDir, "allowlist.lock")
     private val hmacKeyFile: File = File(baseDir, "allowlist.hmac")
+
+    /**
+     * JVM-wide mutex that serialises threads in this process before they
+     * race for the kernel-level [java.nio.channels.FileLock] on
+     * [lockFile]. Java NIO `FileChannel.lock()` is a **process-wide**
+     * advisory lock, not a thread-wide one — concurrent acquire attempts
+     * from two threads in the same JVM throw
+     * [java.nio.channels.OverlappingFileLockException] from
+     * `SharedFileLockTable.checkList`, which we previously swallowed
+     * inside [readSignedArray] and returned `null` for the parsed entries
+     * — making `isAllowed` falsely return `false` for an already-approved
+     * caller (Bug #5). The canonical first-party startup pattern
+     * (`registerClient` racing `getCapabilities` on two binder threads)
+     * hits this every time.
+     *
+     * Keyed by the absolute lock-file path through
+     * [PROCESS_LOCKS] so two `AllowlistStore` instances in the same
+     * process — e.g. test fixtures that recreate the store with a fresh
+     * temp dir — get independent mutexes and don't false-share. The
+     * outer mutex is a [ReentrantLock] so a single thread can still
+     * legitimately re-enter (e.g. [revoke] -> [recordPending]).
+     */
+    private val processLock: ReentrantLock =
+        PROCESS_LOCKS.computeIfAbsent(lockFile.absolutePath) { ReentrantLock() }
 
     /**
      * Tracks how many times the current thread is inside [withFileLock]. Java NIO
@@ -446,17 +471,42 @@ class AllowlistStore(
     // ---- Persistence -----------------------------------------------------
 
     private inline fun <T> withFileLock(block: () -> T): T {
-        RandomAccessFile(lockFile, "rw").use { raf ->
-            raf.channel.use { ch ->
-                val lock: FileLock = ch.lock()
-                fileLockDepth.set((fileLockDepth.get() ?: 0) + 1)
+        // Bug #5: gate THREADS in this JVM before the FileLock acquire so
+        // that `FileChannel.lock()` only ever sees one acquirer at a time
+        // per lock-file path. Without this, two concurrent isAllowed calls
+        // race in `SharedFileLockTable` and one of them throws
+        // OverlappingFileLockException, which readSignedArray swallows to
+        // null and authorizeCall then mis-classifies an approved caller
+        // as un-approved. ReentrantLock so a single thread that re-enters
+        // (e.g. revoke -> writeDenied -> readSignedArray) is fine.
+        processLock.lock()
+        try {
+            // Reentrant call from the same thread — caller already holds the
+            // FileLock, so skip the second kernel acquire (would throw
+            // OverlappingFileLockException). This preserves the existing
+            // fileLockDepth contract used by `loadOrCreateHmacKey`.
+            if (fileLockDepth.get() > 0) {
+                fileLockDepth.set(fileLockDepth.get() + 1)
                 try {
                     return block()
                 } finally {
-                    fileLockDepth.set(((fileLockDepth.get() ?: 1) - 1).coerceAtLeast(0))
-                    try { lock.release() } catch (_: Throwable) { }
+                    fileLockDepth.set((fileLockDepth.get() - 1).coerceAtLeast(0))
                 }
             }
+            return RandomAccessFile(lockFile, "rw").use { raf ->
+                raf.channel.use { ch ->
+                    val lock: FileLock = ch.lock()
+                    fileLockDepth.set((fileLockDepth.get() ?: 0) + 1)
+                    try {
+                        block()
+                    } finally {
+                        fileLockDepth.set(((fileLockDepth.get() ?: 1) - 1).coerceAtLeast(0))
+                        try { lock.release() } catch (_: Throwable) { }
+                    }
+                }
+            }
+        } finally {
+            processLock.unlock()
         }
     }
 
@@ -853,6 +903,22 @@ class AllowlistStore(
     companion object {
         private const val TAG = "AllowlistStore"
         const val DEFAULT_DIR_NAME = "mindlayer_allowlist"
+
+        /**
+         * Bug #5: per-lock-file JVM-wide mutex that serialises threads in
+         * this process before they race for the kernel-level
+         * [java.nio.channels.FileLock]. Keyed by absolute path so two
+         * `AllowlistStore` instances in the same process — typically test
+         * fixtures with fresh temp dirs — get independent mutexes.
+         *
+         * The map grows monotonically until process death. In `:ml`
+         * there is exactly one production store, so growth is bounded.
+         * Test code that uses many temp dirs would leak a small
+         * `ReentrantLock` per dir (~96 B), accepted in exchange for
+         * correctness and the lack of any other reasonable lifecycle
+         * hook for `AllowlistStore`.
+         */
+        private val PROCESS_LOCKS = ConcurrentHashMap<String, ReentrantLock>()
 
         /**
          * F-033: cap pending-approval rows to bound disk growth on a flooder.
