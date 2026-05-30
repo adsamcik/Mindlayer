@@ -100,6 +100,24 @@ class OcrEngineBenchmarkInstrumentedTest {
         val summaryFile = File(outputDir, "summary.txt")
 
         val bundle = discoverPaddleBundleOrSkip()
+        // Bench-only Tesseract trained-data is gitignored (see docs/OCR_BENCHMARK.md
+        // for how to stage). Self-skip cleanly when the dev didn't drop the
+        // 93 MB tessdata blobs — keeps `./gradlew :app:connectedDebugAndroidTest`
+        // green in default checkouts.
+        val missingTessdata = TESSDATA_FILES.filter { name ->
+            try {
+                testContext.assets.open("$BENCH_ASSET_ROOT/tessdata/$name").use { /* ok */ }
+                false
+            } catch (_: Throwable) {
+                true
+            }
+        }
+        assumeTrue(
+            "Tessdata fixtures missing under assets/$BENCH_ASSET_ROOT/tessdata: " +
+                "$missingTessdata — see docs/OCR_BENCHMARK.md to stage them locally.",
+            missingTessdata.isEmpty(),
+        )
+
         val paddle = LiteRtPaddleOcrBackend(targetContext, memoryHeadroomBytes = 0L).also {
             it.initialize(bundle, "CPU")
             Log.i(TAG, "Paddle initialised, backend=${it.activeBackend}, bundle=${bundle.displayName}")
