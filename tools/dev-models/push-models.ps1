@@ -4,11 +4,19 @@
     debuggable Android device via adb.
 
 .DESCRIPTION
-    Pushes one or more model files from a local cache directory into
-    /data/local/tmp/ on a connected device. The runtime registries
+    Pushes one or more model files from a local cache directory into the
+    Mindlayer service's externalFilesDir on a connected device
+    (``/sdcard/Android/data/<pkg>/files``). The runtime registries
     (ModelRegistry / EmbeddingModelRegistry / PaddleOcrModelRegistry)
     scan that directory on debuggable builds and load whatever they
     find, bypassing the multi-GB AI Asset Pack install path.
+
+    The script detects whether ``com.adsamcik.mindlayer.service.debug``
+    or ``com.adsamcik.mindlayer.service`` is installed and uses the
+    matching externalFilesDir. If neither is installed yet, it falls
+    back to ``/data/local/tmp/`` with a loud warning — that path used
+    to work historically but apps cannot list it on Android 12+ (API
+    31+), so push-before-install only works on older devices.
 
     This script does NOT download anything. It is a pure local-file +
     adb operation. See docs/DEV_MODELS.md for where to source models.
@@ -35,6 +43,16 @@
 
 .PARAMETER DryRun
     Print what would be pushed without actually invoking 'adb push'.
+    In dry-run the script assumes the debug service package is
+    installed (most common dev case) and prints the corresponding
+    externalFilesDir target. Combine with -PreferLegacyTmp to preview
+    the legacy ``/data/local/tmp`` path.
+
+.PARAMETER PreferLegacyTmp
+    Force the legacy ``/data/local/tmp`` push target regardless of
+    whether the service is installed. Useful for testing the fallback
+    branch and for old API-30-or-earlier devices where /data/local/tmp
+    listing still works.
 
 .EXAMPLE
     .\push-models.ps1 -All -Cache D:\mindlayer-models
@@ -50,7 +68,8 @@ param(
     [switch]$All,
     [string]$Cache,
     [string]$Device,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$PreferLegacyTmp
 )
 
 Set-StrictMode -Version Latest
@@ -60,7 +79,13 @@ $ErrorActionPreference = 'Stop'
 # Constants — must stay in sync with the registries under
 # app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/.
 # ---------------------------------------------------------------------------
-$RemoteDir = '/data/local/tmp'
+$LegacyRemoteDir = '/data/local/tmp'
+$ServicePkgRelease = 'com.adsamcik.mindlayer.service'
+$ServicePkgDebug = 'com.adsamcik.mindlayer.service.debug'
+# Resolved at runtime via Resolve-RemoteDir; seeded with the legacy path
+# so $script:RemoteDir always has a value even before resolution runs.
+$script:RemoteDir = $LegacyRemoteDir
+$script:UsingLegacyRemoteDir = $true
 
 $GemmaFile = 'gemma-4-E2B-it.litertlm'
 $GemmaManifest = 'gemma_model/src/main/assets/model_integrity.json'
@@ -146,9 +171,71 @@ function Assert-DebuggableDevice {
     $debuggable = (Invoke-AdbCapture -AdbArgs @('shell', 'getprop', 'ro.debuggable')).Output.Trim()
     $buildType  = (Invoke-AdbCapture -AdbArgs @('shell', 'getprop', 'ro.build.type')).Output.Trim()
     if ($debuggable -ne '1' -and $buildType -notin @('userdebug', 'eng')) {
-        throw "/data/local/tmp sideload requires a debuggable build/device. " +
+        throw "Mindlayer sideload requires a debuggable build/device. " +
               "Got ro.debuggable='$debuggable' ro.build.type='$buildType'. " +
               "Release ('user') builds also gate sideload via BuildConfig.DEBUG."
+    }
+}
+
+function Resolve-RemoteDir {
+    <#
+        Resolve the on-device push target:
+
+        1. -PreferLegacyTmp → /data/local/tmp/ (no device query).
+        2. -DryRun without -PreferLegacyTmp → assume the debug variant
+           is installed (most common dev case) and use its externalFilesDir.
+        3. Otherwise: query 'pm list packages' for the debug variant
+           first, then release. First match wins. If neither is found,
+           fall back to /data/local/tmp/ with a loud warning.
+
+        Returns a [pscustomobject] with: Dir, UsingLegacy, Pkg.
+    #>
+    if ($PreferLegacyTmp) {
+        return [pscustomobject]@{
+            Dir = $LegacyRemoteDir; UsingLegacy = $true; Pkg = $null
+        }
+    }
+    if ($DryRun) {
+        return [pscustomobject]@{
+            Dir = "/sdcard/Android/data/$ServicePkgDebug/files"
+            UsingLegacy = $false
+            Pkg = $ServicePkgDebug
+        }
+    }
+    foreach ($pkg in @($ServicePkgDebug, $ServicePkgRelease)) {
+        $r = Invoke-AdbCapture -AdbArgs @('shell', 'pm', 'list', 'packages', $pkg)
+        if ($r.ExitCode -ne 0) { continue }
+        $lines = $r.Output -split "`r?`n" | ForEach-Object { $_.Trim() }
+        if ($lines -contains "package:$pkg") {
+            return [pscustomobject]@{
+                Dir = "/sdcard/Android/data/$pkg/files"
+                UsingLegacy = $false
+                Pkg = $pkg
+            }
+        }
+    }
+    Write-Warning ("Mindlayer service not installed on device " +
+        "($ServicePkgDebug / $ServicePkgRelease). Falling back to " +
+        "$LegacyRemoteDir — this MAY FAIL on Android 12+ (API 31+) because " +
+        "apps can no longer list /data/local/tmp/ even when files inside " +
+        "are world-readable. Install a debug build of :app first, then re-run.")
+    return [pscustomobject]@{
+        Dir = $LegacyRemoteDir; UsingLegacy = $true; Pkg = $null
+    }
+}
+
+function Initialize-RemoteDir {
+    <#
+        Ensure $script:RemoteDir exists on the device. externalFilesDir
+        is normally created by the app on first launch; a freshly-
+        installed APK may not have run yet, so mkdir -p is cheap and
+        safe. Skipped in dry-run and for the legacy /data/local/tmp
+        path (which always exists).
+    #>
+    if ($DryRun -or $script:UsingLegacyRemoteDir) { return }
+    $r = Invoke-AdbCapture -AdbArgs @('shell', 'mkdir', '-p', $script:RemoteDir)
+    if ($r.ExitCode -ne 0) {
+        throw "Failed to create remote dir $($script:RemoteDir): $($r.Output)"
     }
 }
 
@@ -214,7 +301,7 @@ function Push-OneFile {
         [Parameter(Mandatory)][string]$LocalPath,
         [Parameter(Mandatory)][string]$Filename
     )
-    $remote = "$RemoteDir/$Filename"
+    $remote = "$($script:RemoteDir)/$Filename"
     $localSize = (Get-Item -LiteralPath $LocalPath).Length
     $argsPush = @('push', $LocalPath, $remote)
     $argsLs   = @('shell', 'ls', '-l', $remote)
@@ -325,6 +412,18 @@ if (-not $DryRun) {
 } else {
     Write-Host '  (skipping adb/device checks in dry-run mode)'
 }
+
+$resolved = Resolve-RemoteDir
+$script:RemoteDir = $resolved.Dir
+$script:UsingLegacyRemoteDir = $resolved.UsingLegacy
+$remoteLabel = if ($resolved.UsingLegacy) {
+    "$($resolved.Dir)  (LEGACY — /data/local/tmp is unlistable on API 31+)"
+} else {
+    "$($resolved.Dir)  (service pkg: $($resolved.Pkg))"
+}
+Write-Host "  remote: $remoteLabel"
+
+Initialize-RemoteDir
 
 $failures = New-Object 'System.Collections.Generic.List[string]'
 

@@ -2,16 +2,27 @@
 # Dev-only sideload of Mindlayer on-device AI models to a connected
 # debuggable Android device via adb.
 #
-# Pushes model files from a local cache into /data/local/tmp on the
-# device. The runtime registries scan that directory on debuggable
-# builds (BuildConfig.DEBUG) and load whatever they find. This script
-# does NOT download anything — see docs/DEV_MODELS.md for sources.
+# Pushes model files from a local cache into the Mindlayer service's
+# externalFilesDir (/sdcard/Android/data/<pkg>/files) on the device.
+# The runtime registries scan that directory on debuggable builds
+# (BuildConfig.DEBUG) and load whatever they find. The script detects
+# whether the debug or release service variant is installed; if
+# neither is, it falls back to /data/local/tmp/ with a loud warning
+# (apps cannot list /data/local/tmp on Android 12+ even when files
+# inside are world-readable). This script does NOT download anything
+# — see docs/DEV_MODELS.md for sources.
 #
 # Bash 3.2 compatible (default macOS bash). No GNU-only flags.
 
 set -euo pipefail
 
-REMOTE_DIR='/data/local/tmp'
+LEGACY_REMOTE_DIR='/data/local/tmp'
+SERVICE_PKG_RELEASE='com.adsamcik.mindlayer.service'
+SERVICE_PKG_DEBUG='com.adsamcik.mindlayer.service.debug'
+# Resolved at runtime via resolve_remote_dir; seeded with the legacy
+# path so REMOTE_DIR is always set.
+REMOTE_DIR="$LEGACY_REMOTE_DIR"
+USING_LEGACY_REMOTE_DIR=1
 ZERO_SHA='0000000000000000000000000000000000000000000000000000000000000000'
 
 GEMMA_FILE='gemma-4-E2B-it.litertlm'
@@ -38,32 +49,40 @@ ALL=0
 CACHE="${MINDLAYER_MODEL_CACHE:-}"
 DEVICE=''
 DRY_RUN=0
+PREFER_LEGACY_TMP=0
 
 usage() {
   cat <<'EOF'
 Usage: push-models.sh [--gemma] [--embeddings] [--paddleocr] [--all]
                       [--cache <dir>] [--device <serial>] [--dry-run]
+                      [--prefer-legacy-tmp]
 
-  --gemma         Push the chat model (Gemma 4 E2B .litertlm).
-  --embeddings    Push EmbeddingGemma weights + tokenizer.
-  --paddleocr     Push the four PaddleOCR PP-OCRv5 mobile files.
-  --all           Equivalent to --gemma --embeddings --paddleocr.
-  --cache <dir>   Local cache directory (default: $MINDLAYER_MODEL_CACHE).
-  --device <id>   adb device serial when multiple devices are connected.
-  --dry-run       Print actions without invoking 'adb push'.
+  --gemma              Push the chat model (Gemma 4 E2B .litertlm).
+  --embeddings         Push EmbeddingGemma weights + tokenizer.
+  --paddleocr          Push the four PaddleOCR PP-OCRv5 mobile files.
+  --all                Equivalent to --gemma --embeddings --paddleocr.
+  --cache <dir>        Local cache directory (default: $MINDLAYER_MODEL_CACHE).
+  --device <id>        adb device serial when multiple devices are connected.
+  --dry-run            Print actions without invoking 'adb push'. Assumes
+                       the debug service variant is installed so the dry-run
+                       preview matches a normal dev device.
+  --prefer-legacy-tmp  Force the legacy /data/local/tmp/ push target
+                       regardless of installed-service detection. Useful
+                       for the API <= 30 fallback and for testing.
 EOF
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --gemma)       GEMMA=1 ;;
-    --embeddings)  EMBEDDINGS=1 ;;
-    --paddleocr)   PADDLEOCR=1 ;;
-    --all)         ALL=1 ;;
-    --cache)       shift; CACHE="${1:-}" ;;
-    --device)      shift; DEVICE="${1:-}" ;;
-    --dry-run)     DRY_RUN=1 ;;
-    -h|--help)     usage; exit 0 ;;
+    --gemma)              GEMMA=1 ;;
+    --embeddings)         EMBEDDINGS=1 ;;
+    --paddleocr)          PADDLEOCR=1 ;;
+    --all)                ALL=1 ;;
+    --cache)              shift; CACHE="${1:-}" ;;
+    --device)             shift; DEVICE="${1:-}" ;;
+    --dry-run)            DRY_RUN=1 ;;
+    --prefer-legacy-tmp)  PREFER_LEGACY_TMP=1 ;;
+    -h|--help)            usage; exit 0 ;;
     *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
   esac
   shift
@@ -126,9 +145,57 @@ assert_debuggable() {
   debuggable="$(run_adb shell getprop ro.debuggable | tr -d '\r\n ')"
   build_type="$(run_adb shell getprop ro.build.type | tr -d '\r\n ')"
   if [ "$debuggable" != "1" ] && [ "$build_type" != "userdebug" ] && [ "$build_type" != "eng" ]; then
-    echo "error: /data/local/tmp sideload requires a debuggable build/device." >&2
+    echo "error: Mindlayer sideload requires a debuggable build/device." >&2
     echo "       ro.debuggable='$debuggable' ro.build.type='$build_type'." >&2
     echo "       Release 'user' builds also gate sideload via BuildConfig.DEBUG." >&2
+    exit 1
+  fi
+}
+
+# Resolve the on-device push target. Sets REMOTE_DIR, USING_LEGACY_REMOTE_DIR,
+# RESOLVED_PKG. Mirrors Resolve-RemoteDir in push-models.ps1.
+resolve_remote_dir() {
+  RESOLVED_PKG=''
+  if [ "$PREFER_LEGACY_TMP" -eq 1 ]; then
+    REMOTE_DIR="$LEGACY_REMOTE_DIR"
+    USING_LEGACY_REMOTE_DIR=1
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    REMOTE_DIR="/sdcard/Android/data/$SERVICE_PKG_DEBUG/files"
+    USING_LEGACY_REMOTE_DIR=0
+    RESOLVED_PKG="$SERVICE_PKG_DEBUG"
+    return 0
+  fi
+  local pkg listing
+  for pkg in "$SERVICE_PKG_DEBUG" "$SERVICE_PKG_RELEASE"; do
+    listing="$(run_adb shell pm list packages "$pkg" 2>/dev/null || true)"
+    if echo "$listing" | tr -d '\r' | grep -qx "package:$pkg"; then
+      REMOTE_DIR="/sdcard/Android/data/$pkg/files"
+      USING_LEGACY_REMOTE_DIR=0
+      RESOLVED_PKG="$pkg"
+      return 0
+    fi
+  done
+  echo "warning: Mindlayer service not installed on device" >&2
+  echo "         ($SERVICE_PKG_DEBUG / $SERVICE_PKG_RELEASE)." >&2
+  echo "         Falling back to $LEGACY_REMOTE_DIR — this MAY FAIL on Android 12+" >&2
+  echo "         (API 31+) because apps can no longer list /data/local/tmp/ even when" >&2
+  echo "         files inside are world-readable. Install a debug build of :app first," >&2
+  echo "         then re-run." >&2
+  REMOTE_DIR="$LEGACY_REMOTE_DIR"
+  USING_LEGACY_REMOTE_DIR=1
+}
+
+# Create REMOTE_DIR on the device when it's the externalFilesDir variant.
+# externalFilesDir is normally created by the app on first launch; mkdir -p
+# is cheap and safe. Skipped in dry-run and for the legacy path.
+init_remote_dir() {
+  if [ "$DRY_RUN" -eq 1 ] || [ "$USING_LEGACY_REMOTE_DIR" -eq 1 ]; then
+    return 0
+  fi
+  if ! run_adb shell mkdir -p "$REMOTE_DIR" >/dev/null; then
+    echo "error: failed to create remote dir $REMOTE_DIR" >&2
     exit 1
   fi
 }
@@ -255,6 +322,14 @@ if [ "$DRY_RUN" -eq 0 ]; then
 else
   echo "  (skipping adb/device checks in dry-run mode)"
 fi
+
+resolve_remote_dir
+if [ "$USING_LEGACY_REMOTE_DIR" -eq 1 ]; then
+  echo "  remote: $REMOTE_DIR  (LEGACY — /data/local/tmp is unlistable on API 31+)"
+else
+  echo "  remote: $REMOTE_DIR  (service pkg: $RESOLVED_PKG)"
+fi
+init_remote_dir
 
 if [ "$GEMMA" -eq 1 ]; then
   process_group 'Gemma chat' "$GEMMA_MANIFEST" "$GEMMA_FILE"
