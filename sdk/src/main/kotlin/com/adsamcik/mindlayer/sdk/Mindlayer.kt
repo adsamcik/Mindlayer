@@ -2,6 +2,7 @@ package com.adsamcik.mindlayer.sdk
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import com.adsamcik.mindlayer.EngineInfo
 import com.adsamcik.mindlayer.HistoryTurn
@@ -73,6 +74,31 @@ import java.util.UUID
  *
  * **Thread safety:** All methods are safe to call from any thread.
  * Suspend methods use the caller's coroutine context.
+ *
+ * **Embeddings — error and capability contract**
+ *
+ * All embedding entry points ([embedOne], [embedMany], [embed], [embedBatch],
+ * [embedBatchLarge], [embedBatchDeferred], [fetchEmbeddingBatch],
+ * [cancelEmbed], [cancelEmbeddingBatch], [acknowledgeEmbeddingBatch]) obey
+ * the same contract:
+ *
+ * | Failure scenario                                              | `MindlayerException.code`         |
+ * |---------------------------------------------------------------|-----------------------------------|
+ * | Service doesn't advertise `FEATURE_EMBEDDINGS`                | `NOT_SUPPORTED` (5006)            |
+ * | Old service stub (`NoSuchMethodError`/`AbstractMethodError`)  | `NOT_SUPPORTED` (5006)            |
+ * | Empty `items` / batch over the active cap                     | `IllegalArgumentException` (eager)|
+ * | Service-side batch too large past validation                  | `EMBEDDING_BATCH_TOO_LARGE` (5011)|
+ * | Service-side input bytes too long                             | `EMBEDDING_INPUT_TOO_LONG` (5013) |
+ * | Embedding model unavailable on device                         | `EMBEDDING_MODEL_UNAVAILABLE` (5012) |
+ * | Embeddings disabled by policy                                 | `EMBEDDING_DISABLED` (5014)       |
+ * | Deferred batch fetched after TTL                              | `DEFERRED_EXPIRED` (5008)         |
+ * | Deferred batch not owned by this UID                          | `SESSION_NOT_FOUND_OR_NOT_OWNED` (5004) |
+ * | Per-UID rate limit exceeded                                   | `RATE_LIMITED` (5002)             |
+ *
+ * Prefer the [embedOne] / [embedMany] facades for new code — they pick
+ * the cheapest viable transport (inline / SharedMemory / deferred
+ * fallback) automatically. See `docs/EMBEDDINGS_SDK_POLISH.md` for the
+ * full proposal and rationale.
  */
 /** Inference backend for engine pre-warming. */
 enum class InferenceBackend(internal val value: String) {
@@ -106,6 +132,29 @@ class Mindlayer private constructor(
          * without dropping anything in steady-state.
          */
         const val EVICTION_BUFFER: Int = 64
+
+        /**
+         * Maximum estimated reply-parcel bytes before [embedMany] upgrades from
+         * inline binder transport to SharedMemory. Half of the documented
+         * 1 MB binder transaction limit, leaving generous headroom for parcel
+         * overhead and any other in-flight transactions on the same binder.
+         * Internal so tests can pin selection-rule behavior without bringing
+         * real binders into the loop.
+         */
+        internal const val INLINE_REPLY_BYTE_BUDGET: Long = 512L * 1024L
+
+        /** Native output dimension of EmbeddingGemma-300M. */
+        internal const val DEFAULT_EMBEDDING_DIM: Int = 768
+
+        /**
+         * Conservative per-item parcel overhead used when estimating reply
+         * bytes for transport selection. Covers tag, modelId, tokenCount,
+         * truncated, backend, durationMs, schemaVersion serialization.
+         */
+        internal const val PARCEL_OVERHEAD_BYTES_PER_ITEM: Long = 256L
+
+        /** Sentinel backend reported when the deferred-fallback path produced no items. */
+        internal const val UNKNOWN_BACKEND: String = "unknown"
 
         /**
          * Create a [Mindlayer] instance and start binding to the service.
@@ -914,6 +963,203 @@ class Mindlayer private constructor(
      * if (!mindlayer.getCapabilities().supports(ServiceCapabilities.FEATURE_EMBEDDINGS)) {
      *     // service doesn't ship embeddings — show a friendly message
      * }
+     * val vec = mindlayer.embedOne("the cat sat on the mat")
+     * val index = InMemoryVectorIndex()
+     * index.put("doc1", vec)
+     * val hits = index.search(mindlayer.embedOne("feline on textile"), k = 5)
+     * ```
+     *
+     * Compute one L2-normalized embedding for [text]. Returns the bare
+     * [FloatArray] — the typed [com.adsamcik.mindlayer.EmbeddingResult]
+     * (with `tag`, `modelId`, `tokenCount`, `backend`, `durationMs`) is
+     * reachable via [embed] (the [EmbeddingConfig] overload) if you need it.
+     *
+     * Capability-gated by [ServiceCapabilities.FEATURE_EMBEDDINGS]; old
+     * service binaries throw [MindlayerException] with `NOT_SUPPORTED`.
+     *
+     * @param text The text to embed. Sensitive input — never logged.
+     * @param task Embedding task prefix (RetrievalDocument by default —
+     *   the right choice for indexing documents you intend to search later).
+     *   Use [EmbeddingTask.RetrievalQuery] for the query side.
+     * @param modelId Override the service-default embedding model. `null` =
+     *   service picks. v1 has only one model (`embedding-gemma-300m-v1`).
+     * @param outputDim Matryoshka truncation: 768 / 512 / 256 / 128. `null`
+     *   = use the model's native dimension (768).
+     * @param normalize L2-normalize so cosine similarity = dot product.
+     *   Almost always `true`; set `false` only if you need raw magnitudes.
+     * @param tag Opaque caller-supplied tag echoed back in the typed result.
+     *   Useful for batch correlation; unused for single embeddings.
+     */
+    @Suppress("DEPRECATION")
+    suspend fun embedOne(
+        text: String,
+        task: EmbeddingTask = EmbeddingTask.RetrievalDocument,
+        modelId: String? = null,
+        outputDim: Int? = null,
+        normalize: Boolean = true,
+        tag: String? = null,
+    ): FloatArray = embed(
+        EmbeddingConfig(
+            text = text,
+            task = task,
+            modelId = modelId,
+            outputDim = outputDim,
+            normalize = normalize,
+            tag = tag,
+        ),
+    ).vector
+
+    /**
+     * Compute embeddings for [items] in one trip. The SDK picks transport
+     * (inline binder, SharedMemory, or a deferred-batch fallback) based on
+     * batch size, payload estimate, API level, and service-advertised caps
+     * — consumers do not choose. The transport that was used is reported
+     * on [EmbeddingBatch.transport].
+     *
+     * For durable batches that must survive client-process death, use
+     * [embedBatchDeferred] (push notification via [embeddingBatchCompletions]
+     * + manual fetch / ack).
+     *
+     * Capability-gated by [ServiceCapabilities.FEATURE_EMBEDDINGS]; old
+     * service binaries throw [MindlayerException] with `NOT_SUPPORTED`.
+     *
+     * @throws IllegalArgumentException if [items] is empty, or if the batch
+     *   size exceeds the active cap for the chosen transport.
+     * @throws MindlayerException on capability mismatch, rate-limit, or any
+     *   of the embedding-specific service errors (see the class-level KDoc
+     *   error/capability table).
+     */
+    suspend fun embedMany(items: List<EmbeddingConfig>): EmbeddingBatch {
+        require(items.isNotEmpty()) { "Embedding batch must be non-empty" }
+        val caps = requireEmbeddingCapability()
+        return when (selectEmbeddingTransport(caps, items)) {
+            EmbeddingTransport.Inline -> embedManyInline(caps, items)
+            EmbeddingTransport.SharedMemory -> embedManyShm(caps, items)
+            EmbeddingTransport.DeferredFallback -> embedManyDeferredFallback(items)
+        }
+    }
+
+    /**
+     * String-convenience overload of [embedMany]. Wraps every [String] in
+     * an [EmbeddingConfig] with the supplied [task] and [modelId]; for
+     * per-item config (different tasks, tags, output dims), call the
+     * `List<EmbeddingConfig>` overload directly.
+     */
+    suspend fun embedMany(
+        texts: List<String>,
+        task: EmbeddingTask = EmbeddingTask.RetrievalDocument,
+        modelId: String? = null,
+    ): EmbeddingBatch = embedMany(
+        texts.map { EmbeddingConfig(text = it, task = task, modelId = modelId) },
+    )
+
+    /**
+     * Transport-selection rule for [embedMany]. Internal; exposed for tests
+     * so the inline / SHM / deferred routing can be pinned without touching
+     * a binder.
+     */
+    internal fun selectEmbeddingTransport(
+        caps: ServiceCapabilities,
+        items: List<EmbeddingConfig>,
+    ): EmbeddingTransport {
+        // SharedMemory requires API 27 (android.os.SharedMemory) AND service
+        // advertising a non-zero SHM cap. The service zeros maxEmbeddingBatchShm
+        // on API 26 already; we re-check Build.VERSION here as a defense-in-depth
+        // gate so a misadvertised cap never tries to allocate SharedMemory.
+        val shmSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1
+            && caps.maxEmbeddingBatchShm > 0
+        val needsLargeTransport = items.size > caps.maxEmbeddingBatchInline
+            || estimatedReplyBytes(caps, items) > INLINE_REPLY_BYTE_BUDGET
+        return when {
+            !needsLargeTransport -> EmbeddingTransport.Inline
+            shmSupported && items.size <= caps.maxEmbeddingBatchShm -> EmbeddingTransport.SharedMemory
+            else -> EmbeddingTransport.DeferredFallback
+        }
+    }
+
+    private fun estimatedReplyBytes(caps: ServiceCapabilities, items: List<EmbeddingConfig>): Long {
+        // Upper bound: each item contributes (dim * 4 bytes) + parcel overhead.
+        // Use the largest advertised output dim because per-item outputDim is
+        // optional. 256-byte overhead covers tag/modelId/tokenCount/backend
+        // string headers — generous, but inline transport is cheap to
+        // upgrade to SHM so over-budgeting is safe.
+        val maxDim = caps.embeddingDims.maxOrNull() ?: DEFAULT_EMBEDDING_DIM
+        return items.size.toLong() * (maxDim.toLong() * 4L + PARCEL_OVERHEAD_BYTES_PER_ITEM)
+    }
+
+    private suspend fun embedManyInline(
+        caps: ServiceCapabilities,
+        items: List<EmbeddingConfig>,
+    ): EmbeddingBatch {
+        validateEmbeddingBatchSize(items, caps.maxEmbeddingBatchInline, "inline")
+        return try {
+            withContext(Dispatchers.IO) {
+                val res = withTypedErrors { it.embedBatch(items.map { config -> config.toAidlRequest() }) }
+                EmbeddingBatch(
+                    results = res.results,
+                    transport = EmbeddingTransport.Inline,
+                    totalDurationMs = res.totalDurationMs,
+                    backend = res.backend,
+                )
+            }
+        } catch (_: NoSuchMethodError) {
+            throw embeddingNotSupported()
+        } catch (_: AbstractMethodError) {
+            throw embeddingNotSupported()
+        }
+    }
+
+    private suspend fun embedManyShm(
+        caps: ServiceCapabilities,
+        items: List<EmbeddingConfig>,
+    ): EmbeddingBatch {
+        validateEmbeddingBatchSize(items, caps.maxEmbeddingBatchShm, "shared-memory")
+        return try {
+            withContext(Dispatchers.IO) {
+                val transfer = withTypedErrors { it.embedBatchShm(items.map { config -> config.toAidlRequest() }) }
+                // Read the batch-level fields *before* parseEmbeddingTransfer
+                // drains and closes the PFD — the parcelable fields themselves
+                // survive close, but reading them eagerly keeps the surface
+                // symmetric with the inline path.
+                val totalDurationMs = transfer.totalDurationMs
+                val backend = transfer.backend
+                val results = parseEmbeddingTransfer(transfer)
+                EmbeddingBatch(
+                    results = results,
+                    transport = EmbeddingTransport.SharedMemory,
+                    totalDurationMs = totalDurationMs,
+                    backend = backend,
+                )
+            }
+        } catch (_: NoSuchMethodError) {
+            throw embeddingNotSupported()
+        } catch (_: AbstractMethodError) {
+            throw embeddingNotSupported()
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private suspend fun embedManyDeferredFallback(items: List<EmbeddingConfig>): EmbeddingBatch {
+        // Reuse the existing fallback chain in embedBatchLarge: it already
+        // routes through embedBatch (if items fit inline) or deferred (if
+        // not), and is the single source of truth for the SHM-unavailable
+        // path. Batch-level metadata is best-effort here — durationMs is
+        // tracked per-item; backend is read from the first item.
+        val results = embedBatchLarge(items)
+        return EmbeddingBatch(
+            results = results,
+            transport = EmbeddingTransport.DeferredFallback,
+            totalDurationMs = 0L,
+            backend = results.firstOrNull()?.backend ?: UNKNOWN_BACKEND,
+        )
+    }
+
+    /**
+     * ```kotlin
+     * val mindlayer = Mindlayer.connect(context); mindlayer.awaitConnected()
+     * if (!mindlayer.getCapabilities().supports(ServiceCapabilities.FEATURE_EMBEDDINGS)) {
+     *     // service doesn't ship embeddings — show a friendly message
+     * }
      * val vec = mindlayer.embed("the cat sat on the mat")
      * val index = InMemoryVectorIndex()
      * index.put("doc1", vec)
@@ -930,6 +1176,12 @@ class Mindlayer private constructor(
      *
      * For non-default config see [embed] ([EmbeddingConfig] overload).
      */
+    @Deprecated(
+        "Use embedOne(text) — same semantics, named for symmetry with embedMany(). " +
+            "See docs/EMBEDDINGS_SDK_POLISH.md.",
+        ReplaceWith("embedOne(text)"),
+        DeprecationLevel.WARNING,
+    )
     suspend fun embed(text: String): FloatArray = embed(EmbeddingConfig(text = text)).vector
 
     /**
@@ -960,6 +1212,13 @@ class Mindlayer private constructor(
      * Capability-gated by [ServiceCapabilities.FEATURE_EMBEDDINGS]; old service
      * binaries throw [MindlayerException] with `NOT_SUPPORTED`.
      */
+    @Deprecated(
+        "Use embedMany(items) — picks the cheapest viable transport (inline, " +
+            "SharedMemory, or deferred fallback) automatically. " +
+            "See docs/EMBEDDINGS_SDK_POLISH.md.",
+        ReplaceWith("embedMany(configs).results"),
+        DeprecationLevel.WARNING,
+    )
     suspend fun embedBatch(configs: List<EmbeddingConfig>): List<com.adsamcik.mindlayer.EmbeddingResult> {
         val caps = requireEmbeddingCapability()
         validateEmbeddingBatchSize(configs, caps.maxEmbeddingBatchInline, "inline")
@@ -982,6 +1241,13 @@ class Mindlayer private constructor(
      * Capability-gated by [ServiceCapabilities.FEATURE_EMBEDDINGS]; old service
      * binaries throw [MindlayerException] with `NOT_SUPPORTED`.
      */
+    @Deprecated(
+        "Use embedMany(items) — picks SharedMemory automatically when the " +
+            "batch needs it. See docs/EMBEDDINGS_SDK_POLISH.md.",
+        ReplaceWith("embedMany(configs).results"),
+        DeprecationLevel.WARNING,
+    )
+    @Suppress("DEPRECATION")
     suspend fun embedBatchLarge(configs: List<EmbeddingConfig>): List<com.adsamcik.mindlayer.EmbeddingResult> {
         val caps = requireEmbeddingCapability()
         if (caps.maxEmbeddingBatchShm <= 0) {
