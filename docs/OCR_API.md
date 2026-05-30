@@ -1,11 +1,86 @@
 # Multi-frame OCR / parsing API
 
-> v0.8 Phase 1–4 + Wave 1. Single source of truth for the Mindlayer
-> multi-frame OCR API. The AIDL/SDK/event stream is wired; production
-> exposure remains gated by `OcrFeatureFlags.IS_PRODUCTION_READY = false`
+> v0.8 Phase 1–4 + Wave 1, plus v0.9 single-image one-shot. Single source
+> of truth for the Mindlayer OCR APIs. The AIDL/SDK/event stream is wired;
+> production exposure remains gated by `OcrFeatureFlags.IS_PRODUCTION_READY = false`
 > until the real-device validation matrix signs off.
 
-## TL;DR
+## Two shapes, one engine
+
+Mindlayer exposes OCR through two AIDL surfaces backed by the same
+`LiteRtPaddleOcrBackend`:
+
+| Surface | When to use | Capability flag |
+|---|---|---|
+| `ocrImage(MediaPart, OcrImageOptions): OcrImageResult` — **v0.9** | Single captured image (gallery picker, sharesheet, screenshot text-extraction, "scan this receipt" one-shot). Sync, no session ceremony. | `FEATURE_OCR_IMAGE_ONESHOT` |
+| `createOcrSession` / `pushOcrFrame` / `streamOcrEvents` / `finalizeOcrSession` — **v0.8** | Streaming camera frames with cross-frame fusion, presort, barcode anchoring, structured-output finalization. | `FEATURE_OCR_SESSION` |
+
+Both flags flip together (same production-readiness gate). The engine's
+per-instance mutex serialises all calls so the two APIs share throughput
+without racing for the native delegate.
+
+## TL;DR — single-image (v0.9)
+
+```kotlin
+val mindlayer = Mindlayer.connect(context)
+mindlayer.awaitConnected()
+
+if (!mindlayer.getCapabilities().supports(ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT)) {
+    return  // OCR is still hidden by the production-readiness gate.
+}
+
+// Raw OCR only — ~1-2s on real hardware.
+val result = mindlayer.ocrImage(
+    bytes = jpegBytes,
+    mimeType = "image/jpeg",
+)
+result.lines.forEach { line ->
+    Log.i("ocr", "${line.text} (conf=${line.confidence})")
+}
+
+// OCR + structured extraction (Gemma) — adds ~2-5s of LLM decode.
+val structured = mindlayer.ocrImage(
+    bytes = jpegBytes,
+    mimeType = "image/jpeg",
+    options = OcrImageOptions(
+        emitBoundingBoxes = true,
+        runLlmExtraction = true,
+        extractionSchemaJson = """{"type":"object","properties":{"total":{"type":"string"}}}""",
+    ),
+)
+structured.extractionFields.forEach { field ->
+    Log.i("ocr", "${field.name} = ${field.value}")
+}
+structured.extractionJson?.let { Log.i("ocr", "raw: $it") }
+```
+
+The bytes path picks SharedMemory or pipe transport automatically based on
+size (payloads under `OCR_INLINE_PIPE_THRESHOLD_BYTES` use a PFD pipe;
+larger payloads use SharedMemory on API 27+). Caller does not manage the
+file descriptor.
+
+### Single-image semantics
+
+| Property | Value |
+|---|---|
+| Transport | `ocrImage` accepts an encoded image bytes (JPEG / PNG / WEBP) via the bytes-in SDK wrapper, or any `MediaPart` (SHM or PFD) via the direct AIDL call. |
+| Concurrency | Per-engine mutex serialises with concurrent session-pipeline pushes. |
+| Synchronicity | Sync binder transaction. The call returns when both OCR and (optionally) LLM extraction are complete. |
+| Failure modes | `INVALID_REQUEST` (options or MediaPart shape), `SERVICE_UNAVAILABLE` (engine not ready or never wired), `LOW_MEMORY` (engine refused for memory headroom), `TRANSIENT_RESOURCE_EXHAUSTED` (SharedMemory pool saturated). |
+| Persistence | None. Recognized text and extraction output live in the response parcelable only; never persisted to filesDir / cacheDir / external storage. Caller may persist via the SDK history DB. |
+
+### When to choose `ocrImage` vs `ocrSession`
+
+- ✅ Use `ocrImage` for one-off captures, deep links, screenshots, gallery
+  pickers, sharesheet targets. Less ceremony, no event pipe, no per-call
+  setup cost beyond the engine itself.
+- ✅ Use `ocrSession` for streaming camera feeds where multi-frame
+  fusion meaningfully improves quality (cross-frame voting, barcode
+  anchor lock, schema-shaped structured output across frames). The
+  session pipeline also runs the service-side presort so blurry / dark
+  frames get rejected before reaching the engine.
+
+## TL;DR — multi-frame session (v0.8)
 
 ```kotlin
 val mindlayer = Mindlayer.connect(context)
@@ -48,12 +123,13 @@ mindlayer.ocrSession(OcrProfile.Receipt) {
 
 ## Capability discovery
 
-The service advertises OCR support via three flags in
+The service advertises OCR support via flags in
 `ServiceCapabilities.supportedFeatures`:
 
 | Flag | Meaning |
 |---|---|
 | `FEATURE_OCR_SESSION` | Multi-frame OCR sessions are callable. The code path is wired, but this flag is advertised only when the PaddleOCR engine is ready **and** `OcrFeatureFlags.IS_PRODUCTION_READY` is `true`; Wave 1 keeps it dark. |
+| `FEATURE_OCR_IMAGE_ONESHOT` | v0.9 single-image `ocrImage(MediaPart, OcrImageOptions): OcrImageResult` AIDL is callable. Shares the same engine-ready + production-readiness gate as `FEATURE_OCR_SESSION` — the two flags flip together. |
 | `FEATURE_OCR_PRESORT_SERVICE_SIDE` | Service-side quality presort capability. The presort runs on accepted OCR frames; callers should still check the advertised flag before relying on it as a version signal. |
 | `FEATURE_OCR_BARCODE_ANCHOR` | ZXing barcode anchor in the evidence package. Advertised as a wire-shape capability. |
 | `FEATURE_OCR_BOUNDING_BOXES` | Per-line bounding boxes in extraction output. Advertised as a wire-shape capability. |
