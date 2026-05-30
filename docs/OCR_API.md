@@ -534,4 +534,43 @@ When `optionsJson.pageBoundaries` is absent or `enabled=false`:
 
 ### SDK + CameraX support
 
-PR 1 (server detection) is implemented. PR 2 will add `:sdk` deserialization for the two new wire events and CameraX-side `Sensor.TYPE_GYROSCOPE` forwarding into `OcrFrameMeta.extraJson.imu`. Until PR 2 ships, callers can already drive the feature by hand-rolling the JSON envelope and listening to the raw stream.
+PR 2 (the `:sdk` deserialization + `:sdk-camerax` IMU forwarding) is now shipped. The two new wire events surface as **typed `OcrEvent` subclasses** on `OcrSession.events`, and a **`pageBoundaries { … }` builder block** writes the JSON envelope so callers never assemble it by hand:
+
+```kotlin
+val session = mindlayer.ocrRealtime(OcrProfile.RECEIPT_FAST) {
+    sourceHint = "camera"
+    pageBoundaries {
+        // enabled = true is implied by the block existing; every other
+        // knob defaults to the values in the table above.
+        stabilityFrames = 4
+        llmExtractPerPage = false
+        llmExtractFinal = true
+    }
+}
+
+session.events.collect { event ->
+    when (event) {
+        is OcrEvent.PageStarted   -> Log.d(TAG, "Page ${event.pageIndex} opened")
+        is OcrEvent.PageFinalized -> Log.d(TAG, "Page ${event.pageIndex} closed: " +
+            "${event.lineCount} lines / ${event.framesContributed} frames " +
+            "(perPageLlm=${event.fullJson != null})")
+        is OcrEvent.ResultFinalized -> /* aggregate, fires once after all pages */
+        else -> { /* existing per-frame events */ }
+    }
+}
+```
+
+For the gyro signal to contribute, frames must carry an `imu` block in `OcrFrameMeta.extraJson`. The `:sdk-camerax` `OcrImageAnalyzer` does this automatically when constructed with a `SensorManager`:
+
+```kotlin
+val analyzer = OcrImageAnalyzer(
+    session = session,
+    sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager,
+)
+// later, when the camera lifecycle ends:
+analyzer.close() // unregisters the gyro listener
+```
+
+The analyzer registers a `TYPE_GYROSCOPE` listener at `SENSOR_DELAY_GAME`, tracks the peak `sqrt(x²+y²+z²)` magnitude observed between successive `analyze()` calls, and merges `{"imu":{"gyro_max_rad_per_s": <peak>}}` into each frame's `extraJson`. Without a `SensorManager` (the default), `extraJson` is left untouched — the boundary detector then falls back to the text + spatial signals alone, which is still useful.
+
+Old service binaries that don't emit `ocr_page_started` / `ocr_page_finalized` are transparent to the new SDK — the reader simply never sees them and only the existing per-frame and session-end events fire.

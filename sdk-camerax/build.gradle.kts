@@ -78,6 +78,7 @@ dependencies {
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.kotlinx.serialization.json)
 
     // CameraX is compileOnly so consumers pick their own version. The
     // analyser interfaces and ImageProxy / ImageInfo APIs have been

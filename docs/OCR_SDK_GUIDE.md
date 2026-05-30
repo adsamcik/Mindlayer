@@ -288,6 +288,63 @@ try {
 }
 ```
 
+## Multi-page realtime (v0.9)
+
+When a single `ocrRealtime` session captures **different content over time** — e.g. the user pans the camera from page 1 of a receipt to page 2 — the service can detect the page boundary and emit a fresh **per-page** event pair while still emitting the single session-end `OcrEvent.ResultFinalized` for backward compatibility.
+
+The feature is **opt-in** via a `pageBoundaries { … }` block on the session builder. Without the block, the session behaves exactly as v0.8 (single finalize, no per-page events):
+
+```kotlin
+val session = mindlayer.ocrRealtime(OcrProfile.RECEIPT_FAST) {
+    sourceHint = "camera"
+    pageBoundaries {
+        // enabled = true is implied by the block existing.
+        // Every other knob has a sensible default; tune only as needed.
+        jaccardThreshold = 0.3f
+        spatialThreshold = 0.5f
+        gyroThreshold    = 2.0f
+        stabilityFrames  = 3      // N consecutive different frames → boundary
+        llmExtractPerPage = false // run LLM extractor on the whole session, not per page
+        llmExtractFinal   = true
+    }
+}
+
+session.events.collect { event ->
+    when (event) {
+        is OcrEvent.PageStarted -> {
+            // pageIndex (0-based), triggerFrameId (0 for the first page,
+            // otherwise the frameId of the frame that closed the prior streak)
+        }
+        is OcrEvent.PageFinalized -> {
+            // pageIndex, lineCount, framesContributed, lines: List<String>,
+            // fullJson: String? (LLM extraction JSON when llmExtractPerPage=true)
+        }
+        is OcrEvent.ResultFinalized -> {
+            // Fires once after all pages — same backward-compat shape
+            // your v0.8 code already handles.
+        }
+        else -> { /* per-frame events you already handle */ }
+    }
+}
+```
+
+### Forwarding gyro from CameraX
+
+For the gyro signal to contribute to boundary detection, each frame must carry `{"imu":{"gyro_max_rad_per_s": …}}` on `OcrFrameMeta.extraJson`. The `:sdk-camerax` `OcrImageAnalyzer` does this automatically when constructed with a `SensorManager`:
+
+```kotlin
+val analyzer = OcrImageAnalyzer(
+    session = session,
+    sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager,
+)
+// later, on activity stop / lifecycle teardown:
+analyzer.close() // unregisters the gyro listener
+```
+
+The analyzer registers a `Sensor.TYPE_GYROSCOPE` listener at `SensorManager.SENSOR_DELAY_GAME`, tracks the peak `sqrt(x²+y²+z²)` magnitude observed between successive `analyze()` calls, and resets the peak after each frame. Without a `SensorManager`, the constructor is binary-identical to before — `extraJson` is left untouched and the boundary detector falls back to text + spatial signals only (still useful, just less robust against fast pans on glossy paper).
+
+> **Backward compatibility.** Old service binaries that don't emit the new wire events are transparent to the SDK — the reader simply never sees them. Old callers using `ocrRealtime` without a `pageBoundaries { … }` block see byte-identical v0.8 behaviour. See [`OCR_API.md`](OCR_API.md#multi-page-realtime-v09--preview) for the full wire-level contract, JSON envelope, and event-sequence example.
+
 ## Migration — `ocrSession` / `ocrImage` → `ocrRealtime` / `ocrAsync`
 
 The v0.10 SDK rename is a pure name change. The underlying AIDL

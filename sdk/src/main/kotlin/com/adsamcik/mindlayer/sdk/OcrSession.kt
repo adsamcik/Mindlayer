@@ -8,6 +8,10 @@ import com.adsamcik.mindlayer.MediaPart
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * Builder-style configuration for an OCR session.
@@ -44,14 +48,161 @@ class OcrSessionConfigBuilder internal constructor(private val profile: OcrProfi
     /** Opaque JSON envelope for forward-compatible knobs. */
     var optionsJson: String? = null
 
+    @Volatile
+    private var pageBoundariesConfig: PageBoundariesBuilder? = null
+
+    /**
+     * Configure v0.9 page-boundary detection. When left untouched (the
+     * builder is never invoked), the session behaves identically to v0.8
+     * — single session-end [OcrEvent.ResultFinalized], no per-page
+     * [OcrEvent.PageStarted] / [OcrEvent.PageFinalized] events.
+     *
+     * When enabled, the service detects when the camera moves to
+     * different content (Jaccard text overlap + spatial bbox shift +
+     * gyro spike, gated by an N-frame stability window), emits a fresh
+     * [OcrEvent.PageStarted] / [OcrEvent.PageFinalized] pair per page,
+     * and still emits a single session-end [OcrEvent.ResultFinalized].
+     *
+     * For the gyro signal to contribute, frames must include IMU samples
+     * in [com.adsamcik.mindlayer.OcrFrameMeta.extraJson] — the
+     * `:sdk-camerax` `OcrImageAnalyzer` forwards them automatically when
+     * constructed with a [android.hardware.SensorManager]. Without IMU
+     * samples the heuristic falls back to text + spatial signals alone
+     * (still useful, just slightly less robust to held-by-hand shake).
+     *
+     * Calling this method multiple times is idempotent — only the last
+     * configured block wins. The block is serialised into [optionsJson]
+     * at [build] time; if the caller also supplied a raw `optionsJson`,
+     * the two are merged with caller-supplied keys winning on collision
+     * (consistent with how every other opaque-JSON envelope on the SDK
+     * surface is handled).
+     *
+     * @see PageBoundariesBuilder for the per-knob KDoc.
+     */
+    fun pageBoundaries(configure: PageBoundariesBuilder.() -> Unit = {}) {
+        val builder = PageBoundariesBuilder()
+        builder.configure()
+        pageBoundariesConfig = builder
+    }
+
     internal fun build(): OcrSessionConfig = OcrSessionConfig(
         mode = profile.mode,
         outputSchemaJson = outputSchemaJson,
         languageHints = languageHints,
         maxFrames = maxFrames,
         frameRateLimitFps = frameRateLimitFps,
-        optionsJson = optionsJson,
+        optionsJson = mergedOptionsJson(),
     )
+
+    private fun mergedOptionsJson(): String? {
+        val pageBoundariesBlock = pageBoundariesConfig?.toJsonObject() ?: return optionsJson
+        val callerObject = optionsJson?.takeIf { it.isNotBlank() }?.let {
+            runCatching { OCR_OPTIONS_JSON.parseToJsonElement(it) as? JsonObject }
+                .getOrNull()
+        }
+        // Caller-supplied keys win on collision (consistent with how
+        // `extraContextJson` and friends are merged elsewhere in the SDK).
+        val merged = buildJsonObject {
+            put(KEY_PAGE_BOUNDARIES, pageBoundariesBlock)
+            callerObject?.forEach { (key, value) -> put(key, value) }
+        }
+        return merged.toString()
+    }
+
+    private companion object {
+        const val KEY_PAGE_BOUNDARIES = "pageBoundaries"
+        val OCR_OPTIONS_JSON = Json { ignoreUnknownKeys = true; isLenient = true }
+    }
+}
+
+/**
+ * DSL block for [OcrSessionConfigBuilder.pageBoundaries].
+ *
+ * Every knob has a documented default chosen to match what
+ * [com.adsamcik.mindlayer.service.engine.PageBoundariesConfig.parse] reads
+ * server-side; out-of-range values are clamped on the service. Callers
+ * may safely tweak only the knobs they care about.
+ *
+ * # Defaults
+ *
+ * | Knob | Default | Range / clamp |
+ * |---|---|---|
+ * | [enabled] | `true` | — calling the [OcrSessionConfigBuilder.pageBoundaries] block opts in |
+ * | [jaccardThreshold] | `0.3f` | `0.0..1.0` |
+ * | [spatialThreshold] | `0.5f` | `0.0..2.0` |
+ * | [gyroThreshold] | `2.0f` | `0.0..50.0` |
+ * | [stabilityFrames] | `3` | `1..30` |
+ * | [llmExtractPerPage] | `false` | — defer per-page LLM extraction to session finalize when enabled |
+ * | [llmExtractFinal] | `true` | — aggregate-LLM extraction on `OCR_RESULT_FINALIZED.fullJson` |
+ *
+ * See `docs/OCR_API.md` ("Multi-page realtime (v0.9 — preview)") for
+ * the full boundary-detection rule and event-sequence example.
+ */
+class PageBoundariesBuilder {
+
+    /**
+     * Master switch. `true` opts the session into per-page events.
+     * Defaults to `true` because the builder being invoked at all is
+     * already an opt-in gesture; callers that want to wire the block
+     * conditionally can flip it to `false` to keep v0.8 behavior.
+     */
+    var enabled: Boolean = true
+
+    /**
+     * Token-set Jaccard below this between successive frames signals
+     * "different content" for one frame. Clamped server-side to
+     * `0.0..1.0`.
+     */
+    var jaccardThreshold: Float = 0.3f
+
+    /**
+     * Manhattan distance (in normalised 0..1 frame coordinates, summed
+     * across x+y axes) between successive bbox centroids that signals
+     * "camera pan". Clamped server-side to `0.0..2.0`.
+     */
+    var spatialThreshold: Float = 0.5f
+
+    /**
+     * `gyro_max_rad_per_s` (from
+     * [com.adsamcik.mindlayer.OcrFrameMeta.extraJson]'s `imu` block)
+     * above this signals "physical motion". Clamped server-side to
+     * `0.0..50.0`.
+     */
+    var gyroThreshold: Float = 2.0f
+
+    /**
+     * Number of consecutive "different" frames required before a
+     * boundary fires. Filters single-frame glitches (focus search,
+     * hand obscuring the page). Clamped server-side to `1..30`.
+     */
+    var stabilityFrames: Int = 3
+
+    /**
+     * When `true`, the service runs the OCR LLM extractor once per
+     * page during session finalize; the result is attached to that
+     * page's [OcrEvent.PageFinalized.fullJson]. Off by default —
+     * per-page LLM extraction is heavyweight.
+     */
+    var llmExtractPerPage: Boolean = false
+
+    /**
+     * When `true`, the service runs the OCR LLM extractor once on the
+     * aggregated text of all pages at session finalize and attaches
+     * the result to [OcrEvent.ResultFinalized.fullJson]. When `false`,
+     * the same field carries a lightweight rollup shape
+     * (`{"pages":[…]}`) instead.
+     */
+    var llmExtractFinal: Boolean = true
+
+    internal fun toJsonObject(): JsonObject = buildJsonObject {
+        put("enabled", enabled)
+        put("jaccardThreshold", jaccardThreshold)
+        put("spatialThreshold", spatialThreshold)
+        put("gyroThreshold", gyroThreshold)
+        put("stabilityFrames", stabilityFrames)
+        put("llmExtractPerPage", llmExtractPerPage)
+        put("llmExtractFinal", llmExtractFinal)
+    }
 }
 
 /**
