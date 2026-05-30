@@ -25,6 +25,8 @@ import com.adsamcik.mindlayer.OcrFrameMeta;
 import com.adsamcik.mindlayer.OcrFrameAck;
 import com.adsamcik.mindlayer.OcrSessionState;
 import com.adsamcik.mindlayer.OcrLimits;
+import com.adsamcik.mindlayer.OcrImageOptions;
+import com.adsamcik.mindlayer.OcrImageResult;
 import com.adsamcik.mindlayer.HealthCheck;
 import com.adsamcik.mindlayer.IClientCallback;
 
@@ -150,6 +152,30 @@ interface IMindlayerService {
     void finalizeOcrSession(String sessionId);
     void closeOcrSession(String sessionId);
     OcrLimits getOcrLimits();
+
+    // v0.9 single-image OCR — one-shot synchronous OCR for callers that
+    // have a single image and just want recognized text (gallery picker,
+    // sharesheet target, "scan this receipt" one-shot, screenshot text
+    // extraction). Bypasses the session pipeline ceremony (createSession /
+    // pushFrame / streamEvents / finalize) so there is no per-call setup
+    // cost, no event-pipe wiring, and no multi-frame fusion.
+    //
+    // The same PaddleOCR engine that powers pushOcrFrame runs here — the
+    // engine layer's per-instance mutex serialises ocrImage calls with
+    // session pushes, so the two APIs share throughput rather than
+    // competing on the native delegate.
+    //
+    // When OcrImageOptions.runLlmExtraction is true, the service also runs
+    // the structured-extraction Gemma pass against the recognized lines
+    // and returns the fields + raw JSON in the same response. This adds
+    // the LLM decode latency (~2-5s) to the call. The non-LLM path
+    // (the default) returns OCR-only in ~1-2s on real hardware.
+    //
+    // Capability-gated via ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT.
+    // Old services that don't know about the method raise
+    // NoSuchMethodError / AbstractMethodError on the binder stub;
+    // capability-aware SDKs check the flag before calling.
+    OcrImageResult ocrImage(in MediaPart image, in OcrImageOptions options);
 
     // v0.8.1 health check. Lightweight liveness probe — returns the
     // service's wall-clock + uptime + per-engine state + apiVersion.

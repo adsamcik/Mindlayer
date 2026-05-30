@@ -208,6 +208,23 @@ data class ServiceCapabilities(
         const val FEATURE_OCR_BOUNDING_BOXES: String = "ocr_bounding_boxes"
 
         /**
+         * v0.9: single-image OCR — synchronous `ocrImage` AIDL method that
+         * accepts one [MediaPart] and returns an [OcrImageResult] in the
+         * same call. Opt-in LLM extraction via
+         * [OcrImageOptions.runLlmExtraction]. Bypasses the multi-frame
+         * session ceremony (`createOcrSession` / `pushOcrFrame` /
+         * `streamOcrEvents` / `finalizeOcrSession`) for callers that just
+         * have one image and want recognized lines back.
+         *
+         * Advertised only when the PaddleOCR engine is `Ready` *and* the
+         * production-readiness gate is on — same conditions as
+         * [FEATURE_OCR_SESSION]. SDKs that don't see this flag should not
+         * call `ocrImage` (the binder stub raises
+         * `NoSuchMethodError` / `AbstractMethodError` on old services).
+         */
+        const val FEATURE_OCR_IMAGE_ONESHOT: String = "ocr_image_oneshot"
+
+        /**
          * v0.8.1: lightweight `ping()` health-check endpoint.
          *
          * Returns a [com.adsamcik.mindlayer.HealthCheck] parcelable
