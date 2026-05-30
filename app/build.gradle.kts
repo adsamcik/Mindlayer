@@ -743,5 +743,13 @@ dependencies {
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.mockk.android)
     androidTestImplementation(libs.room.testing)
+    androidTestImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(project(":sdk"))
+
+    // OCR engine benchmark — Tesseract4Android. ANDROIDTEST ONLY. Never
+    // shipped in :app or :sdk. The benchmark is `OcrEngineBenchmarkInstrumentedTest`
+    // and exists to compare PaddleOCR vs Tesseract on a fixture image set.
+    // Pulled from JitPack via a content-scoped repository declaration in
+    // `settings.gradle.kts` (Apache 2.0).
+    androidTestImplementation(libs.tesseract4android)
 }
