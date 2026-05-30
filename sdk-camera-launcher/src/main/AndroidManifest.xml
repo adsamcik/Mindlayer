@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+        Camera access: requested at runtime by [OcrCaptureActivity]; the host
+        app does NOT need to declare it. Declared as a feature so the Play
+        Store can categorise the app, but with required=false so apps that
+        ship the launcher behind a feature flag aren't forced to require a
+        camera at install time.
+
+        Privacy invariant: this module does NOT declare android.permission.INTERNET
+        or any networking-adjacent permission — see
+        .github/instructions/privacy-offline.instructions.md.
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera"
+                  android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus"
+                  android:required="false" />
+
+    <application>
+        <!--
+            The OCR capture activity is launched by the consumer via an
+            Activity Result contract. exported=false because consumers
+            should never start it directly via Intent — they always go
+            through [OcrCaptureContract], which is the only stable surface.
+            We do NOT advertise it in the launcher.
+        -->
+        <activity
+            android:name=".OcrCaptureActivity"
+            android:exported="false"
+            android:theme="@style/Theme.MindlayerOcrCaptureLauncher"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode"
+            android:screenOrientation="portrait"
+            tools:ignore="LockedOrientationActivity"/>
+    </application>
+</manifest>

@@ -37,6 +37,7 @@ rootProject.name = "Mindlayer"
 include(":app")
 include(":sdk")
 include(":sdk-camerax")
+include(":sdk-camera-launcher")
 include(":shared")
 include(":lint-checks")
 include(":gemma_model")

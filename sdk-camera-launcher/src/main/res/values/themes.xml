@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Minimal NoActionBar theme used by [OcrCaptureActivity]. The activity
+        renders its own Compose UI (Material3 colours inherit from the
+        composition), so we only need a host theme that doesn't draw an
+        action bar and lets us go edge-to-edge with transparent system bars.
+
+        Inherits from the platform Material theme rather than a 3rd-party
+        component theme so the launcher doesn't drag in AppCompat /
+        com.google.android.material as transitive deps.
+    -->
+    <style name="Theme.MindlayerOcrCaptureLauncher"
+           parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>
