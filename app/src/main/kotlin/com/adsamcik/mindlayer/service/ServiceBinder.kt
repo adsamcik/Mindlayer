@@ -102,6 +102,24 @@ class ServiceBinder(
     private val callbackRegistry: EvictionRegistry = EvictionRegistry(),
     private val ocrSessionManager: OcrSessionManager = OcrSessionManager(),
     private val sharedMemoryPool: com.adsamcik.mindlayer.service.ipc.SharedMemoryPool? = null,
+    /**
+     * Direct engine handle for the single-image `ocrImage` AIDL method
+     * (v0.9). When `null` the `ocrImage` call fails with
+     * [MindlayerErrorCode.SERVICE_UNAVAILABLE]. The service wires the
+     * same engine instance that powers the session pipeline so the two
+     * APIs share the per-engine mutex and never race for the native
+     * delegate.
+     */
+    private val paddleOcrEngine: com.adsamcik.mindlayer.service.engine.PaddleOcrEngine? = null,
+    /**
+     * Structured-extraction extractor used when the caller sets
+     * [com.adsamcik.mindlayer.OcrImageOptions.runLlmExtraction] = true.
+     * Defaults to [com.adsamcik.mindlayer.service.engine.NoOpOcrLlmExtractor]
+     * so the binder is constructible in tests; production
+     * [MindlayerMlService] injects [com.adsamcik.mindlayer.service.engine.LiteRtLmGemmaOcrExtractorProduction].
+     */
+    private val ocrLlmExtractor: com.adsamcik.mindlayer.service.engine.OcrLlmExtractor =
+        com.adsamcik.mindlayer.service.engine.NoOpOcrLlmExtractor(),
 ) : IMindlayerService.Stub() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -2249,7 +2267,9 @@ class ServiceBinder(
             ocrSessionManager.isProductionReady &&
             ocrSessionManager.isEngineReady()
         ) {
-            baseFeatures + com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_SESSION
+            baseFeatures +
+                com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_SESSION +
+                com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT
         } else {
             baseFeatures
         }
@@ -2595,6 +2615,227 @@ class ServiceBinder(
         authorizeCall(cost = 0.1)
         // Returns the manager configured limits regardless of whether FEATURE_OCR_SESSION is advertised.
         return ocrSessionManager.getLimits()
+    }
+
+    /**
+     * v0.9 single-image OCR. Sync binder transaction; runs the existing
+     * PaddleOCR engine on a single [MediaPart] and, when requested,
+     * forwards the recognized lines to the LLM extractor for structured
+     * fields. Returns once both passes are done.
+     *
+     * Threading: the engine's per-instance mutex serialises this call
+     * with any concurrent session pushes. There is no per-call setup
+     * cost (no session record, no event pipe, no fusion accumulator).
+     *
+     * Wire errors:
+     *  - [com.adsamcik.mindlayer.shared.MindlayerErrorCode.INVALID_REQUEST]
+     *    on validator failure or MediaPart decode failure.
+     *  - [com.adsamcik.mindlayer.shared.MindlayerErrorCode.SERVICE_UNAVAILABLE]
+     *    when the OCR engine is not wired or not ready (model bundle
+     *    missing, init still in flight, init failed).
+     *  - [com.adsamcik.mindlayer.shared.MindlayerErrorCode.LOW_MEMORY]
+     *    when the engine declined recognition for memory reasons.
+     *  - [com.adsamcik.mindlayer.shared.MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED]
+     *    when SharedMemory staging was rejected by the pool.
+     */
+    override fun ocrImage(
+        image: com.adsamcik.mindlayer.MediaPart,
+        options: com.adsamcik.mindlayer.OcrImageOptions,
+    ): com.adsamcik.mindlayer.OcrImageResult {
+        val totalStartedNs = System.nanoTime()
+        authorizeCall(cost = 1.0)
+        try {
+            IpcInputValidator.validateOcrImageOptions(options)
+        } catch (e: IllegalArgumentException) {
+            try { image.source.close() } catch (_: Throwable) { /* fine */ }
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_REQUEST,
+                "Invalid OcrImageOptions: ${e.message}",
+            )
+        }
+        try {
+            IpcInputValidator.validateImageTransfer(image, MAX_MEDIA_BYTES)
+        } catch (t: Throwable) {
+            try { image.source.close() } catch (_: Throwable) { /* fine */ }
+            MindlayerLog.w(
+                TAG,
+                "ocrImage MediaPart rejected: ${t.safeLabel()}",
+                throwable = null,
+            )
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_REQUEST,
+                "Invalid ocrImage MediaPart: ${t.safeLabel()}",
+            )
+        }
+
+        val engine = paddleOcrEngine
+        val pool = sharedMemoryPool
+        if (engine == null || pool == null || !ocrSessionManager.isEngineReady()) {
+            try { image.source.close() } catch (_: Throwable) { /* fine */ }
+            throw typedBinderException(
+                MindlayerErrorCode.SERVICE_UNAVAILABLE,
+                "OCR engine not ready",
+            )
+        }
+
+        val uid = Binder.getCallingUid()
+        val scopedKey = "ocr-image:$uid:${System.nanoTime()}"
+
+        val extracted = try {
+            com.adsamcik.mindlayer.service.engine.MediaPartYPlaneExtractor.extractY(image, pool, scopedKey)
+        } catch (e: SecurityException) {
+            try { image.source.close() } catch (_: Throwable) { /* fine */ }
+            MindlayerLog.w(
+                TAG,
+                "ocrImage Y-plane extraction rejected: ${e.safeLabel()}",
+                requestId = scopedKey,
+                throwable = null,
+            )
+            throw e
+        } catch (e: com.adsamcik.mindlayer.service.ipc.SharedMemoryPoolExhaustedException) {
+            try { image.source.close() } catch (_: Throwable) { /* fine */ }
+            MindlayerLog.w(
+                TAG,
+                "ocrImage Y-plane staging exhausted: ${e.safeLabel()}",
+                requestId = scopedKey,
+                throwable = null,
+            )
+            throw typedBinderException(
+                MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
+                "shm_pool_exhausted reason=${e.reason} retryAfterMs=${e.retryAfterMs}",
+            )
+        } catch (t: Throwable) {
+            try { image.source.close() } catch (_: Throwable) { /* fine */ }
+            MindlayerLog.w(
+                TAG,
+                "ocrImage Y-plane extraction failed: ${t.safeLabel()}",
+                requestId = scopedKey,
+                throwable = null,
+            )
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_REQUEST,
+                "ocrImage decode failed: ${t.safeLabel()}",
+            )
+        }
+
+        val engineConfig = com.adsamcik.mindlayer.service.engine.OcrEngineConfig(
+            emitBoundingBoxes = options.emitBoundingBoxes,
+            maxLines = options.maxLines,
+            orientationDisabled = options.orientationDisabled,
+        )
+
+        val ocrStartedNs = System.nanoTime()
+        val ocrOutput = try {
+            runBlocking {
+                engine.recognise(
+                    extracted.yPlane,
+                    extracted.width,
+                    extracted.height,
+                    engineConfig,
+                )
+            }
+        } catch (e: com.adsamcik.mindlayer.service.engine.LowMemoryException) {
+            MindlayerLog.w(
+                TAG,
+                "ocrImage rejected: low memory availMb=${e.availMb} requiredMb=${e.requiredMb}",
+                requestId = scopedKey,
+            )
+            throw typedBinderException(
+                MindlayerErrorCode.LOW_MEMORY,
+                "Insufficient memory: availMb=${e.availMb} requiredMb=${e.requiredMb}",
+            )
+        } catch (t: Throwable) {
+            MindlayerLog.w(
+                TAG,
+                "ocrImage recognise failed: ${t.safeLabel()}",
+                requestId = scopedKey,
+                throwable = null,
+            )
+            throw typedBinderException(
+                MindlayerErrorCode.SERVICE_UNAVAILABLE,
+                "OCR recognise failed: ${t.safeLabel()}",
+            )
+        }
+        val ocrDurationMs = (System.nanoTime() - ocrStartedNs) / 1_000_000L
+
+        var extractionResult: com.adsamcik.mindlayer.service.engine.OcrExtractionResult? = null
+        var llmDurationMs = 0L
+        if (options.runLlmExtraction) {
+            val schema = options.extractionSchemaJson
+            check(!schema.isNullOrEmpty()) {
+                // validateOcrImageOptions already enforces this; defense-in-depth.
+                "runLlmExtraction requires non-empty extractionSchemaJson"
+            }
+            val evidence = com.adsamcik.mindlayer.service.engine.OcrEvidencePackage(
+                sessionId = scopedKey,
+                frameId = 0L,
+                frameIndex = 0,
+                mode = com.adsamcik.mindlayer.OcrSessionConfig.MODE_GENERAL_DOCUMENT,
+                outputSchemaJson = schema,
+                textLines = ocrOutput.lines,
+                barcodeAnchors = emptyList(),
+                frameQuality = 1.0,
+            )
+            val llmStartedNs = System.nanoTime()
+            extractionResult = try {
+                runBlocking { ocrLlmExtractor.extract(evidence) }
+            } catch (t: Throwable) {
+                // Per OcrLlmExtractor contract, implementations SHOULD return
+                // empty rather than throw. If something does throw, fall back to
+                // returning OCR-only result instead of poisoning the whole call.
+                MindlayerLog.w(
+                    TAG,
+                    "ocrImage LLM extraction failed: ${t.safeLabel()}",
+                    requestId = scopedKey,
+                    throwable = null,
+                )
+                null
+            }
+            llmDurationMs = (System.nanoTime() - llmStartedNs) / 1_000_000L
+        }
+
+        val totalDurationMs = (System.nanoTime() - totalStartedNs) / 1_000_000L
+        MindlayerLog.d(
+            TAG,
+            "ocrImage ok lines=${ocrOutput.lines.size} runLlm=${options.runLlmExtraction} " +
+                "ocr=${ocrDurationMs}ms llm=${llmDurationMs}ms total=${totalDurationMs}ms",
+            requestId = scopedKey,
+        )
+
+        return com.adsamcik.mindlayer.OcrImageResult(
+            lines = ocrOutput.lines.map { line ->
+                com.adsamcik.mindlayer.OcrImageLine(
+                    text = line.text,
+                    confidence = confidenceToWire(line.confidence),
+                    boundingBox = line.boundingBox,
+                    orientationDegrees = line.orientationDegrees,
+                )
+            },
+            extractionFields = extractionResult?.fields?.map { field ->
+                com.adsamcik.mindlayer.OcrImageExtractedField(
+                    name = field.name,
+                    value = field.value,
+                    confidence = confidenceToWire(field.confidence),
+                )
+            }.orEmpty(),
+            extractionJson = extractionResult?.rawJson,
+            backend = ocrOutput.backend,
+            ocrDurationMs = ocrDurationMs,
+            llmDurationMs = llmDurationMs,
+            totalDurationMs = totalDurationMs,
+        )
+    }
+
+    /** Map the engine-side verbalized confidence to the wire-int scale. */
+    private fun confidenceToWire(
+        c: com.adsamcik.mindlayer.service.engine.OcrFieldFusion.Confidence,
+    ): Int = when (c) {
+        com.adsamcik.mindlayer.service.engine.OcrFieldFusion.Confidence.LOW ->
+            com.adsamcik.mindlayer.OcrImageLine.CONFIDENCE_LOW
+        com.adsamcik.mindlayer.service.engine.OcrFieldFusion.Confidence.MEDIUM ->
+            com.adsamcik.mindlayer.OcrImageLine.CONFIDENCE_MEDIUM
+        com.adsamcik.mindlayer.service.engine.OcrFieldFusion.Confidence.HIGH ->
+            com.adsamcik.mindlayer.OcrImageLine.CONFIDENCE_HIGH
     }
 
     // ─────────────────────────────────────────────────────────────────────

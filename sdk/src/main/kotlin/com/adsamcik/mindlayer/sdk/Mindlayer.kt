@@ -2250,6 +2250,78 @@ class Mindlayer private constructor(
         return OcrSession(sessionId = sessionId, config = config, mindlayer = this)
     }
 
+    /**
+     * Single-image OCR — recognise text in one encoded image and return
+     * synchronously. Convenience for callers that just have one captured
+     * image (gallery picker, sharesheet target, screenshot text
+     * extraction) and don't want session ceremony.
+     *
+     * Pass [options].`runLlmExtraction = true` (plus
+     * [com.adsamcik.mindlayer.OcrImageOptions.extractionSchemaJson]) to
+     * also run the structured-extraction Gemma pass and receive
+     * [com.adsamcik.mindlayer.OcrImageResult.extractionFields] +
+     * [com.adsamcik.mindlayer.OcrImageResult.extractionJson]. Adds the
+     * LLM decode latency (~2-5s) to the call.
+     *
+     * The bytes path picks SharedMemory or pipe transport automatically
+     * based on size — payloads under
+     * `OCR_INLINE_PIPE_THRESHOLD_BYTES` use a PFD pipe; larger payloads
+     * use SharedMemory on API 27+. Caller does not need to manage the
+     * file descriptor.
+     *
+     * # Capability
+     *
+     * Requires [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT].
+     * Throws [MindlayerException] with
+     * [com.adsamcik.mindlayer.shared.MindlayerErrorCode.FEATURE_NOT_SUPPORTED]
+     * when the connected service does not advertise the flag (e.g. the
+     * production-readiness gate is still off, the model bundle is
+     * missing, or the service is older than v0.9).
+     *
+     * @param bytes encoded image bytes (JPEG / PNG / WEBP). Must be
+     *   non-empty.
+     * @param mimeType the image MIME type — one of `image/jpeg`,
+     *   `image/png`, `image/webp`.
+     * @param options recognition + extraction toggles.
+     * @throws MindlayerException with a typed error code on service
+     *   rejection (LOW_MEMORY, INVALID_REQUEST, SERVICE_UNAVAILABLE).
+     */
+    suspend fun ocrImage(
+        bytes: ByteArray,
+        mimeType: String,
+        options: com.adsamcik.mindlayer.OcrImageOptions = com.adsamcik.mindlayer.OcrImageOptions(),
+    ): com.adsamcik.mindlayer.OcrImageResult {
+        requireOcrImageCapability()
+        val part = MediaTransfer.ocrEncodedImagePart(
+            requestId = "ocr-image-${java.util.UUID.randomUUID()}",
+            bytes = bytes,
+            mimeType = mimeType,
+        )
+        return try {
+            withContext(Dispatchers.IO) {
+                withTypedErrors { it.ocrImage(part, options) }
+            }
+        } catch (_: NoSuchMethodError) {
+            throw ocrImageNotSupported()
+        } catch (_: AbstractMethodError) {
+            throw ocrImageNotSupported()
+        } finally {
+            part.source.closeQuietly()
+        }
+    }
+
+    private suspend fun requireOcrImageCapability() {
+        val caps = getCapabilities()
+        if (ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT !in caps.supportedFeatures) {
+            throw ocrImageNotSupported()
+        }
+    }
+
+    private fun ocrImageNotSupported(): MindlayerException = MindlayerException(
+        message = "Connected Mindlayer service does not support single-image OCR (ocrImage)",
+        code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.FEATURE_NOT_SUPPORTED,
+    )
+
     /** Internal: forward a fully-staged OCR frame to the AIDL stub. */
     internal suspend fun pushOcrFrame(
         sessionId: String,

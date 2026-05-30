@@ -91,6 +91,37 @@ class ServiceBinderOcrCapabilityTest {
         )
     }
 
+    @Test fun `FEATURE_OCR_IMAGE_ONESHOT advertised iff engine ready and production`() {
+        every { ocrManager.isEngineReady() } returns true
+        val withEngine = newBinder(ocrManager).getCapabilities()
+        assertTrue(
+            "engine ready + production ready -> FEATURE_OCR_IMAGE_ONESHOT must be advertised",
+            withEngine.supports(ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT),
+        )
+
+        every { ocrManager.isEngineReady() } returns false
+        val withoutEngine = newBinder(ocrManager).getCapabilities()
+        assertFalse(
+            "engine NOT ready -> FEATURE_OCR_IMAGE_ONESHOT must NOT be advertised",
+            withoutEngine.supports(ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT),
+        )
+    }
+
+    @Test fun `OCR session and one-shot flip together`() {
+        // The two flags share a single gate (engine ready + production ready),
+        // so they must always advertise as a pair. Capability-aware SDKs can
+        // therefore rely on either flag's presence to imply the other.
+        every { ocrManager.isEngineReady() } returns true
+        val ready = newBinder(ocrManager).getCapabilities()
+        assertTrue(ready.supports(ServiceCapabilities.FEATURE_OCR_SESSION))
+        assertTrue(ready.supports(ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT))
+
+        every { ocrManager.isEngineReady() } returns false
+        val dark = newBinder(ocrManager).getCapabilities()
+        assertFalse(dark.supports(ServiceCapabilities.FEATURE_OCR_SESSION))
+        assertFalse(dark.supports(ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT))
+    }
+
     @Test fun `OCR flag flip is independent of FEATURE_EMBEDDINGS`() {
         every { ocrManager.isEngineReady() } returns true
         val caps = newBinder(ocrManager).getCapabilities()

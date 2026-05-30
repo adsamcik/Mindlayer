@@ -6,6 +6,7 @@ import com.adsamcik.mindlayer.EmbeddingTask
 import com.adsamcik.mindlayer.HistoryTurn
 import com.adsamcik.mindlayer.ImageTransfer
 import com.adsamcik.mindlayer.OcrFrameMeta
+import com.adsamcik.mindlayer.OcrImageOptions
 import com.adsamcik.mindlayer.OcrLimits
 import com.adsamcik.mindlayer.OcrSessionConfig
 import com.adsamcik.mindlayer.RequestMeta
@@ -692,6 +693,86 @@ object IpcInputValidator {
                 "OcrFrameMeta.extraJson too long (${e.length} > $MAX_OCR_SCHEMA_JSON_LEN)"
             }
         }
+    }
+
+    /**
+     * Hard upper bound on [OcrImageOptions.maxLines]. Mirrors the engine's
+     * own clamp (`OcrEngineConfig.maxLines`) and matches the session-side
+     * cap. `0` is interpreted as "service default" downstream.
+     */
+    const val MAX_OCR_IMAGE_LINES = 1024
+
+    /**
+     * Hard upper bound on [OcrImageOptions.extractionDecodeBudgetTokens].
+     * `0` means "service default" ([OcrLimits.ocrPerFrameDecodeBudgetTokens]);
+     * positive values up to this ceiling override the per-call decode budget
+     * for the optional LLM extraction pass.
+     */
+    const val MAX_OCR_IMAGE_DECODE_BUDGET_TOKENS = 8 * 1024
+
+    /**
+     * Validate a caller-supplied [OcrImageOptions] before the engine sees it.
+     *
+     * Mirrors [validateOcrSessionConfig] in spirit — schema-version pin,
+     * language hint count + per-hint shape, schema/options JSON length caps
+     * — but specific to the single-image one-shot surface:
+     *  - [OcrImageOptions.maxLines] clamped to [MAX_OCR_IMAGE_LINES] (0 = default).
+     *  - [OcrImageOptions.extractionDecodeBudgetTokens] clamped to
+     *    [MAX_OCR_IMAGE_DECODE_BUDGET_TOKENS] (0 = service default).
+     *  - When [OcrImageOptions.runLlmExtraction] is true,
+     *    [OcrImageOptions.extractionSchemaJson] must be present and non-empty;
+     *    when false, the schema field is allowed but ignored (caller may pass
+     *    it speculatively in case they flip the toggle later).
+     */
+    fun validateOcrImageOptions(options: OcrImageOptions) {
+        require(options.schemaVersion == OcrImageOptions.CURRENT_SCHEMA_VERSION) {
+            "OcrImageOptions.schemaVersion=${options.schemaVersion} unsupported " +
+                "(expected ${OcrImageOptions.CURRENT_SCHEMA_VERSION})"
+        }
+        require(options.maxLines in 0..MAX_OCR_IMAGE_LINES) {
+            "OcrImageOptions.maxLines=${options.maxLines} out of range " +
+                "(0..$MAX_OCR_IMAGE_LINES)"
+        }
+        require(options.extractionDecodeBudgetTokens in 0..MAX_OCR_IMAGE_DECODE_BUDGET_TOKENS) {
+            "OcrImageOptions.extractionDecodeBudgetTokens=" +
+                "${options.extractionDecodeBudgetTokens} out of range " +
+                "(0..$MAX_OCR_IMAGE_DECODE_BUDGET_TOKENS)"
+        }
+        require(options.languageHints.size <= MAX_OCR_LANG_HINT_COUNT) {
+            "OcrImageOptions.languageHints has too many entries " +
+                "(${options.languageHints.size} > $MAX_OCR_LANG_HINT_COUNT)"
+        }
+        for (hint in options.languageHints) {
+            require(hint.length in 1..MAX_OCR_LANG_HINT_LEN) {
+                "OcrImageOptions.languageHints entry length out of range " +
+                    "(got ${hint.length}, allowed 1..$MAX_OCR_LANG_HINT_LEN)"
+            }
+            require(BCP47_PATTERN.matches(hint)) {
+                "OcrImageOptions.languageHints entry is not BCP-47 shaped " +
+                    "(<redacted:${hint.length}>)"
+            }
+        }
+        options.extractionSchemaJson?.let { schema ->
+            require(schema.length <= MAX_OCR_SCHEMA_JSON_LEN) {
+                "OcrImageOptions.extractionSchemaJson too long " +
+                    "(${schema.length} > $MAX_OCR_SCHEMA_JSON_LEN)"
+            }
+        }
+        if (options.runLlmExtraction) {
+            val schema = options.extractionSchemaJson
+            require(!schema.isNullOrEmpty()) {
+                "OcrImageOptions.runLlmExtraction=true requires a non-empty " +
+                    "extractionSchemaJson"
+            }
+        }
+        options.optionsJson?.let { opts ->
+            require(opts.length <= MAX_OCR_SCHEMA_JSON_LEN) {
+                "OcrImageOptions.optionsJson too long " +
+                    "(${opts.length} > $MAX_OCR_SCHEMA_JSON_LEN)"
+            }
+        }
+        // featureFlags is a reserved bitfield; accept any value and ignore
+        // unknown bits, matching the AIDL_STABILITY guidance.
     }
 
     // ─────────────────────────────────────────────────────────────────────
