@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        Mindlayer first-party OCR driver / validation harness.
+
+        This sample app exists solely to:
+          1. Demonstrate the cross-app OCR APIs end-to-end (single-image
+             `ocrImage` + multi-frame `ocrSession`) as a reference for
+             external SDK consumers.
+          2. Drive the v0.9 OCR production-readiness validation matrix
+             from `docs/OCR_VALIDATION_REPORT.md` — open the service
+             connection, exercise each documented scenario, write a JSON
+             report to `externalFilesDir/ocr-validation/`.
+
+        It uses BIND_ML_SERVICE the same way any external first-party app
+        would. The permission is protectionLevel="signature|knownSigner";
+        on a developer machine both this APK and the `:app` APK are auto-
+        signed with `~/.android/debug.keystore` so the signature side
+        matches at install time. The user still has to approve the app
+        once via the dashboard — that flow is part of what we validate.
+
+        No INTERNET / CAMERA permissions: the realtime scenarios feed
+        pre-bundled fixture images into the OCR session as encoded
+        frames, exactly like a CameraX adapter would, but without the
+        OS camera dependency. That keeps the validation harness
+        deterministic and runnable on emulators with no virtual camera.
+    -->
+
+    <uses-permission android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE" />
+
+    <queries>
+        <package android:name="com.adsamcik.mindlayer.service" />
+        <package android:name="com.adsamcik.mindlayer.service.debug" />
+    </queries>
+
+    <application
+        android:label="Mindlayer OCR Driver"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:allowBackup="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
