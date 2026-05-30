@@ -171,6 +171,16 @@ class ConnectionManager {
     fun getService(): IMindlayerService? = binderRef.get()
 
     /**
+     * Returns the application [Context] the SDK was bound with, or `null`
+     * if [connect] hasn't been called yet. Internal because the SDK
+     * sometimes needs scratch storage (e.g. for the encoded-OCR-image
+     * transport's regular-file PFD path, see Bug #7) and pulling the
+     * context off the connection avoids threading it through every
+     * single AIDL entry point.
+     */
+    internal fun getContext(): Context? = boundContext
+
+    /**
      * Returns the live binder or throws [IllegalStateException].
      */
     fun requireService(): IMindlayerService =

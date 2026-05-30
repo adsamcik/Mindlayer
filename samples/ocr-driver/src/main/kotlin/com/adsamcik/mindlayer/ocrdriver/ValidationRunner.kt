@@ -108,7 +108,16 @@ class ValidationRunner(
         // Poll until OCR appears or we time out — production apps should
         // do the same dance (subscribe to capabilities-changed or retry
         // with backoff) rather than treating the first response as final.
-        suspend fun pollForOcrCapability(timeoutMs: Long = 10_000L): Boolean {
+        //
+        // Poll cost: getCapabilities is 0.25 rate-limit units. We poll at
+        // 1 Hz (so the bucket refill at ~1 token/sec keeps pace) for up
+        // to 15s, then sleep a final RATE_LIMIT_RECOVERY_DELAY_MS to let
+        // the bucket refill to a comfortable level before the actual
+        // scenarios start firing real OCR / inference calls.
+        suspend fun pollForOcrCapability(
+            timeoutMs: Long = 15_000L,
+            pollIntervalMs: Long = 1_000L,
+        ): Boolean {
             val deadline = System.currentTimeMillis() + timeoutMs
             while (System.currentTimeMillis() < deadline) {
                 try {
@@ -127,11 +136,15 @@ class ValidationRunner(
                     // Transient rate-limit on a polling probe is acceptable
                     // — fall through to the delay and retry.
                 }
-                delay(250)
+                delay(pollIntervalMs)
             }
             return false
         }
         val ocrReady = pollForOcrCapability()
+        // Even after OCR is advertised, give the rate-limit bucket a
+        // moment to recover from the warmup polling so the first heavy
+        // scenario doesn't immediately exhaust the remaining tokens.
+        delay(RATE_LIMIT_RECOVERY_DELAY_MS)
 
         val capsSubset = try {
             mindlayer.getCapabilities().supportedFeatures
@@ -412,4 +425,14 @@ class ValidationRunner(
         rotationDegrees = 0,
         qualityHint = OcrFrameMeta.QUALITY_GOOD,
     )
+
+    companion object {
+        /**
+         * After OCR is advertised, wait this long for the per-UID rate-limit
+         * bucket to refill before the first heavy scenario runs. Sized to
+         * roughly cover the 1-token-per-second refill cadence × the number
+         * of forceRefresh probes the warmup poll burns.
+         */
+        const val RATE_LIMIT_RECOVERY_DELAY_MS: Long = 3_000L
+    }
 }

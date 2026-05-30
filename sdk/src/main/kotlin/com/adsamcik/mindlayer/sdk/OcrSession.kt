@@ -292,6 +292,10 @@ class OcrSession internal constructor(
             requestId = "ocr-frame-${java.util.UUID.randomUUID()}",
             bytes = bytes,
             mimeType = mimeType,
+            // Bug #7: provide bound context so the transport selector
+            // uses a regular-file PFD (not a pipe) and survives the
+            // service's H5 hardening.
+            context = mindlayer.connection.getContext(),
         )
         return mindlayer.pushOcrFrame(sessionId, part, meta)
     }

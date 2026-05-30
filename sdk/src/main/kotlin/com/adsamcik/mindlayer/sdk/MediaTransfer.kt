@@ -145,17 +145,36 @@ object MediaTransfer {
         )
     }
 
-    /** Build an OCR [MediaPart] from encoded JPEG/PNG/WEBP image bytes. */
+    /**
+     * Build an OCR [MediaPart] from encoded JPEG/PNG/WEBP image bytes.
+     *
+     * Transport selection:
+     *  - **SharedMemory** (API 27+, bytes > [OCR_INLINE_PIPE_THRESHOLD_BYTES]):
+     *    zero-copy through an anonymous shared-memory region.
+     *  - **Regular-file PFD** (when [context] is non-null): bytes are written
+     *    to a unique file in `context.cacheDir`, the file is opened
+     *    read-only as a [ParcelFileDescriptor], and then immediately
+     *    unlinked from disk. The kernel keeps the inode alive via the open
+     *    FD until both ends (SDK writer-side autoclose + service reader-side
+     *    autoclose) drop their references. Bug #7: this is the path that
+     *    survives the service's H5 hardening (which rejects FIFO/pipe FDs
+     *    as "Unsupported source PFD type" because they can block the
+     *    staging thread indefinitely — see SharedMemoryPool.assertSafePfdType).
+     *  - **Pipe PFD** (legacy fallback, [context] is null): old behaviour,
+     *    will FAIL against a hardened service. Kept for callers (mostly
+     *    pre-Bug-#7 tests) that cannot supply a context.
+     */
     fun ocrEncodedImagePart(
         requestId: String,
         bytes: ByteArray,
         mimeType: String,
+        context: Context? = null,
     ): com.adsamcik.mindlayer.MediaPart {
         require(mimeType in setOf("image/jpeg", "image/png", "image/webp")) {
             "OCR encoded frames support image/jpeg, image/png, or image/webp (got $mimeType)"
         }
         require(bytes.isNotEmpty()) { "encoded image bytes must not be empty" }
-        return bytesImagePart(requestId = requestId, bytes = bytes, mimeType = mimeType)
+        return bytesImagePart(requestId = requestId, bytes = bytes, mimeType = mimeType, context = context)
     }
 
     private fun bytesImagePart(
@@ -165,11 +184,63 @@ object MediaTransfer {
         width: Int = 0,
         height: Int = 0,
         rowStride: Int = 0,
+        context: Context? = null,
     ): com.adsamcik.mindlayer.MediaPart {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1 && bytes.size > OCR_INLINE_PIPE_THRESHOLD_BYTES) {
-            bytesImagePartSharedMemory(requestId, bytes, mimeType, width, height, rowStride)
-        } else {
-            bytesImagePartPipe(requestId, bytes, mimeType, width, height, rowStride)
+        return when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1 && bytes.size > OCR_INLINE_PIPE_THRESHOLD_BYTES ->
+                bytesImagePartSharedMemory(requestId, bytes, mimeType, width, height, rowStride)
+            context != null ->
+                bytesImagePartRegularFile(requestId, bytes, mimeType, width, height, rowStride, context)
+            else ->
+                // Legacy pipe transport — will fail against the H5-hardened
+                // service. Retained so callers that don't (yet) thread a
+                // Context through still compile; new code paths always
+                // provide a context so they take the regular-file branch.
+                bytesImagePartPipe(requestId, bytes, mimeType, width, height, rowStride)
+        }
+    }
+
+    /**
+     * Bug #7 workaround: write [bytes] to a uniquely-named file inside
+     * `context.cacheDir`, open it read-only as a [ParcelFileDescriptor],
+     * and unlink the on-disk file immediately. The kernel keeps the
+     * inode alive via the open FD until every reference closes, so the
+     * service can `read` the regular-file FD without us leaving a stale
+     * cache file behind if the AIDL call short-circuits.
+     */
+    private fun bytesImagePartRegularFile(
+        requestId: String,
+        bytes: ByteArray,
+        mimeType: String,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        context: Context,
+    ): com.adsamcik.mindlayer.MediaPart {
+        val cacheDir = context.cacheDir.also { it.mkdirs() }
+        val file = File.createTempFile("ocr-img-", ".bin", cacheDir)
+        try {
+            file.writeBytes(bytes)
+            val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            // Unlink immediately — the open FD keeps the inode alive on
+            // both sides of the binder (service reads from its dup'd FD),
+            // and we don't litter the cacheDir if the call short-circuits.
+            file.delete()
+            return com.adsamcik.mindlayer.MediaPart(
+                requestId = requestId,
+                kind = com.adsamcik.mindlayer.MediaPart.KIND_IMAGE,
+                mimeType = mimeType,
+                source = pfd,
+                isSharedMemory = false,
+                payloadBytes = bytes.size.toLong(),
+                width = width,
+                height = height,
+                rowStride = rowStride,
+            )
+        } catch (t: Throwable) {
+            // If anything went wrong after the file was created, clean up.
+            runCatching { file.delete() }
+            throw t
         }
     }
 

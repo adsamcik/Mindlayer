@@ -2037,6 +2037,13 @@ class Mindlayer private constructor(
      * val answer = mindlayer.chat("What is specialty coffee?")
      * ```
      */
+    @Deprecated(
+        message = "Use inferAsync(text) — canonical name that pairs " +
+            "cleanly with inferRealtime() and matches the OCR realtime/" +
+            "async API naming.",
+        replaceWith = ReplaceWith("inferAsync(text)"),
+        level = DeprecationLevel.WARNING,
+    )
     suspend fun chat(text: String): String {
         awaitConnected()
         return generate(text)
@@ -2045,6 +2052,12 @@ class Mindlayer private constructor(
     /**
      * Send a message with an image and get the response. No session management needed.
      */
+    @Deprecated(
+        message = "Use inferAsync(text, MediaTransfer.imagePart(image)) — " +
+            "canonical name + explicit media transport.",
+        replaceWith = ReplaceWith("inferAsync(text, MediaTransfer.imagePart(image))"),
+        level = DeprecationLevel.WARNING,
+    )
     suspend fun chat(text: String, image: Bitmap): String {
         awaitConnected()
         return generateWithImage(text, image)
@@ -2949,6 +2962,12 @@ class Mindlayer private constructor(
             requestId = "ocr-image-${java.util.UUID.randomUUID()}",
             bytes = bytes,
             mimeType = mimeType,
+            // Bug #7: thread the bound application Context through so the
+            // transport selector takes the regular-file PFD path (not the
+            // pipe path that the service rejects with H5's "Unsupported
+            // source PFD type"). Null only on the never-connected fast
+            // path, where the call below would fail anyway.
+            context = connection.getContext(),
         )
         return try {
             withContext(Dispatchers.IO) {
