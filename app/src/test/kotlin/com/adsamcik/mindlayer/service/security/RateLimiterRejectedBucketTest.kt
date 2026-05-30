@@ -97,11 +97,14 @@ class RateLimiterRejectedBucketTest {
             timeSource = { time },
         )
         // F-027 refinement: the rejected-callers bucket follows the same
-        // one-token grant policy as the main bucket — a brand-new unknown
-        // caller gets exactly one bookkeeping action so its first
-        // `recordPending` lands. The second attempt without refill rejects,
-        // so a flooder still cannot burst the disk-I/O budget on cold start.
+        // first-call grant policy as the main bucket — a brand-new unknown
+        // caller gets the bookkeeping budget so its first `recordPending`
+        // lands. Bug #3 follow-up bumped the default grant to 2.0 so the
+        // documented connect handshake fits; subsequent calls without
+        // refill must still reject so a flooder cannot burst the disk-I/O
+        // budget on cold start.
         assertTrue("first-call grant", rl.tryAcquireRejected(1000))
-        assertFalse("burst blocked - grant is one-shot", rl.tryAcquireRejected(1000))
+        assertTrue("second call still within 2.0 grant", rl.tryAcquireRejected(1000))
+        assertFalse("burst blocked - grant is bounded at 2.0", rl.tryAcquireRejected(1000))
     }
 }
