@@ -18,6 +18,11 @@ gradle.properties text
 gradlew text eol=lf
 gradlew.bat text eol=crlf
 
+# Shell scripts must be LF on all platforms so bash can execute them
+# (Linux CI). Without this, Git's autocrlf on Windows checkouts would
+# rewrite them to CRLF, breaking the shebang line.
+*.sh text eol=lf
+
 # AIDL
 *.aidl text
 
