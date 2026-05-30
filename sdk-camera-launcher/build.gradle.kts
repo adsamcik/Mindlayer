@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "com.adsamcik.mindlayer.sdk.camera.launcher"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 26
