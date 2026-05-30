@@ -100,13 +100,68 @@ class LiteRtPaddleOcrBackend internal constructor(
             }
         }
 
+        // Memory headroom is checked once, before any init attempt. The
+        // throw escapes via the outer suspend boundary, never enters the
+        // fallback dance below.
         checkMemoryHeadroom(bundle)
+
+        try {
+            attemptInit(bundle, selectedBackend, initStartNs)
+        } catch (t: Throwable) {
+            // LowMemoryException stays terminal — callers (engine + UI) need
+            // to see it. CPU is the last-resort backend, so a CPU-forced
+            // failure is also terminal: no fallback dance, original behaviour.
+            if (t is LowMemoryException || selectedBackend == "CPU") {
+                MindlayerLog.w(
+                    TAG,
+                    "PaddleOCR backend init failed: ${t.safeLabel()}",
+                    throwable = null,
+                )
+                throw t
+            }
+            MindlayerLog.w(
+                TAG,
+                "PaddleOCR $selectedBackend init failed (safeLabel=${t.safeLabel()}), " +
+                    "falling back to CPU",
+                throwable = null,
+            )
+            recordOcrFallbackDecision(originalBackend = selectedBackend)
+            try {
+                attemptInit(bundle, "CPU", initStartNs)
+                MindlayerLog.w(
+                    TAG,
+                    "PaddleOCR CPU fallback succeeded (active=CPU)",
+                    throwable = null,
+                )
+            } catch (cpuT: Throwable) {
+                MindlayerLog.w(
+                    TAG,
+                    "PaddleOCR CPU last-resort init failed (safeLabel=${cpuT.safeLabel()})",
+                    throwable = null,
+                )
+                throw cpuT
+            }
+        }
+    }
+
+    /**
+     * Performs a single init attempt with the given backend label. On success
+     * publishes the new runner / dictionary / bundle / backend label and logs
+     * "PaddleOCR backend ready". On failure closes any partially-created
+     * runner and rethrows; the previous state is untouched so the caller can
+     * decide whether to fall back to a different backend.
+     */
+    private suspend fun attemptInit(
+        bundle: PaddleOcrModelInfo,
+        backend: String,
+        initStartNs: Long,
+    ) {
         var pendingRunner: PaddleOcrLiteRtRunner? = null
         try {
             val loaded = withContext(Dispatchers.IO) {
                 verifyBundleFilesExist(bundle)
                 val loadedDictionary = loadDictionary(bundle.dictionaryPath)
-                val newRunner = runnerFactory(bundle, selectedBackend)
+                val newRunner = runnerFactory(bundle, backend)
                 pendingRunner = newRunner
                 LoadedPipeline(
                     runner = newRunner,
@@ -116,7 +171,7 @@ class LiteRtPaddleOcrBackend internal constructor(
             val previousRunner = runner
             runner = loaded.runner
             dictionary = loaded.dictionary
-            backendLabel = selectedBackend
+            backendLabel = backend
             loadedBundle = bundle
             pendingRunner = null
             if (previousRunner !== loaded.runner) {
@@ -124,22 +179,39 @@ class LiteRtPaddleOcrBackend internal constructor(
             }
             val durationMs = elapsedMs(initStartNs)
             logRepository?.logOcrBackendReady(
-                backend = selectedBackend,
+                backend = backend,
                 bundleId = bundle.id,
                 durationMs = durationMs,
             )
             MindlayerLog.i(
                 TAG,
-                "PaddleOCR backend ready: id=${bundle.id}, backend=$selectedBackend, " +
+                "PaddleOCR backend ready: id=${bundle.id}, backend=$backend, " +
                     "size=${bundle.totalSizeBytes}B, hasCls=${bundle.hasOrientationClassifier}",
             )
         } catch (t: Throwable) {
             pendingRunner?.runCatching { close() }
-            MindlayerLog.w(TAG, "PaddleOCR backend init failed: ${t.safeLabel()}", throwable = null)
             throw t
         } finally {
             pendingRunner = null
         }
+    }
+
+    /**
+     * Records a follow-up [LiteRtAcceleratorResolver] decision reflecting the
+     * runtime fallback. Dashboards surface `latestDecision("ocr")`, so this
+     * keeps the "active backend" display in sync with the runner that ended
+     * up loaded, while preserving the original-attempt chain for diagnostics.
+     */
+    private fun recordOcrFallbackDecision(originalBackend: String) {
+        val original = LiteRtAcceleratorResolver.latestDecision("ocr")
+        val chainedAttempts = (original?.attempted ?: emptyList()) +
+            listOf(originalBackend to "init-failed", "CPU" to "selected")
+        LiteRtAcceleratorResolver.recordDecision(
+            featureName = "ocr",
+            backend = "CPU",
+            reason = "${originalBackend}_INIT_FAILED_FALLBACK_CPU",
+            attempted = chainedAttempts,
+        )
     }
 
     override suspend fun recognise(
