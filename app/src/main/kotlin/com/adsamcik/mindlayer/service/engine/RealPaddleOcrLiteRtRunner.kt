@@ -48,11 +48,14 @@ internal class RealPaddleOcrLiteRtRunner private constructor(
 
     companion object {
         /**
-         * Creates the three-model OCR pipeline. Until PR #4 lands the shared
-         * accelerator coordinator, callers must avoid GPU/NPU here: creating
-         * det/rec/cls CompiledModel instances sequentially on the same
-         * accelerator can cross LiteRT issue #5264 hazard surface. See
-         * docs/LITERT_COEXISTENCE.md for the coexistence matrix.
+         * Creates the three-model OCR pipeline. Creating det/rec/cls
+         * `CompiledModel` instances sequentially on the same accelerator
+         * crosses the LiteRT issue #5264 hazard surface — this is the
+         * highest-exposure caller of the resolver. The resolver picks
+         * the accelerator (default GPU, NPU on explicit opt-in with
+         * SoC + native-library probe); coexistence with LiteRT-LM
+         * remains real-device-gated. See
+         * docs/LITERT_COEXISTENCE.md for the validation checklist.
          */
         fun create(bundle: PaddleOcrModelInfo, acceleratorLabel: String): PaddleOcrLiteRtRunner {
             val accel = when (acceleratorLabel) {

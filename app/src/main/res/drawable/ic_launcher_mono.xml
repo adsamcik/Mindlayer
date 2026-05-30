@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Themed (monochrome) layer for the adaptive launcher icon.
+  Renders as a single-color silhouette in Android 13+ themed icon mode,
+  abstracting the rich color foreground (geode + tech-octagon glyph) to
+  a portal-style octagon ring + center diamond that reads cleanly at
+  every launcher size.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M36,24 L72,24 L84,36 L84,72 L72,84 L36,84 L24,72 L24,36 Z
+                          M42,34 L66,34 L74,42 L74,66 L66,74 L42,74 L34,66 L34,42 Z
+                          M54,48 L60,54 L54,60 L48,54 Z" />
+</vector>

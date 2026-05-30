@@ -31,6 +31,21 @@ enum class DashboardMessageTone {
     ERROR,
 }
 
+/**
+ * Per-engine verification state shown on the dashboard's engine
+ * verification card. Captures the most recent run for one engine
+ * (chat / embeddings / OCR) so the three modalities are testable
+ * independently and the UI can show a status pill + last-run output
+ * for each.
+ */
+data class EngineTestState(
+    val isRunning: Boolean = false,
+    val status: String = "",
+    val tone: DashboardMessageTone = DashboardMessageTone.NEUTRAL,
+    val output: String = "",
+    val lastCompletedAtMs: Long? = null,
+)
+
 data class AcceleratorDecisionUi(
     val featureName: String,
     val backend: String,
@@ -126,6 +141,20 @@ data class DashboardUiState(
     val isTestRunning: Boolean = false,
     val testStatusTone: DashboardMessageTone = DashboardMessageTone.NEUTRAL,
     val lastTestCompletedAtMs: Long? = null,
+    /**
+     * Embeddings verification state — independent of [isTestRunning]
+     * (which models chat). Embeddings exercise the EmbeddingGemma engine
+     * via [com.adsamcik.mindlayer.IMindlayerService.embed], which is
+     * separate from the chat engine and can run concurrently.
+     */
+    val embeddingTest: EngineTestState = EngineTestState(),
+    /**
+     * OCR verification state — independent of chat + embeddings.
+     * Exercises the PaddleOCR engine via the
+     * [com.adsamcik.mindlayer.IMindlayerService.createOcrSession]
+     * + ``pushOcrFrame`` + ``finalizeOcrSession`` session lifecycle.
+     */
+    val ocrTest: EngineTestState = EngineTestState(),
 ) {
     fun statusFreshness(nowMs: Long = System.currentTimeMillis()): DashboardFreshness =
         freshnessOf(lastStatusUpdateMs, nowMs, STATUS_STALE_AFTER_MS)
@@ -164,6 +193,80 @@ data class DashboardUiState(
 
     fun canRunTestInference(nowMs: Long = System.currentTimeMillis()): Boolean =
         testReadinessIssue(nowMs) == null
+
+    /**
+     * Returns the reason embedding verification can't run right now,
+     * or null when the embedding ``Test`` button should be enabled.
+     * Looser than [testReadinessIssue]: embeddings have their own engine
+     * and don't require the chat engine to be warm or status to be fresh.
+     */
+    fun embeddingTestReadinessIssue(): String? = when {
+        embeddingTest.isRunning -> "An embedding test is already running."
+        connectionState == DashboardConnectionState.CONNECTING -> {
+            "Service is connecting. Wait for the binder to attach before testing."
+        }
+
+        connectionState == DashboardConnectionState.DISCONNECTED -> {
+            "Reconnect the service before running a test."
+        }
+
+        else -> null
+    }
+
+    fun canRunEmbeddingTest(): Boolean = embeddingTestReadinessIssue() == null
+
+    /**
+     * Returns the reason OCR verification can't run right now, or null
+     * when the OCR ``Test`` button should be enabled. Same loose policy
+     * as [embeddingTestReadinessIssue]: OCR has its own engine
+     * (``PaddleOcrEngine``) which is independent of chat warmup.
+     */
+    fun ocrTestReadinessIssue(): String? = when {
+        ocrTest.isRunning -> "An OCR test is already running."
+        connectionState == DashboardConnectionState.CONNECTING -> {
+            "Service is connecting. Wait for the binder to attach before testing."
+        }
+
+        connectionState == DashboardConnectionState.DISCONNECTED -> {
+            "Reconnect the service before running a test."
+        }
+
+        else -> null
+    }
+
+    fun canRunOcrTest(): Boolean = ocrTestReadinessIssue() == null
+
+    /**
+     * Whether the "Verify all engines" button on the welcome card
+     * should be enabled. Disabled while ANY of the three engines is
+     * already running a test (so the orchestrator's sequencing isn't
+     * fighting a manual single-engine run).
+     */
+    fun canRunAllVerifications(): Boolean =
+        !isTestRunning && !embeddingTest.isRunning && !ocrTest.isRunning &&
+            connectionState == DashboardConnectionState.CONNECTED
+
+    val isAnyTestRunning: Boolean
+        get() = isTestRunning || embeddingTest.isRunning || ocrTest.isRunning
+
+    /**
+     * Summarises the verification state across all three engines for
+     * the dashboard's welcome card pill / colour. Returns a tone +
+     * a string-resource id the UI can resolve to localised copy.
+     */
+    fun verifyAllSummaryTone(): DashboardMessageTone {
+        if (isAnyTestRunning) return DashboardMessageTone.INFO
+        val toneOf = { test: EngineTestState -> test.tone.takeIf { test.lastCompletedAtMs != null } }
+        val chatTone = if (lastTestCompletedAtMs != null) testStatusTone else null
+        val tones = listOfNotNull(chatTone, toneOf(embeddingTest), toneOf(ocrTest))
+        if (tones.isEmpty()) return DashboardMessageTone.NEUTRAL
+        return when {
+            tones.any { it == DashboardMessageTone.ERROR } -> DashboardMessageTone.ERROR
+            tones.any { it == DashboardMessageTone.WARNING } -> DashboardMessageTone.WARNING
+            tones.all { it == DashboardMessageTone.SUCCESS } -> DashboardMessageTone.SUCCESS
+            else -> DashboardMessageTone.NEUTRAL
+        }
+    }
 
     fun serviceHealth(nowMs: Long = System.currentTimeMillis()): DashboardHealthLevel = when {
         connectionState == DashboardConnectionState.CONNECTING || isStatusLoading -> {

@@ -254,7 +254,7 @@ parses them on the SDK side.
 | AIDL + SDK DSL | Implemented: create, push Y-plane / encoded / SHM frames, state, finalize, close, limits. | `FEATURE_OCR_SESSION` remains absent until production-ready. |
 | Event streaming | Implemented: `streamOcrEvents` pipe, SDK `Flow<OcrEvent>`, terminal `OcrEvent.Error`, `FRAME_DROPPED`, and `RESULT_FINALIZED`. | Attach the stream before pushing; otherwise ack `STATUS_REJECTED_STREAM_NOT_ATTACHED`. |
 | Backpressure | Implemented: `MAX_FRAME_BYTES` guard, queue-depth ack, busy/quality/finalized/oversized/stream-not-attached statuses. | Payloads above 1 MiB must use SharedMemory or be downscaled. |
-| Engine + extraction | Implemented behind the service path with CPU-only OCR accelerator selection. | OCR is CPU-locked until LiteRT/LiteRT-LM coexistence validation completes. |
+| Engine + extraction | Implemented behind the service path with GPU-default OCR accelerator selection (CPU and NPU available via explicit caller request). | Same-process LiteRT/LiteRT-LM coexistence remains real-device-gated — see `docs/LITERT_COEXISTENCE.md`. |
 | Public capability | Code exists but is dark. | `OcrFeatureFlags.IS_PRODUCTION_READY = false`; callers must capability-check and degrade. |
 | Real-device validation | Required before production exposure. | Needs signed-off device matrix for model assets, thermal/memory behavior, and LiteRT coexistence. |
 
@@ -273,21 +273,23 @@ until both gates flip.
 | 1 | Wire types, AIDL methods, model-pack scaffold, model registry, presort, field fusion, `PaddleOcrEngine` scaffold, session manager, SDK DSL, `:sdk-camerax` | Complete | #52–#59 | Established the frozen wire surface and client ergonomics. |
 | 2 | LLM extraction, structured output, capability flip plumbing | Complete | #69–#70 | Engine-ready gate wired, but still product-flag gated. |
 | 3 | Bounding boxes, barcode anchor, typed geometry/evidence events | Complete | #72–#74 | Wire-shape capabilities are additive and safe for old readers. |
-| 4 | Safety gates, dictionary sanity, transient-init retry, log redaction, CPU-only fallback, real frame transports, finalization drain, `FRAME_DROPPED`, preprocessing/post-processing, coexistence gate, E2E smoke | Complete | #78, #85, #87–#89 | Event streaming is live; remaining production gate is `IS_PRODUCTION_READY=false`. |
+| 4 | Safety gates, dictionary sanity, transient-init retry, log redaction, GPU-default-with-CPU-and-NPU-opt-in accelerator selection, real frame transports, finalization drain, `FRAME_DROPPED`, preprocessing/post-processing, coexistence gate, E2E smoke | Complete | #78, #85, #87–#89 | Event streaming is live; remaining production gate is `IS_PRODUCTION_READY=false`. |
 | Wave 1 | Stream-attachment ack + terminal OCR error event | Complete | #92, #98 | `STATUS_REJECTED_STREAM_NOT_ATTACHED` prevents lost events; `OcrEvent.Error` surfaces terminal stream failures. |
 | Release flip | `IS_PRODUCTION_READY` → true | Future | — | Single-line atomic flip after real-device validation and first-party driver sign-off. |
-| Acceleration | Per-call GPU/NPU OCR opt-in | Future | — | Requires process-wide LiteRT/LiteRT-LM coexistence validation. |
+| Acceleration | Per-call GPU/NPU OCR opt-in | Available | — | OCR resolver mirrors chat (`null` → GPU; explicit `NPU` probed with GPU-fallback; explicit `CPU`/`GPU` honored). Same-process LiteRT/LiteRT-LM coexistence still requires real-device validation. |
 
 ### Accelerator selection (Phase 4 PR #4)
 
 `LiteRtAcceleratorResolver` is the single owner of CPU/GPU/NPU
-resolution for both embeddings and OCR. OCR currently forces the
-backend to CPU regardless of `preferredBackend` with the recorded
-reason `OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED` — the dashboard
-surfaces the downgrade alongside any GPU/NPU downgrade taken by the
-embedding stack. Once the coexistence checklist signs off and PR #6
-ships the production flag, OCR can opt back into the resolver's
-GPU/NPU path on allowlisted SoCs.
+resolution for both embeddings and OCR. OCR mirrors chat: `null`
+defaults to GPU; explicit `NPU` is probed (SoC allowlist + native
+library check) and falls back to GPU if unsupported; explicit
+`CPU` and `GPU` are always honored. The dashboard surfaces every
+resolver decision via `LogRepository.logBackendDecision`. The
+three sequential `CompiledModel` instances (det + rec + cls) make
+this the highest-exposure site for LiteRT issue #5264 — run the
+`docs/LITERT_COEXISTENCE.md` validation checklist on target
+devices before relying on GPU/NPU OCR in production.
 
 ### Logging contract
 

@@ -10,6 +10,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -75,7 +76,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -100,6 +103,7 @@ private val CategorySession = Color(0xFF2E7D32)
 private val CategoryMemory = Color(0xFF7B1FA2)
 private val CategoryError = Color(0xFFC62828)
 private val CategoryDefault = Color(0xFF616161)
+private const val HeaderSeparatorAspectRatio = 443f / 1181f
 
 @Composable
 private fun thermalColor(band: String): Color = MindlayerColors.Thermal.color(band)
@@ -252,6 +256,16 @@ private fun testBadgeLabel(state: DashboardUiState): String = when {
     else -> stringResource(R.string.dashboard_test_badge_ready)
 }
 
+@Composable
+private fun engineTestBadgeLabel(test: EngineTestState): String = when {
+    test.isRunning -> stringResource(R.string.dashboard_test_badge_running)
+    test.status.isBlank() -> stringResource(R.string.dashboard_test_badge_idle)
+    test.tone == DashboardMessageTone.SUCCESS -> stringResource(R.string.dashboard_test_badge_pass)
+    test.tone == DashboardMessageTone.WARNING -> stringResource(R.string.dashboard_test_badge_warn)
+    test.tone == DashboardMessageTone.ERROR -> stringResource(R.string.dashboard_test_badge_fail)
+    else -> stringResource(R.string.dashboard_test_badge_ready)
+}
+
 private fun accessibilityBandLabel(value: String): String =
     value.lowercase().replaceFirstChar {
         if (it.isLowerCase()) it.titlecase() else it.toString()
@@ -262,6 +276,9 @@ private fun accessibilityBandLabel(value: String): String =
 fun DashboardScreen(
     state: DashboardUiState,
     onTestInference: () -> Unit = {},
+    onTestEmbeddings: () -> Unit = {},
+    onTestOcr: () -> Unit = {},
+    onRunAllVerifications: () -> Unit = {},
     onNavigateToHistory: () -> Unit = {},
     onNavigateToLogs: () -> Unit = {},
     logRepository: LogRepository? = null,
@@ -305,13 +322,14 @@ fun DashboardScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 item { CardEnterAnimation(0) { DashboardHero(state) } }
-                item { CardEnterAnimation(1) { StatusSection(state) } }
-                item { CardEnterAnimation(2) { ThermalMemoryRow(state) } }
-                item { CardEnterAnimation(3) { ActiveSessionsCard(state) } }
-                item { CardEnterAnimation(4) { ActivityNavigationCard(onNavigateToHistory, onNavigateToLogs) } }
-                item { CardEnterAnimation(5) { TestInferenceCard(state, onTestInference) } }
+                item { CardEnterAnimation(1) { WelcomeCard(state, onRunAllVerifications) } }
+                item { CardEnterAnimation(2) { TestInferenceCard(state, onTestInference, onTestEmbeddings, onTestOcr) } }
+                item { CardEnterAnimation(3) { StatusSection(state) } }
+                item { CardEnterAnimation(4) { ThermalMemoryRow(state) } }
+                item { CardEnterAnimation(5) { ActiveSessionsCard(state) } }
+                item { CardEnterAnimation(6) { ActivityNavigationCard(onNavigateToHistory, onNavigateToLogs) } }
                 item {
-                    CardEnterAnimation(6) {
+                    CardEnterAnimation(7) {
                         AllowedAppsCard(
                             logRepository = logRepository,
                             onRevokeAidl = onRevokeApp,
@@ -346,14 +364,7 @@ private fun DashboardHero(state: DashboardUiState) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = stringResource(R.string.dashboard_app_title),
-                style = MaterialTheme.typography.headlineLarge.copy(
-                    letterSpacing = 1.2.sp,
-                ),
-                fontWeight = FontWeight.ExtraBold,
-                color = MaterialTheme.colorScheme.primary,
-            )
+            DashboardWordmark(Modifier.weight(1f, fill = false))
             if (!showBanner) {
                     Row(
                         modifier = Modifier.semantics(mergeDescendants = true) {
@@ -439,6 +450,195 @@ private fun DashboardHero(state: DashboardUiState) {
                 },
             )
         }
+    }
+}
+
+@Composable
+private fun DashboardWordmark(modifier: Modifier = Modifier) {
+    val headlineStyle = MaterialTheme.typography.headlineLarge.copy(
+       letterSpacing = 0.sp,
+    )
+    val separatorHeight = with(LocalDensity.current) { headlineStyle.fontSize.toDp() }
+    val wordmarkLabel = stringResource(R.string.dashboard_app_title)
+    val mindText = stringResource(R.string.dashboard_brand_mind)
+    val layerText = stringResource(R.string.dashboard_brand_layer)
+
+    Row(
+       modifier = modifier.semantics(mergeDescendants = true) {
+           contentDescription = wordmarkLabel
+       },
+       verticalAlignment = Alignment.CenterVertically,
+       horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+       Text(
+           text = mindText,
+           style = headlineStyle,
+           fontWeight = FontWeight.ExtraBold,
+           color = MaterialTheme.colorScheme.primary,
+           maxLines = 1,
+       )
+       Image(
+           painter = painterResource(R.drawable.ic_mindlayer_header_separator),
+           contentDescription = null,
+           modifier = Modifier
+               .height(separatorHeight)
+               .width(separatorHeight * HeaderSeparatorAspectRatio),
+       )
+       Text(
+           text = layerText,
+           style = headlineStyle,
+           fontWeight = FontWeight.ExtraBold,
+           color = MaterialTheme.colorScheme.primary,
+           maxLines = 1,
+       )
+    }
+}
+
+// ── Welcome / on-device AI summary ──────────────────────────────────────────
+
+@Composable
+private fun WelcomeCard(state: DashboardUiState, onRunAllVerifications: () -> Unit) {
+    val tone = state.verifyAllSummaryTone()
+    val isRunning = state.isAnyTestRunning
+    val (pillLabel, pillTone) = welcomePill(state, tone, isRunning)
+    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.3f
+
+    DashboardCard(title = stringResource(R.string.dashboard_welcome_title), icon = Icons.Filled.Info) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                text = stringResource(R.string.dashboard_welcome_body),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilledTonalButton(
+                    onClick = onRunAllVerifications,
+                    enabled = state.canRunAllVerifications(),
+                ) {
+                    if (isRunning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text(
+                        if (isRunning) {
+                            stringResource(R.string.dashboard_welcome_button_running)
+                        } else {
+                            stringResource(R.string.dashboard_welcome_button_run)
+                        },
+                    )
+                }
+                Badge(text = pillLabel, color = toneColor(pillTone))
+            }
+
+            // Per-engine compact summary so the welcome card shows
+            // which engine produced which signal at a glance.
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        color = MaterialTheme.colorScheme.surfaceVariant
+                            .copy(alpha = if (darkTheme) 0.35f else 0.25f),
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                WelcomeEngineLine(
+                    label = stringResource(R.string.dashboard_test_chat_label),
+                    isRunning = state.isTestRunning,
+                    completedAtMs = state.lastTestCompletedAtMs,
+                    tone = if (state.lastTestCompletedAtMs != null) state.testStatusTone else null,
+                )
+                WelcomeEngineLine(
+                    label = stringResource(R.string.dashboard_test_embeddings_label),
+                    isRunning = state.embeddingTest.isRunning,
+                    completedAtMs = state.embeddingTest.lastCompletedAtMs,
+                    tone = if (state.embeddingTest.lastCompletedAtMs != null) state.embeddingTest.tone else null,
+                )
+                WelcomeEngineLine(
+                    label = stringResource(R.string.dashboard_test_ocr_label),
+                    isRunning = state.ocrTest.isRunning,
+                    completedAtMs = state.ocrTest.lastCompletedAtMs,
+                    tone = if (state.ocrTest.lastCompletedAtMs != null) state.ocrTest.tone else null,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WelcomeEngineLine(
+    label: String,
+    isRunning: Boolean,
+    completedAtMs: Long?,
+    tone: DashboardMessageTone?,
+) {
+    val effectiveTone = when {
+        isRunning -> DashboardMessageTone.INFO
+        tone != null -> tone
+        else -> DashboardMessageTone.NEUTRAL
+    }
+    val badgeLabel = when {
+        isRunning -> stringResource(R.string.dashboard_test_badge_running)
+        completedAtMs == null -> stringResource(R.string.dashboard_test_badge_idle)
+        tone == DashboardMessageTone.SUCCESS -> stringResource(R.string.dashboard_test_badge_pass)
+        tone == DashboardMessageTone.WARNING -> stringResource(R.string.dashboard_test_badge_warn)
+        tone == DashboardMessageTone.ERROR -> stringResource(R.string.dashboard_test_badge_fail)
+        else -> stringResource(R.string.dashboard_test_badge_idle)
+    }
+    val nowMs = System.currentTimeMillis()
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            completedAtMs?.let { ts ->
+                if (!isRunning) {
+                    Text(
+                        text = formatRelativeTimestamp(ts, nowMs),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Badge(text = badgeLabel, color = toneColor(effectiveTone))
+        }
+    }
+}
+
+@Composable
+private fun welcomePill(
+    state: DashboardUiState,
+    tone: DashboardMessageTone,
+    isRunning: Boolean,
+): Pair<String, DashboardMessageTone> {
+    val hasAnyCompleted = state.lastTestCompletedAtMs != null ||
+        state.embeddingTest.lastCompletedAtMs != null ||
+        state.ocrTest.lastCompletedAtMs != null
+    return when {
+        isRunning -> stringResource(R.string.dashboard_welcome_state_running) to DashboardMessageTone.INFO
+        !hasAnyCompleted -> stringResource(R.string.dashboard_welcome_state_idle) to DashboardMessageTone.NEUTRAL
+        tone == DashboardMessageTone.SUCCESS ->
+            stringResource(R.string.dashboard_welcome_state_pass) to DashboardMessageTone.SUCCESS
+        tone == DashboardMessageTone.WARNING ->
+            stringResource(R.string.dashboard_welcome_state_warn) to DashboardMessageTone.WARNING
+        tone == DashboardMessageTone.ERROR ->
+            stringResource(R.string.dashboard_welcome_state_fail) to DashboardMessageTone.ERROR
+        else -> stringResource(R.string.dashboard_welcome_state_partial) to DashboardMessageTone.INFO
     }
 }
 
@@ -584,27 +784,58 @@ private fun StatusSection(state: DashboardUiState) {
             val acceleratorDecisions = state.acceleratorDecisions.ifEmpty {
                 state.acceleratorDecision?.let(::listOf).orEmpty()
             }
-            acceleratorDecisions.forEach { decision ->
-                val attempts = decision.attemptedSummary.takeIf { it.isNotBlank() }
-                DiagnosticCallout(
-                    message = if (attempts != null) {
-                        stringResource(
-                            R.string.dashboard_accelerator_decision_with_attempts,
-                            decision.featureName,
-                            decision.backend,
-                            decision.reason,
-                            attempts,
-                        )
-                    } else {
-                        stringResource(
-                            R.string.dashboard_accelerator_decision,
-                            decision.featureName,
-                            decision.backend,
-                            decision.reason,
-                        )
-                    },
-                    tone = DashboardMessageTone.INFO,
-                )
+            if (acceleratorDecisions.isNotEmpty()) {
+                var showAdvanced by remember { mutableStateOf(false) }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { showAdvanced = !showAdvanced }
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = stringResource(
+                            if (showAdvanced) R.string.dashboard_advanced_hide
+                            else R.string.dashboard_advanced_show,
+                        ),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                AnimatedVisibility(visible = showAdvanced) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        acceleratorDecisions.forEach { decision ->
+                            val attempts = decision.attemptedSummary.takeIf { it.isNotBlank() }
+                            DiagnosticCallout(
+                                message = if (attempts != null) {
+                                    stringResource(
+                                        R.string.dashboard_accelerator_decision_with_attempts,
+                                        decision.featureName,
+                                        decision.backend,
+                                        decision.reason,
+                                        attempts,
+                                    )
+                                } else {
+                                    stringResource(
+                                        R.string.dashboard_accelerator_decision,
+                                        decision.featureName,
+                                        decision.backend,
+                                        decision.reason,
+                                    )
+                                },
+                                tone = DashboardMessageTone.INFO,
+                            )
+                        }
+                    }
+                }
             }
 
             if (!state.isEngineLoaded || state.backend.equals("NONE", ignoreCase = true)) {
@@ -1174,10 +1405,28 @@ private fun ActivityNavigationCard(
     }
 }
 
-// ── Test Inference ────────────────────────────────────────────────────────────
+// ── Engine verification ──────────────────────────────────────────────────────
 
 @Composable
-private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Unit) {
+private fun TestInferenceCard(
+    state: DashboardUiState,
+    onTestInference: () -> Unit,
+    onTestEmbeddings: () -> Unit,
+    onTestOcr: () -> Unit,
+) {
+    DashboardCard(title = stringResource(R.string.dashboard_card_test_inference_title), icon = Icons.Filled.PlayArrow) {
+        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            ChatEngineRow(state, onTestInference)
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            EmbeddingEngineRow(state, onTestEmbeddings)
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            OcrEngineRow(state, onTestOcr)
+        }
+    }
+}
+
+@Composable
+private fun ChatEngineRow(state: DashboardUiState, onTestInference: () -> Unit) {
     val nowMs = System.currentTimeMillis()
     val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.3f
     val displayTone = when {
@@ -1186,97 +1435,268 @@ private fun TestInferenceCard(state: DashboardUiState, onTestInference: () -> Un
         else -> state.testStatusTone
     }
 
-    DashboardCard(title = stringResource(R.string.dashboard_card_test_inference_title), icon = Icons.Filled.PlayArrow) {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            text = stringResource(R.string.dashboard_test_chat_label),
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = stringResource(R.string.dashboard_test_chat_subtitle),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FilledTonalButton(
+                onClick = onTestInference,
+                enabled = state.canRunTestInference(nowMs),
             ) {
-                FilledTonalButton(
-                    onClick = onTestInference,
-                    enabled = state.canRunTestInference(nowMs),
-                ) {
-                    if (state.isTestRunning) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                        )
-                        Spacer(Modifier.width(8.dp))
-                    }
-                    Text(if (state.isTestRunning) stringResource(R.string.dashboard_test_button_running) else stringResource(R.string.dashboard_test_button_run))
+                if (state.isTestRunning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                    Spacer(Modifier.width(8.dp))
                 }
-                Column(horizontalAlignment = Alignment.End) {
-                    Badge(text = testBadgeLabel(state), color = toneColor(displayTone))
-                    state.lastTestCompletedAtMs?.let { ts ->
-                        if (!state.isTestRunning) {
-                            Text(
-                                text = formatRelativeTimestamp(ts, nowMs),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(top = 2.dp),
-                            )
-                        }
-                    }
-                }
+                Text(if (state.isTestRunning) stringResource(R.string.dashboard_test_button_running) else stringResource(R.string.dashboard_test_button_run))
             }
-
-            if (state.testStatus.isNotBlank()) {
-                DiagnosticCallout(message = state.testStatus, tone = displayTone)
-            } else {
-                Text(
-                    text = stringResource(R.string.dashboard_test_verify),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            AnimatedVisibility(visible = state.shouldHighlightTestResult(nowMs)) {
-                DiagnosticCallout(
-                    message = stringResource(R.string.dashboard_callout_engine_not_ready),
-                    tone = DashboardMessageTone.WARNING,
-                )
-            }
-
-            val hasOutput = state.testOutput.isNotBlank()
-            if (hasOutput || state.isTestRunning) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .animateContentSize(),
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (darkTheme) 0.45f else 0.35f),
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
+            Column(horizontalAlignment = Alignment.End) {
+                Badge(text = testBadgeLabel(state), color = toneColor(displayTone))
+                state.lastTestCompletedAtMs?.let { ts ->
+                    if (!state.isTestRunning) {
                         Text(
-                            text = stringResource(R.string.dashboard_output),
-                            style = MaterialTheme.typography.labelMedium,
+                            text = formatRelativeTimestamp(ts, nowMs),
+                            style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            text = if (hasOutput) state.testOutput else stringResource(R.string.dashboard_test_waiting_for_output),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .then(
-                                    if (hasOutput) {
-                                        Modifier.heightIn(min = 48.dp, max = 200.dp)
-                                            .verticalScroll(rememberScrollState())
-                                    } else {
-                                        Modifier
-                                    }
-                                ),
-                            style = MindlayerType.Mono.BodySmall,
+                            modifier = Modifier.padding(top = 2.dp),
                         )
                     }
                 }
             }
+        }
+
+        if (state.testStatus.isNotBlank()) {
+            DiagnosticCallout(message = state.testStatus, tone = displayTone)
+        } else {
+            Text(
+                text = stringResource(R.string.dashboard_test_verify),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        AnimatedVisibility(visible = state.shouldHighlightTestResult(nowMs)) {
+            DiagnosticCallout(
+                message = stringResource(R.string.dashboard_callout_engine_not_ready),
+                tone = DashboardMessageTone.WARNING,
+            )
+        }
+
+        val hasOutput = state.testOutput.isNotBlank()
+        if (hasOutput || state.isTestRunning) {
+            EngineOutputBox(
+                output = state.testOutput,
+                hasOutput = hasOutput,
+                darkTheme = darkTheme,
+            )
+        }
+    }
+}
+
+@Composable
+private fun EmbeddingEngineRow(state: DashboardUiState, onTestEmbeddings: () -> Unit) {
+    val nowMs = System.currentTimeMillis()
+    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.3f
+    val test = state.embeddingTest
+    val displayTone = when {
+        test.isRunning -> DashboardMessageTone.INFO
+        test.status.isBlank() -> DashboardMessageTone.NEUTRAL
+        else -> test.tone
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            text = stringResource(R.string.dashboard_test_embeddings_label),
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = stringResource(R.string.dashboard_test_embeddings_subtitle),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FilledTonalButton(
+                onClick = onTestEmbeddings,
+                enabled = state.canRunEmbeddingTest(),
+            ) {
+                if (test.isRunning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(
+                    if (test.isRunning) {
+                        stringResource(R.string.dashboard_test_embedding_button_running)
+                    } else {
+                        stringResource(R.string.dashboard_test_embedding_button_run)
+                    },
+                )
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Badge(text = engineTestBadgeLabel(test), color = toneColor(displayTone))
+                test.lastCompletedAtMs?.let { ts ->
+                    if (!test.isRunning) {
+                        Text(
+                            text = formatRelativeTimestamp(ts, nowMs),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
+                }
+            }
+        }
+
+        if (test.status.isNotBlank()) {
+            DiagnosticCallout(message = test.status, tone = displayTone)
+        }
+
+        val hasOutput = test.output.isNotBlank()
+        if (hasOutput || test.isRunning) {
+            EngineOutputBox(
+                output = test.output,
+                hasOutput = hasOutput,
+                darkTheme = darkTheme,
+            )
+        }
+    }
+}
+
+@Composable
+private fun OcrEngineRow(state: DashboardUiState, onTestOcr: () -> Unit) {
+    val nowMs = System.currentTimeMillis()
+    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.3f
+    val test = state.ocrTest
+    val displayTone = when {
+        test.isRunning -> DashboardMessageTone.INFO
+        test.status.isBlank() -> DashboardMessageTone.NEUTRAL
+        else -> test.tone
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            text = stringResource(R.string.dashboard_test_ocr_label),
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = stringResource(R.string.dashboard_test_ocr_subtitle),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FilledTonalButton(
+                onClick = onTestOcr,
+                enabled = state.canRunOcrTest(),
+            ) {
+                if (test.isRunning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(
+                    if (test.isRunning) {
+                        stringResource(R.string.dashboard_test_ocr_button_running)
+                    } else {
+                        stringResource(R.string.dashboard_test_ocr_button_run)
+                    },
+                )
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Badge(text = engineTestBadgeLabel(test), color = toneColor(displayTone))
+                test.lastCompletedAtMs?.let { ts ->
+                    if (!test.isRunning) {
+                        Text(
+                            text = formatRelativeTimestamp(ts, nowMs),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
+                }
+            }
+        }
+
+        if (test.status.isNotBlank()) {
+            DiagnosticCallout(message = test.status, tone = displayTone)
+        }
+
+        val hasOutput = test.output.isNotBlank()
+        if (hasOutput || test.isRunning) {
+            EngineOutputBox(
+                output = test.output,
+                hasOutput = hasOutput,
+                darkTheme = darkTheme,
+            )
+        }
+    }
+}
+
+@Composable
+private fun EngineOutputBox(output: String, hasOutput: Boolean, darkTheme: Boolean) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .animateContentSize(),
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (darkTheme) 0.45f else 0.35f),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.dashboard_output),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = if (hasOutput) output else stringResource(R.string.dashboard_test_waiting_for_output),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (hasOutput) {
+                            Modifier.heightIn(min = 48.dp, max = 200.dp)
+                                .verticalScroll(rememberScrollState())
+                        } else {
+                            Modifier
+                        }
+                    ),
+                style = MindlayerType.Mono.BodySmall,
+            )
         }
     }
 }
