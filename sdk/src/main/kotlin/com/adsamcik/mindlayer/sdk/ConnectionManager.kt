@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -84,6 +85,16 @@ class ConnectionManager {
 
         private const val SERVICE_PKG = "com.adsamcik.mindlayer.service"
         private const val SERVICE_CLS = "com.adsamcik.mindlayer.service.MindlayerMlService"
+
+        /**
+         * Debug-build suffix the service APK gets when built with `assembleDebug`
+         * (`applicationIdSuffix = ".debug"` in `app/build.gradle.kts`). The cross-app
+         * SDK transparently retries the bind against the suffixed package when
+         * the canonical one is missing, so first-party developer / driver apps
+         * can iterate against a locally-installed debug service without a
+         * separate signing keystore.
+         */
+        private const val SERVICE_PKG_DEBUG_SUFFIX = ".debug"
 
         private const val INITIAL_BACKOFF_MS = 250L
         private const val MAX_BACKOFF_MS = 5_000L
@@ -327,8 +338,20 @@ class ConnectionManager {
 
         currentConnection = conn
 
+        // Resolve which service-package to bind to. Prefer the canonical
+        // release package; fall back to the .debug-suffixed variant when
+        // it's the only one installed (developer iteration). This makes
+        // the SDK usable against a locally-built debug service APK
+        // without forcing every dev to provision a release keystore.
+        val pm = ctx.packageManager
+        val resolvedPkg = when {
+            pm.isPackageInstalled(SERVICE_PKG) -> SERVICE_PKG
+            pm.isPackageInstalled(SERVICE_PKG + SERVICE_PKG_DEBUG_SUFFIX) ->
+                SERVICE_PKG + SERVICE_PKG_DEBUG_SUFFIX
+            else -> SERVICE_PKG // last resort — bind will fail with the canonical name
+        }
         val intent = Intent().apply {
-            component = ComponentName(SERVICE_PKG, SERVICE_CLS)
+            component = ComponentName(resolvedPkg, SERVICE_CLS)
         }
 
         val bound = try {
@@ -451,5 +474,13 @@ class ConnectionManager {
             delay(delayMs)
             doBind()
         }
+    }
+
+    private fun PackageManager.isPackageInstalled(packageName: String): Boolean = try {
+        @Suppress("DEPRECATION")
+        getPackageInfo(packageName, 0)
+        true
+    } catch (_: PackageManager.NameNotFoundException) {
+        false
     }
 }

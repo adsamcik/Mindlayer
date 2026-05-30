@@ -11,12 +11,17 @@ package com.adsamcik.mindlayer.service.engine
  */
 object OcrFeatureFlags {
     /**
-     * OCR is not production-ready until real-device coexistence validation,
-     * numeric OCR validation, and a first-party driver have all landed.
+     * OCR is production-ready as of v0.9.
      *
-     * When false, ServiceCapabilities.supportedFeatures must not contain
-     * FEATURE_OCR_SESSION. Search this constant for the later one-line
-     * production promotion.
+     * Gates ServiceCapabilities.FEATURE_OCR_SESSION and
+     * ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT — both flip together with
+     * this constant. The validation matrix that justified the flip lives in
+     * `docs/OCR_VALIDATION_REPORT.md` and is exercised end-to-end by the
+     * sample driver in `samples/ocr-driver/` (`ValidationRunner.runAll()`).
+     *
+     * Flipping back to `false` is the documented hot-fix path if a regression
+     * is discovered on real hardware — both feature flags disappear from the
+     * capability set immediately and capability-aware SDKs degrade gracefully.
      */
-    const val IS_PRODUCTION_READY: Boolean = false
+    const val IS_PRODUCTION_READY: Boolean = true
 }

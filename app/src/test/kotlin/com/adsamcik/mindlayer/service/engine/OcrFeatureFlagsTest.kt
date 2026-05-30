@@ -30,11 +30,12 @@ import java.io.File
 /**
  * Pins the [OcrFeatureFlags.IS_PRODUCTION_READY] gate at two layers:
  *
- *  1. **Constant + manager wiring** — the committed flag stays `false`
- *     until Phase 4 PR #6 (the atomic single-line flip) and the
- *     [OcrSessionManager] default constructor arg honours that flag.
+ *  1. **Constant + manager wiring** — the committed flag is `true` as of v0.9
+ *     (production promotion), and the [OcrSessionManager] default constructor
+ *     arg honours that flag.
  *  2. **Binder advertisement** — [ServiceBinder.getCapabilities]
- *     advertises [ServiceCapabilities.FEATURE_OCR_SESSION] **only**
+ *     advertises [ServiceCapabilities.FEATURE_OCR_SESSION] (and
+ *     [ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT]) **only**
  *     when BOTH `isProductionReady == true` AND `isEngineReady() == true`.
  *
  * Complements [com.adsamcik.mindlayer.service.ServiceBinderOcrCapabilityTest],
@@ -61,9 +62,15 @@ class OcrFeatureFlagsTest {
 
     // ── Layer 1: constant + OcrSessionManager wiring ─────────────────────
 
-    @Test fun defaultOcrProductionFlagIsFalse() {
-        assertFalse(OcrFeatureFlags.IS_PRODUCTION_READY)
-        assertFalse(OcrSessionManager().isProductionReady)
+    @Test fun defaultOcrProductionFlagIsTrue() {
+        assertTrue(
+            "v0.9 production promotion: IS_PRODUCTION_READY must remain true",
+            OcrFeatureFlags.IS_PRODUCTION_READY,
+        )
+        assertTrue(
+            "OcrSessionManager default ctor must mirror OcrFeatureFlags.IS_PRODUCTION_READY",
+            OcrSessionManager().isProductionReady,
+        )
     }
 
     @Test fun constructorInjectionControlsProductionGate() = runTest {
@@ -88,6 +95,10 @@ class OcrFeatureFlagsTest {
             "production-not-ready -> FEATURE_OCR_SESSION must NOT be advertised",
             caps.supports(ServiceCapabilities.FEATURE_OCR_SESSION),
         )
+        assertFalse(
+            "production-not-ready -> FEATURE_OCR_IMAGE_ONESHOT must NOT be advertised",
+            caps.supports(ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT),
+        )
     }
 
     @Test fun `FEATURE_OCR_SESSION present when both gates true`() {
@@ -95,6 +106,10 @@ class OcrFeatureFlagsTest {
         assertTrue(
             "production-ready + engine-ready -> FEATURE_OCR_SESSION must be advertised",
             caps.supports(ServiceCapabilities.FEATURE_OCR_SESSION),
+        )
+        assertTrue(
+            "production-ready + engine-ready -> FEATURE_OCR_IMAGE_ONESHOT must be advertised",
+            caps.supports(ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT),
         )
     }
 
@@ -104,23 +119,29 @@ class OcrFeatureFlagsTest {
             "engine-not-ready -> FEATURE_OCR_SESSION must NOT be advertised",
             caps.supports(ServiceCapabilities.FEATURE_OCR_SESSION),
         )
+        assertFalse(
+            "engine-not-ready -> FEATURE_OCR_IMAGE_ONESHOT must NOT be advertised",
+            caps.supports(ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT),
+        )
     }
 
     @Test fun `both gates false then FEATURE_OCR_SESSION absent`() {
         val caps = newBinder(productionReady = false, engineReady = false).getCapabilities()
         assertFalse(caps.supports(ServiceCapabilities.FEATURE_OCR_SESSION))
+        assertFalse(caps.supports(ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT))
     }
 
     @Test fun `live ServiceBinder respects committed IS_PRODUCTION_READY default`() {
         // The default OcrSessionManager pulls isProductionReady from
         // OcrFeatureFlags.IS_PRODUCTION_READY. With the committed value
-        // (false) FEATURE_OCR_SESSION must NEVER appear regardless of
-        // engine readiness.
+        // (true as of v0.9) FEATURE_OCR_SESSION + FEATURE_OCR_IMAGE_ONESHOT
+        // must appear when the engine is also ready.
         val ocr = mockk<OcrSessionManager>(relaxed = true)
         every { ocr.isProductionReady } returns OcrFeatureFlags.IS_PRODUCTION_READY
         every { ocr.isEngineReady() } returns true
         val caps = newBinderFromMock(ocr).getCapabilities()
-        assertEquals(false, caps.supports(ServiceCapabilities.FEATURE_OCR_SESSION))
+        assertEquals(true, caps.supports(ServiceCapabilities.FEATURE_OCR_SESSION))
+        assertEquals(true, caps.supports(ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT))
     }
 
     private fun newBinder(productionReady: Boolean, engineReady: Boolean): ServiceBinder {
