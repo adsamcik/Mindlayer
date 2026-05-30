@@ -12,14 +12,16 @@ import java.util.concurrent.atomic.AtomicLong
  * bucket object. The bucket map itself is a [ConcurrentHashMap].
  *
  * **First-call grant (F-027 refinement).** Brand-new buckets start with
- * exactly [initialFirstCallTokens] (default `1.0`), not the full capacity
- * and not zero. This lets the canonical first-connect flow
- * (`bindService` → `onServiceConnected` → `registerClient`, cost ≤ 1.0)
- * succeed without waiting for the refill cadence (~1 token/sec at the
- * default 60 RPM), while still preventing the "burst, idle past
- * [idleEvictMs], burst again" evasion that motivated F-027: the grant is
- * a single token, never the full capacity, and is consumed by the first
- * call. From there only elapsed-time refill governs, exactly as before.
+ * exactly [initialFirstCallTokens] (default `2.0`), not the full capacity
+ * and not zero. This lets the documented connect handshake
+ * (`bindService` → `onServiceConnected` → `registerClient` cost 1.0 →
+ * `getCapabilities` cost 0.25, optionally followed by a feature-gate
+ * `getCapabilities`) succeed without waiting for the refill cadence
+ * (~1 token/sec at the default 60 RPM), while still preventing the
+ * "burst, idle past [idleEvictMs], burst again" evasion that motivated
+ * F-027: the grant is two tokens, never the full capacity, and is
+ * consumed by the opening handshake. From there only elapsed-time
+ * refill governs, exactly as before.
  */
 class RateLimiter(
     private val maxRequestsPerMinute: Int = DEFAULT_RPM,
@@ -41,11 +43,13 @@ class RateLimiter(
     /**
      * F-027 refinement: number of tokens granted to a brand-new (or freshly
      * recreated after idle eviction) bucket. Default [INITIAL_FIRST_CALL_TOKENS]
-     * (`1.0`) — exactly enough for the documented `registerClient` first
-     * call. Tests pin this to `0.0` for the historical "starts empty"
-     * behaviour or to a larger value to experiment with looser cold-start
-     * policy. Never raise the production default without re-evaluating the
-     * burst-after-eviction calculation in [newEmptyBucket]'s call site.
+     * (`2.0`) — enough for the documented connect handshake
+     * (`registerClient` cost 1.0 + `getCapabilities` cost 0.25 ×
+     * 2 follow-ups). Tests pin this to `0.0` for the historical "starts
+     * empty" behaviour or to a larger value to experiment with looser
+     * cold-start policy. Never raise the production default without
+     * re-evaluating the burst-after-eviction calculation in
+     * [newEmptyBucket]'s call site.
      */
     private val initialFirstCallTokens: Double = INITIAL_FIRST_CALL_TOKENS,
     private val timeSource: () -> Long = { SystemClock.elapsedRealtime() },
@@ -321,15 +325,21 @@ class RateLimiter(
 
         /**
          * F-027 refinement: tokens granted to a brand-new (or freshly
-         * recreated after idle eviction) bucket so the canonical first
-         * `registerClient` call succeeds without waiting on refill cadence.
-         * Sized to exactly one nominal call (`cost = 1.0`); a first call
-         * cheaper than `1.0` leaves the remainder available for an
-         * immediate follow-up, while an opening call >`1.0` still rejects
-         * (acceptable: documented first calls are `1.0`). Raising this
-         * default would re-open the burst-after-eviction hole F-027 was
-         * written to close — tests pin lower values to lock that in.
+         * recreated after idle eviction) bucket so the canonical first-
+         * connect handshake succeeds without waiting on refill cadence.
+         *
+         * The documented startup pattern is:
+         *   1. `registerClient(token)` — cost 1.0
+         *   2. `getCapabilities()`     — cost 0.25
+         *   3. (optional) a second `getCapabilities()` for feature gating
+         *
+         * Total ≈ 1.5. The grant is sized at 2.0 so the standard handshake
+         * + one cheap status follow-up all fit in the bucket without
+         * tripping the rate limiter. A heavier opening call (e.g.
+         * cost 4.0) still rejects, locking in F-027's burst-after-
+         * eviction protection: the grant is one-shot and never even
+         * approaches the full capacity (default 60).
          */
-        const val INITIAL_FIRST_CALL_TOKENS: Double = 1.0
+        const val INITIAL_FIRST_CALL_TOKENS: Double = 2.0
     }
 }

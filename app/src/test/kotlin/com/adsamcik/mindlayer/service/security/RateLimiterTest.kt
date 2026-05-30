@@ -15,12 +15,14 @@ class RateLimiterTest {
     fun `allows requests up to burst capacity once bucket fills`() {
         val clock = FakeClock()
         val rl = RateLimiter(maxRequestsPerMinute = 5, timeSource = clock)
-        // F-027 refinement: fresh buckets now start with the 1-token
-        // first-call grant (default INITIAL_FIRST_CALL_TOKENS = 1.0), so
-        // the very first acquire succeeds without waiting on refill.
+        // F-027 refinement: fresh buckets start with the 2-token first-
+        // call grant (default INITIAL_FIRST_CALL_TOKENS = 2.0) so the
+        // documented connect handshake (registerClient + getCapabilities)
+        // succeeds without waiting on refill.
         assertTrue("first-call grant allows fresh uid through", rl.tryAcquire(1000))
-        // Drain that grant immediately — second call without refill fails.
-        assertFalse("grant is one-shot, not full capacity", rl.tryAcquire(1000))
+        assertTrue("second handshake call still within grant", rl.tryAcquire(1000))
+        // Drain that grant immediately — third call without refill fails.
+        assertFalse("grant is bounded at 2.0, not full capacity", rl.tryAcquire(1000))
         // After one full minute the bucket refills to capacity (5).
         clock.now = 60_000
         repeat(5) { assertTrue("call $it", rl.tryAcquire(1000)) }
@@ -28,15 +30,18 @@ class RateLimiterTest {
     }
 
     @Test
-    fun `fresh uid gets one-token grant then must wait for refill (F-027 refinement)`() {
+    fun `fresh uid gets two-token grant then must wait for refill (F-027 refinement)`() {
         val clock = FakeClock(now = 123_456L)
         val rl = RateLimiter(maxRequestsPerMinute = 60, timeSource = clock)
-        // Brand-new UID gets exactly one token — enough for the canonical
-        // registerClient first-call (cost 1.0) but NOT enough to burst:
-        // the second call without refill rejects, closing the original
-        // F-027 evasion ("burst, idle past 10-min eviction, repeat").
+        // Brand-new UID gets 2.0 tokens — enough for the canonical
+        // connect handshake (registerClient cost 1.0 + getCapabilities
+        // cost 0.25 + a follow-up feature check). NOT enough to burst:
+        // the third cost-1.0 call without refill rejects, closing the
+        // original F-027 evasion ("burst, idle past 10-min eviction,
+        // repeat").
         assertTrue("first-call grant", rl.tryAcquire(1000))
-        assertFalse("second call without refill rejects", rl.tryAcquire(1000))
+        assertTrue("second handshake call within grant", rl.tryAcquire(1000))
+        assertFalse("third call without refill rejects", rl.tryAcquire(1000))
         // After 1s of refill (60/min => 1 token/s), one more acquire succeeds.
         clock.now += 1_000
         assertTrue(rl.tryAcquire(1000))
@@ -47,9 +52,10 @@ class RateLimiterTest {
     fun `refills tokens over time`() {
         val clock = FakeClock()
         val rl = RateLimiter(maxRequestsPerMinute = 60, timeSource = clock)
-        // F-027 refinement: first-call grant means the opening tryAcquire
-        // succeeds; drain it then advance the clock to test refill.
+        // F-027 refinement: 2-token first-call grant. Drain it then advance
+        // the clock to test refill.
         assertTrue("first-call grant", rl.tryAcquire(1000))
+        assertTrue("second handshake call inside grant", rl.tryAcquire(1000))
         assertFalse("grant exhausted", rl.tryAcquire(1000))
         // Fill the bucket by advancing the clock after bucket creation.
         clock.now = 60_000
@@ -65,8 +71,11 @@ class RateLimiterTest {
     fun `per-uid buckets are independent`() {
         val clock = FakeClock()
         val rl = RateLimiter(maxRequestsPerMinute = 2, timeSource = clock)
-        // F-027 refinement: each UID gets its own one-token grant; drain
-        // both so the remainder of the test exercises the refilled state.
+        // F-027 refinement: each UID gets its own 2-token grant (clamped at
+        // capacity=2); drain both so the remainder of the test exercises
+        // the refilled state.
+        assertTrue(rl.tryAcquire(1000))
+        assertTrue(rl.tryAcquire(2000))
         assertTrue(rl.tryAcquire(1000))
         assertTrue(rl.tryAcquire(2000))
         assertFalse(rl.tryAcquire(1000))
