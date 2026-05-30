@@ -13,7 +13,7 @@ Android service app (`com.adsamcik.mindlayer.service`) that loads a single LLM (
 
 ## Tech stack
 
-- Kotlin 2.3.21 / JDK 17 bytecode (Gradle tests on JDK 21) / AGP 9.2.1 / `compileSdk 36`, `minSdk 26`
+- Kotlin 2.3.21 / JDK 17 bytecode (Gradle tests on JDK 21) / AGP 9.2.1 / `compileSdk 37`, `minSdk 26`, `targetSdk 36`
 - Modules: `:app` (service+dashboard), `:sdk` (client SDK), `:sdk-camerax` (optional CameraX adapter), `:shared` (wire types), `:gemma_model`, `:embeddinggemma_model`, `:paddleocr_model` (install-time AI packs)
 - LiteRT-LM 0.12.0 + base LiteRT 2.1.5 for EmbeddingGemma, Jetpack Compose (BOM 2026.04.01), Room 2.8.4 + SQLCipher 4.15.0
 - Tests: JUnit 4, MockK, Robolectric (sdk=33), Turbine, kotlinx-coroutines-test

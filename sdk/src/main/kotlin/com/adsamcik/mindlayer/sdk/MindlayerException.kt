@@ -7,7 +7,7 @@ import com.adsamcik.mindlayer.shared.MindlayerErrorCode
  *
  * # Wire encoding
  *
- * AIDL on `compileSdk 36` does not expose `android.os.ServiceSpecificException`
+ * AIDL on Mindlayer's `compileSdk` does not expose `android.os.ServiceSpecificException`
  * in the public stubs (Google made it system-API-only). Typed service errors
  * are therefore encoded as a [SecurityException] whose message carries a
  * stable wire prefix produced by

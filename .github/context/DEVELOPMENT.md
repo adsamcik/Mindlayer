@@ -8,7 +8,7 @@
 | Tool | Version | Notes |
 |---|---|---|
 | JDK | 17 (build) — but tests run on 21 in CI, see [Java 21 gotcha](#%EF%B8%8F-the-java-21-test-runtime-gotcha) | `compileOptions { sourceCompatibility/targetCompatibility = VERSION_17 }` and `kotlin { jvmTarget = JVM_17 }` |
-| Android SDK | `compileSdk 36`, `minSdk 26`, `targetSdk 36` | |
+| Android SDK | `compileSdk 37`, `minSdk 26`, `targetSdk 36` | `compileSdk 37` required by Compose BOM 2026.05.01 alpha (1.12.0-alpha03 / material3 1.5.0-alpha20) |
 | Gradle | wrapper-managed (`gradlew`) | Plugin: AGP 9.2.1 |
 | Kotlin | 2.3.21 (KSP 2.3.8) | `kotlin.code.style=official` |
 | Compose | BOM 2026.04.01, Material3 1.5.0-alpha18 | |
