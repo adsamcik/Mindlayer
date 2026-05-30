@@ -1,9 +1,15 @@
 # Multi-frame OCR / parsing API
 
-> v0.8 Phase 1–4 + Wave 1, plus v0.9 single-image one-shot. Single source
-> of truth for the Mindlayer OCR APIs. The AIDL/SDK/event stream is wired;
-> production exposure remains gated by `OcrFeatureFlags.IS_PRODUCTION_READY = false`
+> v0.8 Phase 1–4 + Wave 1, plus v0.9 single-image one-shot, plus v0.10
+> SDK rename + camera-launcher module. Single source of truth for the
+> Mindlayer OCR APIs. The AIDL/SDK/event stream is wired; production
+> exposure remains gated by `OcrFeatureFlags.IS_PRODUCTION_READY = false`
 > until the real-device validation matrix signs off.
+>
+> **New consumer guide:** [`OCR_SDK_GUIDE.md`](OCR_SDK_GUIDE.md) is the
+> primary entry point for SDK consumers (decision rule, snippets, error
+> handling, full sample). This document remains the authoritative
+> reference for the AIDL surface, wire details, and engine semantics.
 
 ## Two shapes, one engine
 
@@ -14,6 +20,14 @@ Mindlayer exposes OCR through two AIDL surfaces backed by the same
 |---|---|---|
 | `ocrImage(MediaPart, OcrImageOptions): OcrImageResult` — **v0.9** | Single captured image (gallery picker, sharesheet, screenshot text-extraction, "scan this receipt" one-shot). Sync, no session ceremony. | `FEATURE_OCR_IMAGE_ONESHOT` |
 | `createOcrSession` / `pushOcrFrame` / `streamOcrEvents` / `finalizeOcrSession` — **v0.8** | Streaming camera frames with cross-frame fusion, presort, barcode anchoring, structured-output finalization. | `FEATURE_OCR_SESSION` |
+
+**SDK surface naming (v0.10):** `Mindlayer.ocrSession()` was renamed to
+`Mindlayer.ocrRealtime()`, and `Mindlayer.ocrImage()` was renamed to
+`Mindlayer.ocrAsync()`. The old names remain as `@Deprecated`
+(WARNING-level) aliases that delegate to the new ones — the AIDL methods
+themselves are unchanged, so wire compatibility is preserved. New code
+should use the new names; see [`OCR_SDK_GUIDE.md`](OCR_SDK_GUIDE.md)
+for the decision rule.
 
 Both flags flip together (same production-readiness gate). The engine's
 per-instance mutex serialises all calls so the two APIs share throughput
@@ -69,16 +83,28 @@ file descriptor.
 | Failure modes | `INVALID_REQUEST` (options or MediaPart shape), `SERVICE_UNAVAILABLE` (engine not ready or never wired), `LOW_MEMORY` (engine refused for memory headroom), `TRANSIENT_RESOURCE_EXHAUSTED` (SharedMemory pool saturated). |
 | Persistence | None. Recognized text and extraction output live in the response parcelable only; never persisted to filesDir / cacheDir / external storage. Caller may persist via the SDK history DB. |
 
-### When to choose `ocrImage` vs `ocrSession`
+### When to choose `ocrAsync` vs `ocrRealtime`
 
-- ✅ Use `ocrImage` for one-off captures, deep links, screenshots, gallery
-  pickers, sharesheet targets. Less ceremony, no event pipe, no per-call
-  setup cost beyond the engine itself.
-- ✅ Use `ocrSession` for streaming camera feeds where multi-frame
-  fusion meaningfully improves quality (cross-frame voting, barcode
-  anchor lock, schema-shaped structured output across frames). The
-  session pipeline also runs the service-side presort so blurry / dark
-  frames get rejected before reaching the engine.
+> Renamed in v0.10. The old SDK names `ocrImage` / `ocrSession` still
+> work as deprecated aliases.
+
+- ✅ Use `ocrAsync` (formerly `ocrImage`) for one-off captures, deep
+  links, screenshots, gallery pickers, sharesheet targets. Less
+  ceremony, no event pipe, no per-call setup cost beyond the engine
+  itself.
+- ✅ Use `ocrRealtime` (formerly `ocrSession`) for streaming camera
+  feeds where multi-frame fusion meaningfully improves quality
+  (cross-frame voting, barcode anchor lock, schema-shaped structured
+  output across frames). The session pipeline also runs the
+  service-side presort so blurry / dark frames get rejected before
+  reaching the engine.
+- ✅ Use the **`:sdk-camera-launcher`** module for either when you
+  want a turn-key camera capture flow — see
+  [`OCR_SDK_GUIDE.md`](OCR_SDK_GUIDE.md). The launcher registers a
+  single `ActivityResultContract` that opens a Mindlayer-owned camera
+  Activity, asks for the `CAMERA` permission, runs the chosen surface,
+  and returns a structured result. Consumers never touch CameraX,
+  permissions, or the session lifecycle themselves.
 
 ## TL;DR — multi-frame session (v0.8)
 

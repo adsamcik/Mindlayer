@@ -37,7 +37,7 @@ sealed class OcrAnalyzerEvent {
  * # Usage
  *
  * ```kotlin
- * val session = mindlayer.ocrSession(OcrProfile.Receipt) { maxFrames = 30 }
+ * val session = mindlayer.ocrRealtime(OcrProfile.Receipt) { maxFrames = 30 }
  * val analyzer = OcrImageAnalyzer(session) { frame, ack ->
  *     // Optional: observe per-frame ACKs for UI throttling feedback.
  * }

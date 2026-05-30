@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Generic, content-free strings only — never include recognized text
+         or any data extracted from the image. Per privacy invariant, the
+         user-visible camera-launcher UI must not leak structured output. -->
+    <string name="mindlayer_ocr_capture_title">Scan</string>
+    <string name="mindlayer_ocr_capture_button">Capture</string>
+    <string name="mindlayer_ocr_capture_finalize">Done</string>
+    <string name="mindlayer_ocr_capture_cancel">Cancel</string>
+    <string name="mindlayer_ocr_capture_processing">Processing…</string>
+    <string name="mindlayer_ocr_capture_permission_required">Camera access is required to scan.</string>
+    <string name="mindlayer_ocr_capture_permission_grant">Grant access</string>
+    <string name="mindlayer_ocr_capture_permission_open_settings">Open Settings</string>
+    <string name="mindlayer_ocr_capture_connecting">Connecting to Mindlayer…</string>
+    <string name="mindlayer_ocr_capture_error_generic">Capture failed.</string>
+</resources>
