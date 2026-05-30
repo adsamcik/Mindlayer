@@ -239,6 +239,13 @@ jobs:
       - name: Run instrumented tests
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2
         env:
+          # `reactivecircus/android-emulator-runner@v2.37.0` splits the
+          # `script:` input on every newline and runs each line in its
+          # own `sh -c`, which silently breaks multi-line shell
+          # constructs (if/then/else/fi). The driver script keeps the
+          # conditional in one bash program; we surface its inputs via
+          # env vars on the step.
+          HAVE_AI_PACK: ${{ steps.ai-pack.outputs.have-pack }}
           PADDLEOCR_DET_SHA256: ${{ vars.PADDLEOCR_DET_SHA256 }}
           PADDLEOCR_REC_SHA256: ${{ vars.PADDLEOCR_REC_SHA256 }}
           PADDLEOCR_CLS_SHA256: ${{ vars.PADDLEOCR_CLS_SHA256 }}
@@ -250,26 +257,7 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: |
-            if [ "${{ steps.ai-pack.outputs.have-pack }}" = "true" ]; then
-              ./gradlew \
-                :paddleocr_model:assembleDebug \
-                --no-daemon \
-                -PpaddleOcrDetSha256="${PADDLEOCR_DET_SHA256}" \
-                -PpaddleOcrRecSha256="${PADDLEOCR_REC_SHA256}" \
-                -PpaddleOcrClsSha256="${PADDLEOCR_CLS_SHA256}" \
-                -PpaddleOcrDictSha256="${PADDLEOCR_DICT_SHA256}"
-              ./gradlew \
-                :app:connectedDebugAndroidTest \
-                :sdk:connectedDebugAndroidTest \
-                --no-daemon \
-                -PpaddleOcrDetSha256="${PADDLEOCR_DET_SHA256}" \
-                -PpaddleOcrRecSha256="${PADDLEOCR_REC_SHA256}" \
-                -PpaddleOcrClsSha256="${PADDLEOCR_CLS_SHA256}" \
-                -PpaddleOcrDictSha256="${PADDLEOCR_DICT_SHA256}"
-            else
-              ./gradlew :app:connectedDebugAndroidTest :sdk:connectedDebugAndroidTest --no-daemon
-            fi
+          script: bash scripts/ci/instrumented-tests.sh
 
       - name: Upload instrumented test reports
         if: always()
