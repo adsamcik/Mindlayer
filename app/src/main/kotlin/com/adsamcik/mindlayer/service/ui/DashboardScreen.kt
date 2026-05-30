@@ -59,6 +59,7 @@ import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
@@ -90,12 +91,16 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.adsamcik.mindlayer.service.R
+import com.adsamcik.mindlayer.service.engine.OcrAcceleratorFailureCache
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerColors
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerTheme
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerType
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.text.DateFormat
+import java.util.Date
+import java.util.Locale
 
 private val CategoryInference = Color(0xFF1565C0)
 private val CategoryThermal = Color(0xFFE65100)
@@ -278,6 +283,13 @@ fun DashboardScreen(
     onTestInference: () -> Unit = {},
     onTestEmbeddings: () -> Unit = {},
     onTestOcr: () -> Unit = {},
+    /**
+     * Invoked by the "Retry now" button shown when the OCR accelerator
+     * failure cache is in cooldown. Clears the persisted record so the
+     * next OCR engine cold start will retry the resolver-picked backend
+     * instead of short-circuiting to CPU.
+     */
+    onClearOcrFailureCache: () -> Unit = {},
     onRunAllVerifications: () -> Unit = {},
     onNavigateToHistory: () -> Unit = {},
     onNavigateToLogs: () -> Unit = {},
@@ -323,7 +335,7 @@ fun DashboardScreen(
             ) {
                 item { CardEnterAnimation(0) { DashboardHero(state) } }
                 item { CardEnterAnimation(1) { WelcomeCard(state, onRunAllVerifications) } }
-                item { CardEnterAnimation(2) { TestInferenceCard(state, onTestInference, onTestEmbeddings, onTestOcr) } }
+                item { CardEnterAnimation(2) { TestInferenceCard(state, onTestInference, onTestEmbeddings, onTestOcr, onClearOcrFailureCache) } }
                 item { CardEnterAnimation(3) { StatusSection(state) } }
                 item { CardEnterAnimation(4) { ThermalMemoryRow(state) } }
                 item { CardEnterAnimation(5) { ActiveSessionsCard(state) } }
@@ -1413,6 +1425,7 @@ private fun TestInferenceCard(
     onTestInference: () -> Unit,
     onTestEmbeddings: () -> Unit,
     onTestOcr: () -> Unit,
+    onClearOcrFailureCache: () -> Unit,
 ) {
     DashboardCard(title = stringResource(R.string.dashboard_card_test_inference_title), icon = Icons.Filled.PlayArrow) {
         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -1420,7 +1433,7 @@ private fun TestInferenceCard(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             EmbeddingEngineRow(state, onTestEmbeddings)
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            OcrEngineRow(state, onTestOcr)
+            OcrEngineRow(state, onTestOcr, onClearOcrFailureCache)
         }
     }
 }
@@ -1586,7 +1599,11 @@ private fun EmbeddingEngineRow(state: DashboardUiState, onTestEmbeddings: () -> 
 }
 
 @Composable
-private fun OcrEngineRow(state: DashboardUiState, onTestOcr: () -> Unit) {
+private fun OcrEngineRow(
+    state: DashboardUiState,
+    onTestOcr: () -> Unit,
+    onClearOcrFailureCache: () -> Unit,
+) {
     val nowMs = System.currentTimeMillis()
     val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.3f
     val test = state.ocrTest
@@ -1647,6 +1664,17 @@ private fun OcrEngineRow(state: DashboardUiState, onTestOcr: () -> Unit) {
             }
         }
 
+        // Persisted GPU/NPU init failure: skip log + "Retry now" action.
+        // Only visible while the cooldown is active; an expired record is
+        // ignored — the next normal init will retry the previously-failed
+        // accelerator on its own.
+        OcrAcceleratorCooldownRow(
+            failure = state.ocrFailureSnapshot,
+            cooldownMs = state.ocrFailureCooldownMs,
+            nowMs = nowMs,
+            onRetryNow = onClearOcrFailureCache,
+        )
+
         if (test.status.isNotBlank()) {
             DiagnosticCallout(message = test.status, tone = displayTone)
         }
@@ -1658,6 +1686,64 @@ private fun OcrEngineRow(state: DashboardUiState, onTestOcr: () -> Unit) {
                 hasOutput = hasOutput,
                 darkTheme = darkTheme,
             )
+        }
+    }
+}
+
+/**
+ * Status row shown under the OCR engine card when the persisted accelerator
+ * failure cache says a non-CPU init failed recently and the cooldown window
+ * is still active. Renders a tertiary-toned message + "Retry now" button.
+ *
+ * Empty record → nothing rendered (the canonical "happy path").
+ * Expired record → nothing rendered either — the next normal OCR engine
+ * init will retry the previously-failed accelerator without UI nagging.
+ */
+@Composable
+private fun OcrAcceleratorCooldownRow(
+    failure: OcrAcceleratorFailureCache.FailureRecord?,
+    cooldownMs: Long,
+    nowMs: Long,
+    onRetryNow: () -> Unit,
+) {
+    if (failure == null) return
+    val cooldownEndsAtMs = failure.lastFailedAtMs + cooldownMs
+    val inCooldown = nowMs in failure.lastFailedAtMs..cooldownEndsAtMs
+    if (!inCooldown) return
+
+    val tertiary = MaterialTheme.colorScheme.tertiary
+    val timeFormatter = remember {
+        DateFormat.getDateTimeInstance(
+            DateFormat.MEDIUM,
+            DateFormat.SHORT,
+            Locale.getDefault(),
+        )
+    }
+    val until = timeFormatter.format(Date(cooldownEndsAtMs))
+    val backend = failure.lastFailedBackend
+    val label = failure.lastFailedSafeLabel
+    val count = failure.failureCount
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = stringResource(R.string.dashboard_ocr_cooldown_message, backend, until),
+                style = MaterialTheme.typography.bodySmall,
+                color = tertiary,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                text = stringResource(R.string.dashboard_ocr_cooldown_details, label, count),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        TextButton(onClick = onRetryNow) {
+            Text(stringResource(R.string.dashboard_ocr_cooldown_retry))
         }
     }
 }

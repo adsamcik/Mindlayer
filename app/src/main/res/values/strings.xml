@@ -172,6 +172,10 @@
     <string name="dashboard_test_ocr_subtitle">Renders a small PNG with the words “Hello world 1234” and runs it through the PaddleOCR session pipeline.</string>
     <string name="dashboard_test_ocr_button_run">Test OCR</string>
     <string name="dashboard_test_ocr_button_running">OCR…</string>
+    <!-- F-094 (OCR accelerator failure cache) status row strings -->
+    <string name="dashboard_ocr_cooldown_message">%1$s acceleration disabled until %2$s</string>
+    <string name="dashboard_ocr_cooldown_details">failed: %1$s × %2$d</string>
+    <string name="dashboard_ocr_cooldown_retry">Retry now</string>
     <string name="dashboard_welcome_title">On-device AI</string>
     <string name="dashboard_welcome_body">Mindlayer runs the chat language model, sentence embeddings and OCR locally on this device. Nothing leaves your phone. Tap to verify all three engines respond.</string>
     <string name="dashboard_welcome_button_run">Verify all engines</string>
