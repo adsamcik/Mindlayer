@@ -187,6 +187,21 @@ class Mindlayer private constructor(
         const val EVICTION_BUFFER: Int = 64
 
         /**
+         * TTL for the [getCapabilities] cache. Capabilities are dynamic —
+         * the service's on-device engines warm up asynchronously after
+         * first connect (PaddleOCR ~200ms, Gemma 4 E2B ~1-3s, EmbeddingGemma
+         * ~500ms), unload on memory pressure, and reload lazily on the
+         * next call. Caching forever would silently pin the very first
+         * reply (often `FEATURE_OCR_* = false` during init) and would
+         * stop capability-aware clients from ever seeing features come
+         * online (Bug #6). 5s is short enough that a feature flipping
+         * on is visible within a polling iteration, long enough to absorb
+         * tight back-to-back gets without redundant binder round-trips.
+         * Tests may pass `forceRefresh = true` to bypass entirely.
+         */
+        const val CAPABILITIES_CACHE_TTL_MS: Long = 5_000L
+
+        /**
          * Maximum estimated reply-parcel bytes before [embedMany] upgrades from
          * inline binder transport to SharedMemory. Half of the documented
          * 1 MB binder transaction limit, leaving generous headroom for parcel
@@ -419,12 +434,27 @@ class Mindlayer private constructor(
 
     @Volatile private var cachedCapabilities: ServiceCapabilities? = null
 
+    @Volatile private var cachedCapabilitiesAtMs: Long = 0L
+
     /**
      * Probe and cache the [ServiceCapabilities] of the connected service.
      *
      * The first call after [awaitConnected] performs the AIDL handshake and
-     * caches the result for the lifetime of this [Mindlayer] instance.
-     * Subsequent calls return the cached value without crossing the wire.
+     * caches the result for [CAPABILITIES_CACHE_TTL_MS] ms. Within that
+     * window subsequent calls return the cached value without crossing the
+     * wire; after it expires the next call re-probes. Cache expiry matters
+     * because capabilities are dynamic — the on-device engine warms up
+     * asynchronously after first connect (PaddleOCR / Gemma model load),
+     * unloads on memory pressure, and reloads lazily on the next call.
+     * The pre-fix lifetime-of-instance cache silently pinned the very
+     * first reply (often `FEATURE_OCR_* = false` during the ~200ms init
+     * window) forever and meant capability-aware clients never saw
+     * features come online (Bug #6).
+     *
+     * Pass `forceRefresh = true` to bypass the cache (e.g. inside a retry
+     * loop polling for a specific feature to appear). The forced re-probe
+     * still passes through the service's quarter-cost rate-limit gate, so
+     * tight polling loops should add a small `delay` between iterations.
      *
      * **Old service compatibility**: if the connected service predates the
      * `getCapabilities` AIDL method (built before v0.2), this falls back to
@@ -440,8 +470,16 @@ class Mindlayer private constructor(
      * }
      * ```
      */
-    suspend fun getCapabilities(): ServiceCapabilities {
-        cachedCapabilities?.let { return it }
+    suspend fun getCapabilities(forceRefresh: Boolean = false): ServiceCapabilities {
+        if (!forceRefresh) {
+            val cached = cachedCapabilities
+            if (cached != null) {
+                val ageMs = System.currentTimeMillis() - cachedCapabilitiesAtMs
+                if (ageMs in 0..CAPABILITIES_CACHE_TTL_MS) {
+                    return cached
+                }
+            }
+        }
         val service = connection.awaitConnected()
         val caps = try {
             service.capabilities
@@ -459,6 +497,7 @@ class Mindlayer private constructor(
             throw e
         }
         cachedCapabilities = caps
+        cachedCapabilitiesAtMs = System.currentTimeMillis()
         return caps
     }
 

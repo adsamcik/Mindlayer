@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -93,7 +94,42 @@ class MindlayerCapabilitiesTest {
         mindlayer.getCapabilities()
         mindlayer.getCapabilities()
 
+        // Cache is now TTL-bounded (5 s) but three back-to-back calls in
+        // a test run fit well inside the window; only one binder probe.
         verify(exactly = 1) { mockService.capabilities }
+    }
+
+    @Test
+    fun `Bug #6 - forceRefresh bypasses the cache and sees fresh capabilities`() = runTest {
+        // Engine warmup pattern: first probe returns minimal caps (OCR
+        // engine still initialising), poll with forceRefresh, see the
+        // feature come online. Before the fix, lifetime-of-instance
+        // caching pinned the first reply forever and capability-aware
+        // clients never observed the transition.
+        val coldCaps = sampleCaps.copy(
+            supportedFeatures = setOf(ServiceCapabilities.FEATURE_PIPE_STREAM_V1),
+        )
+        val warmCaps = sampleCaps.copy(
+            supportedFeatures = setOf(
+                ServiceCapabilities.FEATURE_PIPE_STREAM_V1,
+                ServiceCapabilities.FEATURE_OCR_SESSION,
+                ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT,
+            ),
+        )
+        every { mockService.capabilities } returnsMany listOf(coldCaps, warmCaps)
+
+        val first = mindlayer.getCapabilities()
+        assertFalse("cold probe — OCR not advertised yet", first.supports(ServiceCapabilities.FEATURE_OCR_SESSION))
+
+        val cachedAgain = mindlayer.getCapabilities()
+        assertSame("within TTL: cached cold copy", first, cachedAgain)
+
+        val forced = mindlayer.getCapabilities(forceRefresh = true)
+        assertTrue(
+            "forceRefresh sees the warm engine — OCR now advertised",
+            forced.supports(ServiceCapabilities.FEATURE_OCR_SESSION),
+        )
+        verify(exactly = 2) { mockService.capabilities }
     }
 
     @Test

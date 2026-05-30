@@ -99,6 +99,40 @@ class ValidationRunner(
     suspend fun runAll(): ValidationReport {
         val results = mutableListOf<ValidationScenarioResult>()
 
+        // Engine warmup: the PaddleOCR backend initialises lazily inside
+        // OcrSessionManager on the first non-self caller's connect. On a
+        // cold service (no prior client) the bundle discovery + native
+        // tflite load can take 200-800ms on the emulator; getCapabilities
+        // called during that window returns BEFORE the engine has reached
+        // PaddleOcrEngineState.Ready, so FEATURE_OCR_* is correctly absent.
+        // Poll until OCR appears or we time out — production apps should
+        // do the same dance (subscribe to capabilities-changed or retry
+        // with backoff) rather than treating the first response as final.
+        suspend fun pollForOcrCapability(timeoutMs: Long = 10_000L): Boolean {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                try {
+                    // forceRefresh = true bypasses the SDK's TTL cache so
+                    // each iteration crosses the wire and sees the actual
+                    // current engine state — without this the very first
+                    // (FEATURE_OCR=false) reply gets pinned for 5 s and
+                    // the poll never converges.
+                    val caps = mindlayer.getCapabilities(forceRefresh = true)
+                    if (caps.supports(ServiceCapabilities.FEATURE_OCR_SESSION) &&
+                        caps.supports(ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT)
+                    ) {
+                        return true
+                    }
+                } catch (_: Throwable) {
+                    // Transient rate-limit on a polling probe is acceptable
+                    // — fall through to the delay and retry.
+                }
+                delay(250)
+            }
+            return false
+        }
+        val ocrReady = pollForOcrCapability()
+
         val capsSubset = try {
             mindlayer.getCapabilities().supportedFeatures
                 .filter { it.startsWith("ocr_") }
@@ -110,12 +144,12 @@ class ValidationRunner(
         results += scenario("capability_advertise") {
             val caps = mindlayer.getCapabilities()
             check(caps.supports(ServiceCapabilities.FEATURE_OCR_SESSION)) {
-                "FEATURE_OCR_SESSION not advertised — engine not ready or production gate off"
+                "FEATURE_OCR_SESSION not advertised after ${if (ocrReady) "ready" else "10s poll"} — engine not ready or production gate off"
             }
             check(caps.supports(ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT)) {
-                "FEATURE_OCR_IMAGE_ONESHOT not advertised — engine not ready or production gate off"
+                "FEATURE_OCR_IMAGE_ONESHOT not advertised after ${if (ocrReady) "ready" else "10s poll"} — engine not ready or production gate off"
             }
-            "FEATURE_OCR_SESSION + FEATURE_OCR_IMAGE_ONESHOT both advertised"
+            "FEATURE_OCR_SESSION + FEATURE_OCR_IMAGE_ONESHOT both advertised after ${if (ocrReady) "engine warm-up" else "timeout — unexpectedly succeeded"}"
         }
 
         results += scenario("single_image_no_llm") {
