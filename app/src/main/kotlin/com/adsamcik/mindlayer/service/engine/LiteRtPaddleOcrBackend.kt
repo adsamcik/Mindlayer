@@ -38,6 +38,8 @@ class LiteRtPaddleOcrBackend internal constructor(
     private val availableMemoryProvider: () -> Long = defaultAvailableMemoryProvider(context),
     private val runnerFactory: PaddleOcrLiteRtRunnerFactory,
     private val logRepository: LogRepository? = null,
+    private val failureCache: OcrAcceleratorFailureCache = OcrAcceleratorFailureCache(context),
+    private val clock: () -> Long = { System.currentTimeMillis() },
 ) : PaddleOcrBackend {
 
     constructor(
@@ -53,6 +55,8 @@ class LiteRtPaddleOcrBackend internal constructor(
             RealPaddleOcrLiteRtRunner.create(bundle, acceleratorLabel)
         },
         logRepository = logRepository,
+        failureCache = OcrAcceleratorFailureCache(context),
+        clock = { System.currentTimeMillis() },
     )
 
     private val mutex = Mutex()
@@ -87,7 +91,40 @@ class LiteRtPaddleOcrBackend internal constructor(
     ): Unit = mutex.withLock {
         val initStartNs = System.nanoTime()
         shuttingDown = false
-        val selectedBackend = resolveBackend(preferredBackend)
+        val resolvedRaw = resolveBackend(preferredBackend)
+
+        // Cooldown short-circuit: when the caller did not pin a specific
+        // backend, the resolver picked a non-CPU backend, and the failure
+        // cache shows a recent failure within the cooldown window, skip the
+        // doomed accelerator init and go straight to CPU. Saves 1-2s of
+        // guaranteed-doomed init + battery on every cold start AND every
+        // memory-pressure unload+reload cycle on stable-failure devices.
+        //
+        // Explicit caller picks (`preferredBackend != null`) always win,
+        // even for the cached backend — the caller is asking for a specific
+        // accelerator and the cache MUST NOT second-guess that.
+        val cooldownRecord = failureCache.snapshot()
+        val cooldownSkip = preferredBackend == null &&
+            resolvedRaw != "CPU" &&
+            cooldownRecord != null &&
+            cooldownRecord.isInCooldown(clock = clock, cooldownMs = failureCache.cooldownMs)
+        val selectedBackend = if (cooldownSkip) {
+            MindlayerLog.i(
+                TAG,
+                "PaddleOCR $resolvedRaw init skipped: prior failure within cooldown window " +
+                    "(cachedBackend=${cooldownRecord!!.lastFailedBackend}, " +
+                    "ageMs=${clock() - cooldownRecord.lastFailedAtMs}, " +
+                    "failureCount=${cooldownRecord.failureCount})",
+            )
+            recordOcrCooldownSkipDecision(
+                resolverPick = resolvedRaw,
+                cooldownRecord = cooldownRecord,
+            )
+            "CPU"
+        } else {
+            resolvedRaw
+        }
+
         loadedBundle?.let { current ->
             if (current.id == bundle.id &&
                 current.detectionPath == bundle.detectionPath &&
@@ -107,10 +144,25 @@ class LiteRtPaddleOcrBackend internal constructor(
 
         try {
             attemptInit(bundle, selectedBackend, initStartNs)
+            // Successful init on a non-CPU backend clears the cache so a
+            // transient failure is not sticky for the full cooldown window.
+            // Skip the clear if we short-circuited to CPU via cooldown
+            // (cooldownSkip=true) — the cache is still authoritative for
+            // the resolver-picked backend that we never even tried.
+            if (selectedBackend != "CPU" && !cooldownSkip && cooldownRecord != null) {
+                failureCache.clear()
+                MindlayerLog.i(
+                    TAG,
+                    "PaddleOCR $selectedBackend init recovered; cleared accelerator failure cache",
+                )
+            }
         } catch (t: Throwable) {
             // LowMemoryException stays terminal — callers (engine + UI) need
             // to see it. CPU is the last-resort backend, so a CPU-forced
             // failure is also terminal: no fallback dance, original behaviour.
+            // LowMemory is also NEVER cached: memory-pressure failures are
+            // transient and would otherwise poison a 24 h skip window over
+            // a momentary RAM dip.
             if (t is LowMemoryException || selectedBackend == "CPU") {
                 MindlayerLog.w(
                     TAG,
@@ -125,6 +177,11 @@ class LiteRtPaddleOcrBackend internal constructor(
                     "falling back to CPU",
                 throwable = null,
             )
+            // Record BEFORE the CPU fallback attempt. If CPU also throws,
+            // the GPU failure is still persisted so the next cold-start can
+            // skip it; the alternative (record after CPU success) loses the
+            // GPU failure when the whole init path dies.
+            failureCache.recordFailure(backend = selectedBackend, safeLabel = t.safeLabel())
             recordOcrFallbackDecision(originalBackend = selectedBackend)
             try {
                 attemptInit(bundle, "CPU", initStartNs)
@@ -210,6 +267,28 @@ class LiteRtPaddleOcrBackend internal constructor(
             featureName = "ocr",
             backend = "CPU",
             reason = "${originalBackend}_INIT_FAILED_FALLBACK_CPU",
+            attempted = chainedAttempts,
+        )
+    }
+
+    /**
+     * Records a [LiteRtAcceleratorResolver] decision reflecting that the
+     * resolver-picked accelerator was skipped because of a recent prior
+     * failure (within [OcrAcceleratorFailureCache.cooldownMs]). The dashboard
+     * sees backend=CPU + a "_COOLDOWN_SKIP" reason so the OCR status row can
+     * distinguish a cooldown-skipped backend from a real CPU pick.
+     */
+    private fun recordOcrCooldownSkipDecision(
+        resolverPick: String,
+        cooldownRecord: OcrAcceleratorFailureCache.FailureRecord,
+    ) {
+        val original = LiteRtAcceleratorResolver.latestDecision("ocr")
+        val chainedAttempts = (original?.attempted ?: emptyList()) +
+            listOf(resolverPick to "cooldown-skip", "CPU" to "selected")
+        LiteRtAcceleratorResolver.recordDecision(
+            featureName = "ocr",
+            backend = "CPU",
+            reason = "${resolverPick}_COOLDOWN_SKIP_CPU_failureCount=${cooldownRecord.failureCount}",
             attempted = chainedAttempts,
         )
     }
@@ -708,12 +787,16 @@ class LiteRtPaddleOcrBackend internal constructor(
             memoryHeadroomBytes: Long = 0L,
             availableMemoryProvider: () -> Long = { Long.MAX_VALUE },
             runnerFactory: PaddleOcrLiteRtRunnerFactory,
+            failureCache: OcrAcceleratorFailureCache = OcrAcceleratorFailureCache(context),
+            clock: () -> Long = { System.currentTimeMillis() },
         ): LiteRtPaddleOcrBackend = LiteRtPaddleOcrBackend(
             context = context,
             memoryHeadroomBytes = memoryHeadroomBytes,
             availableMemoryProvider = availableMemoryProvider,
             runnerFactory = runnerFactory,
             logRepository = null,
+            failureCache = failureCache,
+            clock = clock,
         )
     }
 }

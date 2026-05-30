@@ -24,6 +24,7 @@ import com.adsamcik.mindlayer.ServiceStatus
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.SessionInfo
 import com.adsamcik.mindlayer.service.health.MlHealthRecorder
+import com.adsamcik.mindlayer.service.engine.OcrAcceleratorFailureCache
 import com.adsamcik.mindlayer.service.logging.LogDao
 import com.adsamcik.mindlayer.service.logging.LogDatabase
 import com.adsamcik.mindlayer.service.logging.LogEntry
@@ -64,6 +65,13 @@ class DashboardViewModel : ViewModel() {
 
     private var logDao: LogDao? = null
     private var mlHealthRecorder: MlHealthRecorder? = null
+    /**
+     * Dashboard-side mirror of [OcrAcceleratorFailureCache]. The cache file
+     * lives under `<filesDir>/ocr_accelerator/` which is shared between `:ml`
+     * (writer) and the main process (this reader). Atomic-rename + FileLock
+     * inside the cache guarantees no torn read.
+     */
+    private var ocrFailureCache: OcrAcceleratorFailureCache? = null
     private var service: com.adsamcik.mindlayer.IMindlayerService? = null
     private var bound = false
     private var statusPollingJob: Job? = null
@@ -117,6 +125,7 @@ class DashboardViewModel : ViewModel() {
         // The service writes from `:ml`, atomic-rename means we never see
         // a torn JSON, and self-UID AIDL would be throttled by design.
         mlHealthRecorder = MlHealthRecorder(context)
+        ocrFailureCache = OcrAcceleratorFailureCache(context)
 
         _uiState.update {
             it.copy(
@@ -196,6 +205,27 @@ class DashboardViewModel : ViewModel() {
         }
     }
 
+    /**
+     * Clears the persisted OCR accelerator failure cache (the "Retry now"
+     * button on the OCR engine card). Subsequent OCR engine cold-starts will
+     * attempt the resolver-picked accelerator (GPU/NPU) again instead of
+     * short-circuiting to CPU.
+     *
+     * We cannot re-init the OCR engine from this process — that would
+     * require an AIDL call, and adding AIDL surface is out of scope. The
+     * cache state file is the single source of truth; the next `:ml`
+     * cold load (or memory-pressure unload+reload) will see the empty cache
+     * and try the resolver's pick. The UI updates immediately because the
+     * next [startPolling] sample reads the now-empty cache file.
+     */
+    fun clearOcrFailureCache() {
+        val cache = ocrFailureCache ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            cache.clear()
+            _uiState.update { it.copy(ocrFailureSnapshot = null) }
+        }
+    }
+
     private fun startPolling() {
         statusPollingJob?.cancel()
         statusPollingJob = viewModelScope.launch {
@@ -228,6 +258,12 @@ class DashboardViewModel : ViewModel() {
                     } else {
                         0
                     }
+                    // Cross-process read of the OCR accelerator failure
+                    // cache. Cheap unlocked snapshot — atomic-rename in the
+                    // cache writer guarantees no torn JSON.
+                    val ocrFailureSnap = ocrFailureCache?.snapshot()
+                    val ocrCooldownMs = ocrFailureCache?.cooldownMs
+                        ?: OcrAcceleratorFailureCache.DEFAULT_COOLDOWN_MS
 
                     _uiState.update { current ->
                         current.copy(
@@ -269,6 +305,8 @@ class DashboardViewModel : ViewModel() {
                             },
                             initTimeSeconds = engineInfo?.initTimeSeconds ?: 0f,
                             modelId = engineInfo?.modelId ?: "",
+                            ocrFailureSnapshot = ocrFailureSnap,
+                            ocrFailureCooldownMs = ocrCooldownMs,
                         )
                     }
                 } catch (e: Exception) {

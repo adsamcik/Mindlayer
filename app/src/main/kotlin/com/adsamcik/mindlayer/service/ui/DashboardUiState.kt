@@ -1,5 +1,7 @@
 package com.adsamcik.mindlayer.service.ui
 
+import com.adsamcik.mindlayer.service.engine.OcrAcceleratorFailureCache
+
 private const val STATUS_STALE_AFTER_MS = 6_000L
 private const val LOGS_STALE_AFTER_MS = 12_000L
 
@@ -155,6 +157,28 @@ data class DashboardUiState(
      * + ``pushOcrFrame`` + ``finalizeOcrSession`` session lifecycle.
      */
     val ocrTest: EngineTestState = EngineTestState(),
+    /**
+     * Snapshot of the on-disk OCR accelerator failure cache. Populated by
+     * the dashboard ViewModel via a cross-process read of
+     * `<filesDir>/ocr_accelerator/accelerator_failure.json` — written by
+     * `:ml` whenever the GPU/NPU init falls back to CPU.
+     *
+     * `null` means the cache is empty (no recent failure). A non-null value
+     * with `isInCooldown == true` (computed against `System.currentTimeMillis()`
+     * in the Composable) drives the "GPU acceleration disabled until …" status
+     * row + "Retry now" button under the OCR engine card.
+     *
+     * The data class itself is intentionally small + serialisable-friendly;
+     * we do NOT bake locale-aware date formatting into the cache layer.
+     */
+    val ocrFailureSnapshot: OcrAcceleratorFailureCache.FailureRecord? = null,
+    /**
+     * Cooldown window in ms that the dashboard should apply when deciding
+     * whether [ocrFailureSnapshot] is currently active. Matches the value
+     * the service uses; surfacing it here keeps cache + UI in lockstep when
+     * the constant is bumped.
+     */
+    val ocrFailureCooldownMs: Long = OcrAcceleratorFailureCache.DEFAULT_COOLDOWN_MS,
 ) {
     fun statusFreshness(nowMs: Long = System.currentTimeMillis()): DashboardFreshness =
         freshnessOf(lastStatusUpdateMs, nowMs, STATUS_STALE_AFTER_MS)
