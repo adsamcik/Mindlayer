@@ -39,6 +39,7 @@ import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
+@Suppress("DEPRECATION") // pins legacy embed(text) / embedBatch / embedBatchLarge — replaced by embedOne / embedMany facades
 class MindlayerEmbedTest {
     private lateinit var mockService: IMindlayerService
     private lateinit var mockConnection: ConnectionManager
