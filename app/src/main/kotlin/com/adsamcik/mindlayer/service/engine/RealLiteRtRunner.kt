@@ -73,7 +73,46 @@ internal class RealLiteRtRunner private constructor(
                 "GPU" -> Accelerator.GPU
                 else -> Accelerator.CPU
             }
-            val cm = CompiledModel.create(modelPath, CompiledModel.Options(accel))
+            val options = CompiledModel.Options(accel)
+            if (accel == Accelerator.GPU) {
+                // EmbeddingGemma-300M's transformer attention produces
+                // softmax logits and layer-norm variances that overflow
+                // FP16. On Snapdragon 8 Gen 3 (Adreno 750, LITERT_CL
+                // OpenCL backend) the GPU delegate's FP16-by-default
+                // path returns all-NaN output even though the model
+                // compiles cleanly (verified 2026-05-31 on Samsung
+                // S928B). Forcing FP32 keeps the computation
+                // numerically stable at the cost of ~2x throughput
+                // relative to FP16, which is still ~12x faster than
+                // CPU XNNPACK on the same device. infiniteFloatCapping
+                // is a defence-in-depth NaN/Inf clamp for any op that
+                // still overflows under FP32 (rare but possible on
+                // long sequences).
+                //
+                // The numerical guard in LiteRtEmbeddingBackend.attempt
+                // Init catches any residual NaN at warm-up time and
+                // falls back to CPU before any caller sees a bad
+                // vector, so a future GPU regression here is
+                // user-invisible — only the latency degrades.
+                options.gpuOptions = CompiledModel.GpuOptions(
+                    constantTensorSharing = null,
+                    infiniteFloatCapping = true,
+                    allowSrcQuantizedFcConvOps = null,
+                    precision = CompiledModel.GpuOptions.Precision.FP32,
+                    bufferStorageType = null,
+                    preferTextureWeights = null,
+                    serializationDir = null,
+                    modelCacheKey = null,
+                    serializeProgramCache = null,
+                    serializeExternalTensors = null,
+                    externalTensorsMode = null,
+                    externalTensorPattern = null,
+                    backend = null,
+                    priority = null,
+                    numStepsOfCommandBufferPreparations = null,
+                )
+            }
+            val cm = CompiledModel.create(modelPath, options)
             return RealLiteRtRunner(cm)
         }
     }
