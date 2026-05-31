@@ -21,7 +21,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.adsamcik.mindlayer.ocrdriver.OcrSlice
 
-private val FIXTURES = listOf("receipt.png", "document.png", "screen_capture.png")
+private val FIXTURES = listOf("receipt.png", "document.png", "screen_capture.png", "dashboard-fixture.png")
 
 @Composable
 fun OcrTab(
@@ -49,9 +49,9 @@ fun OcrTab(
                 style = MaterialTheme.typography.bodySmall,
             )
             Text("Fixture:", style = MaterialTheme.typography.bodySmall)
-            Row(
+            androidx.compose.foundation.layout.FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 FIXTURES.forEach { name ->
                     FilterChip(
