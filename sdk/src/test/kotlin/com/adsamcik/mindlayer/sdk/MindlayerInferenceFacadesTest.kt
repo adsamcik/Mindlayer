@@ -188,21 +188,41 @@ class MindlayerInferenceFacadesTest {
     private fun assertDeprecated(name: String, expectedReplacement: String) {
         val methods = methodsNamed(name)
         assertTrue("Method '$name' not found on Mindlayer", methods.isNotEmpty())
-        // Kotlin compiles @Deprecated to kotlin.Deprecated on the method.
-        val method = methods.first()
-        val deprecated = method.getAnnotation(Deprecated::class.java)
-        assertNotNull(
-            "Method '$name' missing @kotlin.Deprecated annotation",
-            deprecated,
-        )
-        assertEquals(
-            "Method '$name' deprecation level should remain WARNING during migration",
-            DeprecationLevel.WARNING,
-            deprecated!!.level,
-        )
+        // Every overload must be @Deprecated, and AT LEAST ONE must
+        // reference the expected replacement — `chat` for instance has
+        // both a session-based overload (`chat(sessionId, text)`
+        // → `inferRealtime`) and a one-shot convenience overload
+        // (`chat(text)` → `inferAsync`), and both are valid migrations.
+        // Reflection ordering across JDK versions is not stable, so an
+        // earlier `methods.first()` lookup picked whichever overload the
+        // JVM happened to surface first and false-failed on the others.
+        methods.forEach { method ->
+            val dep = method.getAnnotation(Deprecated::class.java)
+            assertNotNull(
+                "Overload $method missing @kotlin.Deprecated annotation",
+                dep,
+            )
+            assertEquals(
+                "Overload $method deprecation level should remain WARNING during migration",
+                DeprecationLevel.WARNING,
+                dep!!.level,
+            )
+        }
+        val anyMatchingReplacement = methods.any { method ->
+            method.getAnnotation(Deprecated::class.java)
+                ?.replaceWith
+                ?.expression
+                ?.contains(expectedReplacement) == true
+        }
         assertTrue(
-            "Method '$name' ReplaceWith should reference '$expectedReplacement' but was '${deprecated.replaceWith.expression}'",
-            deprecated.replaceWith.expression.contains(expectedReplacement),
+            "No '$name' overload's ReplaceWith references '$expectedReplacement'. " +
+                "Overloads and their ReplaceWith expressions:\n" +
+                methods.joinToString("\n") { method ->
+                    val expr = method.getAnnotation(Deprecated::class.java)
+                        ?.replaceWith?.expression
+                    "  - $method → ${expr ?: "(no ReplaceWith)"}"
+                },
+            anyMatchingReplacement,
         )
     }
 

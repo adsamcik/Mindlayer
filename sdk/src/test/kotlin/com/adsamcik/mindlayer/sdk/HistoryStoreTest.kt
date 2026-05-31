@@ -674,4 +674,81 @@ class HistoryStoreTest {
             replay.turns.size <= 2,
         )
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Bug #9: confirmConversationWithRename — service may rewrite the
+    //  sessionId for external callers (anti-id-harvesting). Without the
+    //  rename path, every external caller's first persistUserTurn fails
+    //  with `SQLiteConstraintException: FOREIGN KEY constraint failed
+    //  (code 787)` because the turn's FK references a non-existent
+    //  conversation row.
+    // ═══════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `bug 9 - confirmConversationWithRename fast path when ids match (self-UID)`() = runTest {
+        store.prepareConversation("self-uid-sess", defaultConfig)
+        // Service returns the SAME id (self-UID dashboard keeps its tentative id).
+        store.confirmConversationWithRename("self-uid-sess", "self-uid-sess")
+
+        val row = db.conversationDao().get("self-uid-sess")
+        assertNotNull("self-uid row must survive at original id", row)
+        assertEquals("READY", row!!.state)
+        assertEquals("Be helpful.", row.systemPrompt)
+    }
+
+    @Test
+    fun `bug 9 - confirmConversationWithRename migrates row when service rewrites id`() = runTest {
+        // SDK starts with a client-side UUID before calling the service.
+        val tentativeId = "tentative-uuid-from-sdk"
+        store.prepareConversation(tentativeId, defaultConfig.copy(sessionId = tentativeId))
+        val tentativeRow = db.conversationDao().get(tentativeId)
+        assertNotNull("tentative row must exist before rename", tentativeRow)
+
+        // Service returns a different id (external-caller path).
+        val serviceId = "sess-svc-${java.util.UUID.randomUUID()}"
+        store.confirmConversationWithRename(tentativeId, serviceId)
+
+        // Tentative row gone, replacement at the service id.
+        assertNull("tentative row must be removed after rename", db.conversationDao().get(tentativeId))
+        val renamedRow = db.conversationDao().get(serviceId)
+        assertNotNull("renamed row must exist at service-returned id", renamedRow)
+        assertEquals("READY", renamedRow!!.state)
+        assertEquals("Be helpful.", renamedRow.systemPrompt)
+        assertEquals("GPU", renamedRow.backend)
+        assertEquals(4096, renamedRow.maxTokens)
+    }
+
+    @Test
+    fun `bug 9 - persistUserTurn after rename satisfies FOREIGN KEY constraint`() = runTest {
+        // The actual production scenario that surfaced Bug #9.
+        val tentativeId = "tentative-${java.util.UUID.randomUUID()}"
+        val serviceId = "service-${java.util.UUID.randomUUID()}"
+
+        store.prepareConversation(tentativeId, defaultConfig.copy(sessionId = tentativeId))
+        store.confirmConversationWithRename(tentativeId, serviceId)
+
+        // Pre-fix this threw SQLiteConstraintException because the turn's
+        // FK pointed at `serviceId` but the conversation row was still at
+        // `tentativeId`. Post-fix the row was atomically re-keyed so the
+        // turn's FK resolves cleanly.
+        val turnId = store.persistUserTurn(serviceId, "validation probe text")
+        assertNotNull(turnId)
+
+        val turn = db.turnDao().get(turnId)
+        assertNotNull(turn)
+        assertEquals(serviceId, turn!!.conversationId)
+        assertEquals("PENDING", turn.state)
+    }
+
+    @Test
+    fun `bug 9 - rename is no-op when tentative row missing (defensive)`() = runTest {
+        // Edge case: prepareConversation was rolled back or never ran.
+        // Rename should log + return cleanly rather than throw.
+        val serviceId = "no-tentative-${java.util.UUID.randomUUID()}"
+        store.confirmConversationWithRename("never-existed", serviceId)
+        // No exception thrown. No row created (the original prepare path is
+        // responsible for the row; we don't fabricate config from thin air).
+        assertNull(db.conversationDao().get("never-existed"))
+        assertNull(db.conversationDao().get(serviceId))
+    }
 }
