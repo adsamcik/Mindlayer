@@ -50,6 +50,7 @@ import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.loggable
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.logging.safeLabelWithDetail
 import com.adsamcik.mindlayer.service.logging.sanitizeLogField
 import com.adsamcik.mindlayer.service.security.AllowlistStore
 import com.adsamcik.mindlayer.service.security.CallerIdentity
@@ -2507,7 +2508,7 @@ class ServiceBinder(
             try { frame.source.close() } catch (_: Throwable) { /* fine */ }
             MindlayerLog.w(
                 TAG,
-                "OCR Y-plane extraction failed: ${t.safeLabel()}",
+                "OCR Y-plane extraction failed: ${t.safeLabelWithDetail()}",
                 requestId = scopedKey,
                 sessionId = sanitizeLogField(sessionId),
                 throwable = null,
@@ -2708,13 +2709,13 @@ class ServiceBinder(
             try { image.source.close() } catch (_: Throwable) { /* fine */ }
             MindlayerLog.w(
                 TAG,
-                "ocrImage Y-plane extraction failed: ${t.safeLabel()}",
+                "ocrImage Y-plane extraction failed: ${t.safeLabelWithDetail()}",
                 requestId = scopedKey,
                 throwable = null,
             )
             throw typedBinderException(
                 MindlayerErrorCode.INVALID_REQUEST,
-                "ocrImage decode failed: ${t.safeLabel()}",
+                "ocrImage decode failed: ${t.safeLabelWithDetail()}",
             )
         }
 
@@ -2747,13 +2748,13 @@ class ServiceBinder(
         } catch (t: Throwable) {
             MindlayerLog.w(
                 TAG,
-                "ocrImage recognise failed: ${t.safeLabel()}",
+                "ocrImage recognise failed: ${t.safeLabelWithDetail()}",
                 requestId = scopedKey,
                 throwable = null,
             )
             throw typedBinderException(
                 MindlayerErrorCode.SERVICE_UNAVAILABLE,
-                "OCR recognise failed: ${t.safeLabel()}",
+                "OCR recognise failed: ${t.safeLabelWithDetail()}",
             )
         }
         val ocrDurationMs = (System.nanoTime() - ocrStartedNs) / 1_000_000L

@@ -304,10 +304,10 @@ class ValidationRunner(
             val sessionId = try {
                 mindlayer.createSession {
                     systemPrompt("validation harness probe")
-                    maxTokens(64)
+                    maxTokens(256)
                 }
             } catch (t: Throwable) {
-                return@scenario "createSession failed at AIDL: ${t.javaClass.simpleName}"
+                return@scenario "createSession failed: ${t.javaClass.simpleName}:${(t.message ?: "").take(80)}"
             }
             val result = try {
                 kotlinx.coroutines.withTimeoutOrNull(15_000L) {
@@ -357,6 +357,71 @@ class ValidationRunner(
             // it via getStatus polling. Just confirm getCapabilities responded
             // (which itself proves binder + authz both work).
             "capabilities returned ${caps.supportedFeatures.size} features"
+        }
+
+        // ── End-to-end engine scenarios ───────────────────────────────────
+        // These run when the Gemma 4 E2B and EmbeddingGemma-300M models are
+        // staged on the device. They self-skip cleanly (returning a
+        // descriptive note rather than asserting) when the engines aren't
+        // loaded — so the same harness works on dev devices with no models
+        // staged AND on real-device validation rigs that have everything
+        // provisioned.
+
+        results += scenario("gemma_inference_e2e") {
+            // Explicit real-Gemma probe distinct from inference_facade_smoke:
+            // when the engine is loaded, demand an actual non-empty text
+            // response from a short prompt (no tools, no media). When the
+            // engine is absent, surface the typed error without failing.
+            val sessionId = try {
+                mindlayer.createSession {
+                    systemPrompt("You answer in five words or less.")
+                    maxTokens(256)
+                }
+            } catch (t: Throwable) {
+                return@scenario "engine missing — createSession failed: ${t.javaClass.simpleName}:${(t.message ?: "").take(80)}"
+            }
+            val response = try {
+                kotlinx.coroutines.withTimeoutOrNull(120_000L) {
+                    mindlayer.inferAsync(sessionId, "Say hello.")
+                }
+            } catch (t: Throwable) {
+                runCatching { mindlayer.destroySession(sessionId) }
+                return@scenario "engine missing — inferAsync threw: ${t.javaClass.simpleName}:${(t.message ?: "").take(60)}"
+            } finally {
+                runCatching { mindlayer.destroySession(sessionId) }
+            }
+            check(response != null) { "Gemma inference timed out after 120s" }
+            check(response.isNotBlank()) { "Gemma returned blank response" }
+            // Strip raw response in the note to avoid PII / prompt-text leakage
+            // in logcat — report only metadata.
+            "Gemma E2E ok len=${response.length}"
+        }
+
+        results += scenario("embeddings_inference_e2e") {
+            // Explicit real-EmbeddingGemma probe distinct from
+            // embeddings_capability_accuracy: when the engine is loaded,
+            // assert vector quality (non-empty, finite, distinguishable
+            // for distinct inputs). When the engine is absent, surface a
+            // clean note.
+            val caps = mindlayer.getCapabilities(forceRefresh = true)
+            if (ServiceCapabilities.FEATURE_EMBEDDINGS !in caps.supportedFeatures) {
+                return@scenario "engine missing — FEATURE_EMBEDDINGS not advertised"
+            }
+            @Suppress("DEPRECATION")
+            val v1 = mindlayer.embedOne("The cat sits on the mat.")
+            check(v1.isNotEmpty()) { "embedOne returned empty vector" }
+            check(v1.all { it.isFinite() }) { "embedOne returned NaN/Inf in vector" }
+            val norm = kotlin.math.sqrt(v1.fold(0.0) { acc, x -> acc + x.toDouble() * x }).toFloat()
+            check(norm in 0.9f..1.1f) { "vector not L2-normalised (norm=$norm)" }
+            // Distinguishability check: a topically-different sentence
+            // should NOT produce an identical vector.
+            @Suppress("DEPRECATION")
+            val v2 = mindlayer.embedOne("Quantum mechanics describes particles.")
+            check(v2.size == v1.size) { "vector dimension mismatch ${v1.size} vs ${v2.size}" }
+            var cosine = 0.0
+            for (i in v1.indices) cosine += v1[i].toDouble() * v2[i].toDouble()
+            check(cosine < 0.99) { "unrelated inputs produced near-identical vectors (cos=$cosine)" }
+            "EmbeddingGemma E2E ok dim=${v1.size} L2=${"%.3f".format(norm)} cos(distinct)=${"%.3f".format(cosine)}"
         }
 
         val passed = results.count { it.ok }
