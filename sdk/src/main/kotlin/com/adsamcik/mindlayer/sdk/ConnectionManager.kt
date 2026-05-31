@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.Build
@@ -90,9 +91,10 @@ class ConnectionManager {
          * Debug-build suffix the service APK gets when built with `assembleDebug`
          * (`applicationIdSuffix = ".debug"` in `app/build.gradle.kts`). The cross-app
          * SDK transparently retries the bind against the suffixed package when
-         * the canonical one is missing, so first-party developer / driver apps
-         * can iterate against a locally-installed debug service without a
-         * separate signing keystore.
+         * the canonical one is missing, but **only when the consuming app is
+         * itself debuggable** (`ApplicationInfo.FLAG_DEBUGGABLE`). Release
+         * client APKs cannot opt into this fallback — preventing a production
+         * app from silently binding to an attacker-installed `.debug` service.
          */
         private const val SERVICE_PKG_DEBUG_SUFFIX = ".debug"
 
@@ -350,14 +352,21 @@ class ConnectionManager {
 
         // Resolve which service-package to bind to. Prefer the canonical
         // release package; fall back to the .debug-suffixed variant when
-        // it's the only one installed (developer iteration). This makes
-        // the SDK usable against a locally-built debug service APK
-        // without forcing every dev to provision a release keystore.
+        // it's the only one installed AND the consuming app is itself a
+        // debug build (FLAG_DEBUGGABLE). The flag is set by the build
+        // system for `debug` build types and cannot be turned on for a
+        // release-signed APK, so a production client can never silently
+        // bind to a `.debug` service that an attacker installed.
         val pm = ctx.packageManager
+        val callerIsDebuggable =
+            (ctx.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        val debugPkg = SERVICE_PKG + SERVICE_PKG_DEBUG_SUFFIX
         val resolvedPkg = when {
             pm.isPackageInstalled(SERVICE_PKG) -> SERVICE_PKG
-            pm.isPackageInstalled(SERVICE_PKG + SERVICE_PKG_DEBUG_SUFFIX) ->
-                SERVICE_PKG + SERVICE_PKG_DEBUG_SUFFIX
+            callerIsDebuggable && pm.isPackageInstalled(debugPkg) -> {
+                Log.i(TAG, "Resolved Mindlayer service to debug fallback $debugPkg (caller is debuggable)")
+                debugPkg
+            }
             else -> SERVICE_PKG // last resort — bind will fail with the canonical name
         }
         val intent = Intent().apply {
