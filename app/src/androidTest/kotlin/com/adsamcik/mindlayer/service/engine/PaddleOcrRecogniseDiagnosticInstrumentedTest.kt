@@ -8,6 +8,7 @@ import android.graphics.Paint
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertNotNull
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -46,6 +47,24 @@ class PaddleOcrRecogniseDiagnosticInstrumentedTest {
 
     @Test
     fun diag_real_recognise_on_synthetic_text_print_exception_or_lines() = runBlocking {
+        // CI without the PaddleOCR AI Pack provisioned (the four
+        // `PADDLEOCR_*_SHA256` repository variables unset, so the
+        // `Provision AI Pack assets` step short-circuits with
+        // `have-pack=false`) cannot stage the det/rec/cls/dict artefacts
+        // the registry needs. Skip cleanly in that environment — local
+        // dev runs and CI runs WITH the vars configured still get the
+        // full regression coverage. Mirrors the
+        // `paddleocr_production_backend_loads_real_ai_pack_assets`
+        // self-skip in EngineCoexistenceInstrumentedTest so the two
+        // diagnostic paths behave identically on a bare runner.
+        val assetList = context.assets.list("")?.toList().orEmpty()
+        assumeTrue(
+            "PaddleOCR AI Pack manifest not mirrored into the test APK; configure " +
+                "PADDLEOCR_* repository variables (see docs/MODEL_SHAS.md) and " +
+                "provision the bundle to enable this diagnostic in CI.",
+            assetList.contains("paddleocr_model_integrity.json"),
+        )
+
         val bundles = PaddleOcrModelRegistry.discoverBundles(context, requireIntegrity = false)
         val bundle = PaddleOcrModelRegistry.getDefaultBundle(bundles)
         assertNotNull("PADDLE_OCR_DIAG: bundle resolution null — staging missing?", bundle)
