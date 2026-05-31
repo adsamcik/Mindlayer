@@ -1,6 +1,5 @@
 package com.adsamcik.mindlayer.sdk
 
-import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.map
@@ -8,29 +7,80 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.serialization.json.JsonObject
 
 /**
- * Canonical, caller-facing inference event stream type for the Spike-E surface.
+ * Canonical, caller-facing inference event stream type (Spike-E §1).
  *
- * NOTE (C1 deviation): the live [InferenceHandle.events] flow still emits the
- * existing [MindlayerEvent] frames in C1 to keep the impl, [Conversation], and
- * tests compiling unchanged. `InferenceEvent` is published now as the forward
- * type that C2 will adapt the pipe stream onto. The free operators below are
- * defined against it so the public surface is complete.
+ * This is the single event type emitted from [InferenceHandle.events]. It is
+ * the merge of the former wire-frame `MindlayerEvent` and the C1 placeholder
+ * `InferenceEvent`: the rename completed in C3 keeps the wire-frame field
+ * shape (so the impl, [Conversation], and the existing call sites read the
+ * same members) and folds the two names into one.
+ *
+ * **Event ordering guarantee:**
+ * 1. [Started] — exactly once, always first
+ * 2. [TextDelta], [ToolCall], [Metrics] — zero or more, in sequence order
+ * 3. [Done] or [Error] — exactly one, always last (terminal event)
+ *
+ * If the flow completes without a terminal event, the inference was cancelled
+ * or the service connection was lost.
+ *
+ * ## C3 deviation from Spike-E §1
+ *
+ * Spike-E §1 sketched canonical subtypes whose fields differ from the wire
+ * frame (`Started(sessionId)`, `Done(finishReason: FinishReason, metrics)`,
+ * `Error(code: Int, ...)`). The completed rename keeps the **wire-frame**
+ * shape instead — it is what the streaming impl, [Conversation], and the test
+ * suite already consume — and adds one compatibility change: [seq] is nullable
+ * (`null` when the event was not produced from a streamed pipe frame, e.g. a
+ * one-shot bridge). This avoids an ~80-call-site shape rewrite while still
+ * unifying the type name.
  */
-sealed interface InferenceEvent {
-    /** The service accepted the request; [sessionId] is the resolved session. */
-    data class Started(val sessionId: String) : InferenceEvent
+sealed class InferenceEvent {
+    /** Signals that the service has accepted the request and inference is beginning. */
+    data class Started(val requestId: String) : InferenceEvent()
 
-    /** An incremental chunk of generated text. */
-    data class TextDelta(val text: String) : InferenceEvent
+    /**
+     * An incremental chunk of generated text. Collect and concatenate these
+     * for the full response.
+     *
+     * @property seq Wire-stream sequence number; `null` when this event was
+     *   not produced from a streamed pipe frame.
+     */
+    data class TextDelta(val text: String, val seq: Long? = null) : InferenceEvent()
 
-    /** The model requested a tool call; respond via [InferenceHandle.Tools.submitToolResult]. */
-    data class ToolCall(val callId: String, val name: String, val argsJson: String) : InferenceEvent
+    /** The model is requesting a tool invocation. Respond with [Mindlayer.submitToolResult] using [callId]. */
+    data class ToolCall(
+        val toolName: String,
+        val arguments: String,
+        val callId: String,
+        val seq: Long? = null,
+    ) : InferenceEvent()
 
-    /** Terminal success frame. */
-    data class Done(val finishReason: FinishReason, val metrics: Metrics) : InferenceEvent
+    /** Performance metrics snapshot emitted periodically during inference. */
+    data class Metrics(
+        val prefillToksPerSec: Float?,
+        val decodeToksPerSec: Float?,
+        val thermalBand: String?,
+        val seq: Long? = null,
+    ) : InferenceEvent()
 
-    /** Terminal error frame. [code] is a [MindlayerErrorCode] integer constant. */
-    data class Error(val code: Int, val message: String) : InferenceEvent
+    /** Terminal event indicating an error. No further events will follow. */
+    data class Error(
+        val message: String,
+        val code: String?,
+        val seq: Long? = null,
+        val tsMs: Long? = null,
+        val codeInt: Int? = null,
+    ) : InferenceEvent()
+
+    /** Terminal event indicating successful completion. [fullText] contains the accumulated response if available. */
+    data class Done(
+        val finishReason: String,
+        val fullText: String?,
+        val seq: Long? = null,
+    ) : InferenceEvent()
+
+    /** An event type not recognised by this SDK version. Safe to ignore. */
+    data class Unknown(val type: String, val seq: Long? = null) : InferenceEvent()
 }
 
 /**
@@ -58,6 +108,12 @@ fun Flow<InferenceEvent>.textDeltas(): Flow<String> =
 fun Flow<InferenceEvent>.throwOnError(): Flow<InferenceEvent> =
     onEach { event ->
         if (event is InferenceEvent.Error) {
-            throw MindlayerException(message = event.message, code = event.code)
+            throw MindlayerException.fromStreamError(
+                message = event.message,
+                codeName = event.code,
+                codeInt = event.codeInt,
+                seq = event.seq,
+                tsMs = event.tsMs,
+            )
         }
     }

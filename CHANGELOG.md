@@ -4,6 +4,27 @@ All notable changes to Mindlayer are documented in this file.
 
 The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha01] - 2026-05
+
+### Changed (breaking)
+- **SDK v1 API surface finalized.** Canonical builders `infer { }`, `ocr { }`,
+  and `openSession { }` are now implemented (previously stubs that threw).
+  Terminals `awaitText()` / `awaitJson()` / `awaitToolCalls()` on
+  `InferenceHandle` are functional.
+- **`InferenceEvent` merged/renamed.** The old `MindlayerEvent` stream type is
+  removed in favour of the single `sealed class InferenceEvent`
+  (`Started` / `TextDelta` / `ToolCall` / `Metrics` / `Error` / `Done`).
+- **Deprecated cancellation API removed.** Public `InferenceHandle.cancel()` and
+  `isCancelled` are gone; teardown is handled internally
+  (`Conversation.close()` / session lifecycle).
+- **`prewarm()` and `getEngineInfo()` promoted onto the `Mindlayer`
+  interface** so they are reachable from the value returned by `connect()`.
+
+### Notes
+- See `docs/SDK_V1_MIGRATION.md` for the full migration guide and the list of
+  intentional alpha deviations (eager `infer` bridge, dropped `seed`,
+  no tool-calling via `infer { }`, OCR bbox denormalization).
+
 ## [Unreleased]
 
 ### Added

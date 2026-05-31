@@ -64,6 +64,24 @@ interface Mindlayer {
     /** Unbind from the service and release SDK-side resources. Idempotent. */
     fun disconnect()
 
+    // ── Engine control / introspection ─────────────────────────────────────
+    //
+    // C3 addition (deviation from Spike-E §0/§1, which sketched no engine-
+    // control surface on the interface): these utility methods already existed
+    // as public members on the impl, but consumers reach the service only
+    // through this interface (connect() returns Mindlayer). Surfacing them here
+    // unblocks the migration of warm-up and diagnostics call sites without a
+    // redesign. They are not part of the canonical builder API.
+
+    /**
+     * Pre-warm the inference engine on [backend]. Returns immediately,
+     * regardless of whether engine init has finished.
+     */
+    suspend fun prewarm(backend: InferenceBackend = InferenceBackend.GPU)
+
+    /** Engine introspection: selected model, perf stats, backend, etc. */
+    suspend fun getEngineInfo(): com.adsamcik.mindlayer.EngineInfo
+
     // ── Canonical builder-based API (Spike-E §0/§1) ────────────────────────
 
     suspend fun infer(build: InferenceRequest.Builder.() -> Unit): InferenceHandle =

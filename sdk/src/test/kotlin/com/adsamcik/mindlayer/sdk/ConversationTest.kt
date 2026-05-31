@@ -403,7 +403,7 @@ class ConversationTest {
         // time it returns. No polling/sleeping required.
         conv.close()
 
-        assertTrue("handle must be marked cancelled after close()", handle.isCancelled)
+        assertTrue("handle must be marked cancelled after close()", (handle as InferenceHandleImpl).isCancelled)
         assertEquals(
             "cancel must happen before destroySession",
             listOf("cancel", "destroy"),

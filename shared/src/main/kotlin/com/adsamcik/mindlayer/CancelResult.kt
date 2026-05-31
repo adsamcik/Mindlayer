@@ -29,8 +29,8 @@ data class CancelResult(
         /**
          * Request was active and has been cancelled. Native generation has
          * been stopped; the inference flow's terminal frame will be
-         * `MindlayerEvent.Done(finishReason="cancelled")` or an
-         * `MindlayerEvent.Error` if the cancel raced with completion.
+         * `InferenceEvent.Done(finishReason="cancelled")` or an
+         * `InferenceEvent.Error` if the cancel raced with completion.
          */
         const val CANCELLED: Int = 1
 

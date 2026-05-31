@@ -2,6 +2,7 @@ package com.adsamcik.mindlayer.sdk
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import com.adsamcik.mindlayer.EngineInfo
@@ -34,6 +35,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -57,8 +64,8 @@ import java.util.UUID
  *
  * mindlayer.inferRealtime(sessionId, "Hello!").events.collect { event ->
  *     when (event) {
- *         is MindlayerEvent.TextDelta -> print(event.text)
- *         is MindlayerEvent.Done -> println()
+ *         is InferenceEvent.TextDelta -> print(event.text)
+ *         is InferenceEvent.Done -> println()
  *         else -> {}
  *     }
  * }
@@ -75,9 +82,9 @@ import java.util.UUID
  *
  * | Method | Returns | Use when |
  * |---|---|---|
- * | [inferRealtime] | [InferenceHandle] streaming `Flow<MindlayerEvent>` | UI wants token-by-token rendering, or you need fine-grained control over the event stream |
+ * | [inferRealtime] | [InferenceHandle] streaming `Flow<InferenceEvent>` | UI wants token-by-token rendering, or you need fine-grained control over the event stream |
  * | [inferAsync] | `String` (collected to completion) | You want the final response as a single value, no tool-call round-trips |
- * | [inferTools] | [InferenceHandle] | Session was configured with [SessionConfigBuilder.tools]; you intend to handle [MindlayerEvent.ToolCall] events and call [submitToolResultDetailed] |
+ * | [inferTools] | [InferenceHandle] | Session was configured with [SessionConfigBuilder.tools]; you intend to handle [InferenceEvent.ToolCall] events and call [submitToolResultDetailed] |
  *
  * Build media attachments via
  * [`MediaTransfer.imagePart(...)`][MediaTransfer.imagePart] /
@@ -276,10 +283,7 @@ internal class MindlayerImpl(
                 "session" to CallParams.idPrefix(request.sessionId),
             ),
         ) {
-            throw MindlayerException(
-                message = "Mindlayer v1 — infer behaviour lands in C3",
-                code = MindlayerErrorCode.NOT_SUPPORTED,
-            )
+            runInferRequest(request, overrideSessionId = null)
         }
     }
 
@@ -293,10 +297,252 @@ internal class MindlayerImpl(
                 "boxes" to request.emitBoundingBoxes.toString(),
             ),
         ) {
+            runOcrRequest(request)
+        }
+    }
+
+    override suspend fun openSession(configure: SessionScope.() -> Unit): MindlayerSession {
+        return instrument(method = "openSession", params = emptyMap()) {
+            val scope = CapturedSessionScope().apply(configure)
+            val sessionId = createSession {
+                scope.systemPrompt?.let { systemPrompt(it) }
+                scope.maxTokens?.let { maxTokens(it) }
+            }
+            BridgeSession(SessionHandle(this, sessionId))
+        }
+    }
+
+    /**
+     * Behavioural body for [infer] / [MindlayerSession.infer]. Bridges the
+     * canonical request onto the legacy one-shot generation path: an ephemeral
+     * request runs through [generate] / [generateWithImage] / [generateWithAudio]
+     * (create → chat → destroy); a named-session request runs through the
+     * `*Once` chat bridges. The full response text is then replayed as a tiny
+     * cold [InferenceEvent] stream so the terminals (`awaitText`/`awaitJson`)
+     * and `events` collectors behave uniformly.
+     *
+     * C3 deviations (documented in `docs/SDK_V1_MIGRATION.md`):
+     *  - eager, not token-streaming: the suspend returns after the one-shot
+     *    completes; `events` replays a single [InferenceEvent.TextDelta]. Use
+     *    the legacy streaming path for live token deltas.
+     *  - tool-calling via `infer{}` is not wired (throws NOT_SUPPORTED).
+     *  - [SamplerScope.seed] has no [SessionConfigBuilder] equivalent and is
+     *    dropped.
+     */
+    private suspend fun runInferRequest(
+        request: InferenceRequest.Builder,
+        overrideSessionId: String?,
+    ): InferenceHandle {
+        if (request.outputMode is InferenceRequest.OutputMode.Tools) {
             throw MindlayerException(
-                message = "Mindlayer v1 — ocr behaviour lands in C3",
+                message = "Mindlayer v1 — tool-calling via infer{} is not wired in 1.0.0-alpha01; " +
+                    "create a named session with createSession { tools { } } and collect the " +
+                    "streaming events instead.",
                 code = MindlayerErrorCode.NOT_SUPPORTED,
             )
+        }
+
+        val prompt = request.promptText.orEmpty()
+        val bitmap = request.imageInputs.firstNotNullOfOrNull { (it as? ImageInput.Bitmap)?.bitmap }
+        val audio = request.audioFile
+        val sessionId = overrideSessionId ?: request.sessionId
+
+        @Suppress("DEPRECATION")
+        val text: String = if (sessionId != null) {
+            when {
+                bitmap != null -> chatWithImageOnce(sessionId, prompt, bitmap)
+                audio != null -> chatWithAudioOnce(sessionId, prompt, audio)
+                else -> chatOnce(sessionId, prompt)
+            }
+        } else {
+            val configure = sessionConfigureFrom(request)
+            when {
+                bitmap != null -> generateWithImage(prompt, bitmap, configure)
+                audio != null -> generateWithAudio(prompt, audio, configure)
+                else -> generate(prompt, configure)
+            }
+        }
+
+        val requestId = "infer-${UUID.randomUUID()}"
+        return InferenceHandleImpl(
+            requestId = requestId,
+            events = flow {
+                emit(InferenceEvent.Started(requestId))
+                if (text.isNotEmpty()) emit(InferenceEvent.TextDelta(text))
+                emit(InferenceEvent.Done(finishReason = "stop", fullText = text))
+            },
+            sessionId = sessionId.orEmpty(),
+        )
+    }
+
+    /**
+     * Translate the [SessionScope] / [SamplerScope] captured by an inference
+     * request into a [SessionConfigBuilder] configure block for the ephemeral
+     * one-shot session. [SamplerScope.seed] is dropped (no builder field).
+     */
+    private fun sessionConfigureFrom(request: InferenceRequest.Builder): SessionConfigBuilder.() -> Unit {
+        val session = CapturedSessionScope().apply { request.sessionConfigure?.invoke(this) }
+        val sampler = CapturedSamplerScope().apply { request.samplerConfigure?.invoke(this) }
+        return {
+            session.systemPrompt?.let { systemPrompt(it) }
+            session.maxTokens?.let { maxTokens(it) }
+            sampler.topK?.let { topK(it) }
+            sampler.topP?.let { topP(it) }
+            sampler.temperature?.let { temperature(it) }
+        }
+    }
+
+    /**
+     * Behavioural body for [ocr]. Converts the request image to encoded bytes,
+     * runs the legacy one-shot [ocrAsync] bridge, and maps the
+     * [com.adsamcik.mindlayer.OcrImageResult] onto the canonical [OcrResult].
+     */
+    private suspend fun runOcrRequest(request: OcrRequest.Builder): OcrHandle.OneShot {
+        val image = request.image ?: throw MindlayerException(
+            message = "Mindlayer v1 — ocr{} requires an image(...) input.",
+            code = MindlayerErrorCode.INVALID_REQUEST,
+        )
+        val (bytes, mimeType) = imageInputToBytes(image)
+        val (width, height) = decodeImageSize(bytes)
+        val options = com.adsamcik.mindlayer.OcrImageOptions(
+            emitBoundingBoxes = request.emitBoundingBoxes,
+            languageHints = request.languageHints,
+            runLlmExtraction = request.extractionSchema != null,
+            extractionSchemaJson = request.extractionSchema?.json?.toString(),
+        )
+        @Suppress("DEPRECATION")
+        val raw = ocrAsync(bytes, mimeType, options)
+        return OneShotOcrHandle(mapOcrImageResult(raw, width, height))
+    }
+
+    private val lenientJson = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    private fun imageInputToBytes(image: ImageInput): Pair<ByteArray, String> = when (image) {
+        is ImageInput.Bytes -> image.bytes to image.mimeType
+        is ImageInput.Bitmap -> bitmapToPng(image.bitmap) to "image/png"
+        is ImageInput.File -> image.file.readBytes() to guessImageMime(image.file.name)
+        is ImageInput.Uri -> {
+            val resolver = image.context.contentResolver
+            val data = resolver.openInputStream(image.uri)?.use { it.readBytes() }
+                ?: throw MindlayerException(
+                    message = "Mindlayer v1 — ocr{} could not open image Uri.",
+                    code = MindlayerErrorCode.INVALID_REQUEST,
+                )
+            data to (resolver.getType(image.uri) ?: "image/*")
+        }
+    }
+
+    private fun bitmapToPng(bitmap: Bitmap): ByteArray =
+        ByteArrayOutputStream().use { out ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+            out.toByteArray()
+        }
+
+    private fun guessImageMime(name: String): String = when {
+        name.endsWith(".png", ignoreCase = true) -> "image/png"
+        name.endsWith(".webp", ignoreCase = true) -> "image/webp"
+        else -> "image/jpeg"
+    }
+
+    private fun decodeImageSize(bytes: ByteArray): Pair<Int, Int> {
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        return opts.outWidth to opts.outHeight
+    }
+
+    private fun mapOcrImageResult(
+        raw: com.adsamcik.mindlayer.OcrImageResult,
+        width: Int,
+        height: Int,
+    ): OcrResult {
+        val lines = raw.lines.map { line ->
+            OcrLine(
+                text = line.text,
+                boundingBox = denormalizeQuad(line.boundingBox, width, height),
+                confidence = confidenceToFloat(line.confidence),
+            )
+        }
+        val extractionJson = raw.extractionJson?.let { json ->
+            runCatching { lenientJson.parseToJsonElement(json) as JsonObject }.getOrNull()
+        }
+        val fullJson = extractionJson ?: buildJsonObject {
+            put("lines", buildJsonArray { lines.forEach { add(JsonPrimitive(it.text)) } })
+        }
+        val metrics = Metrics(totalDurationMs = raw.totalDurationMs.takeIf { it > 0L })
+        return OcrResult(lines = lines, fullJson = fullJson, extractionJson = extractionJson, metrics = metrics)
+    }
+
+    /**
+     * Collapse a normalised 8-float quad ([x1,y1,…,x4,y4] in 0..1) onto the
+     * axis-aligned `[left, top, right, bottom]` pixel rectangle [OcrLine] uses.
+     * Returns `null` when no quad was emitted or the image size is unknown.
+     */
+    private fun denormalizeQuad(quad: FloatArray?, width: Int, height: Int): List<Int>? {
+        if (quad == null || quad.size < 8 || width <= 0 || height <= 0) return null
+        val xs = listOf(quad[0], quad[2], quad[4], quad[6])
+        val ys = listOf(quad[1], quad[3], quad[5], quad[7])
+        val left = (xs.min() * width).toInt()
+        val top = (ys.min() * height).toInt()
+        val right = (xs.max() * width).toInt()
+        val bottom = (ys.max() * height).toInt()
+        return listOf(left, top, right, bottom)
+    }
+
+    private fun confidenceToFloat(confidence: Int): Float? = when (confidence) {
+        com.adsamcik.mindlayer.OcrImageLine.CONFIDENCE_HIGH -> 1.0f
+        com.adsamcik.mindlayer.OcrImageLine.CONFIDENCE_MEDIUM -> 0.66f
+        com.adsamcik.mindlayer.OcrImageLine.CONFIDENCE_LOW -> 0.33f
+        else -> null
+    }
+
+    /** Mutable [SessionScope] capture used to translate configure blocks. */
+    private class CapturedSessionScope : SessionScope {
+        override var systemPrompt: String? = null
+        override var maxTokens: Int? = null
+        override var historyPolicy: HistoryPolicy = HistoryPolicy.METADATA_ONLY
+    }
+
+    /** Mutable [SamplerScope] capture used to translate sampling blocks. */
+    private class CapturedSamplerScope : SamplerScope {
+        override var topK: Int? = null
+        override var topP: Float? = null
+        override var temperature: Float? = null
+        override var seed: Int? = null
+    }
+
+    /** One-shot [OcrHandle.OneShot] backed by an already-computed [OcrResult]. */
+    private class OneShotOcrHandle(private val result: OcrResult) : OcrHandle.OneShot {
+        override val events: Flow<OcrEvent> = flow {
+            emit(OcrEvent.ResultFinalized(result.fullJson.toString()))
+        }
+
+        override suspend fun awaitResult(): OcrResult = result
+    }
+
+    /**
+     * [MindlayerSession] bridging the canonical session surface onto a legacy
+     * [SessionHandle] (create → chat*Once → destroy). [close] is fire-and-forget
+     * on [lifecycleScope]; [closeAsync] awaits the destroy round-trip.
+     */
+    private inner class BridgeSession(private val handle: SessionHandle) : MindlayerSession {
+        override val id: String get() = handle.sessionId
+
+        @Suppress("DEPRECATION")
+        override suspend fun ask(prompt: String): String = handle.chatOnce(prompt)
+
+        @Suppress("DEPRECATION")
+        override suspend fun describe(prompt: String, image: Bitmap): String =
+            handle.chatWithImageOnce(prompt, image)
+
+        override suspend fun infer(build: InferenceRequest.Builder.() -> Unit): InferenceHandle =
+            runInferRequest(InferenceRequest.Builder().apply(build), overrideSessionId = handle.sessionId)
+
+        override fun close() {
+            lifecycleScope.launch { runCatching { handle.delete() } }
+        }
+
+        override suspend fun closeAsync() {
+            handle.delete()
         }
     }
 
@@ -598,7 +844,7 @@ internal class MindlayerImpl(
     /**
      * Unbind from the Mindlayer service and release resources.
      *
-     * Active inference flows will complete with [MindlayerEvent.Error] (code: "DISCONNECTED").
+     * Active inference flows will complete with [InferenceEvent.Error] (code: "DISCONNECTED").
      * Blocking one-shot methods ([chatOnce], [generate]) will throw [MindlayerException].
      * Sessions are preserved on the service side and can be resumed after [connect].
      *
@@ -678,7 +924,7 @@ internal class MindlayerImpl(
      *
      * @param backend the preferred backend to initialize.
      */
-    suspend fun prewarm(backend: InferenceBackend = InferenceBackend.GPU) {
+    override suspend fun prewarm(backend: InferenceBackend) {
         withContext(Dispatchers.IO) {
             val service = connection.awaitConnected()
             service.prewarm(backend.value)
@@ -851,7 +1097,7 @@ internal class MindlayerImpl(
      * through to the service's native cancel.
      *
      * History persistence: the user turn is saved BEFORE IPC and the
-     * assistant turn is marked COMPLETED only after the [MindlayerEvent.Done]
+     * assistant turn is marked COMPLETED only after the [InferenceEvent.Done]
      * event.
      *
      * @deprecated Use [inferRealtime] for the canonical streaming entry
@@ -1063,7 +1309,7 @@ internal class MindlayerImpl(
      * generated synchronously before the suspend, so cancel wiring can be
      * set up before the request even ships.
      *
-     * @return [InferenceHandle] streaming [MindlayerEvent]s. Collect the
+     * @return [InferenceHandle] streaming [InferenceEvent]s. Collect the
      *   handle's [events][InferenceHandle.events] flow and call
      *   [cancel][InferenceHandle.cancel] to abort.
      * @throws MindlayerException for typed service errors (rate limit,
@@ -1101,12 +1347,12 @@ internal class MindlayerImpl(
      * [awaitDeferred] directly.
      *
      * @return the full response text accumulated from
-     *   [MindlayerEvent.TextDelta] / [MindlayerEvent.Done] events.
+     *   [InferenceEvent.TextDelta] / [InferenceEvent.Done] events.
      * @throws MindlayerException if the service reports an error or sends
-     *   an unexpected [MindlayerEvent.ToolCall] (tool calling is not
+     *   an unexpected [InferenceEvent.ToolCall] (tool calling is not
      *   supported in async / one-shot mode — use [inferTools] instead).
      * @throws IllegalStateException if the stream ends without a terminal
-     *   [MindlayerEvent.Done] event.
+     *   [InferenceEvent.Done] event.
      */
     override suspend fun inferAsync(
         sessionId: String,
@@ -1122,13 +1368,13 @@ internal class MindlayerImpl(
      *
      * Canonical entry point for tool-calling inference. Use this when the
      * session was configured with [SessionConfigBuilder.tools] and you
-     * intend to handle [MindlayerEvent.ToolCall] events by calling
+     * intend to handle [InferenceEvent.ToolCall] events by calling
      * [submitToolResultDetailed].
      *
      * The wire shape is the same as [inferRealtime] — both route through
      * the same `infer` / `inferMulti` AIDL methods. The distinction is
      * **intent**: a session opened with tools may interleave
-     * [MindlayerEvent.ToolCall] events into its event stream, and the
+     * [InferenceEvent.ToolCall] events into its event stream, and the
      * caller is expected to round-trip those via
      * [submitToolResultDetailed]. Outside a tools-enabled session this
      * method behaves identically to [inferRealtime].
@@ -1142,14 +1388,14 @@ internal class MindlayerImpl(
      * val handle = mindlayer.inferTools(sessionId, "What's the weather in Prague?")
      * handle.events.collect { event ->
      *     when (event) {
-     *         is MindlayerEvent.ToolCall -> {
+     *         is InferenceEvent.ToolCall -> {
      *             val result = runMyHandler(event)
      *             mindlayer.submitToolResultDetailed(
      *                 sessionId, handle.requestId, event.callId, result,
      *             )
      *         }
-     *         is MindlayerEvent.TextDelta -> print(event.text)
-     *         is MindlayerEvent.Done -> println()
+     *         is InferenceEvent.TextDelta -> print(event.text)
+     *         is InferenceEvent.Done -> println()
      *         else -> {}
      *     }
      * }
@@ -1891,7 +2137,7 @@ internal class MindlayerImpl(
     /**
      * Submit a tool result back to the service for continued inference.
      *
-     * Use the [MindlayerEvent.ToolCall.callId] from the tool-call event being answered.
+     * Use the [InferenceEvent.ToolCall.callId] from the tool-call event being answered.
      */
     suspend fun submitToolResult(
         requestId: String,
@@ -2060,7 +2306,7 @@ internal class MindlayerImpl(
     }
 
     /** Get engine info (selected model, perf stats, etc.). */
-    suspend fun getEngineInfo(): EngineInfo {
+    override suspend fun getEngineInfo(): EngineInfo {
         return withTypedErrors { it.engineInfo }
     }
 
@@ -2259,10 +2505,10 @@ internal class MindlayerImpl(
      * accumulated text. Throws [MindlayerException] on service errors.
      *
      * @throws MindlayerException if the service reports an error or sends
-     *   an unexpected [MindlayerEvent.ToolCall] (tool calling is not
+     *   an unexpected [InferenceEvent.ToolCall] (tool calling is not
      *   supported in one-shot mode).
      * @throws IllegalStateException if the stream ends without a terminal
-     *   [MindlayerEvent.Done] event.
+     *   [InferenceEvent.Done] event.
      *
      * @deprecated Use [inferAsync] — same behavior, canonical name. See
      *   `docs/INFERENCE_SDK_POLISH.md`.
@@ -2326,9 +2572,9 @@ internal class MindlayerImpl(
      * Stream just the text deltas from [chat] as a [Flow]&lt;String&gt;.
      *
      * Filters out non-text events (Started, Metrics) and converts terminal
-     * frames into flow signals: [MindlayerEvent.Done] completes the flow,
-     * [MindlayerEvent.Error] throws a [MindlayerException], and an
-     * unexpected [MindlayerEvent.ToolCall] throws with code
+     * frames into flow signals: [InferenceEvent.Done] completes the flow,
+     * [InferenceEvent.Error] throws a [MindlayerException], and an
+     * unexpected [InferenceEvent.ToolCall] throws with code
      * `UNSUPPORTED_TOOL_CALL` (silently dropping it would deadlock the
      * inference because no [submitToolResult] would follow).
      *
@@ -2386,11 +2632,11 @@ internal class MindlayerImpl(
         val accumulator = StringBuilder()
         handle.events.collect { event ->
             when (event) {
-                is MindlayerEvent.TextDelta -> accumulator.append(event.text)
-                is MindlayerEvent.Done -> {
+                is InferenceEvent.TextDelta -> accumulator.append(event.text)
+                is InferenceEvent.Done -> {
                     result = event.fullText ?: accumulator.toString()
                 }
-                is MindlayerEvent.Error -> throw MindlayerException.fromStreamError(
+                is InferenceEvent.Error -> throw MindlayerException.fromStreamError(
                     message = event.message,
                     codeName = event.code,
                     codeInt = event.codeInt,
@@ -2399,7 +2645,7 @@ internal class MindlayerImpl(
                     requestId = handle.requestId,
                     sessionId = sessionId,
                 )
-                is MindlayerEvent.ToolCall -> throw MindlayerException(
+                is InferenceEvent.ToolCall -> throw MindlayerException(
                     message = TOOL_CALL_IN_ONESHOT_MSG,
                     codeName = "UNSUPPORTED_TOOL_CALL",
                     requestId = handle.requestId,
@@ -2426,9 +2672,9 @@ internal class MindlayerImpl(
     ): kotlinx.coroutines.flow.Flow<String> = kotlinx.coroutines.flow.flow {
         handle.events.collect { event ->
             when (event) {
-                is MindlayerEvent.TextDelta -> emit(event.text)
-                is MindlayerEvent.Done -> return@collect
-                is MindlayerEvent.Error -> throw MindlayerException.fromStreamError(
+                is InferenceEvent.TextDelta -> emit(event.text)
+                is InferenceEvent.Done -> return@collect
+                is InferenceEvent.Error -> throw MindlayerException.fromStreamError(
                     message = event.message,
                     codeName = event.code,
                     codeInt = event.codeInt,
@@ -2437,7 +2683,7 @@ internal class MindlayerImpl(
                     requestId = handle.requestId,
                     sessionId = sessionId,
                 )
-                is MindlayerEvent.ToolCall -> throw MindlayerException(
+                is InferenceEvent.ToolCall -> throw MindlayerException(
                     message = TOOL_CALL_IN_ONESHOT_MSG,
                     codeName = "UNSUPPORTED_TOOL_CALL",
                     requestId = handle.requestId,
@@ -2541,17 +2787,8 @@ internal class MindlayerImpl(
      *    [Conversation.close]. Best-effort against the currently-cached
      *    binder; silently drops the cancel when no connection is available.
      */
-    private fun buildHandle(requestId: String, flow: Flow<MindlayerEvent>): InferenceHandle {
+    private fun buildHandle(requestId: String, flow: Flow<InferenceEvent>): InferenceHandle {
         return InferenceHandleImpl(requestId, flow).also { handle ->
-            handle.setCancelCallback {
-                try {
-                    withContext(Dispatchers.IO) {
-                        connection.awaitConnected().cancelInference(requestId)
-                    }
-                } catch (_: Exception) {
-                    // Best-effort cancel — service may be disconnected
-                }
-            }
             handle.setSyncCancelCallback {
                 try {
                     connection.getService()?.cancelInference(requestId)
@@ -2566,9 +2803,9 @@ internal class MindlayerImpl(
      * Wraps [startInference] with history persistence.
      *
      * 1. Persist user turn as PENDING before IPC.
-     * 2. On [MindlayerEvent.Started]: mark user turn COMPLETED, begin
+     * 2. On [InferenceEvent.Started]: mark user turn COMPLETED, begin
      *    assistant turn as STREAMING.
-     * 3. On [MindlayerEvent.Done]: mark assistant turn COMPLETED with full
+     * 3. On [InferenceEvent.Done]: mark assistant turn COMPLETED with full
      *    text.
      * 4. On error/cancellation: mark assistant turn INTERRUPTED.
      */
@@ -2578,7 +2815,7 @@ internal class MindlayerImpl(
         meta: RequestMeta,
         imageProvider: suspend () -> com.adsamcik.mindlayer.ImageTransfer?,
         audioProvider: suspend () -> com.adsamcik.mindlayer.AudioTransfer?,
-    ): Flow<MindlayerEvent> {
+    ): Flow<InferenceEvent> {
         if (historyStore == null) {
             return startInference(meta, imageProvider, audioProvider)
         }
@@ -2595,16 +2832,16 @@ internal class MindlayerImpl(
                 startInference(meta, imageProvider, audioProvider)
                     .collect { event ->
                         when (event) {
-                            is MindlayerEvent.Started -> {
+                            is InferenceEvent.Started -> {
                                 assistantTurnId = withContext(Dispatchers.IO) {
                                     historyStoreLocal.markUserTurnCompleted(userTurnId)
                                     historyStoreLocal.beginAssistantTurn(sessionId)
                                 }
                             }
-                            is MindlayerEvent.TextDelta -> {
+                            is InferenceEvent.TextDelta -> {
                                 textAccumulator.append(event.text)
                             }
-                            is MindlayerEvent.Done -> {
+                            is InferenceEvent.Done -> {
                                 val finalText = event.fullText
                                     ?: textAccumulator.toString()
                                 val aid = assistantTurnId
@@ -2615,7 +2852,7 @@ internal class MindlayerImpl(
                                 }
                                 completed = true
                             }
-                            is MindlayerEvent.Error -> {
+                            is InferenceEvent.Error -> {
                                 val aid = assistantTurnId
                                 if (aid != null) {
                                     withContext(Dispatchers.IO) {
@@ -2660,7 +2897,7 @@ internal class MindlayerImpl(
         meta: RequestMeta,
         imageProvider: suspend () -> com.adsamcik.mindlayer.ImageTransfer?,
         audioProvider: suspend () -> com.adsamcik.mindlayer.AudioTransfer?,
-    ): Flow<MindlayerEvent> {
+    ): Flow<InferenceEvent> {
         // Preserve the public chat* contract: do not return a handle until a binder is available.
         connection.awaitConnected()
         return flow {
@@ -2714,7 +2951,7 @@ internal class MindlayerImpl(
     private suspend fun startInferenceMulti(
         meta: RequestMeta,
         media: List<com.adsamcik.mindlayer.MediaPart>,
-    ): Flow<MindlayerEvent> {
+    ): Flow<InferenceEvent> {
         val pipe = ParcelFileDescriptor.createReliablePipe()
         val readEnd = pipe[0]
         val writeEnd = pipe[1]
@@ -2804,7 +3041,7 @@ internal class MindlayerImpl(
         userText: String,
         meta: RequestMeta,
         media: List<com.adsamcik.mindlayer.MediaPart>,
-    ): Flow<MindlayerEvent> {
+    ): Flow<InferenceEvent> {
         if (historyStore == null) {
             return startInferenceMulti(meta, media)
         }
@@ -2820,14 +3057,14 @@ internal class MindlayerImpl(
             try {
                 innerFlow.collect { event ->
                     when (event) {
-                        is MindlayerEvent.Started -> {
+                        is InferenceEvent.Started -> {
                             historyStoreLocal.markUserTurnCompleted(userTurnId)
                             assistantTurnId = historyStoreLocal.beginAssistantTurn(sessionId)
                         }
-                        is MindlayerEvent.TextDelta -> {
+                        is InferenceEvent.TextDelta -> {
                             textAccumulator.append(event.text)
                         }
-                        is MindlayerEvent.Done -> {
+                        is InferenceEvent.Done -> {
                             val finalText = event.fullText
                                 ?: textAccumulator.toString()
                             val aid = assistantTurnId
@@ -2836,7 +3073,7 @@ internal class MindlayerImpl(
                             }
                             completed = true
                         }
-                        is MindlayerEvent.Error -> {
+                        is InferenceEvent.Error -> {
                             val aid = assistantTurnId
                             if (aid != null) {
                                 historyStoreLocal.markTurnInterrupted(aid)
@@ -3328,7 +3565,7 @@ class SessionConfigBuilder {
      * }
      * ```
      *
-     * See [MindlayerEvent.ToolCall] for handling tool invocations.
+     * See [InferenceEvent.ToolCall] for handling tool invocations.
      */
     fun tools(configure: ToolsBuilder.() -> Unit) {
         toolsJson = ToolsBuilder().apply(configure).build()
@@ -3415,7 +3652,7 @@ class SessionConfigBuilder {
      * coalescing. The service writer accumulates up to 8 tokens or 16 ms
      * (whichever comes first) into a single batched frame, cutting wire
      * overhead at high token rates. The SDK reader expands each batched
-     * frame back into per-token [com.adsamcik.mindlayer.sdk.MindlayerEvent.TextDelta]
+     * frame back into per-token [com.adsamcik.mindlayer.sdk.InferenceEvent.TextDelta]
      * emissions so consumers see no API change — only fewer syscalls and
      * lower CPU on both sides.
      *

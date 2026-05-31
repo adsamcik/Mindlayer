@@ -20,74 +20,8 @@ import java.io.EOFException
 import java.io.IOException
 
 /**
- * Typed events emitted during inference, collected from [InferenceHandle.events].
- *
- * **Event ordering guarantee:**
- * 1. [Started] — exactly once, always first
- * 2. [TextDelta], [ToolCall], [Metrics] — zero or more, in sequence order
- * 3. [Done] or [Error] — exactly one, always last (terminal event)
- *
- * If the flow completes without a terminal event, the inference was cancelled
- * or the service connection was lost.
- *
- * ## C2 deviation status — kept (deferred to C3)
- *
- * Spike-E §1 names the canonical stream frame [InferenceEvent], and C1 already
- * introduced that type with a deliberately different shape (e.g.
- * `InferenceEvent.Started(sessionId)` / `InferenceEvent.TextDelta(text)` —
- * no `seq`). This legacy `MindlayerEvent` is the *wire-frame* type the impl,
- * [Conversation], and ~80 call sites still depend on (they read [TextDelta.seq],
- * [Metrics], etc.). A `typealias MindlayerEvent = InferenceEvent` is therefore
- * structurally impossible — the two carry different fields. Re-pointing
- * [InferenceHandle.events] at [InferenceEvent] is stream-adaptation work that
- * belongs with the behavioural wiring in C3, so the legacy type stays for now.
- */
-sealed class MindlayerEvent {
-    /** Signals that the service has accepted the request and inference is beginning. */
-    data class Started(val requestId: String) : MindlayerEvent()
-
-    /** An incremental chunk of generated text. Collect and concatenate these for the full response. */
-    data class TextDelta(val text: String, val seq: Long) : MindlayerEvent()
-
-    /** The model is requesting a tool invocation. Respond with [Mindlayer.submitToolResult] using [callId]. */
-    data class ToolCall(
-        val toolName: String,
-        val arguments: String,
-        val callId: String,
-        val seq: Long,
-    ) : MindlayerEvent()
-
-    /** Performance metrics snapshot emitted periodically during inference. */
-    data class Metrics(
-        val prefillToksPerSec: Float?,
-        val decodeToksPerSec: Float?,
-        val thermalBand: String?,
-        val seq: Long,
-    ) : MindlayerEvent()
-
-    /** Terminal event indicating an error. No further events will follow. */
-    data class Error(
-        val message: String,
-        val code: String?,
-        val seq: Long,
-        val tsMs: Long? = null,
-        val codeInt: Int? = null,
-    ) : MindlayerEvent()
-
-    /** Terminal event indicating successful completion. [fullText] contains the accumulated response if available. */
-    data class Done(
-        val finishReason: String,
-        val fullText: String?,
-        val seq: Long,
-    ) : MindlayerEvent()
-
-    /** An event type not recognised by this SDK version. Safe to ignore. */
-    data class Unknown(val type: String, val seq: Long) : MindlayerEvent()
-}
-
-/**
  * Reads length-prefixed JSON frames from a [ParcelFileDescriptor] pipe and
- * emits typed [MindlayerEvent]s.
+ * emits typed [InferenceEvent]s.
  *
  * Frame format: 4 bytes little-endian u32 length + UTF-8 JSON payload
  * (mirrors [com.adsamcik.mindlayer.service.ipc.TokenStreamWriter]).
@@ -113,7 +47,7 @@ object TokenStreamReader {
      * Runs entirely on [Dispatchers.IO]. Backpressure is natural — when the
      * collector is slow the pipe buffer fills and the service blocks.
      */
-    fun readStream(readEnd: ParcelFileDescriptor): Flow<MindlayerEvent> = flow {
+    fun readStream(readEnd: ParcelFileDescriptor): Flow<InferenceEvent> = flow {
         val input = DataInputStream(
             BufferedInputStream(
                 ParcelFileDescriptor.AutoCloseInputStream(readEnd),
@@ -132,21 +66,21 @@ object TokenStreamReader {
                 // Guard all per-frame operations: a malicious service must not crash the collector.
                 // emit() is intentionally placed OUTSIDE the try block so CancellationException
                 // from a cancelled collector propagates correctly and is never swallowed.
-                var terminalError: MindlayerEvent.Error? = null
-                val parsedEvents: List<MindlayerEvent>? = try {
+                var terminalError: InferenceEvent.Error? = null
+                val parsedEvents: List<InferenceEvent>? = try {
                     require(len in 0..MAX_FRAME_BYTES) { "Invalid frame length: $len" }
                     val payload = ByteArray(len)
                     input.readFully(payload)
                     parseFrameMulti(payload.decodeToString())
                 } catch (e: EOFException) {
-                    terminalError = MindlayerEvent.Error(
+                    terminalError = InferenceEvent.Error(
                         message = "Protocol error: truncated frame",
                         code = "PROTOCOL_ERROR_EOF",
                         seq = -1,
                     )
                     null
                 } catch (e: IllegalArgumentException) {
-                    terminalError = MindlayerEvent.Error(
+                    terminalError = InferenceEvent.Error(
                         message = "Protocol error: invalid frame length",
                         code = "PROTOCOL_ERROR_LENGTH",
                         seq = -1,
@@ -154,14 +88,14 @@ object TokenStreamReader {
                     null
                 } catch (e: SerializationException) {
                     // Defensive: parseFrameMulti already catches this, but guard against future changes.
-                    terminalError = MindlayerEvent.Error(
+                    terminalError = InferenceEvent.Error(
                         message = "Protocol error: invalid frame encoding",
                         code = "PROTOCOL_ERROR_JSON",
                         seq = -1,
                     )
                     null
                 } catch (e: Throwable) {
-                    terminalError = MindlayerEvent.Error(
+                    terminalError = InferenceEvent.Error(
                         message = "Protocol error",
                         code = "PROTOCOL_ERROR",
                         seq = -1,
@@ -174,7 +108,7 @@ object TokenStreamReader {
                     parsedEvents == null -> {
                         // Unrecognised frame — not a StreamEvent or StreamHeader.
                         emit(
-                            MindlayerEvent.Error(
+                            InferenceEvent.Error(
                                 message = "Protocol error: unrecognised frame",
                                 code = "PROTOCOL_ERROR_JSON",
                                 seq = -1,
@@ -197,7 +131,7 @@ object TokenStreamReader {
                 readEnd.checkError()
             } catch (e: IOException) {
                 emit(
-                    MindlayerEvent.Error(
+                    InferenceEvent.Error(
                         message = "Service pipe error: ${e.message}",
                         code = "PIPE_ERROR",
                         seq = -1,
@@ -216,22 +150,22 @@ object TokenStreamReader {
      * Stable wire identifier for the v1 pipe protocol. Reader accepts v1
      * **or** v2 (see [com.adsamcik.mindlayer.shared.StreamProtocol.SUPPORTED])
      * — v2 streams may carry [com.adsamcik.mindlayer.shared.StreamEventType.TOKEN_DELTA_BATCH]
-     * which the reader expands into per-token [MindlayerEvent.TextDelta]
+     * which the reader expands into per-token [InferenceEvent.TextDelta]
      * emissions so the SDK consumer surface is unchanged.
      */
     internal const val EXPECTED_PIPE_PROTOCOL = "mindlayer.stream.v1"
 
     /**
-     * Parse one wire frame into zero-or-more [MindlayerEvent]s.
+     * Parse one wire frame into zero-or-more [InferenceEvent]s.
      * - Normal frames yield exactly one event.
      * - [com.adsamcik.mindlayer.shared.StreamEventType.TOKEN_DELTA_BATCH]
-     *   frames yield one [MindlayerEvent.TextDelta] per `texts[]` element,
+     *   frames yield one [InferenceEvent.TextDelta] per `texts[]` element,
      *   in order, with synthesised contiguous `seq` values ending at the
      *   envelope's `seq`.
      * - Unparseable frames yield an empty list (legacy "skip silently"
      *   behavior preserved for forward-compat with future event payloads).
      */
-    private fun parseFrameMulti(jsonStr: String): List<MindlayerEvent> {
+    private fun parseFrameMulti(jsonStr: String): List<InferenceEvent> {
         // Try the common case first.
         val streamEvent = try {
             json.decodeFromString<StreamEvent>(jsonStr)
@@ -248,7 +182,7 @@ object TokenStreamReader {
             StreamEventType.TOKEN_DELTA_BATCH -> expandBatch(streamEvent)
             else -> {
                 val mapped = mapEvent(streamEvent)
-                if (mapped is MindlayerEvent.Unknown && mapped.type == StreamEventType.TOKEN_DELTA_BATCH) {
+                if (mapped is InferenceEvent.Unknown && mapped.type == StreamEventType.TOKEN_DELTA_BATCH) {
                     // Defense-in-depth: should be unreachable since the when
                     // above handles it, but keeps the contract explicit.
                     expandBatch(streamEvent)
@@ -262,11 +196,11 @@ object TokenStreamReader {
     /**
      * Validate the [StreamHeader.protocol] against
      * [com.adsamcik.mindlayer.shared.StreamProtocol.SUPPORTED]. Mismatches
-     * yield a synthetic [MindlayerEvent.Error] with code `PROTOCOL_MISMATCH`.
+     * yield a synthetic [InferenceEvent.Error] with code `PROTOCOL_MISMATCH`.
      */
-    private fun headerEvent(header: StreamHeader): MindlayerEvent {
+    private fun headerEvent(header: StreamHeader): InferenceEvent {
         return if (header.protocol !in com.adsamcik.mindlayer.shared.StreamProtocol.SUPPORTED) {
-            MindlayerEvent.Error(
+            InferenceEvent.Error(
                 message = "Unsupported pipe protocol: '${header.protocol}' " +
                     "(SDK supports ${com.adsamcik.mindlayer.shared.StreamProtocol.SUPPORTED})",
                 code = "PROTOCOL_MISMATCH",
@@ -274,17 +208,17 @@ object TokenStreamReader {
                 tsMs = null,
             )
         } else {
-            MindlayerEvent.Started(header.requestId)
+            InferenceEvent.Started(header.requestId)
         }
     }
 
     /**
      * Expand a [StreamEventType.TOKEN_DELTA_BATCH] frame into per-token
-     * [MindlayerEvent.TextDelta] emissions. The envelope's `seq` is the
+     * [InferenceEvent.TextDelta] emissions. The envelope's `seq` is the
      * seq of the last token; earlier tokens' seqs count backwards. Empty
      * `texts` list yields no events.
      */
-    private fun expandBatch(envelope: StreamEvent): List<MindlayerEvent> {
+    private fun expandBatch(envelope: StreamEvent): List<InferenceEvent> {
         val texts = envelope.payload["texts"]
             ?.let { it as? kotlinx.serialization.json.JsonArray }
             ?: return emptyList()
@@ -297,7 +231,7 @@ object TokenStreamReader {
             // Synthesise contiguous seq values: last entry gets the envelope
             // seq; earlier entries count backwards.
             val perTokenSeq = lastSeq - (texts.size - 1 - index)
-            MindlayerEvent.TextDelta(text = text, seq = perTokenSeq)
+            InferenceEvent.TextDelta(text = text, seq = perTokenSeq)
         }
     }
 
@@ -306,41 +240,41 @@ object TokenStreamReader {
      * [StreamHeader] (first frame only). Returns `null` for unparseable frames.
      *
      * The header is validated against [com.adsamcik.mindlayer.shared.StreamProtocol.SUPPORTED];
-     * a mismatch yields a synthetic [MindlayerEvent.Error] frame so old SDKs
+     * a mismatch yields a synthetic [InferenceEvent.Error] frame so old SDKs
      * talking to a future service that bumped the protocol fail loudly
      * instead of silently misinterpreting later frames.
      *
      * Kept for binary compat with prior internal callers; new code paths use
      * [parseFrameMulti] directly to handle batched events.
      */
-    private fun parseFrame(jsonStr: String): MindlayerEvent? =
+    private fun parseFrame(jsonStr: String): InferenceEvent? =
         parseFrameMulti(jsonStr).firstOrNull()
 
     /**
-     * Maps a wire [StreamEvent] to a typed [MindlayerEvent], reading payload
+     * Maps a wire [StreamEvent] to a typed [InferenceEvent], reading payload
      * keys that match [com.adsamcik.mindlayer.service.ipc.TokenStreamWriter].
      */
-    private fun mapEvent(event: StreamEvent): MindlayerEvent = when (event.type) {
-        StreamEventType.TOKEN_DELTA -> MindlayerEvent.TextDelta(
+    private fun mapEvent(event: StreamEvent): InferenceEvent = when (event.type) {
+        StreamEventType.TOKEN_DELTA -> InferenceEvent.TextDelta(
             text = event.payload["text"]?.jsonPrimitive?.contentOrNull ?: "",
             seq = event.seq,
         )
 
-        StreamEventType.TOOL_CALL -> MindlayerEvent.ToolCall(
+        StreamEventType.TOOL_CALL -> InferenceEvent.ToolCall(
             toolName = event.payload["name"]?.jsonPrimitive?.contentOrNull ?: "",
             arguments = event.payload["args"]?.jsonPrimitive?.contentOrNull ?: "{}",
             callId = event.payload["callId"]?.jsonPrimitive?.contentOrNull ?: "",
             seq = event.seq,
         )
 
-        StreamEventType.METRICS -> MindlayerEvent.Metrics(
+        StreamEventType.METRICS -> InferenceEvent.Metrics(
             prefillToksPerSec = event.payload["prefillToksPerSec"]?.jsonPrimitive?.floatOrNull,
             decodeToksPerSec = event.payload["decodeToksPerSec"]?.jsonPrimitive?.floatOrNull,
             thermalBand = event.payload["thermalBand"]?.jsonPrimitive?.contentOrNull,
             seq = event.seq,
         )
 
-        StreamEventType.ERROR -> MindlayerEvent.Error(
+        StreamEventType.ERROR -> InferenceEvent.Error(
             message = event.payload["message"]?.jsonPrimitive?.contentOrNull ?: "Unknown error",
             code = event.payload["code"]?.jsonPrimitive?.contentOrNull,
             seq = event.seq,
@@ -348,12 +282,12 @@ object TokenStreamReader {
             codeInt = event.payload["codeInt"]?.jsonPrimitive?.intOrNull,
         )
 
-        StreamEventType.DONE -> MindlayerEvent.Done(
+        StreamEventType.DONE -> InferenceEvent.Done(
             finishReason = event.payload["finish_reason"]?.jsonPrimitive?.contentOrNull ?: "unknown",
             fullText = event.payload["full_text"]?.jsonPrimitive?.contentOrNull,
             seq = event.seq,
         )
 
-        else -> MindlayerEvent.Unknown(type = event.type, seq = event.seq)
+        else -> InferenceEvent.Unknown(type = event.type, seq = event.seq)
     }
 }

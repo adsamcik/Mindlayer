@@ -195,7 +195,7 @@ data class DashboardUiState(
     /**
      * SDK infer-realtime verification state — exercises the SDK facade's
      * [com.adsamcik.mindlayer.sdk.Mindlayer.inferRealtime] streaming path
-     * and verifies that [com.adsamcik.mindlayer.sdk.MindlayerEvent] events
+     * and verifies that [com.adsamcik.mindlayer.sdk.InferenceEvent] events
      * are delivered correctly.
      */
     val sdkInferRealtimeTest: EngineTestState = EngineTestState(),

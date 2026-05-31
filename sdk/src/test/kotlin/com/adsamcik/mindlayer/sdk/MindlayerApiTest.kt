@@ -639,7 +639,7 @@ class MindlayerApiTest {
         val handle = mindlayer.chat("sess-handle", "Hello")
         assertNotNull(handle.requestId)
         assertTrue(handle.requestId.isNotEmpty())
-        assertFalse(handle.isCancelled)
+        assertFalse((handle as InferenceHandleImpl).isCancelled)
 
         // Verify we can still collect events through the handle
         handle.events.toList()
@@ -653,27 +653,27 @@ class MindlayerApiTest {
     }
 
     @Test
-    fun `InferenceHandle_cancel_is_idempotent`() = runTest {
+    fun `InferenceHandle_sync_cancel_is_idempotent`() = runTest {
         var cancelCount = 0
         val handle = InferenceHandleImpl("req", flowOf())
-        handle.setCancelCallback { cancelCount++ }
-        handle.cancel()
-        handle.cancel()
-        handle.cancel()
+        handle.setSyncCancelCallback { cancelCount++ }
+        handle.cancelSync()
+        handle.cancelSync()
+        handle.cancelSync()
         assertEquals(1, cancelCount)
         assertTrue(handle.isCancelled)
     }
 
     @Test
-    fun `InferenceHandle_cancel_calls_cancelInference_on_service`() = runTest {
+    fun `InferenceHandle_sync_cancel_calls_cancelInference_on_service`() = runTest {
         every {
             mockService.infer(any(), any(), any(), any())
         } answers {
             arg<ParcelFileDescriptor>(3).close()
         }
 
-        val handle = mindlayer.chat("sess-cancel", "Cancel me")
-        handle.cancel()
+        val handle = mindlayer.chat("sess-cancel", "Cancel me") as InferenceHandleImpl
+        handle.cancelSync()
 
         assertTrue(handle.isCancelled)
         coVerify(exactly = 1) { mockService.cancelInference(handle.requestId) }

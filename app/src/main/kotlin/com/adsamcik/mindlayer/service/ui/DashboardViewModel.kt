@@ -1541,7 +1541,7 @@ class DashboardViewModel : ViewModel() {
 
     /**
      * Exercises the SDK facade's [com.adsamcik.mindlayer.sdk.Mindlayer.inferRealtime]
-     * streaming path and verifies that [com.adsamcik.mindlayer.sdk.MindlayerEvent]
+     * streaming path and verifies that [com.adsamcik.mindlayer.sdk.InferenceEvent]
      * token-delta events are delivered correctly.
      */
     fun runSdkInferRealtimeTest(context: Context) {
@@ -1594,7 +1594,7 @@ class DashboardViewModel : ViewModel() {
                 var done = false
                 handle.events.collect { event ->
                     when (event) {
-                        is com.adsamcik.mindlayer.sdk.MindlayerEvent.TextDelta -> {
+                        is com.adsamcik.mindlayer.sdk.InferenceEvent.TextDelta -> {
                             output.append(event.text)
                             deltaCount++
                             _uiState.update {
@@ -1603,8 +1603,8 @@ class DashboardViewModel : ViewModel() {
                                 ))
                             }
                         }
-                        is com.adsamcik.mindlayer.sdk.MindlayerEvent.Done -> done = true
-                        is com.adsamcik.mindlayer.sdk.MindlayerEvent.Error -> throw com.adsamcik.mindlayer.sdk.MindlayerException.fromStreamError(
+                        is com.adsamcik.mindlayer.sdk.InferenceEvent.Done -> done = true
+                        is com.adsamcik.mindlayer.sdk.InferenceEvent.Error -> throw com.adsamcik.mindlayer.sdk.MindlayerException.fromStreamError(
                             message = event.message,
                             codeName = event.code,
                             seq = event.seq,

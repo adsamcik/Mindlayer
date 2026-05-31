@@ -387,8 +387,8 @@ class DashboardViewModelTest {
     @Test
     fun `runSdkInferRealtimeTest records success when Done event received`() = runTest {
         val events = kotlinx.coroutines.flow.flowOf(
-            com.adsamcik.mindlayer.sdk.MindlayerEvent.TextDelta("1, 2, 3.", 0L),
-            com.adsamcik.mindlayer.sdk.MindlayerEvent.Done("stop", "1, 2, 3.", 1L),
+            com.adsamcik.mindlayer.sdk.InferenceEvent.TextDelta("1, 2, 3.", 0L),
+            com.adsamcik.mindlayer.sdk.InferenceEvent.Done("stop", "1, 2, 3.", 1L),
         )
         val handle = com.adsamcik.mindlayer.sdk.InferenceHandle("req-rt-1", events)
 
@@ -414,7 +414,7 @@ class DashboardViewModelTest {
 
     @Test
     fun `runSdkInferRealtimeTest records error on stream Error event`() = runTest {
-        val errorEvent = com.adsamcik.mindlayer.sdk.MindlayerEvent.Error(
+        val errorEvent = com.adsamcik.mindlayer.sdk.InferenceEvent.Error(
             message = "stream interrupted",
             code = "STREAM_ERROR",
             seq = 0L,

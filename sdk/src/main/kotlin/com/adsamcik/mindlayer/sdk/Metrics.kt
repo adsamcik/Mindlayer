@@ -3,7 +3,7 @@ package com.adsamcik.mindlayer.sdk
 /**
  * Why an inference run stopped, surfaced on [InferenceEvent.Done].
  *
- * The service emits a wire string (see [MindlayerEvent.Done.finishReason]);
+ * The service emits a wire string (see [InferenceEvent.Done.finishReason]);
  * [from] maps it onto this stable enum so callers branch on a closed set
  * rather than string-matching. Unknown wire values map to [UNKNOWN].
  */
@@ -47,7 +47,7 @@ enum class FinishReason {
 /**
  * Performance snapshot for a completed inference, OCR, or embedding call.
  *
- * Distinct from the streaming [MindlayerEvent.Metrics] frame: this is the
+ * Distinct from the streaming [InferenceEvent.Metrics] frame: this is the
  * terminal, caller-facing aggregate carried by [InferenceEvent.Done],
  * [InferenceResult], and [OcrResult]. All fields are nullable because the
  * service may omit them (e.g. on cached or short calls).

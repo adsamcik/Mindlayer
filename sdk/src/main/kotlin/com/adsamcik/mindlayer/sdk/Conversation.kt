@@ -211,17 +211,17 @@ class Conversation internal constructor(
         var result: String? = null
         handle.events.collect { event ->
             when (event) {
-                is MindlayerEvent.TextDelta -> accumulator.append(event.text)
-                is MindlayerEvent.Done -> {
+                is InferenceEvent.TextDelta -> accumulator.append(event.text)
+                is InferenceEvent.Done -> {
                     result = event.fullText ?: accumulator.toString()
                 }
-                is MindlayerEvent.Error -> throw MindlayerException.fromStreamError(
+                is InferenceEvent.Error -> throw MindlayerException.fromStreamError(
                     message = event.message,
                     codeName = event.code,
                     seq = event.seq,
                     tsMs = event.tsMs,
                 )
-                is MindlayerEvent.ToolCall -> throw MindlayerException(
+                is InferenceEvent.ToolCall -> throw MindlayerException(
                     message = MindlayerImpl.TOOL_CALL_IN_ONESHOT_MSG,
                     codeName = "UNSUPPORTED_TOOL_CALL",
                 )
