@@ -12,65 +12,65 @@
         {
             "name": "capability_advertise",
             "ok": true,
-            "durationMs": 1,
+            "durationMs": 2,
             "note": "FEATURE_OCR_SESSION + FEATURE_OCR_IMAGE_ONESHOT both advertised after engine warm-up"
         },
         {
             "name": "single_image_no_llm",
             "ok": false,
-            "durationMs": 656,
+            "durationMs": 543,
             "note": "MindlayerException: OCR recognise failed: LiteRtException"
         },
         {
             "name": "single_image_with_llm",
             "ok": false,
-            "durationMs": 277,
+            "durationMs": 297,
             "note": "MindlayerException: OCR recognise failed: LiteRtException"
         },
         {
             "name": "single_image_bbox",
             "ok": false,
-            "durationMs": 249,
+            "durationMs": 202,
             "note": "MindlayerException: OCR recognise failed: LiteRtException"
         },
         {
             "name": "session_lifecycle_basic",
             "ok": true,
-            "durationMs": 640,
+            "durationMs": 652,
             "note": "events=3 finalJsonLen=2"
         },
         {
             "name": "session_stream_not_attached_rejects",
-            "ok": false,
-            "durationMs": 4,
-            "note": "MindlayerException: Rate limit exceeded"
+            "ok": true,
+            "durationMs": 35,
+            "note": "ack=6"
         },
         {
             "name": "session_close_idempotent",
-            "ok": false,
-            "durationMs": 3,
-            "note": "MindlayerException: Rate limit exceeded"
+            "ok": true,
+            "durationMs": 6,
+            "note": "close() twice raised no exception"
         },
         {
             "name": "inference_facade_smoke",
             "ok": true,
-            "durationMs": 1,
+            "durationMs": 4,
             "note": "createSession failed at AIDL: IllegalArgumentException"
         },
         {
             "name": "embeddings_capability_accuracy",
             "ok": true,
-            "durationMs": 0,
+            "durationMs": 1,
             "note": "FEATURE_EMBEDDINGS absent (engine missing); embedOne mapped to: MindlayerException"
         },
         {
             "name": "ping_health_check",
             "ok": true,
-            "durationMs": 0,
+            "durationMs": 5,
             "note": "capabilities returned 19 features"
         }
     ],
-    "passed": 5,
-    "failed": 5,
+    "passed": 7,
+    "failed": 3,
     "total": 10
 }
