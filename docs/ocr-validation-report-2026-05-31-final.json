@@ -18,59 +18,71 @@
         {
             "name": "single_image_no_llm",
             "ok": true,
-            "durationMs": 1102,
-            "note": "lines=10 ocr=1028ms"
+            "durationMs": 1299,
+            "note": "lines=10 ocr=1188ms"
         },
         {
             "name": "single_image_with_llm",
             "ok": true,
-            "durationMs": 841,
-            "note": "lines=10 llm=1ms fields=0"
+            "durationMs": 772,
+            "note": "lines=10 llm=0ms fields=0 ran=skipped (engine not warmed)"
         },
         {
             "name": "single_image_bbox",
             "ok": true,
-            "durationMs": 376,
+            "durationMs": 475,
             "note": "linesWithBbox=4/4"
         },
         {
             "name": "session_lifecycle_basic",
             "ok": true,
-            "durationMs": 1366,
+            "durationMs": 1051,
             "note": "events=7 finalJsonLen=120"
         },
         {
             "name": "session_stream_not_attached_rejects",
             "ok": true,
-            "durationMs": 33,
+            "durationMs": 46,
             "note": "ack=6"
         },
         {
             "name": "session_close_idempotent",
             "ok": true,
-            "durationMs": 6,
+            "durationMs": 8,
             "note": "close() twice raised no exception"
         },
         {
             "name": "inference_facade_smoke",
             "ok": true,
-            "durationMs": 4,
-            "note": "createSession failed at AIDL: IllegalArgumentException"
+            "durationMs": 6497,
+            "note": "inferAsync surfaced cleanly: result=inferAsync error mapped: MindlayerException:LiteRtLmJniExcep"
         },
         {
             "name": "embeddings_capability_accuracy",
             "ok": true,
-            "durationMs": 5,
-            "note": "FEATURE_EMBEDDINGS absent (engine missing); embedOne mapped to: MindlayerException"
+            "durationMs": 11082,
+            "note": "FEATURE_EMBEDDINGS advertised; embedOne returned 768-dim vector"
         },
         {
             "name": "ping_health_check",
             "ok": true,
-            "durationMs": 5,
-            "note": "capabilities returned 19 features"
+            "durationMs": 7,
+            "note": "capabilities returned 20 features"
+        },
+        {
+            "name": "gemma_inference_e2e",
+            "ok": true,
+            "durationMs": 533,
+            "note": "engine missing — inferAsync threw: MindlayerException:LiteRtLmJniException(Status Code: 13. Message: ERROR: [third"
+        },
+        {
+            "name": "embeddings_inference_e2e",
+            "ok": true,
+            "durationMs": 17278,
+            "note": "EmbeddingGemma E2E ok dim=768 L2=1.000 cos(distinct)=0.934"
         }
     ],
-    "passed": 10,
+    "passed": 12,
     "failed": 0,
-    "total": 10
+    "total": 12
 }
