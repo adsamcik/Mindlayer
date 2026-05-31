@@ -943,9 +943,9 @@ class DashboardViewModel : ViewModel() {
                     drained.frameProcessedCount == 0 ->
                         "Finalized without processing any frame"
                     !producedText ->
-                        "Pipeline OK but PaddleOCR returned 0 lines from the fixture \u2014 " +
-                            "the recognition model may not have loaded on this device " +
-                            "(check Recent Logs for native errors)"
+                        "PaddleOCR processed the fixture but produced no recognisable text \u2014 " +
+                            "detection found 0 candidates in the rendered “$OCR_FIXTURE_TEXT” strip " +
+                            "(check Recent Logs for native PaddleOCR warnings)"
                     else -> "Completed \u2022 recognized ${drained.lineCount} line(s) on PaddleOCR / CPU"
                 }
                 val output = buildString {
@@ -956,11 +956,11 @@ class DashboardViewModel : ViewModel() {
                         appendLine("\nRecognized text:")
                         appendLine(recognized)
                     } else if (drained.finalized && drained.frameProcessedCount > 0) {
-                        appendLine("\n(No text surfaced from the engine. The fixture is a 480x140 PNG " +
-                            "of \u201c$OCR_FIXTURE_TEXT\u201d; if PaddleOCR is healthy this should " +
-                            "produce at least one line. A LiteRtException during recognise typically " +
-                            "means the recognition .tflite model has a custom op that's not registered " +
-                            "in the runtime.)")
+                        appendLine("\n(No lines surfaced. The fixture is a 480x140 PNG of " +
+                            "\u201c$OCR_FIXTURE_TEXT\u201d. If the engine succeeded but produced 0 " +
+                            "candidates, the detection model rejected the frame; if recognition " +
+                            "threw, errorCount would be > 0 and a LiteRtException line would appear " +
+                            "in Recent Logs.)")
                     }
                 }
 
@@ -1005,7 +1005,8 @@ class DashboardViewModel : ViewModel() {
      * which the app module deliberately doesn't depend on (sdk is a
      * test-only dependency here).
      */
-    private data class OcrDrainResult(
+    @androidx.annotation.VisibleForTesting
+    internal data class OcrDrainResult(
         val totalEvents: Int,
         val frameProcessedCount: Int,
         val errorCount: Int,
@@ -1014,7 +1015,8 @@ class DashboardViewModel : ViewModel() {
         val lineCount: Int,
     )
 
-    private suspend fun drainOcrEvents(readEnd: ParcelFileDescriptor): OcrDrainResult =
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun drainOcrEvents(readEnd: ParcelFileDescriptor): OcrDrainResult =
         withContext(Dispatchers.IO) {
             val input = DataInputStream(BufferedInputStream(
                 ParcelFileDescriptor.AutoCloseInputStream(readEnd)
@@ -1044,20 +1046,20 @@ class DashboardViewModel : ViewModel() {
                         when (event.type) {
                             StreamEventType.OCR_FRAME_PROCESSED -> {
                                 frameProcessedCount++
-                                event.payload["line_count"]?.jsonPrimitive?.contentOrNull
+                                event.payload["lineCount"]?.jsonPrimitive?.contentOrNull
                                     ?.toIntOrNull()?.let { lineCount += it }
                             }
 
                             StreamEventType.OCR_FIELD_UPDATE,
                             StreamEventType.OCR_FIELD_LOCKED -> {
-                                event.payload["top_value"]?.jsonPrimitive?.contentOrNull
+                                event.payload["topValue"]?.jsonPrimitive?.contentOrNull
                                     ?.takeIf { it.isNotBlank() }
                                     ?.let { recognizedLines += it }
                             }
 
                             StreamEventType.OCR_RESULT_FINALIZED -> {
                                 finalized = true
-                                finalizedJson = event.payload["full_json"]
+                                finalizedJson = event.payload["fullJson"]
                                     ?.jsonPrimitive?.contentOrNull
                             }
 
