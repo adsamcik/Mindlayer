@@ -513,6 +513,18 @@ class OcrRecognitionDispatcher(
     suspend fun finalize(sessionId: String, writer: OcrTokenStreamWriter?) {
         val state = perSession[sessionId] ?: return
         state.activeJobs.toList().forEach { it.join() }
+        // Idempotency gate: only one finalize path emits the terminal
+        // OCR_RESULT_FINALIZED + DONE pair per session, even when the
+        // auto-finalize (fired from OcrSessionManager when maxFrames is
+        // reached) races the explicit finalizeOcrSession call from a
+        // caller. The race is structurally guaranteed for any
+        // maxFrames=1 session and OcrTokenStreamWriter is documented as
+        // NOT thread-safe (see SessionState.finalizedOnce comment).
+        // The CAS happens AFTER the activeJobs join so the second
+        // caller still waits for in-flight recognition to complete —
+        // its contract ("session is finalized when this returns") is
+        // preserved without emitting duplicate events.
+        if (!state.finalizedOnce.compareAndSet(false, true)) return
         val pageConfig = pageConfigs[sessionId] ?: PageBoundariesConfig.DISABLED
         if (pageConfig.enabled) {
             finalizePageAware(sessionId, state, pageConfig, writer)
@@ -811,6 +823,29 @@ class OcrRecognitionDispatcher(
          */
         val frameIndex: AtomicInteger = AtomicInteger(0)
         val activeJobs: MutableSet<Job> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+        /**
+         * Set to true the first time [finalize] starts emitting terminal
+         * events for this session. Subsequent finalize calls (e.g. the
+         * explicit `finalizeOcrSession` racing the auto-finalize fired
+         * by the session manager when `maxFrames` is reached) short-
+         * circuit instead of re-emitting `OCR_RESULT_FINALIZED` + `DONE`.
+         *
+         * Why this matters: [OcrTokenStreamWriter] is documented as
+         * NOT thread-safe (the session manager serialises normal emits
+         * through the session mutex, but the finalize path bypasses
+         * that mutex on purpose so it doesn't deadlock against the
+         * recognise job that already holds it for per-line fusion
+         * emits). Two concurrent `writeResultFinalized` calls interleave
+         * at the length-prefixed frame level, corrupting the wire
+         * stream — the SDK reader sees a garbage length and stops
+         * mid-stream, reporting "session never finalized" even though
+         * the recognise succeeded. Observed on first-run dashboard
+         * Test OCR after the GPU port (6 events, lineCount=2, but
+         * finalized=false).
+         */
+        val finalizedOnce: java.util.concurrent.atomic.AtomicBoolean =
+            java.util.concurrent.atomic.AtomicBoolean(false)
 
         /**
          * Most-recent raw-JSON output from the LLM extractor, if any.
