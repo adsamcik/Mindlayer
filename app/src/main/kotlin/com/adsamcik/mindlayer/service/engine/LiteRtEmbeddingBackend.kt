@@ -4,6 +4,7 @@ import android.app.ActivityManager
 import android.content.Context
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.logging.safeLabelWithDetail
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -141,14 +142,68 @@ class LiteRtEmbeddingBackend internal constructor(
         checkMemoryHeadroom(model)
         val selectedBackend = resolveBackend(preferredBackend)
         try {
+            attemptInit(model, selectedBackend)
+        } catch (t: Throwable) {
+            // LowMemoryException stays terminal — callers (engine + UI) need
+            // to see it. CPU is the last-resort backend, so a CPU-forced
+            // failure is also terminal: no fallback dance, original behaviour.
+            // Mirrors LiteRtPaddleOcrBackend's pattern.
+            if (t is LowMemoryException || selectedBackend == "CPU") {
+                MindlayerLog.w(
+                    TAG,
+                    "Embedding backend init failed: ${t.safeLabelWithDetail()}",
+                    throwable = null,
+                )
+                throw t
+            }
+            MindlayerLog.w(
+                TAG,
+                "Embedding $selectedBackend init failed (${t.safeLabelWithDetail()}), " +
+                    "falling back to CPU",
+                throwable = null,
+            )
+            // Record the runtime downgrade so dashboards / diagnostics
+            // see "active backend = CPU" even after the resolver picked
+            // GPU/NPU first.
+            val attempted = LiteRtAcceleratorResolver.latestDecision("embeddings")?.attempted.orEmpty() +
+                listOf(selectedBackend to "init-failed", "CPU" to "selected")
+            LiteRtAcceleratorResolver.recordDecision(
+                featureName = "embeddings",
+                backend = "CPU",
+                reason = "${selectedBackend}_INIT_FAILED_FALLBACK_CPU",
+                attempted = attempted,
+            )
+            try {
+                attemptInit(model, "CPU")
+                MindlayerLog.w(
+                    TAG,
+                    "Embedding CPU fallback succeeded (active=CPU)",
+                    throwable = null,
+                )
+            } catch (cpuT: Throwable) {
+                MindlayerLog.w(
+                    TAG,
+                    "Embedding CPU last-resort init failed (${cpuT.safeLabelWithDetail()})",
+                    throwable = null,
+                )
+                throw cpuT
+            }
+        }
+    }
+
+    private suspend fun attemptInit(
+        model: EmbeddingModelInfo,
+        backend: String,
+    ) {
+        try {
             val newRunner = withContext(Dispatchers.IO) {
                 verifyArtifactFilesExist(model)
-                runnerFactory(model.modelPath, selectedBackend)
+                runnerFactory(model.modelPath, backend)
             }
             runner = newRunner
             tokenizer = tokenizerFactory(model)
             loadedModel = model
-            backendLabel = selectedBackend
+            backendLabel = backend
             if (tokenizer === NoOpSentencePieceTokenizer) {
                 // One-time WARN at init time avoids per-call log spam from
                 // the tokenize() path. The default factory now loads a real
@@ -160,9 +215,21 @@ class LiteRtEmbeddingBackend internal constructor(
                     "Embedding tokenizer stub active (test injection?); embed() will return zeros.",
                 )
             }
+            // Numerical smoke test on non-CPU backends: a single warm-up
+            // embed validates that the chosen accelerator produces finite
+            // output. Observed on Samsung S928B (Snapdragon 8 Gen 3 /
+            // Adreno 750): the LiteRT 2.1.5 OpenCL delegate compiles
+            // EmbeddingGemma-300M cleanly (100% of 2274 ops on GPU) but
+            // some transformer op produces NaN/Inf at runtime, breaking
+            // L2 normalisation and cosine similarity. Detecting this at
+            // init lets the outer catch in `initialize()` re-init on CPU
+            // before any caller sees a bad vector.
+            if (backend != "CPU") {
+                validateBackendNumerics(model, newRunner)
+            }
             MindlayerLog.i(
                 TAG,
-                "Embedding backend ready: model=${model.id}, backend=$selectedBackend",
+                "Embedding backend ready: model=${model.id}, backend=$backend",
             )
         } catch (t: Throwable) {
             runner?.runCatching { close() }
@@ -170,8 +237,36 @@ class LiteRtEmbeddingBackend internal constructor(
             loadedModel = null
             tokenizer = NoOpSentencePieceTokenizer
             backendLabel = "NONE"
-            MindlayerLog.w(TAG, "Embedding backend init failed: ${t.safeLabel()}", throwable = null)
             throw t
+        }
+    }
+
+    /**
+     * Run a single warm-up inference and reject the backend if the output
+     * contains NaN or Inf. Throws [BackendNumericsException] so the outer
+     * `initialize` catch performs the same GPU→CPU fallback dance it
+     * already implements for init-time compile failures.
+     */
+    private suspend fun validateBackendNumerics(
+        model: EmbeddingModelInfo,
+        runner: LiteRtRunner,
+    ) {
+        // Use the model's claimed sequence length so the warm-up inference
+        // matches the production input shape. Pad-token (id 0) keeps the
+        // computation cheap while still exercising every op.
+        val seqLen = model.maxContextTokens.coerceAtLeast(1)
+        val warmupTokens = IntArray(seqLen) // all zeros — valid pad input
+        val warmupMask = IntArray(seqLen)   // mask=0 everywhere, valid
+        val output = withContext(Dispatchers.IO) {
+            runner.runEmbedding(warmupTokens, warmupMask)
+        }
+        val firstBadIdx = output.indexOfFirst { !it.isFinite() }
+        if (firstBadIdx >= 0) {
+            throw BackendNumericsException(
+                "Embedding $backendLabel warm-up produced non-finite value at " +
+                    "index $firstBadIdx (value=${output[firstBadIdx]}). " +
+                    "Backend will fall back to CPU.",
+            )
         }
     }
 
@@ -290,6 +385,18 @@ class LiteRtEmbeddingBackend internal constructor(
     object NoOpSentencePieceTokenizer : SentencePieceTokenizer {
         override fun tokenize(text: String, maxTokens: Int): IntArray = IntArray(0)
     }
+
+    /**
+     * Thrown by [validateBackendNumerics] when a non-CPU backend's
+     * warm-up inference produces NaN or Inf output. The outer
+     * [initialize] catch treats it as an init failure and re-inits on
+     * CPU — exactly the same fallback chain GPU compile errors take.
+     *
+     * Subclasses [IllegalStateException] so the existing fallback path
+     * (``selectedBackend == "CPU"`` test in initialize) keeps treating
+     * it as recoverable rather than terminal.
+     */
+    class BackendNumericsException(message: String) : IllegalStateException(message)
 
     companion object {
         private const val TAG = "LiteRtEmbeddingBackend"

@@ -112,7 +112,8 @@ internal object LiteRtAcceleratorResolver {
         }
     }
 
-    /** Mirrors the pre-existing LiteRtEmbeddingBackend.resolveBackend behaviour byte-for-byte. */
+    /** Embeddings: mirror OCR/Chat — try GPU when no NPU, runtime
+     *  catches GPU compile failure and falls back to CPU. */
     private fun resolveEmbeddings(requested: String?, nativeLibraryDir: String?): AcceleratorDecision {
         val attempted = mutableListOf<Pair<String, String>>()
         return when (requested.normalizedBackend()) {
@@ -124,8 +125,8 @@ internal object LiteRtAcceleratorResolver {
                 if (probe.supported) {
                     decision("NPU", "REQUESTED_NPU_SUPPORTED", attempted)
                 } else {
-                    attempted += "CPU" to "selected"
-                    decision("CPU", "REQUESTED_NPU_UNSUPPORTED_${probe.reason}", attempted)
+                    attempted += "GPU" to "selected"
+                    decision("GPU", "REQUESTED_NPU_UNSUPPORTED_GPU_FALLBACK_${probe.reason}", attempted)
                 }
             }
             null -> {
@@ -134,11 +135,11 @@ internal object LiteRtAcceleratorResolver {
                 if (probe.supported) {
                     decision("NPU", "DEFAULT_NPU_SUPPORTED", attempted)
                 } else {
-                    attempted += "CPU" to "selected"
-                    decision("CPU", "DEFAULT_CPU_NPU_UNSUPPORTED_${probe.reason}", attempted)
+                    attempted += "GPU" to "selected"
+                    decision("GPU", "DEFAULT_GPU_NPU_UNSUPPORTED_${probe.reason}", attempted)
                 }
             }
-            else -> decision("CPU", "UNKNOWN_REQUESTED_BACKEND", attempted + ("CPU" to "selected"))
+            else -> decision("GPU", "UNKNOWN_REQUESTED_BACKEND_GPU_FALLBACK", attempted + ("GPU" to "selected"))
         }
     }
 
