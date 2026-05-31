@@ -134,6 +134,103 @@ class DashboardViewModelTest {
         )
     }
 
+    @Test
+    fun `drainOcrEvents pins camelCase wire contract with OcrTokenStreamWriter`() = runTest {
+        // Regression for the dashboard's snake_case bug — drainOcrEvents
+        // used to read line_count / top_value / full_json while the
+        // service-side OcrTokenStreamWriter has always emitted
+        // camelCase lineCount / topValue / fullJson. The mismatch made
+        // every successful Test OCR run report 0 lines and the
+        // misleading "recognition model may not have loaded" message.
+        //
+        // This test wires a real OcrTokenStreamWriter into a real pipe
+        // and asserts the dashboard's drainer surfaces the values. If
+        // either side renames a field the test fails.
+        val pipe = ParcelFileDescriptor.createReliablePipe()
+        val readEnd = pipe[0]
+        val writeEnd = pipe[1]
+        val sessionId = "ocr-test-session-1"
+
+        val writer = com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter(writeEnd)
+        writer.writeHeader(sessionId)
+        writer.writeFrameProcessing(frameId = 1L)
+        writer.writeFrameProcessed(frameId = 1L, lineCount = 3, durationMs = 1610L)
+        writer.writeFieldUpdate(
+            fieldName = "line[0]",
+            topValue = "Hello world 12",
+            confidence = "high",
+            consecutiveAgreement = 1,
+        )
+        writer.writeFieldLocked(
+            fieldName = "line[2]",
+            topValue = "1234",
+        )
+        writer.writeResultFinalized(
+            fullJson = """{"line[0]":"Hello world 12","line[1]":"[","line[2]":"1234"}""",
+        )
+        writer.writeDone("ocr_complete")
+        writer.close()
+
+        val viewModel = DashboardViewModel()
+        val result = viewModel.drainOcrEvents(readEnd)
+
+        // lineCount field rename would zero this back out.
+        assertEquals("Expected line count from OCR_FRAME_PROCESSED.lineCount", 3, result.lineCount)
+        assertEquals(1, result.frameProcessedCount)
+        assertEquals(0, result.errorCount)
+        assertTrue("Expected finalized=true", result.finalized)
+
+        // The finalized snapshot path should win over OCR_FIELD_UPDATE /
+        // OCR_FIELD_LOCKED concatenation when fullJson is present.
+        assertTrue(
+            "Expected recognized text to carry fullJson content, got: ${result.recognizedText}",
+            result.recognizedText.contains("Hello world 12") &&
+                result.recognizedText.contains("1234"),
+        )
+    }
+
+    @Test
+    fun `drainOcrEvents falls back to topValue concatenation when fullJson is empty`() = runTest {
+        // Even without a finalized fullJson, OCR_FIELD_UPDATE /
+        // OCR_FIELD_LOCKED carry topValue that the dashboard
+        // assembles into a multi-line snapshot. Pins the topValue
+        // field name against accidental snake_case drift.
+        val pipe = ParcelFileDescriptor.createReliablePipe()
+        val readEnd = pipe[0]
+        val writeEnd = pipe[1]
+
+        val writer = com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter(writeEnd)
+        writer.writeHeader("ocr-test-session-2")
+        writer.writeFrameProcessed(frameId = 1L, lineCount = 2, durationMs = 500L)
+        writer.writeFieldUpdate(
+            fieldName = "line[0]",
+            topValue = "First line",
+            confidence = "medium",
+            consecutiveAgreement = 1,
+        )
+        writer.writeFieldLocked(
+            fieldName = "line[1]",
+            topValue = "Second line",
+        )
+        // No writeResultFinalized — fullJson stays null.
+        writer.writeDone("ocr_complete")
+        writer.close()
+
+        val viewModel = DashboardViewModel()
+        val result = viewModel.drainOcrEvents(readEnd)
+
+        assertEquals(2, result.lineCount)
+        assertFalse("finalized=true requires OCR_RESULT_FINALIZED", result.finalized)
+        assertTrue(
+            "Expected First line in recognized text, got: ${result.recognizedText}",
+            result.recognizedText.contains("First line"),
+        )
+        assertTrue(
+            "Expected Second line in recognized text, got: ${result.recognizedText}",
+            result.recognizedText.contains("Second line"),
+        )
+    }
+
     private fun testService(calls: MutableList<String>): IMindlayerService {
         return Proxy.newProxyInstance(
             IMindlayerService::class.java.classLoader,
