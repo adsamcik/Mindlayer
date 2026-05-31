@@ -846,12 +846,23 @@ class SharedMemoryPool(cacheDir: File) {
      * fds where EOF semantics are unreliable). Otherwise reads until EOF.
      */
     private fun stageFromPfd(pfd: ParcelFileDescriptor, outFile: File, knownSize: Int?) {
-        // H5 — reject FIFOs / sockets / character devices that would block the
-        // staging thread indefinitely. SharedMemory regions go through the
-        // dedicated reconstructSharedMemory path and are validated by the
-        // SharedMemory.fromFileDescriptor API, so this guard runs only on
-        // the generic PFD copy path.
-        assertSafePfdType(pfd)
+        // H5 — reject FIFOs / sockets that would block the staging thread
+        // indefinitely. The original concern (per the assertSafePfdType
+        // comment) is that read-until-EOF on a hostile FIFO never returns,
+        // pinning the orchestrator coroutine.
+        //
+        // The bounded path (knownSize != null, i.e. SharedMemory-backed
+        // encoded images) reads exactly knownSize bytes via readExactly, so
+        // even a character-device ashmem FD can't hang the staging thread.
+        // Raw-pixel SharedMemory transfers go through reconstructSharedMemory
+        // (see stageImage), but encoded SharedMemory transfers fall here —
+        // those legitimately come over as S_IFCHR ashmem FDs. Skipping the
+        // type check on the bounded path lets the OCR `ocrAsync(bytes, mime)`
+        // call work for images > OCR_INLINE_PIPE_THRESHOLD_BYTES (64 KB), the
+        // SDK's default transport for non-trivial OCR payloads.
+        if (knownSize == null) {
+            assertSafePfdType(pfd)
+        }
         try {
             if (knownSize != null) {
                 require(knownSize in 1..MAX_MEDIA_BYTES) {
@@ -947,13 +958,22 @@ class SharedMemoryPool(cacheDir: File) {
     }
 
     private fun requireFdSizeAtLeast(pfd: ParcelFileDescriptor, expectedBytes: Int) {
-        val statSize = try {
-            Os.fstat(pfd.fileDescriptor).st_size
+        val st = try {
+            Os.fstat(pfd.fileDescriptor)
         } catch (e: ErrnoException) {
             throw IllegalArgumentException("Unable to stat media source", e)
         }
-        require(statSize >= expectedBytes) {
-            "Media source size ($statSize B) smaller than declared payloadBytes ($expectedBytes B)"
+        // SharedMemory ashmem FDs report st_size=0 regardless of the actual
+        // mapped region size — the kernel doesn't expose ashmem region size via
+        // fstat. We must trust the SDK-declared payloadBytes and let readExactly
+        // catch any truncation via EOF. Same reasoning as the type check in
+        // stageFromPfd: SharedMemory transfers come in as character devices.
+        val isCharDevice = OsConstants.S_IFMT != 0 &&
+            OsConstants.S_IFCHR != 0 &&
+            (st.st_mode and OsConstants.S_IFMT) == OsConstants.S_IFCHR
+        if (isCharDevice) return
+        require(st.st_size >= expectedBytes) {
+            "Media source size (${st.st_size} B) smaller than declared payloadBytes ($expectedBytes B)"
         }
     }
 

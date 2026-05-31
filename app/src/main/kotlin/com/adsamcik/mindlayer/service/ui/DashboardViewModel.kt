@@ -1192,7 +1192,10 @@ class DashboardViewModel : ViewModel() {
                 sessionId = withContext(Dispatchers.IO) {
                     svc.createSession(SessionConfig(
                         systemPrompt = "You are a helpful assistant. Be concise.",
-                        maxTokens = 256,
+                        // Gemma 4 vision tokenises each image to ~256 tokens; together with
+                        // system prompt + reserved overhead + output budget this must clear
+                        // ~700 to avoid INPUT_EXCEEDS_CONTEXT. Headroom for multi-image runs.
+                        maxTokens = 2048,
                     ))
                 }
                 val activeSessionId = requireNotNull(sessionId) {
@@ -1487,31 +1490,28 @@ class DashboardViewModel : ViewModel() {
             val ownedSdk = sdkClientForTest == null
             val sdk = sdkClientForTest ?: com.adsamcik.mindlayer.sdk.Mindlayer.connect(context)
             try {
-                sdk.awaitConnected()
+                sdk.awaitConnected(kotlin.time.Duration.INFINITE)
                 _uiState.update {
                     it.copy(sdkInferAsyncTest = it.sdkInferAsyncTest.copy(
-                        status = "Creating SDK session…",
-                    ))
-                }
-                val sessionId = withContext(Dispatchers.IO) {
-                    sdk.createSession {
-                        systemPrompt("You are a helpful assistant. Be concise.")
-                        maxTokens(128)
-                    }
-                }
-                _uiState.update {
-                    it.copy(sdkInferAsyncTest = it.sdkInferAsyncTest.copy(
-                        status = "Session ${sessionId.take(8)}… created • calling inferAsync…",
+                        status = "Calling infer (one-shot, ephemeral session)…",
                     ))
                 }
                 val response = withContext(Dispatchers.IO) {
-                    sdk.inferAsync(sessionId, "Hello! What are you?")
+                    val handle = sdk.infer {
+                        ephemeralSession {
+                            systemPrompt = "You are a helpful assistant. Be concise."
+                            maxTokens = 1024
+                        }
+                        text("Hello! What are you?")
+                        outputText()
+                    }
+                    (handle as com.adsamcik.mindlayer.sdk.InferenceHandle.Text).awaitText()
                 }
 
                 val completedAt = System.currentTimeMillis()
                 val (status, tone) = when {
                     response.isNotBlank() -> "Completed • ${response.length} chars" to DashboardMessageTone.SUCCESS
-                    else -> "inferAsync returned empty response" to DashboardMessageTone.WARNING
+                    else -> "infer returned empty response" to DashboardMessageTone.WARNING
                 }
                 _uiState.update {
                     it.copy(sdkInferAsyncTest = EngineTestState(
@@ -1568,25 +1568,21 @@ class DashboardViewModel : ViewModel() {
             val ownedSdk = sdkClientForTest == null
             val sdk = sdkClientForTest ?: com.adsamcik.mindlayer.sdk.Mindlayer.connect(context)
             try {
-                sdk.awaitConnected()
+                sdk.awaitConnected(kotlin.time.Duration.INFINITE)
                 _uiState.update {
                     it.copy(sdkInferRealtimeTest = it.sdkInferRealtimeTest.copy(
-                        status = "Creating SDK session…",
-                    ))
-                }
-                val sessionId = withContext(Dispatchers.IO) {
-                    sdk.createSession {
-                        systemPrompt("You are a helpful assistant. Be concise.")
-                        maxTokens(128)
-                    }
-                }
-                _uiState.update {
-                    it.copy(sdkInferRealtimeTest = it.sdkInferRealtimeTest.copy(
-                        status = "Session ${sessionId.take(8)}… created • streaming inferRealtime…",
+                        status = "Streaming infer (ephemeral session)…",
                     ))
                 }
                 val handle = withContext(Dispatchers.IO) {
-                    sdk.inferRealtime(sessionId, "Count to 3.")
+                    sdk.infer {
+                        ephemeralSession {
+                            systemPrompt = "You are a helpful assistant. Be concise."
+                            maxTokens = 1024
+                        }
+                        text("Count to 3.")
+                        outputText()
+                    }
                 }
 
                 val output = StringBuilder()
@@ -1677,22 +1673,31 @@ class DashboardViewModel : ViewModel() {
             try {
                 val bitmap = withContext(Dispatchers.IO) { renderImageInferenceFixtureBitmap() }
                 try {
-                    sdk.awaitConnected()
+                    sdk.awaitConnected(kotlin.time.Duration.INFINITE)
                     _uiState.update {
                         it.copy(sdkGenerateWithImageTest = it.sdkGenerateWithImageTest.copy(
-                            status = "Calling generateWithImage…",
+                            status = "Calling infer (image + text, ephemeral session)…",
                         ))
                     }
                     val response = withContext(Dispatchers.IO) {
-                        sdk.generateWithImage(IMAGE_INFERENCE_PROMPT, bitmap) {
-                            maxTokens(256)
+                        val handle = sdk.infer {
+                            ephemeralSession {
+                                // Gemma 4 vision tokenises each image to ~256 tokens; allow
+                                // headroom for system prompt + multi-image future runs +
+                                // generated output. 2048 clears INPUT_EXCEEDS_CONTEXT.
+                                maxTokens = 2048
+                            }
+                            text(IMAGE_INFERENCE_PROMPT)
+                            image(bitmap)
+                            outputText()
                         }
+                        (handle as com.adsamcik.mindlayer.sdk.InferenceHandle.Text).awaitText()
                     }
 
                     val completedAt = System.currentTimeMillis()
                     val (status, tone) = when {
                         response.isNotBlank() -> "Completed • ${response.length} chars" to DashboardMessageTone.SUCCESS
-                        else -> "generateWithImage returned empty response" to DashboardMessageTone.WARNING
+                        else -> "infer (image+text) returned empty response" to DashboardMessageTone.WARNING
                     }
                     _uiState.update {
                         it.copy(sdkGenerateWithImageTest = EngineTestState(
@@ -1757,31 +1762,32 @@ class DashboardViewModel : ViewModel() {
                     val file = renderOcrFixturePng(context.cacheDir)
                     file.readBytes()
                 }
-                sdk.awaitConnected()
+                sdk.awaitConnected(kotlin.time.Duration.INFINITE)
                 _uiState.update {
                     it.copy(ocrLlmExtractionTest = it.ocrLlmExtractionTest.copy(
-                        status = "Calling ocrAsync with LLM extraction…",
+                        status = "Calling ocr with LLM extraction…",
                     ))
                 }
                 val result = withContext(Dispatchers.IO) {
-                    sdk.ocrAsync(
-                        bytes = pngBytes,
-                        mimeType = "image/png",
-                        options = com.adsamcik.mindlayer.OcrImageOptions(
-                            runLlmExtraction = true,
-                        ),
-                    )
+                    sdk.ocr {
+                        image(pngBytes, "image/png")
+                        profile(com.adsamcik.mindlayer.sdk.OcrProfile.GeneralDocument)
+                        emitBoundingBoxes()
+                        extractWithLlm(
+                            com.adsamcik.mindlayer.sdk.JsonSchema.parse(
+                                """{"type":"object","additionalProperties":true}""",
+                            ),
+                        )
+                    }.awaitResult()
                 }
 
                 val completedAt = System.currentTimeMillis()
                 val lineCount = result.lines.size
-                val hasExtraction = result.extractionJson != null || result.extractionFields.isNotEmpty()
+                val hasExtraction = result.extractionJson != null
                 val summary = buildString {
                     append("lines=$lineCount")
                     if (hasExtraction) append(" • extraction=yes")
-                    append(" • backend=${result.backend}")
-                    append(" • ocr=${result.ocrDurationMs}ms")
-                    if (result.llmDurationMs > 0) append(" • llm=${result.llmDurationMs}ms")
+                    result.metrics.totalDurationMs?.let { append(" • total=${it}ms") }
                 }
                 val (status, tone) = when {
                     lineCount > 0 -> "Completed • $summary" to DashboardMessageTone.SUCCESS
