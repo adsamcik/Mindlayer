@@ -5,6 +5,7 @@ import android.content.Context
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.logging.safeLabelWithDetail
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -166,14 +167,14 @@ class LiteRtPaddleOcrBackend internal constructor(
             if (t is LowMemoryException || selectedBackend == "CPU") {
                 MindlayerLog.w(
                     TAG,
-                    "PaddleOCR backend init failed: ${t.safeLabel()}",
+                    "PaddleOCR backend init failed: ${t.safeLabelWithDetail()}",
                     throwable = null,
                 )
                 throw t
             }
             MindlayerLog.w(
                 TAG,
-                "PaddleOCR $selectedBackend init failed (safeLabel=${t.safeLabel()}), " +
+                "PaddleOCR $selectedBackend init failed (${t.safeLabelWithDetail()}), " +
                     "falling back to CPU",
                 throwable = null,
             )
@@ -193,7 +194,7 @@ class LiteRtPaddleOcrBackend internal constructor(
             } catch (cpuT: Throwable) {
                 MindlayerLog.w(
                     TAG,
-                    "PaddleOCR CPU last-resort init failed (safeLabel=${cpuT.safeLabel()})",
+                    "PaddleOCR CPU last-resort init failed (${cpuT.safeLabelWithDetail()})",
                     throwable = null,
                 )
                 throw cpuT

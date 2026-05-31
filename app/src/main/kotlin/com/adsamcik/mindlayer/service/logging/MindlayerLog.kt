@@ -100,6 +100,50 @@ fun Throwable.safeLabel(): String =
     "${this::class.simpleName}${cause?.let { " -> ${it::class.simpleName}" } ?: ""}"
 
 /**
+ * Like [safeLabel] but appends the exception's `message` for a hand-picked
+ * allowlist of exception classes whose messages are provably free of
+ * user-controlled content (model load errors, op-set probe results,
+ * tensor-shape mismatches, native compile failures). Everything outside
+ * the allowlist falls through to plain [safeLabel].
+ *
+ * Use this at SDK / AIDL boundaries where a generic
+ * `"OCR recognise failed: LiteRtException"` message tells the caller
+ * **nothing** about whether it's a model-load problem, an op-set
+ * problem, an OOM, or a transient device error. With the allowlist
+ * extension the caller sees
+ * `"OCR recognise failed: LiteRtException(Failed to invoke the
+ * compiled model)"` and can immediately route to the right
+ * remediation page.
+ *
+ * The allowlist is intentionally tight: native LiteRT / LiteRT-LM
+ * runtime exceptions, `IllegalArgumentException` / `IllegalStateException`
+ * from our own boundary validators (their messages are field names +
+ * numeric bounds), and the standard JDK
+ * `java.nio.channels.OverlappingFileLockException` / `IOException`
+ * subset whose messages identify file-system / kernel state, never
+ * user content.
+ *
+ * Add a class here ONLY after auditing every throw site in the source
+ * to confirm the message cannot contain caller-supplied strings,
+ * prompts, or model output.
+ */
+fun Throwable.safeLabelWithDetail(maxMessageChars: Int = 160): String {
+    val base = safeLabel()
+    val msg = message
+    if (msg.isNullOrBlank()) return base
+    val fqcn = this::class.java.name
+    val allow = fqcn.startsWith("com.google.ai.edge.litert") ||
+        fqcn == "java.lang.IllegalArgumentException" ||
+        fqcn == "java.lang.IllegalStateException" ||
+        fqcn == "java.nio.channels.OverlappingFileLockException" ||
+        fqcn == "java.io.FileNotFoundException" ||
+        fqcn == "android.system.ErrnoException"
+    if (!allow) return base
+    val trimmed = msg.lineSequence().firstOrNull().orEmpty().take(maxMessageChars)
+    return if (trimmed.isBlank()) base else "$base($trimmed)"
+}
+
+/**
  * Shorten an id for logcat so correlation is possible without dumping full
  * UUIDs. NOT auto-applied to existing callsites — intended for new log
  * lines where brevity matters. Callers that need exact correlation (tests,

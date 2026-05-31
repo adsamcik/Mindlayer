@@ -3,6 +3,7 @@ package com.adsamcik.mindlayer.service.engine
 import com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.logging.safeLabelWithDetail
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -211,7 +212,7 @@ class OcrRecognitionDispatcher(
                     if (t is CancellationException) return@launch
                     MindlayerLog.w(
                         TAG,
-                        "OCR recognise failed: ${t.safeLabel()}, frameId=$frameId",
+                        "OCR recognise failed: ${t.safeLabelWithDetail()}, frameId=$frameId",
                         sessionId = sessionId,
                         throwable = null,
                     )
