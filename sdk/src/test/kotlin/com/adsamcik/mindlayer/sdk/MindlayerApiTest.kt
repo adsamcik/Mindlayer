@@ -61,7 +61,7 @@ class MindlayerApiTest {
     private lateinit var store: HistoryStore
     private lateinit var mockService: IMindlayerService
     private lateinit var mockConnection: ConnectionManager
-    private lateinit var mindlayer: Mindlayer
+    private lateinit var mindlayer: MindlayerImpl
 
     @Before
     fun setUp() {
@@ -117,8 +117,8 @@ class MindlayerApiTest {
 
     // -- Helpers --------------------------------------------------------------
 
-    private fun buildMindlayer(conn: ConnectionManager, historyStore: HistoryStore?): Mindlayer {
-        val ctor = Mindlayer::class.java.getDeclaredConstructor(
+    private fun buildMindlayer(conn: ConnectionManager, historyStore: HistoryStore?): MindlayerImpl {
+        val ctor = MindlayerImpl::class.java.getDeclaredConstructor(
             ConnectionManager::class.java,
             HistoryStore::class.java,
         )
@@ -647,7 +647,7 @@ class MindlayerApiTest {
 
     @Test
     fun `InferenceHandle_exposes_requestId_immediately`() {
-        val handle = InferenceHandle("test-req-id", flowOf())
+        val handle = InferenceHandleImpl("test-req-id", flowOf())
         assertEquals("test-req-id", handle.requestId)
         assertFalse(handle.isCancelled)
     }
@@ -655,7 +655,7 @@ class MindlayerApiTest {
     @Test
     fun `InferenceHandle_cancel_is_idempotent`() = runTest {
         var cancelCount = 0
-        val handle = InferenceHandle("req", flowOf())
+        val handle = InferenceHandleImpl("req", flowOf())
         handle.setCancelCallback { cancelCount++ }
         handle.cancel()
         handle.cancel()

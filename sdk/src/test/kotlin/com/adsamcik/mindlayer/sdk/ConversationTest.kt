@@ -45,7 +45,7 @@ class ConversationTest {
     private lateinit var db: MindlayerDatabase
     private lateinit var mockService: IMindlayerService
     private lateinit var mockConnection: ConnectionManager
-    private lateinit var mindlayer: Mindlayer
+    private lateinit var mindlayer: MindlayerImpl
 
     @Before
     fun setUp() {
@@ -89,8 +89,8 @@ class ConversationTest {
 
     // -- Helpers --------------------------------------------------------------
 
-    private fun buildMindlayer(conn: ConnectionManager, historyStore: HistoryStore?): Mindlayer {
-        val ctor = Mindlayer::class.java.getDeclaredConstructor(
+    private fun buildMindlayer(conn: ConnectionManager, historyStore: HistoryStore?): MindlayerImpl {
+        val ctor = MindlayerImpl::class.java.getDeclaredConstructor(
             ConnectionManager::class.java,
             HistoryStore::class.java,
         )

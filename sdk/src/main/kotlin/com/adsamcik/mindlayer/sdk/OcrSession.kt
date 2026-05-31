@@ -254,7 +254,7 @@ class PageBoundariesBuilder {
 class OcrSession internal constructor(
     val sessionId: String,
     val config: OcrSessionConfig,
-    private val mindlayer: Mindlayer,
+    private val mindlayer: MindlayerImpl,
 ) : AutoCloseable {
 
     @Volatile

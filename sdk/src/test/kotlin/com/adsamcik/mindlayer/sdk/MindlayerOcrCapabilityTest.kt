@@ -28,7 +28,7 @@ import org.robolectric.annotation.Config
 @Config(sdk = [33])
 class MindlayerOcrCapabilityTest {
     private lateinit var mockService: IMindlayerService
-    private lateinit var mindlayer: Mindlayer
+    private lateinit var mindlayer: MindlayerImpl
 
     @Before fun setUp() {
         mockkStatic(Log::class)
@@ -146,8 +146,8 @@ class MindlayerOcrCapabilityTest {
         maxTotalMediaBytesPerRequest = 200L * 1024 * 1024,
     )
 
-    private fun buildMindlayer(conn: ConnectionManager): Mindlayer {
-        val ctor = Mindlayer::class.java.getDeclaredConstructor(ConnectionManager::class.java, HistoryStore::class.java)
+    private fun buildMindlayer(conn: ConnectionManager): MindlayerImpl {
+        val ctor = MindlayerImpl::class.java.getDeclaredConstructor(ConnectionManager::class.java, HistoryStore::class.java)
         ctor.isAccessible = true
         return ctor.newInstance(conn, null)
     }

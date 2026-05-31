@@ -43,7 +43,7 @@ import org.robolectric.annotation.Config
 class MindlayerEmbedTest {
     private lateinit var mockService: IMindlayerService
     private lateinit var mockConnection: ConnectionManager
-    private lateinit var mindlayer: Mindlayer
+    private lateinit var mindlayer: MindlayerImpl
 
     private val embeddingCaps = ServiceCapabilities(
         apiVersion = 8,
@@ -254,14 +254,14 @@ class MindlayerEmbedTest {
         )
     }
 
-    private fun getCallback(mindlayer: Mindlayer): IClientCallback {
-        val getter = Mindlayer::class.java.getDeclaredMethod("getEvictionCallback")
+    private fun getCallback(mindlayer: MindlayerImpl): IClientCallback {
+        val getter = MindlayerImpl::class.java.getDeclaredMethod("getEvictionCallback")
         getter.isAccessible = true
         return getter.invoke(mindlayer) as IClientCallback
     }
 
-    private fun buildMindlayer(conn: ConnectionManager): Mindlayer {
-        val ctor = Mindlayer::class.java.getDeclaredConstructor(ConnectionManager::class.java, HistoryStore::class.java)
+    private fun buildMindlayer(conn: ConnectionManager): MindlayerImpl {
+        val ctor = MindlayerImpl::class.java.getDeclaredConstructor(ConnectionManager::class.java, HistoryStore::class.java)
         ctor.isAccessible = true
         return ctor.newInstance(conn, null)
     }

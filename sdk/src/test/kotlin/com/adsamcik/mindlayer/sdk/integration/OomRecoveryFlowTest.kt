@@ -12,6 +12,7 @@ import com.adsamcik.mindlayer.sdk.ConnectionState
 import com.adsamcik.mindlayer.sdk.HistoryPolicy
 import com.adsamcik.mindlayer.sdk.HistoryStore
 import com.adsamcik.mindlayer.sdk.Mindlayer
+import com.adsamcik.mindlayer.sdk.MindlayerImpl
 import com.adsamcik.mindlayer.sdk.SessionRecovery
 import com.adsamcik.mindlayer.sdk.db.ConversationEntity
 import com.adsamcik.mindlayer.sdk.db.MindlayerDatabase
@@ -50,7 +51,7 @@ class OomRecoveryFlowTest {
     private lateinit var store: HistoryStore
     private lateinit var mockService: IMindlayerService
     private lateinit var mockConnection: ConnectionManager
-    private lateinit var mindlayer: Mindlayer
+    private lateinit var mindlayer: MindlayerImpl
     private lateinit var recovery: SessionRecovery
 
     private val sessionId = "test-session-001"
@@ -100,8 +101,8 @@ class OomRecoveryFlowTest {
 
     // -- Helpers -------------------------------------------------------------
 
-    private fun buildMindlayer(conn: ConnectionManager, historyStore: HistoryStore): Mindlayer {
-        val ctor = Mindlayer::class.java.getDeclaredConstructor(
+    private fun buildMindlayer(conn: ConnectionManager, historyStore: HistoryStore): MindlayerImpl {
+        val ctor = MindlayerImpl::class.java.getDeclaredConstructor(
             ConnectionManager::class.java,
             HistoryStore::class.java,
         )

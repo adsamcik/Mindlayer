@@ -53,7 +53,7 @@ import org.robolectric.annotation.Config
 class MindlayerEmbedManyApi33Test {
     private lateinit var mockService: IMindlayerService
     private lateinit var mockConnection: ConnectionManager
-    private lateinit var mindlayer: Mindlayer
+    private lateinit var mindlayer: MindlayerImpl
 
     private val embeddingCaps = ServiceCapabilities(
         apiVersion = 8,
@@ -330,8 +330,8 @@ class MindlayerEmbedManyApi33Test {
         )
     }
 
-    private fun buildMindlayer(conn: ConnectionManager): Mindlayer {
-        val ctor = Mindlayer::class.java.getDeclaredConstructor(ConnectionManager::class.java, HistoryStore::class.java)
+    private fun buildMindlayer(conn: ConnectionManager): MindlayerImpl {
+        val ctor = MindlayerImpl::class.java.getDeclaredConstructor(ConnectionManager::class.java, HistoryStore::class.java)
         ctor.isAccessible = true
         return ctor.newInstance(conn, null)
     }
@@ -352,7 +352,7 @@ class MindlayerEmbedManyApi33Test {
 class MindlayerEmbedManyApi26Test {
     private lateinit var mockService: IMindlayerService
     private lateinit var mockConnection: ConnectionManager
-    private lateinit var mindlayer: Mindlayer
+    private lateinit var mindlayer: MindlayerImpl
 
     private val embeddingCaps = ServiceCapabilities(
         apiVersion = 8,
@@ -435,8 +435,8 @@ class MindlayerEmbedManyApi26Test {
         durationMs = 4L,
     )
 
-    private fun buildMindlayer(conn: ConnectionManager): Mindlayer {
-        val ctor = Mindlayer::class.java.getDeclaredConstructor(ConnectionManager::class.java, HistoryStore::class.java)
+    private fun buildMindlayer(conn: ConnectionManager): MindlayerImpl {
+        val ctor = MindlayerImpl::class.java.getDeclaredConstructor(ConnectionManager::class.java, HistoryStore::class.java)
         ctor.isAccessible = true
         return ctor.newInstance(conn, null)
     }

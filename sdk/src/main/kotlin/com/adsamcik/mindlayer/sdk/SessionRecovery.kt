@@ -17,7 +17,7 @@ import com.adsamcik.mindlayer.shared.Role
  *     return it so the caller can re-send.
  */
 class SessionRecovery internal constructor(
-    private val mindlayer: Mindlayer,
+    private val mindlayer: MindlayerImpl,
     private val historyStore: HistoryStore,
 ) {
 
