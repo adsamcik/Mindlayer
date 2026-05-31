@@ -596,8 +596,20 @@ internal class MindlayerImpl(
         connection.awaitConnected()
     }
 
-    override suspend fun awaitConnected(timeout: kotlin.time.Duration): Capabilities =
-        error("Mindlayer v1 — awaitConnected(timeout) behaviour lands in C2")
+    override suspend fun awaitConnected(timeout: kotlin.time.Duration): Capabilities {
+        require(timeout > kotlin.time.Duration.ZERO) {
+            "awaitConnected timeout must be positive (use Duration.INFINITE to wait indefinitely)"
+        }
+        // getCapabilities() awaits the binder before reading the feature set, so
+        // a single call both waits for the connection and negotiates capabilities.
+        // INFINITE means "no deadline"; any finite bound wraps the whole wait.
+        val caps = if (timeout == kotlin.time.Duration.INFINITE) {
+            getCapabilities()
+        } else {
+            withTimeout(timeout) { getCapabilities() }
+        }
+        return Capabilities.from(caps)
+    }
 
     // -- v0.4 eviction-callback subscription ---------------------------------
 
