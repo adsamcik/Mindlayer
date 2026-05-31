@@ -95,6 +95,21 @@ PY
         "$fixed_onnx" "$simp_onnx" \
         --overwrite-input-shape "${input_name}:${onnx_input_dims[$kind]}"
 
+    # ONNX QKV-split surgery — rewrites the fused SVTR attention QKV
+    # projection from a single Linear → 5D Reshape → Slice/Squeeze chain
+    # into three independent 4D Q/K/V projections, eliminating every
+    # 5D RESHAPE/TRANSPOSE intermediate that the LiteRT 2.1.5 GPU
+    # delegate cannot compile. Only the rec model has SVTR attention;
+    # det and cls are no-ops (the script self-detects no chains and
+    # passes through unchanged). See docs/PADDLEOCR_GPU_INVESTIGATION.md.
+    qkv_surgery_py="$(dirname "$0")/onnx_split_qkv.py"
+    if [ ! -f "$qkv_surgery_py" ]; then
+        qkv_surgery_py="/usr/local/bin/onnx_split_qkv.py"
+    fi
+    split_onnx="paddleocr-ppocrv5-mobile-${kind}-split.onnx"
+    /opt/venv-onnx2tf/bin/python "$qkv_surgery_py" "$simp_onnx" "$split_onnx"
+    mv "$split_onnx" "$simp_onnx"
+
     # -ofgd: replace GPU-incompatible ops with supported equivalents
     #        where onnx2tf knows how to (e.g. TRANSPOSE_CONV downgrades).
     #        Currently a no-op for the two known blockers — see

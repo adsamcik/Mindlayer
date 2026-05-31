@@ -63,14 +63,47 @@ internal class RealPaddleOcrLiteRtRunner private constructor(
                 "GPU" -> Accelerator.GPU
                 else -> Accelerator.CPU
             }
+            // GPU sub-models get the same FP32 + infiniteFloatCapping
+            // hardening we use for EmbeddingGemma (commit b15a67d).
+            // Even after the ONNX QKV-split surgery makes rec
+            // GPU-compileable, the SVTR attention softmax can overflow
+            // FP16 at certain detection sequences and produce NaN
+            // outputs that silently corrupt OCR text. FP32 keeps the
+            // computation numerically stable at ~2x throughput cost
+            // vs FP16 — still a large win vs CPU XNNPACK. infiniteFloat
+            // Capping clamps any remaining Inf to finite as defence in
+            // depth.
+            fun optionsFor(currentAccel: Accelerator): CompiledModel.Options {
+                val opts = CompiledModel.Options(currentAccel)
+                if (currentAccel == Accelerator.GPU) {
+                    opts.gpuOptions = CompiledModel.GpuOptions(
+                        constantTensorSharing = null,
+                        infiniteFloatCapping = true,
+                        allowSrcQuantizedFcConvOps = null,
+                        precision = CompiledModel.GpuOptions.Precision.FP32,
+                        bufferStorageType = null,
+                        preferTextureWeights = null,
+                        serializationDir = null,
+                        modelCacheKey = null,
+                        serializeProgramCache = null,
+                        serializeExternalTensors = null,
+                        externalTensorsMode = null,
+                        externalTensorPattern = null,
+                        backend = null,
+                        priority = null,
+                        numStepsOfCommandBufferPreparations = null,
+                    )
+                }
+                return opts
+            }
             var detectionModel: CompiledModel? = null
             var recognitionModel: CompiledModel? = null
             var orientationModel: CompiledModel? = null
             try {
-                detectionModel = CompiledModel.create(bundle.detectionPath, CompiledModel.Options(accel))
-                recognitionModel = CompiledModel.create(bundle.recognitionPath, CompiledModel.Options(accel))
+                detectionModel = CompiledModel.create(bundle.detectionPath, optionsFor(accel))
+                recognitionModel = CompiledModel.create(bundle.recognitionPath, optionsFor(accel))
                 orientationModel = bundle.classifierPath?.let { path ->
-                    CompiledModel.create(path, CompiledModel.Options(accel))
+                    CompiledModel.create(path, optionsFor(accel))
                 }
                 return RealPaddleOcrLiteRtRunner(
                     detectionModel = detectionModel,
