@@ -13,13 +13,15 @@ This is **not** a Mindlayer bug — it is a version-skew between
 
 - `onnx2tf 2.4.0` (our pinned conversion tool, targeting **TFLite
   Runtime 2.19.1** op coverage), and
-- `LiteRT 2.1.5` (our pinned on-device runtime, with a smaller GPU
-  delegate kernel set).
+- `LiteRT 2.1.5` (our pinned on-device runtime — and as of 2026-05-31
+  the **latest GA release** of `com.google.ai.edge.litert:litert` on
+  Google Maven, so we cannot simply bump to a newer version that
+  added the missing kernels).
 
-Fixing it requires either bumping LiteRT, downgrading onnx2tf to a
-version that predates the offending canonicalisation passes, or doing
-post-conversion `.tflite` surgery to rewrite the two blocker ops. All
-three options have non-trivial trade-offs documented below.
+The closest realistic fix today is **option 3** below — post-
+conversion `.tflite` surgery to rewrite the two blocker ops in-place
+on the converted flatbuffer. It leaves both pinned versions
+untouched and ~150 lines of Python.
 
 ## Symptom
 
@@ -87,27 +89,18 @@ LiteRT 2.1.5's GPU delegate is pinned at v3.
 
 ## What would actually work
 
-1. **Bump LiteRT to ≥ 2.3.x** (Q1 2026 release that added the
-   missing kernels). Cost: re-validate every existing model against
-   the new runtime, AGP/Gradle dep refresh, re-soak. Out of scope for
-   the current OCR sprint.
-2. **Downgrade onnx2tf to a version before the clamp canonicalisation
-   pass landed** (likely ≤ 2.2.x). Risk: loses other recent fixes the
-   current rec/det workflows rely on (LayerNorm handling, fixed-shape
-   simplification). Worth a sandbox test if option 1 doesn't land
-   soon.
-3. **Post-conversion `.tflite` surgery**: parse the flatbuffer,
-   rewrite `RELU_0_TO_1` ops as `MAXIMUM(0)+MINIMUM(1)` pairs and
-   force `TRANSPOSE_CONV` opcode version down to 3. Doable with the
-   `flatbuffers` Python library + the TFLite schema. Surgical fix
-   that leaves the conversion toolchain untouched.
-4. **Live with CPU on PP-OCRv5 for now.** XNNPACK on Snapdragon 8
-   Gen 3 already runs the full PP-OCRv5 pipeline in ~1 second for the
-   sample fixture. The real cost is real-time camera OCR throughput
-   where multi-frame-per-second is desired; for single-image
-   async API this is acceptable.
+| Option | Viability today | Notes |
+|---|---|---|
+| 1. Bump LiteRT to a release with the missing GPU kernels | ❌ **NOT VIABLE** — `com.google.ai.edge.litert:litert` latest GA on Google Maven is **2.1.5** (the version we already use). The companion `litert-gpu` artifact is stuck at 1.4.2 (legacy delegate path superseded by the GPU support baked into `litert:2.x`). Until Google publishes ≥ 2.2.x there is no newer LiteRT to bump to. Periodically re-check `https://dl.google.com/android/maven2/com/google/ai/edge/litert/litert/maven-metadata.xml`. |
+| 2. Downgrade onnx2tf to a version before the clamp canonicalisation pass landed | ⚠️ Risky | Likely ≤ 2.2.x. Risks losing other recent fixes the current rec/det workflows rely on (LayerNorm handling, fixed-shape simplification). Worth a sandbox test if no other option pans out. |
+| 3. Post-conversion `.tflite` surgery | ✅ **Cheapest viable today** | Parse the flatbuffer, rewrite `RELU_0_TO_1` ops as `MAXIMUM(0)+MINIMUM(1)` pairs, and force `TRANSPOSE_CONV` opcode version to 3. Doable with the `flatbuffers` Python library + the TFLite schema in ~150 lines. Surgical fix that leaves both pinned versions untouched. Validates same day on real hardware. |
+| 4. Live with CPU | ✅ Current state | XNNPACK on Snapdragon 8 Gen 3 already runs the full PP-OCRv5 pipeline in ~1 second for the sample fixture. The real cost is real-time camera OCR throughput where multi-frame-per-second is desired; for single-image async API this is acceptable. |
+| 5. Switch conversion path (e.g. PaddleLite direct, or alternate paddle2tflite tool) | ⚠️ Big unknown | Different toolchain, different bugs. Heavy research investment. |
+| 6. Track upstream — file a LiteRT issue requesting GPU kernels for `RELU_0_TO_1` + `TRANSPOSE_CONV v4` | ✅ Free | Doesn't block anything; helps a future upgrade land sooner. |
 
-We are currently on option 4.
+**Current decision: Option 3 (post-conversion .tflite surgery) is the
+cheapest path to GPU on PP-OCRv5 without moving either pinned
+version.**
 
 ## Why the conversion workflow still uses `-ofgd` and `-cgdc`
 
@@ -159,14 +152,17 @@ dry-runs are byte-identical to CI.
 
 ## Open questions / future work
 
-* Validate that LiteRT 2.3.x kernels include `RELU_0_TO_1` + `TRANSPOSE_CONV v4`
-  before scheduling the runtime bump.
+* When Google publishes LiteRT ≥ 2.2.x, validate whether its GPU
+  delegate kernel registry includes `RELU_0_TO_1` + `TRANSPOSE_CONV v4`
+  before scheduling the runtime bump. Until then, no bump is possible.
 * Sandbox `onnx2tf 2.2.x` to confirm whether disabling the
-  canonicalisation alone unlocks GPU on PP-OCRv5.
-* Prototype option 3 (post-conversion `.tflite` surgery) as a
-  middle path that doesn't move either pinned version.
+  canonicalisation alone unlocks GPU on PP-OCRv5 (fallback to option 2
+  if option 3 hits unexpected blockers).
 * Same investigation likely applies to EmbeddingGemma — its
   `LiteRtAcceleratorResolver.resolveEmbeddings` does not currently
   try GPU at all (it goes NPU-or-CPU). Whether GPU compile would
   succeed on Snapdragon's GPU delegate is unknown until the resolver
   is fixed to attempt it.
+* Optional: file an upstream LiteRT issue requesting GPU kernels for
+  `RELU_0_TO_1` + `TRANSPOSE_CONV v4` so a future runtime bump
+  unblocks this without conversion surgery.
