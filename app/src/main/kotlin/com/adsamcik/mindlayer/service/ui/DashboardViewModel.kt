@@ -15,6 +15,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.adsamcik.mindlayer.EmbeddingRequest
 import com.adsamcik.mindlayer.EngineInfo
+import com.adsamcik.mindlayer.ImageTransfer
 import com.adsamcik.mindlayer.MediaPart
 import com.adsamcik.mindlayer.OcrFrameAck
 import com.adsamcik.mindlayer.OcrFrameMeta
@@ -76,6 +77,15 @@ class DashboardViewModel : ViewModel() {
     private var bound = false
     private var statusPollingJob: Job? = null
     private var logPollingJob: Job? = null
+
+    /**
+     * Test-only injectable SDK client. When non-null, [runSdkInferAsyncTest],
+     * [runSdkInferRealtimeTest], [runSdkGenerateWithImageTest], and
+     * [runOcrLlmExtractionTest] use this instance instead of creating their own
+     * via [com.adsamcik.mindlayer.sdk.Mindlayer.connect].
+     * Production code never sets this field; tests inject a mock via reflection.
+     */
+    internal var sdkClientForTest: com.adsamcik.mindlayer.sdk.Mindlayer? = null
 
     /**
      * Stable liveness token passed to `registerClient` so the service's death
@@ -420,6 +430,10 @@ class DashboardViewModel : ViewModel() {
         const val OCR_FIXTURE_TEXT = "Hello world 1234"
         const val OCR_FIXTURE_WIDTH = 480
         const val OCR_FIXTURE_HEIGHT = 140
+
+        const val IMAGE_INFERENCE_FIXTURE_WIDTH = 320
+        const val IMAGE_INFERENCE_FIXTURE_HEIGHT = 240
+        const val IMAGE_INFERENCE_PROMPT = "In one short sentence, describe what you see in this image."
     }
 
     private val testJson = Json { ignoreUnknownKeys = true }
@@ -1103,6 +1117,317 @@ class DashboardViewModel : ViewModel() {
             )
         }
 
+    /**
+     * Renders a 320×240 PNG of a solid blue square with white text "42"
+     * as a synthetic fixture for the image inference test. The image is
+     * simple enough for any vision model to describe but distinct enough
+     * that an empty or identical-to-prompt response would fail.
+     *
+     * No `FEATURE_MULTIMODAL_VISION` constant exists in [ServiceCapabilities];
+     * [com.adsamcik.mindlayer.IMindlayerService.infer] with an
+     * [ImageTransfer] is always available on the wire so no capability gate
+     * is performed before this test.
+     */
+    fun runImageInferenceTest(context: Context) {
+        _uiState.value.imageInferenceTestReadinessIssue()?.let { issue ->
+            _uiState.update {
+                it.copy(imageInferenceTest = it.imageInferenceTest.copy(
+                    isRunning = false,
+                    status = issue,
+                    tone = DashboardMessageTone.WARNING,
+                ))
+            }
+            return
+        }
+
+        _uiState.update {
+            it.copy(imageInferenceTest = EngineTestState(
+                isRunning = true,
+                status = "Rendering image inference fixture",
+                tone = DashboardMessageTone.INFO,
+            ))
+        }
+
+        val cacheDir = context.cacheDir
+        viewModelScope.launch {
+            var testService: com.adsamcik.mindlayer.IMindlayerService? = null
+            var sessionId: String? = null
+            try {
+                val svc = service ?: run {
+                    _uiState.update {
+                        it.copy(imageInferenceTest = it.imageInferenceTest.copy(
+                            isRunning = false,
+                            status = "Service is not connected",
+                            tone = DashboardMessageTone.ERROR,
+                            lastCompletedAtMs = System.currentTimeMillis(),
+                        ))
+                    }
+                    return@launch
+                }
+                testService = svc
+
+                _uiState.update {
+                    it.copy(imageInferenceTest = it.imageInferenceTest.copy(
+                        status = "Warming engine — first load can take 1–2 min on emulators",
+                    ))
+                }
+                val activeBackend = withContext(Dispatchers.IO) {
+                    svc.prewarmAndAwait(
+                        TEST_INFERENCE_PREWARM_BACKEND,
+                        TEST_INFERENCE_PREWARM_TIMEOUT_MS,
+                    )
+                }
+                if (activeBackend.equals("NONE", ignoreCase = true)) {
+                    throw IllegalStateException(
+                        "Engine did not become ready within " +
+                            "${TEST_INFERENCE_PREWARM_TIMEOUT_MS / 1_000}s",
+                    )
+                }
+
+                _uiState.update {
+                    it.copy(imageInferenceTest = it.imageInferenceTest.copy(
+                        status = "Engine ready on $activeBackend • creating test session",
+                    ))
+                }
+                sessionId = withContext(Dispatchers.IO) {
+                    svc.createSession(SessionConfig(
+                        systemPrompt = "You are a helpful assistant. Be concise.",
+                        maxTokens = 256,
+                    ))
+                }
+                val activeSessionId = requireNotNull(sessionId) {
+                    "Service returned a null session id"
+                }
+
+                val fixtureFile = withContext(Dispatchers.IO) {
+                    renderImageInferenceFixturePng(cacheDir)
+                }
+                _uiState.update {
+                    it.copy(imageInferenceTest = it.imageInferenceTest.copy(
+                        status = "Session ${activeSessionId.take(8)}… created • sending image prompt",
+                    ))
+                }
+
+                val pipe = ParcelFileDescriptor.createReliablePipe()
+                val readEnd = pipe[0]
+                val writeEnd = pipe[1]
+
+                val requestId = UUID.randomUUID().toString()
+                val meta = RequestMeta(
+                    requestId = requestId,
+                    sessionId = activeSessionId,
+                    textContent = IMAGE_INFERENCE_PROMPT,
+                )
+
+                try {
+                    withContext(Dispatchers.IO) {
+                        val imageSource = ParcelFileDescriptor.open(
+                            fixtureFile, ParcelFileDescriptor.MODE_READ_ONLY,
+                        )
+                        val imageTransfer = ImageTransfer(
+                            requestId = requestId,
+                            width = IMAGE_INFERENCE_FIXTURE_WIDTH,
+                            height = IMAGE_INFERENCE_FIXTURE_HEIGHT,
+                            // pixelFormat = 0 (PixelFormat.UNKNOWN) signals compressed data.
+                            pixelFormat = 0,
+                            rowStride = 0,
+                            payloadBytes = fixtureFile.length().toInt(),
+                            source = imageSource,
+                            isSharedMemory = false,
+                            mimeType = "image/png",
+                        )
+                        svc.infer(meta, imageTransfer, null, writeEnd)
+                    }
+                } catch (e: Exception) {
+                    readEnd.close()
+                    throw e
+                } finally {
+                    writeEnd.close()
+                }
+
+                _uiState.update {
+                    it.copy(imageInferenceTest = it.imageInferenceTest.copy(
+                        status = "Streaming response",
+                    ))
+                }
+
+                val output = StringBuilder()
+                var eventCount = 0
+                var finishReason = "unknown"
+                var errorEventCount = 0
+                var unparsedEventCount = 0
+                var streamReadError: String? = null
+
+                withContext(Dispatchers.IO) {
+                    val input = DataInputStream(BufferedInputStream(
+                        ParcelFileDescriptor.AutoCloseInputStream(readEnd),
+                    ))
+                    try {
+                        while (true) {
+                            val len = try {
+                                Integer.reverseBytes(input.readInt())
+                            } catch (_: EOFException) {
+                                break
+                            }
+                            if (len < 0 || len > 1_048_576) break
+
+                            val bytes = ByteArray(len)
+                            input.readFully(bytes)
+                            val jsonStr = bytes.decodeToString()
+                            eventCount++
+
+                            try {
+                                val event = testJson.decodeFromString<StreamEvent>(jsonStr)
+                                when (event.type) {
+                                    "token_delta" -> {
+                                        val text = event.payload["text"]?.jsonPrimitive?.contentOrNull ?: ""
+                                        output.append(text)
+                                        _uiState.update {
+                                            it.copy(imageInferenceTest = it.imageInferenceTest.copy(
+                                                output = output.toString(),
+                                            ))
+                                        }
+                                    }
+
+                                    "error" -> {
+                                        errorEventCount++
+                                        val message = event.payload["message"]?.jsonPrimitive?.contentOrNull ?: "Unknown"
+                                        val code = event.payload["code"]?.jsonPrimitive?.contentOrNull ?: "unknown"
+                                        if (output.isNotEmpty()) output.append('\n')
+                                        output.append("[service error][$code] $message")
+                                        _uiState.update {
+                                            it.copy(imageInferenceTest = it.imageInferenceTest.copy(
+                                                output = output.toString(),
+                                            ))
+                                        }
+                                    }
+
+                                    "done" -> {
+                                        finishReason = event.payload["finish_reason"]
+                                            ?.jsonPrimitive
+                                            ?.contentOrNull
+                                            ?: "unknown"
+                                    }
+                                }
+                            } catch (_: Exception) {
+                                try {
+                                    testJson.decodeFromString<StreamHeader>(jsonStr)
+                                } catch (_: Exception) {
+                                    unparsedEventCount++
+                                    if (unparsedEventCount <= 3) {
+                                        if (output.isNotEmpty()) output.append('\n')
+                                        output.append("[unparsed event] ").append(jsonStr.take(200))
+                                        _uiState.update {
+                                            it.copy(imageInferenceTest = it.imageInferenceTest.copy(
+                                                output = output.toString(),
+                                            ))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        streamReadError = e.toDashboardMessage()
+                    }
+                }
+
+                if (streamReadError != null) {
+                    if (output.isNotEmpty()) output.append("\n\n")
+                    output.append("[stream error] ").append(streamReadError)
+                }
+
+                val completedAt = System.currentTimeMillis()
+                val (status, tone) = when {
+                    streamReadError != null -> {
+                        "Stream read failed after $eventCount event(s)" to DashboardMessageTone.ERROR
+                    }
+
+                    errorEventCount > 0 -> {
+                        "Service returned $errorEventCount error event(s)" to DashboardMessageTone.ERROR
+                    }
+
+                    output.isNotEmpty() && unparsedEventCount > 0 -> {
+                        "Completed with $unparsedEventCount parser warning(s)" to DashboardMessageTone.WARNING
+                    }
+
+                    output.isNotEmpty() -> {
+                        "Completed • $eventCount event(s) • finish=$finishReason" to DashboardMessageTone.SUCCESS
+                    }
+
+                    unparsedEventCount > 0 -> {
+                        "Received $unparsedEventCount unparsed event(s)" to DashboardMessageTone.WARNING
+                    }
+
+                    else -> {
+                        "No output received ($eventCount event(s))" to DashboardMessageTone.WARNING
+                    }
+                }
+
+                _uiState.update {
+                    it.copy(imageInferenceTest = EngineTestState(
+                        isRunning = false,
+                        status = status,
+                        tone = tone,
+                        output = output.toString(),
+                        lastCompletedAtMs = completedAt,
+                    ))
+                }
+            } catch (e: Exception) {
+                val rendered = e.toInferenceErrorMessage()
+                _uiState.update {
+                    it.copy(imageInferenceTest = it.imageInferenceTest.copy(
+                        isRunning = false,
+                        status = "Image inference test failed: $rendered",
+                        tone = DashboardMessageTone.ERROR,
+                        output = rendered,
+                        lastCompletedAtMs = System.currentTimeMillis(),
+                    ))
+                }
+            } finally {
+                sessionId?.let { activeSessionId ->
+                    try {
+                        withContext(Dispatchers.IO) {
+                            testService?.destroySession(activeSessionId)
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        }
+    }
+
+    private fun renderImageInferenceFixtureBitmap(): Bitmap {
+        val bitmap = Bitmap.createBitmap(
+            IMAGE_INFERENCE_FIXTURE_WIDTH, IMAGE_INFERENCE_FIXTURE_HEIGHT, Bitmap.Config.ARGB_8888,
+        )
+        val canvas = Canvas(bitmap)
+        // Solid indigo background — visually distinct from blank/white.
+        canvas.drawColor(Color.rgb(0x3F, 0x51, 0xB5))
+        val paint = Paint().apply {
+            color = Color.WHITE
+            textSize = 96f
+            isAntiAlias = true
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        canvas.drawText("42", IMAGE_INFERENCE_FIXTURE_WIDTH * 0.35f, IMAGE_INFERENCE_FIXTURE_HEIGHT * 0.65f, paint)
+        return bitmap
+    }
+
+    private fun renderImageInferenceFixturePng(cacheDir: File): File {
+        val bitmap = renderImageInferenceFixtureBitmap()
+        try {
+            val file = File(cacheDir, "image-inference-dashboard-fixture.png")
+            file.outputStream().use { out ->
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                    "Failed to encode image inference dashboard fixture PNG"
+                }
+            }
+            return file
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
     private fun renderOcrFixturePng(cacheDir: File): File {
         val bitmap = Bitmap.createBitmap(
             OCR_FIXTURE_WIDTH, OCR_FIXTURE_HEIGHT, Bitmap.Config.ARGB_8888,
@@ -1130,15 +1455,390 @@ class DashboardViewModel : ViewModel() {
         }
     }
 
+    // ---- SDK facade verification -------------------------------------------
+
+    /**
+     * Exercises the SDK facade's [com.adsamcik.mindlayer.sdk.Mindlayer.inferAsync]
+     * single-shot path. Creates an isolated SDK client per run, matching how
+     * a real consumer app initialises, so the facade's session lifecycle,
+     * connection management, and error mapping are all exercised.
+     */
+    fun runSdkInferAsyncTest(context: Context) {
+        _uiState.value.sdkInferAsyncTestReadinessIssue()?.let { issue ->
+            _uiState.update {
+                it.copy(sdkInferAsyncTest = it.sdkInferAsyncTest.copy(
+                    isRunning = false,
+                    status = issue,
+                    tone = DashboardMessageTone.WARNING,
+                ))
+            }
+            return
+        }
+
+        _uiState.update {
+            it.copy(sdkInferAsyncTest = EngineTestState(
+                isRunning = true,
+                status = "Connecting SDK client…",
+                tone = DashboardMessageTone.INFO,
+            ))
+        }
+
+        viewModelScope.launch {
+            val ownedSdk = sdkClientForTest == null
+            val sdk = sdkClientForTest ?: com.adsamcik.mindlayer.sdk.Mindlayer.connect(context)
+            try {
+                sdk.awaitConnected()
+                _uiState.update {
+                    it.copy(sdkInferAsyncTest = it.sdkInferAsyncTest.copy(
+                        status = "Creating SDK session…",
+                    ))
+                }
+                val sessionId = withContext(Dispatchers.IO) {
+                    sdk.createSession {
+                        systemPrompt("You are a helpful assistant. Be concise.")
+                        maxTokens(128)
+                    }
+                }
+                _uiState.update {
+                    it.copy(sdkInferAsyncTest = it.sdkInferAsyncTest.copy(
+                        status = "Session ${sessionId.take(8)}… created • calling inferAsync…",
+                    ))
+                }
+                val response = withContext(Dispatchers.IO) {
+                    sdk.inferAsync(sessionId, "Hello! What are you?")
+                }
+
+                val completedAt = System.currentTimeMillis()
+                val (status, tone) = when {
+                    response.isNotBlank() -> "Completed • ${response.length} chars" to DashboardMessageTone.SUCCESS
+                    else -> "inferAsync returned empty response" to DashboardMessageTone.WARNING
+                }
+                _uiState.update {
+                    it.copy(sdkInferAsyncTest = EngineTestState(
+                        isRunning = false,
+                        status = status,
+                        tone = tone,
+                        output = response,
+                        lastCompletedAtMs = completedAt,
+                    ))
+                }
+            } catch (e: Exception) {
+                val rendered = e.toInferenceErrorMessage()
+                _uiState.update {
+                    it.copy(sdkInferAsyncTest = it.sdkInferAsyncTest.copy(
+                        isRunning = false,
+                        status = "SDK infer-async test failed: $rendered",
+                        tone = DashboardMessageTone.ERROR,
+                        output = rendered,
+                        lastCompletedAtMs = System.currentTimeMillis(),
+                    ))
+                }
+            } finally {
+                if (ownedSdk) sdk.disconnect()
+            }
+        }
+    }
+
+    /**
+     * Exercises the SDK facade's [com.adsamcik.mindlayer.sdk.Mindlayer.inferRealtime]
+     * streaming path and verifies that [com.adsamcik.mindlayer.sdk.MindlayerEvent]
+     * token-delta events are delivered correctly.
+     */
+    fun runSdkInferRealtimeTest(context: Context) {
+        _uiState.value.sdkInferRealtimeTestReadinessIssue()?.let { issue ->
+            _uiState.update {
+                it.copy(sdkInferRealtimeTest = it.sdkInferRealtimeTest.copy(
+                    isRunning = false,
+                    status = issue,
+                    tone = DashboardMessageTone.WARNING,
+                ))
+            }
+            return
+        }
+
+        _uiState.update {
+            it.copy(sdkInferRealtimeTest = EngineTestState(
+                isRunning = true,
+                status = "Connecting SDK client…",
+                tone = DashboardMessageTone.INFO,
+            ))
+        }
+
+        viewModelScope.launch {
+            val ownedSdk = sdkClientForTest == null
+            val sdk = sdkClientForTest ?: com.adsamcik.mindlayer.sdk.Mindlayer.connect(context)
+            try {
+                sdk.awaitConnected()
+                _uiState.update {
+                    it.copy(sdkInferRealtimeTest = it.sdkInferRealtimeTest.copy(
+                        status = "Creating SDK session…",
+                    ))
+                }
+                val sessionId = withContext(Dispatchers.IO) {
+                    sdk.createSession {
+                        systemPrompt("You are a helpful assistant. Be concise.")
+                        maxTokens(128)
+                    }
+                }
+                _uiState.update {
+                    it.copy(sdkInferRealtimeTest = it.sdkInferRealtimeTest.copy(
+                        status = "Session ${sessionId.take(8)}… created • streaming inferRealtime…",
+                    ))
+                }
+                val handle = withContext(Dispatchers.IO) {
+                    sdk.inferRealtime(sessionId, "Count to 3.")
+                }
+
+                val output = StringBuilder()
+                var deltaCount = 0
+                var done = false
+                handle.events.collect { event ->
+                    when (event) {
+                        is com.adsamcik.mindlayer.sdk.MindlayerEvent.TextDelta -> {
+                            output.append(event.text)
+                            deltaCount++
+                            _uiState.update {
+                                it.copy(sdkInferRealtimeTest = it.sdkInferRealtimeTest.copy(
+                                    output = output.toString(),
+                                ))
+                            }
+                        }
+                        is com.adsamcik.mindlayer.sdk.MindlayerEvent.Done -> done = true
+                        is com.adsamcik.mindlayer.sdk.MindlayerEvent.Error -> throw com.adsamcik.mindlayer.sdk.MindlayerException.fromStreamError(
+                            message = event.message,
+                            codeName = event.code,
+                            seq = event.seq,
+                            tsMs = event.tsMs,
+                        )
+                        else -> { /* Started, Metrics, Unknown — ignored */ }
+                    }
+                }
+
+                val completedAt = System.currentTimeMillis()
+                val (status, tone) = when {
+                    output.isNotEmpty() && done -> "Completed • $deltaCount delta(s)" to DashboardMessageTone.SUCCESS
+                    output.isNotEmpty() -> "Stream ended without Done event" to DashboardMessageTone.WARNING
+                    else -> "inferRealtime returned empty stream" to DashboardMessageTone.WARNING
+                }
+                _uiState.update {
+                    it.copy(sdkInferRealtimeTest = EngineTestState(
+                        isRunning = false,
+                        status = status,
+                        tone = tone,
+                        output = output.toString(),
+                        lastCompletedAtMs = completedAt,
+                    ))
+                }
+            } catch (e: Exception) {
+                val rendered = e.toInferenceErrorMessage()
+                _uiState.update {
+                    it.copy(sdkInferRealtimeTest = it.sdkInferRealtimeTest.copy(
+                        isRunning = false,
+                        status = "SDK infer-realtime test failed: $rendered",
+                        tone = DashboardMessageTone.ERROR,
+                        output = rendered,
+                        lastCompletedAtMs = System.currentTimeMillis(),
+                    ))
+                }
+            } finally {
+                if (ownedSdk) sdk.disconnect()
+            }
+        }
+    }
+
+    /**
+     * Exercises the SDK facade's stateless
+     * [com.adsamcik.mindlayer.sdk.Mindlayer.generateWithImage] path with the
+     * same indigo-background fixture used by [runImageInferenceTest].
+     */
+    fun runSdkGenerateWithImageTest(context: Context) {
+        _uiState.value.sdkGenerateWithImageTestReadinessIssue()?.let { issue ->
+            _uiState.update {
+                it.copy(sdkGenerateWithImageTest = it.sdkGenerateWithImageTest.copy(
+                    isRunning = false,
+                    status = issue,
+                    tone = DashboardMessageTone.WARNING,
+                ))
+            }
+            return
+        }
+
+        _uiState.update {
+            it.copy(sdkGenerateWithImageTest = EngineTestState(
+                isRunning = true,
+                status = "Rendering fixture bitmap…",
+                tone = DashboardMessageTone.INFO,
+            ))
+        }
+
+        viewModelScope.launch {
+            val ownedSdk = sdkClientForTest == null
+            val sdk = sdkClientForTest ?: com.adsamcik.mindlayer.sdk.Mindlayer.connect(context)
+            try {
+                val bitmap = withContext(Dispatchers.IO) { renderImageInferenceFixtureBitmap() }
+                try {
+                    sdk.awaitConnected()
+                    _uiState.update {
+                        it.copy(sdkGenerateWithImageTest = it.sdkGenerateWithImageTest.copy(
+                            status = "Calling generateWithImage…",
+                        ))
+                    }
+                    val response = withContext(Dispatchers.IO) {
+                        sdk.generateWithImage(IMAGE_INFERENCE_PROMPT, bitmap) {
+                            maxTokens(256)
+                        }
+                    }
+
+                    val completedAt = System.currentTimeMillis()
+                    val (status, tone) = when {
+                        response.isNotBlank() -> "Completed • ${response.length} chars" to DashboardMessageTone.SUCCESS
+                        else -> "generateWithImage returned empty response" to DashboardMessageTone.WARNING
+                    }
+                    _uiState.update {
+                        it.copy(sdkGenerateWithImageTest = EngineTestState(
+                            isRunning = false,
+                            status = status,
+                            tone = tone,
+                            output = response,
+                            lastCompletedAtMs = completedAt,
+                        ))
+                    }
+                } finally {
+                    bitmap.recycle()
+                }
+            } catch (e: Exception) {
+                val rendered = e.toInferenceErrorMessage()
+                _uiState.update {
+                    it.copy(sdkGenerateWithImageTest = it.sdkGenerateWithImageTest.copy(
+                        isRunning = false,
+                        status = "SDK generate-with-image test failed: $rendered",
+                        tone = DashboardMessageTone.ERROR,
+                        output = rendered,
+                        lastCompletedAtMs = System.currentTimeMillis(),
+                    ))
+                }
+            } finally {
+                if (ownedSdk) sdk.disconnect()
+            }
+        }
+    }
+
+    /**
+     * Exercises the SDK facade's one-shot OCR path
+     * ([com.adsamcik.mindlayer.sdk.Mindlayer.ocrAsync]) with LLM extraction
+     * enabled. Renders the same fixture used by [runOcrTest] so results are
+     * directly comparable against the AIDL-based card.
+     */
+    fun runOcrLlmExtractionTest(context: Context) {
+        _uiState.value.ocrLlmExtractionTestReadinessIssue()?.let { issue ->
+            _uiState.update {
+                it.copy(ocrLlmExtractionTest = it.ocrLlmExtractionTest.copy(
+                    isRunning = false,
+                    status = issue,
+                    tone = DashboardMessageTone.WARNING,
+                ))
+            }
+            return
+        }
+
+        _uiState.update {
+            it.copy(ocrLlmExtractionTest = EngineTestState(
+                isRunning = true,
+                status = "Rendering OCR fixture PNG…",
+                tone = DashboardMessageTone.INFO,
+            ))
+        }
+
+        viewModelScope.launch {
+            val ownedSdk = sdkClientForTest == null
+            val sdk = sdkClientForTest ?: com.adsamcik.mindlayer.sdk.Mindlayer.connect(context)
+            try {
+                val pngBytes = withContext(Dispatchers.IO) {
+                    val file = renderOcrFixturePng(context.cacheDir)
+                    file.readBytes()
+                }
+                sdk.awaitConnected()
+                _uiState.update {
+                    it.copy(ocrLlmExtractionTest = it.ocrLlmExtractionTest.copy(
+                        status = "Calling ocrAsync with LLM extraction…",
+                    ))
+                }
+                val result = withContext(Dispatchers.IO) {
+                    sdk.ocrAsync(
+                        bytes = pngBytes,
+                        mimeType = "image/png",
+                        options = com.adsamcik.mindlayer.OcrImageOptions(
+                            runLlmExtraction = true,
+                        ),
+                    )
+                }
+
+                val completedAt = System.currentTimeMillis()
+                val lineCount = result.lines.size
+                val hasExtraction = result.extractionJson != null || result.extractionFields.isNotEmpty()
+                val summary = buildString {
+                    append("lines=$lineCount")
+                    if (hasExtraction) append(" • extraction=yes")
+                    append(" • backend=${result.backend}")
+                    append(" • ocr=${result.ocrDurationMs}ms")
+                    if (result.llmDurationMs > 0) append(" • llm=${result.llmDurationMs}ms")
+                }
+                val (status, tone) = when {
+                    lineCount > 0 -> "Completed • $summary" to DashboardMessageTone.SUCCESS
+                    else -> "OCR returned 0 lines — recognition model may not have loaded" to DashboardMessageTone.WARNING
+                }
+                val outputText = buildString {
+                    result.lines.forEachIndexed { i, line -> appendLine("[$i] ${line.text}") }
+                    result.extractionJson?.let { appendLine("\nextraction: $it") }
+                }
+                _uiState.update {
+                    it.copy(ocrLlmExtractionTest = EngineTestState(
+                        isRunning = false,
+                        status = status,
+                        tone = tone,
+                        output = outputText.trim(),
+                        lastCompletedAtMs = completedAt,
+                    ))
+                }
+            } catch (e: Exception) {
+                val rendered = e.toInferenceErrorMessage()
+                val rawMsg = e.message.orEmpty()
+                val tone = if (
+                    rendered.contains("OCR_IMAGE_ONESHOT") ||
+                    rendered.contains("unsupported", ignoreCase = true) ||
+                    rawMsg.contains("OCR_IMAGE_ONESHOT") ||
+                    rawMsg.contains("unsupported", ignoreCase = true)
+                ) {
+                    DashboardMessageTone.WARNING
+                } else {
+                    DashboardMessageTone.ERROR
+                }
+                _uiState.update {
+                    it.copy(ocrLlmExtractionTest = it.ocrLlmExtractionTest.copy(
+                        isRunning = false,
+                        status = "OCR + LLM extraction test failed: $rendered",
+                        tone = tone,
+                        output = rendered,
+                        lastCompletedAtMs = System.currentTimeMillis(),
+                    ))
+                }
+            } finally {
+                if (ownedSdk) sdk.disconnect()
+            }
+        }
+    }
+
     // ---- All-engines verification --------------------------------------------
 
     /**
-     * Sequentially exercise all three engines (embeddings, OCR, chat) so a
+     * Sequentially exercise all eight verification paths (embeddings, OCR,
+     * image inference AIDL, SDK infer-async, SDK infer-realtime,
+     * SDK generate-with-image, OCR + LLM extraction, and chat) so a
      * dashboard user can prove the on-device AI stack is healthy with a
      * single tap. Order is fastest-first so the user sees green badges
      * accumulate while the slow chat warmup runs last.
      *
-     * Runs are sequential to avoid loading three multi-GB models
+     * Runs are sequential to avoid loading multiple multi-GB models
      * simultaneously and tripping the service's memory budget. Each step
      * is already a no-op if the corresponding engine is mid-run, so
      * the user can also still poke the individual buttons.
@@ -1150,6 +1850,21 @@ class DashboardViewModel : ViewModel() {
 
             runOcrTest(context)
             awaitOcrTestComplete()
+
+            runImageInferenceTest(context)
+            awaitImageInferenceTestComplete()
+
+            runSdkInferAsyncTest(context)
+            awaitSdkInferAsyncTestComplete()
+
+            runSdkInferRealtimeTest(context)
+            awaitSdkInferRealtimeTestComplete()
+
+            runSdkGenerateWithImageTest(context)
+            awaitSdkGenerateWithImageTestComplete()
+
+            runOcrLlmExtractionTest(context)
+            awaitOcrLlmExtractionTestComplete()
 
             runTestInference()
             // Don't await chat — the dashboard already shows its progress
@@ -1165,6 +1880,36 @@ class DashboardViewModel : ViewModel() {
 
     private suspend fun awaitOcrTestComplete() {
         while (_uiState.value.ocrTest.isRunning && viewModelScope.isActive) {
+            delay(250)
+        }
+    }
+
+    private suspend fun awaitImageInferenceTestComplete() {
+        while (_uiState.value.imageInferenceTest.isRunning && viewModelScope.isActive) {
+            delay(250)
+        }
+    }
+
+    private suspend fun awaitSdkInferAsyncTestComplete() {
+        while (_uiState.value.sdkInferAsyncTest.isRunning && viewModelScope.isActive) {
+            delay(250)
+        }
+    }
+
+    private suspend fun awaitSdkInferRealtimeTestComplete() {
+        while (_uiState.value.sdkInferRealtimeTest.isRunning && viewModelScope.isActive) {
+            delay(250)
+        }
+    }
+
+    private suspend fun awaitSdkGenerateWithImageTestComplete() {
+        while (_uiState.value.sdkGenerateWithImageTest.isRunning && viewModelScope.isActive) {
+            delay(250)
+        }
+    }
+
+    private suspend fun awaitOcrLlmExtractionTestComplete() {
+        while (_uiState.value.ocrLlmExtractionTest.isRunning && viewModelScope.isActive) {
             delay(250)
         }
     }

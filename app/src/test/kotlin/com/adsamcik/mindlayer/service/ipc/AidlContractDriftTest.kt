@@ -1,7 +1,6 @@
 package com.adsamcik.mindlayer.service.ipc
 
 import org.junit.Assert.assertArrayEquals
-import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.nio.file.Files
 import java.nio.file.Path
@@ -14,21 +13,10 @@ class AidlContractDriftTest {
         val root = repoRoot()
         val appDir = root.resolve("app/src/main/aidl/com/adsamcik/mindlayer")
         val sdkDir = root.resolve("sdk/src/main/aidl/com/adsamcik/mindlayer")
-        val appFiles = Files.list(appDir).use { stream ->
-            stream.filter { it.fileName.toString().endsWith(".aidl") }
-                .map { it.fileName.toString() }
-                .sorted()
-                .toList()
-        }
-
-        val sdkFiles = Files.list(sdkDir).use { stream ->
-            stream.filter { it.fileName.toString().endsWith(".aidl") }
-                .map { it.fileName.toString() }
-                .sorted()
-                .toList()
-        }
-        assertEquals("App and SDK AIDL file sets differ", sdkFiles, appFiles)
-        appFiles.forEach { fileName ->
+        // Only the two service-interface files are kept in :app; parcelable stubs
+        // are exported by :sdk's aidl_parcelable artifact and must not be duplicated.
+        val interfaceFiles = listOf("IClientCallback.aidl", "IMindlayerService.aidl")
+        interfaceFiles.forEach { fileName ->
             val appBytes = readNormalized(appDir.resolve(fileName))
             val sdkBytes = readNormalized(sdkDir.resolve(fileName))
             assertArrayEquals("AIDL drift in $fileName", appBytes, sdkBytes)
