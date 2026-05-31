@@ -172,6 +172,26 @@
     <string name="dashboard_test_ocr_subtitle">Renders a small PNG with the words “Hello world 1234” and runs it through the PaddleOCR session pipeline.</string>
     <string name="dashboard_test_ocr_button_run">Test OCR</string>
     <string name="dashboard_test_ocr_button_running">OCR…</string>
+    <string name="dashboard_test_image_inference_label">Image + Text (Gemma multimodal)</string>
+    <string name="dashboard_test_image_inference_subtitle">Renders a 320×240 PNG, attaches it to an inference request, and verifies Gemma returns a non-empty response.</string>
+    <string name="dashboard_test_image_inference_button_run">Test image</string>
+    <string name="dashboard_test_image_inference_button_running">Imaging…</string>
+    <string name="dashboard_test_sdk_infer_async_label">SDK infer — single-shot</string>
+    <string name="dashboard_test_sdk_infer_async_subtitle">Calls Mindlayer.inferAsync through the SDK facade and verifies a non-empty response is returned.</string>
+    <string name="dashboard_test_sdk_infer_async_button_run">Test SDK infer</string>
+    <string name="dashboard_test_sdk_infer_async_button_running">Inferring…</string>
+    <string name="dashboard_test_sdk_infer_realtime_label">SDK infer — streaming</string>
+    <string name="dashboard_test_sdk_infer_realtime_subtitle">Calls Mindlayer.inferRealtime through the SDK facade and verifies token-delta events are streamed correctly.</string>
+    <string name="dashboard_test_sdk_infer_realtime_button_run">Test SDK stream</string>
+    <string name="dashboard_test_sdk_infer_realtime_button_running">Streaming…</string>
+    <string name="dashboard_test_sdk_generate_with_image_label">SDK generate with image</string>
+    <string name="dashboard_test_sdk_generate_with_image_subtitle">Calls the stateless Mindlayer.generateWithImage with a rendered fixture PNG and verifies a non-empty description is returned.</string>
+    <string name="dashboard_test_sdk_generate_with_image_button_run">Test image gen</string>
+    <string name="dashboard_test_sdk_generate_with_image_button_running">Generating…</string>
+    <string name="dashboard_test_ocr_llm_extraction_label">OCR + LLM extraction</string>
+    <string name="dashboard_test_ocr_llm_extraction_subtitle">Calls Mindlayer.ocrAsync with LLM extraction enabled on a rendered text fixture and verifies at least one line is recognised.</string>
+    <string name="dashboard_test_ocr_llm_extraction_button_run">Test OCR+LLM</string>
+    <string name="dashboard_test_ocr_llm_extraction_button_running">Extracting…</string>
     <!-- F-094 (OCR accelerator failure cache) status row strings -->
     <string name="dashboard_ocr_cooldown_message">%1$s acceleration disabled until %2$s</string>
     <string name="dashboard_ocr_cooldown_details">failed: %1$s × %2$d</string>
