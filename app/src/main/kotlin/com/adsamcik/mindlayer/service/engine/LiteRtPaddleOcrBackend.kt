@@ -221,6 +221,24 @@ class LiteRtPaddleOcrBackend internal constructor(
                 val loadedDictionary = loadDictionary(bundle.dictionaryPath)
                 val newRunner = runnerFactory(bundle, backend)
                 pendingRunner = newRunner
+                // Runtime smoke test on non-CPU backends: a single warm-up
+                // det inference validates that the GPU/NPU runtime can
+                // actually allocate input buffers AND produces finite
+                // output. Compile-time success (e.g. "Replacing 322/322
+                // node(s) with delegate") does NOT guarantee runtime
+                // success: observed on Android emulator (swiftshader
+                // LITERT_OPENGL backend) the float [1,640,640,3] det
+                // input buffer allocation throws at createInputBuffers
+                // because the host GLES driver refuses 3-channel float
+                // texture imports of that size. Catching at warm-up
+                // time lets the outer `initialize()` catch perform the
+                // GPU→CPU fallback before any user-facing recognise().
+                // Skipped on CPU since CPU XNNPACK has no equivalent
+                // allocation pitfalls and the warm-up is a real ~100-
+                // 1000ms compute cost we shouldn't pay twice.
+                if (backend != "CPU") {
+                    validateBackendNumerics(newRunner, backend)
+                }
                 LoadedPipeline(
                     runner = newRunner,
                     dictionary = loadedDictionary,
@@ -251,6 +269,48 @@ class LiteRtPaddleOcrBackend internal constructor(
             throw t
         } finally {
             pendingRunner = null
+        }
+    }
+
+    /**
+     * Run a single warm-up det inference and reject the backend if input
+     * buffer allocation or the inference itself fails, or if the output
+     * contains NaN/Inf.
+     *
+     * Two real-device classes of failure this catches:
+     *
+     * 1. Runtime-buffer-allocation failure on GPU backends whose driver
+     *    cannot honour the requested tensor layout. Observed on the
+     *    Android emulator's swiftshader LITERT_OPENGL backend, where
+     *    `createInputBuffers()` throws `LiteRtException("Failed to
+     *    create input buffers")` for a `float [1,640,640,3]` det input
+     *    even though compile reported 100% delegated nodes.
+     *
+     * 2. FP16 overflow / NaN in the SVTR attention softmax of the rec
+     *    sub-model. The QKV-split surgery (`scripts/build-paddleocr-
+     *    models/onnx_split_qkv.py`) makes rec GPU-compileable but the
+     *    attention math still benefits from FP32 + infiniteFloatCapping
+     *    (configured in [RealPaddleOcrLiteRtRunner]); this smoke test is
+     *    the second line of defence if a future LiteRT bump regresses
+     *    that path.
+     *
+     * Throws [BackendNumericsException] (which extends [IllegalStateException]
+     * so the outer `initialize` catch performs the same GPU→CPU fallback
+     * dance it already does for compile failures).
+     */
+    private fun validateBackendNumerics(
+        runner: PaddleOcrLiteRtRunner,
+        backend: String,
+    ) {
+        val warmupInput = FloatArray(DET_INPUT_WIDTH * DET_INPUT_HEIGHT * CHANNELS)
+        val output = runner.runDetection(warmupInput)
+        val firstBadIdx = output.indexOfFirst { !it.isFinite() }
+        if (firstBadIdx >= 0) {
+            throw BackendNumericsException(
+                "PaddleOCR $backend det warm-up produced non-finite value " +
+                    "at index $firstBadIdx (value=${output[firstBadIdx]}). " +
+                    "Backend will fall back to CPU.",
+            )
         }
     }
 
@@ -739,6 +799,15 @@ class LiteRtPaddleOcrBackend internal constructor(
     private data class ClassProbability(val index: Int, val probability: Float)
 
     private enum class Normalization { IMAGE_NET, CENTERED }
+
+    /**
+     * Thrown by [validateBackendNumerics] when a non-CPU PaddleOCR backend
+     * either fails the runtime smoke test (input-buffer alloc, run-call
+     * exception) or returns non-finite values. Subclasses
+     * [IllegalStateException] so the outer init catch performs the same
+     * GPU→CPU fallback dance it already uses for compile-time failures.
+     */
+    class BackendNumericsException(message: String) : IllegalStateException(message)
 
     companion object {
         private const val TAG = "LiteRtPaddleOcrBackend"
