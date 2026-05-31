@@ -35,19 +35,24 @@ name: Build PaddleOCR PP-OCRv5 mobile .tflite models
 # Re-confirm soak compliance whenever you bump any of these.
 #
 # Why -ofgd + -cgdc: PaddleOCR PP-OCRv5 detection's HardSigmoid blocks
-# emit `MAXIMUM(0)+MINIMUM(1)`, which onnx2tf 2.4.0 canonicalises into a
-# single `RELU_0_TO_1` node for graph efficiency. The TFLite GPU
-# delegate doesn't support `RELU_0_TO_1`, so the whole model fails to
-# compile on GPU (`LiteRtException: Failed to compile model`), forcing
-# every device into the CPU fallback path and triggering the
-# `OcrAcceleratorFailureCache` 24h cooldown. The TRANSPOSE_CONV ops also
-# get emitted at schema version 4 (per-channel quant), while the GPU
-# kernel only supports version 3. `--optimization_for_gpu_delegate`
-# rewrites both back into GPU-compatible forms; `--check_gpu_delegate_
-# compatibility` fails the CI step loudly if a future onnx2tf upgrade
-# regresses the conversion. Verified on emulator-5554 (LITERT_OPENGL)
-# and Samsung S928B (LITERT_CL OpenCL) — without these flags the det
-# model is the bottleneck for the entire OCR engine.
+# (SE attention) emit `MAXIMUM(0)+MINIMUM(1)`, which onnx2tf 2.4.0
+# canonicalises into a single `RELU_0_TO_1` node for graph efficiency.
+# It also emits `TRANSPOSE_CONV` at schema version 4 (per-channel
+# quant). LiteRT 2.1.5's GPU delegate kernel registry covers neither
+# op — so the whole detection model fails to compile on GPU and the
+# engine takes the CPU fallback path (24h cooldown). See
+# docs/PADDLEOCR_GPU_INVESTIGATION.md for the full investigation
+# trail, the workaround options (LiteRT version bump, onnx2tf
+# downgrade, post-conversion .tflite surgery), and why we currently
+# accept CPU on the runtime side. The conversion still passes the
+# GPU compatibility check (`-cgdc`) against TFLite Runtime 2.19.1's
+# op table — when LiteRT upgrades, the same artefacts will Just Work
+# on GPU without re-converting.
+#
+# `--optimization_for_gpu_delegate` (`-ofgd`) is kept as a forward-
+# looking hint and `--check_gpu_delegate_compatibility` (`-cgdc`)
+# ensures a future onnx2tf bump that regresses op-level GPU support
+# is loudly visible in the workflow summary.
 #
 # Why -tb tf_converter for rec: onnx2tf v2.4.0 switched its default
 # `--tflite_backend` from `tf_converter` to `flatbuffer_direct`. The new
@@ -269,13 +274,15 @@ jobs:
             # `flatbuffer_direct` backend would emit an unresolvable
             # `ONNX_LAYERNORMALIZATION` custom op for the rec head.
             #
-            # `-ofgd` rewrites GPU-incompatible canonicalisations
-            # (`RELU_0_TO_1` -> `MAXIMUM(0)+MINIMUM(1)`, TRANSPOSE_CONV
-            # v4 -> v3) into forms the LiteRT GPU delegate accepts so
-            # det/rec/cls compile on GPU.
-            # `-cgdc` runs onnx2tf's GPU delegate compatibility check
-            # and fails the conversion step if a future tooling bump
-            # regresses op-level GPU support.
+            # `-ofgd` is a forward-looking optimisation hint (onnx2tf
+            # rewrites a subset of GPU-incompatible ops). `-cgdc` runs
+            # onnx2tf's GPU delegate compatibility report at conversion
+            # time so a future regression of op-level GPU support is
+            # loudly visible. Current state: the converted artefacts
+            # pass `-cgdc` against TFLite Runtime 2.19.1 but LiteRT
+            # 2.1.5's GPU delegate has no kernels for `RELU_0_TO_1` or
+            # `TRANSPOSE_CONV v4`, so the runtime still falls back to
+            # CPU. See docs/PADDLEOCR_GPU_INVESTIGATION.md.
             ../.venv-onnx2tf/bin/onnx2tf \
               -i "$simp_onnx" \
               -o "ppocrv5-${kind}-saved" \
