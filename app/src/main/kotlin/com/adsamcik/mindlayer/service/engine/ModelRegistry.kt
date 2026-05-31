@@ -42,6 +42,14 @@ object ModelRegistry {
     private const val INTEGRITY_MANIFEST = "model_integrity.json"
     private val SHA256_REGEX = Regex("(?i)^[0-9a-f]{64}$")
 
+    /**
+     * Default image budget for vision-capable models. Conservative: most
+     * single-image chat callers (Starlit Coffee bag scan, OCR-driver
+     * sample, etc.) push exactly one image per turn. Bump per-model in
+     * [buildModelInfo] when a model actually advertises more.
+     */
+    private const val DEFAULT_MAX_IMAGES_PER_TURN: Int = 1
+
     /** Strict ordering of trust tiers. Lower ordinal = more trusted. */
     private enum class Origin { AI_PACK, FILES_DIR, EXTERNAL_FILES, CACHE_DIR, SIDELOAD }
 
@@ -226,8 +234,23 @@ object ModelRegistry {
             path = file.absolutePath,
             sizeBytes = file.length(),
             sha256 = sha256,
+            supportsVision = deriveSupportsVision(id),
+            maxImagesPerTurn = if (deriveSupportsVision(id)) DEFAULT_MAX_IMAGES_PER_TURN else 0,
         )
     }
+
+    /**
+     * Heuristic: every Gemma 4 family model has a vision encoder bundled in
+     * the `.litertlm` package. The registry intentionally over-includes
+     * here — declaring vision on a text-only model just allocates the
+     * vision executor at init (harmless), while under-declaring on a
+     * multimodal model SIGSEGVs on first image (LiteRT-LM #1874).
+     *
+     * If a future text-only Gemma 4 ship breaks this assumption, switch to
+     * reading the litertlm metadata header instead of id-pattern matching.
+     */
+    private fun deriveSupportsVision(id: String): Boolean =
+        id.startsWith("gemma-4-", ignoreCase = true)
 
     private fun verifyModelFile(
         file: File,

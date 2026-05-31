@@ -354,7 +354,23 @@ class EngineManager(
                 val config = EngineConfig(
                     modelPath = path,
                     backend = backend,
+                    // F-{vision}: when the model advertises multimodal vision
+                    // (Gemma 4 family), reuse the chosen text backend for the
+                    // vision encoder. Setting `visionBackend = null` would
+                    // skip vision-executor init entirely, and the native
+                    // engine SIGSEGVs on the first image content part (see
+                    // LiteRT-LM #1874). CPU on emulator is the validated
+                    // path; GPU is exercised on real-device CI lanes.
+                    visionBackend = if (target.supportsVision) backend else null,
                     maxNumTokens = maxTokens,
+                    // F-{vision}: LiteRT-LM defaults `max_num_images` to 0
+                    // even when the vision executor is loaded — the result
+                    // is `INVALID_ARGUMENT: Provided more images than
+                    // expected in the prompt` on Android x86_64 + .litertlm
+                    // models whose metadata header doesn't ship the field
+                    // (see LiteRT-LM #1686 comments). Forcing a positive
+                    // explicit value bypasses the auto-derivation bug.
+                    maxNumImages = target.maxImagesPerTurn.takeIf { it > 0 },
                     cacheDir = cacheDir.absolutePath,
                 )
 

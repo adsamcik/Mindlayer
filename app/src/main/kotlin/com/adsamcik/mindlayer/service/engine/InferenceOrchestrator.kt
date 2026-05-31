@@ -573,9 +573,16 @@ class InferenceOrchestrator(
                 writer.writeHeader(meta.requestId)
 
                 // Build multimodal content parts.
-                // ⚠️ Gemma 4 multimodal is blocked by issue #1874 (missing
-                // prompt-template override). The Content parts are wired
-                // correctly but may not produce valid output until resolved.
+                //
+                // Gemma 4 multimodal previously hit LiteRT-LM #1874 (Kotlin
+                // API never set the prompt-template image placeholder) and
+                // #1686 (`max_num_images` defaulted to 0 even when the vision
+                // executor was loaded). Both are fixed upstream as of
+                // litertlm 0.12.0 PLUS [EngineManager] now passes
+                // `visionBackend` + explicit `maxNumImages` for any model
+                // that advertises `ModelInfo.supportsVision = true`. The
+                // wire below stays identical: text + image + audio parts
+                // map 1:1 onto litertlm's `Content` discriminator.
                 val parts = mutableListOf<Content>()
                 val textContent = meta.textContent
                 if (textContent != null) {
