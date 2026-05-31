@@ -547,13 +547,20 @@ class LiteRtPaddleOcrBackend internal constructor(
             }
         }
 
+        val totalDurationMs = elapsedMs(totalStart)
+        MindlayerLog.i(
+            TAG,
+            "OCR recognise: backend=$activeBackend, lines=${lines.size}, " +
+                "det=${detDurationMs}ms, rec=${recDurationMs}ms, cls=${clsDurationMs}ms, " +
+                "total=${totalDurationMs}ms, candidates=${candidates.size}",
+        )
         return OcrEngineOutput(
             lines = lines,
             backend = activeBackend,
             detDurationMs = detDurationMs,
             recDurationMs = recDurationMs,
             clsDurationMs = clsDurationMs,
-            totalDurationMs = elapsedMs(totalStart),
+            totalDurationMs = totalDurationMs,
         )
     }
 

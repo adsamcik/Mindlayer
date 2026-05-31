@@ -946,7 +946,16 @@ class DashboardViewModel : ViewModel() {
                         "PaddleOCR processed the fixture but produced no recognisable text \u2014 " +
                             "detection found 0 candidates in the rendered “$OCR_FIXTURE_TEXT” strip " +
                             "(check Recent Logs for native PaddleOCR warnings)"
-                    else -> "Completed \u2022 recognized ${drained.lineCount} line(s) on PaddleOCR / CPU"
+                    else -> {
+                        // The backend label is process-local
+                        // (`LiteRtAcceleratorResolver` lives in `:ml`, dashboard
+                        // runs in default process) so this status line can't
+                        // surface the actual GPU/CPU choice without a new
+                        // AIDL hop. Keep the message factual — the bundle is
+                        // PP-OCRv5 mobile and the accelerator badge lives on
+                        // the engine card above.
+                        "Completed \u2022 recognized ${drained.lineCount} line(s) on PaddleOCR (PP-OCRv5 mobile)"
+                    }
                 }
                 val output = buildString {
                     appendLine("Events:    ${drained.totalEvents} total \u2022 ${drained.frameProcessedCount} processed \u2022 ${drained.errorCount} error(s)")
