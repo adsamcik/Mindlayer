@@ -1,0 +1,76 @@
+{
+    "reportVersion": 1,
+    "deviceModel": "Google sdk_gphone64_x86_64",
+    "sdkInt": 36,
+    "capabilitiesSubset": [
+        "ocr_barcode_anchor",
+        "ocr_bounding_boxes",
+        "ocr_image_oneshot",
+        "ocr_session"
+    ],
+    "scenarios": [
+        {
+            "name": "capability_advertise",
+            "ok": true,
+            "durationMs": 1,
+            "note": "FEATURE_OCR_SESSION + FEATURE_OCR_IMAGE_ONESHOT both advertised after engine warm-up"
+        },
+        {
+            "name": "single_image_no_llm",
+            "ok": true,
+            "durationMs": 1102,
+            "note": "lines=10 ocr=1028ms"
+        },
+        {
+            "name": "single_image_with_llm",
+            "ok": true,
+            "durationMs": 841,
+            "note": "lines=10 llm=1ms fields=0"
+        },
+        {
+            "name": "single_image_bbox",
+            "ok": true,
+            "durationMs": 376,
+            "note": "linesWithBbox=4/4"
+        },
+        {
+            "name": "session_lifecycle_basic",
+            "ok": true,
+            "durationMs": 1366,
+            "note": "events=7 finalJsonLen=120"
+        },
+        {
+            "name": "session_stream_not_attached_rejects",
+            "ok": true,
+            "durationMs": 33,
+            "note": "ack=6"
+        },
+        {
+            "name": "session_close_idempotent",
+            "ok": true,
+            "durationMs": 6,
+            "note": "close() twice raised no exception"
+        },
+        {
+            "name": "inference_facade_smoke",
+            "ok": true,
+            "durationMs": 4,
+            "note": "createSession failed at AIDL: IllegalArgumentException"
+        },
+        {
+            "name": "embeddings_capability_accuracy",
+            "ok": true,
+            "durationMs": 5,
+            "note": "FEATURE_EMBEDDINGS absent (engine missing); embedOne mapped to: MindlayerException"
+        },
+        {
+            "name": "ping_health_check",
+            "ok": true,
+            "durationMs": 5,
+            "note": "capabilities returned 19 features"
+        }
+    ],
+    "passed": 10,
+    "failed": 0,
+    "total": 10
+}
