@@ -79,10 +79,37 @@ val generateEmbeddingModelIntegrityManifest by tasks.registering {
                 throw GradleException("Release embedding AI-pack builds require -PembeddingTokenizerSha256=<64 hex>")
             }
         }
+        val zero = "0".repeat(64)
+        // SHA selection precedence (highest first):
+        //   1. -PembeddingModelSha256 / -PembeddingTokenizerSha256 — explicit
+        //      per-build pin (CI, release, dev override)
+        //   2. The currently-committed manifest's SHA per role, IF it's a real
+        //      hex digest (not the all-zeros placeholder). Preserves the
+        //      canonical SHA pinned in source control (see docs/MODEL_SHAS.md)
+        //      so debug builds reproduce production integrity behaviour and
+        //      `./gradlew assembleDebug` doesn't churn the manifest back to
+        //      placeholders on every invocation.
+        //   3. All-zeros placeholder fallback for first-build / clean state.
+        val existingManifest = outputs.files.singleFile.takeIf { it.exists() }
+            ?.runCatching { readText() }?.getOrNull()
+            .orEmpty()
+        fun existingShaForRole(role: String): String? {
+            // Match `…"filename":"…", "sha256":"<hex>", …, "role":"<role>"`
+            // tolerantly across whitespace + key ordering.
+            val perRole = Regex(
+                """\{[^}]*"role"\s*:\s*"$role"[^}]*\}""",
+                RegexOption.DOT_MATCHES_ALL,
+            ).find(existingManifest)?.value ?: return null
+            return Regex("\"sha256\"\\s*:\\s*\"([0-9a-fA-F]{64})\"")
+                .find(perRole)?.groupValues?.get(1)?.lowercase()
+                ?.takeIf { it != zero }
+        }
         val modelSha = modelSha256.takeIf { sha256Re.matches(it) }
-            ?: "0".repeat(64)
+            ?: existingShaForRole("weights")
+            ?: zero
         val tokenizerSha = tokenizerSha256.takeIf { sha256Re.matches(it) }
-            ?: "0".repeat(64)
+            ?: existingShaForRole("tokenizer")
+            ?: zero
         val file = outputs.files.singleFile
         file.parentFile.mkdirs()
         file.writeText(
