@@ -1,27 +1,89 @@
 # PaddleOCR GPU delegate investigation (2026-05-31)
 
-## TL;DR
+## TL;DR — current state (2026-05-31, post-surgery)
 
-PaddleOCR PP-OCRv5 mobile **cannot currently run on the LiteRT GPU
-delegate** in Mindlayer. Engine init attempts GPU, fails to compile,
-falls back to CPU (~XNNPACK), and trips the 24h
-`OcrAcceleratorFailureCache` cooldown. The user-visible impact is the
-"GPU acceleration disabled" banner on the dashboard and slower OCR
-than a GPU-capable device should produce.
+| Model | Pre-surgery | Post-surgery | Δ |
+|---|---|---|---|
+| det (640×640) | 130/244 GPU, compile fails | **322/322 GPU, compile succeeds** | ✅ fully GPU-compatible |
+| rec (48×320) | 220/452 GPU, compile fails | 277/398 GPU, compile fails on 5D RESHAPE/TRANSPOSE | ⚠️ partially improved; structural blocker remains |
+| cls (80×160) | (not reached) | not validated standalone (engine fails on rec first) | TBD |
 
-This is **not** a Mindlayer bug — it is a version-skew between
+**Surgery shipped** at `scripts/build-paddleocr-models/tflite_gpu_fixup.py`
++ wired into the Dockerised conversion pipeline. Verified
+numerically equivalent on CPU (same 3-line output on the dashboard
+fixture as the pre-surgery models).
 
-- `onnx2tf 2.4.0` (our pinned conversion tool, targeting **TFLite
-  Runtime 2.19.1** op coverage), and
-- `LiteRT 2.1.5` (our pinned on-device runtime — and as of 2026-05-31
-  the **latest GA release** of `com.google.ai.edge.litert:litert` on
-  Google Maven, so we cannot simply bump to a newer version that
-  added the missing kernels).
+**End-user-visible state is unchanged**: the engine's current
+all-or-nothing GPU policy means a single model's GPU compile failure
+forces the entire pipeline to CPU. To actually realise the det+cls
+GPU speedup we additionally need either (a) per-model GPU/CPU
+selection in `LiteRtPaddleOcrBackend` (Kotlin refactor, not in
+scope for this session) or (b) rec-side surgery for the 5D RESHAPE
+/ TRANSPOSE ops (structural model rewrite — also out of scope).
 
-The closest realistic fix today is **option 3** below — post-
-conversion `.tflite` surgery to rewrite the two blocker ops in-place
-on the converted flatbuffer. It leaves both pinned versions
-untouched and ~150 lines of Python.
+## The surgery — what it does today
+
+`scripts/build-paddleocr-models/tflite_gpu_fixup.py` runs after
+`onnx2tf` in the Dockerised conversion pipeline and walks the
+flatbuffer in place:
+
+1. **`RELU_0_TO_1` → `MAXIMUM(0) + MINIMUM(1)`** — the LiteRT 2.1.5
+   GPU delegate has no kernel for `RELU_0_TO_1` (a TFLite Runtime
+   2.16+ builtin added for clamp-canonicalisation efficiency).
+   Rewriting it as `MAXIMUM + MINIMUM` is exact: `clamp(x, 0, 1) =
+   min(1, max(0, x))`. Tested counts: det = 10, rec = 2, cls = 2.
+2. **`TRANSPOSE_CONV` opcode version 4 → 3** — v4 added per-channel
+   quant fields; float32 models don't use them, so the on-disk
+   bytes stay valid for v3. Tested counts: det = 1.
+3. **`STRIDED_SLICE` opcode version 4 → 2** — same story; v4 added
+   optional ellipsis-axis-mask. Tested counts: rec = 1.
+
+Backed by `tensorflow.lite.tools.flatbuffer_utils` (Google's
+official mutable-flatbuffer helper, used internally by the TFLite
+team) so we don't ship a hand-rolled flatbuffer codec.
+
+## Why rec still fails GPU compile after surgery
+
+Captured logcat from emulator-5554 (LITERT_OPENGL) — identical
+pattern reproduces on Samsung S928B (LITERT_CL OpenCL Adreno):
+
+```
+E tflite : Following operations are not supported by GPU delegate:
+E tflite : RESHAPE: Tensor "model_44/tf.reshape_11/Reshape" has bad input dims size: 5.
+E tflite : RESHAPE: Tensor "model_44/tf.reshape_5/Reshape"  has bad input dims size: 5.
+E tflite : RESHAPE: Tensor "model_44/tf.strided_slice/StridedSlice" has bad input dims size: 5.
+... (6 strided_slice RESHAPEs)
+E tflite : TRANSPOSE: Tensor "model_44/tf.reshape_11/Reshape" has bad input dims size: 5.
+E tflite : TRANSPOSE: Tensor "model_44/tf.reshape_5/Reshape"  has bad input dims size: 5.
+E tflite : 277 operations will run on the GPU, and the remaining 121 operations will run on the CPU.
+W LiteRtPaddleOcrBackend: PaddleOCR GPU init failed
+       (LiteRtException(Failed to compile model)), falling back to CPU
+```
+
+PP-OCRv5's rec head is SVTR-style (transformer over sequence-of-
+patches): the QKV projection unpacks `[B, T, 3*H*D]` into
+`[B, T, 3, H, D]` (5D), then strided-slices Q / K / V out. The
+LiteRT GPU delegate's tensor-shape pipeline tops out at 4D. Even
+with `-rtpo hardswish` and the surgery's STRIDED_SLICE downgrade,
+the 5D reshape/transpose intermediates remain — they're
+intrinsic to the model's attention block, not artefacts of layout
+conversion.
+
+Onnx2tf has no flag that rewrites 5D into chained 4D ops; that
+class of rewrite needs either upstream tooling support or
+hand-written model surgery.
+
+## What we tried (and what didn't work)
+
+| Attempt | Result |
+|---|---|
+| `-ofgd` (`--optimization_for_gpu_delegate`) | No-op for `RELU_0_TO_1`; does downgrade some other ops. |
+| `-rtpo hardswish` | Decomposed HardSwish (244→360 nodes for det) but blockers remained. |
+| `-rtpo hardsigmoid` | Not in onnx2tf 2.4.0's `-rtpo` whitelist. |
+| Post-surgery RELU_0_TO_1 → MAX+MIN rewrite | ✅ Fixed all RELU_0_TO_1 blockers. |
+| Post-surgery TRANSPOSE_CONV v4 → v3 | ✅ Fixed det. |
+| Post-surgery STRIDED_SLICE v4 → v2 | ✅ Improved rec (220 → 277 GPU ops) but 5D RESHAPE/TRANSPOSE remain. |
+| `--keep_nwc_or_nhwc_or_ndhwc_input_names` | Doesn't apply — the 5D shapes are internal to attention, not layout-conversion artefacts. |
 
 ## Symptom
 
@@ -87,20 +149,21 @@ LiteRT 2.1.5's GPU delegate is pinned at v3.
 | `-rtpo hardsigmoid` | Not supported — onnx2tf 2.4.0's `-rtpo` only accepts `{abs,acos,asin,atan,erf,gathernd,gelu,hardswish,inverse,leakyrelu,matmulinteger,neg,pow,power,prelu}`. |
 | Pre-conversion ONNX surgery (rewrite HardSigmoid -> MAX(0)+MIN(1) chain manually) | Untried — onnx2tf would still canonicalise after the rewrite. |
 
-## What would actually work
+## What would actually unlock end-user-visible GPU
 
 | Option | Viability today | Notes |
 |---|---|---|
-| 1. Bump LiteRT to a release with the missing GPU kernels | ❌ **NOT VIABLE** — `com.google.ai.edge.litert:litert` latest GA on Google Maven is **2.1.5** (the version we already use). The companion `litert-gpu` artifact is stuck at 1.4.2 (legacy delegate path superseded by the GPU support baked into `litert:2.x`). Until Google publishes ≥ 2.2.x there is no newer LiteRT to bump to. Periodically re-check `https://dl.google.com/android/maven2/com/google/ai/edge/litert/litert/maven-metadata.xml`. |
-| 2. Downgrade onnx2tf to a version before the clamp canonicalisation pass landed | ⚠️ Risky | Likely ≤ 2.2.x. Risks losing other recent fixes the current rec/det workflows rely on (LayerNorm handling, fixed-shape simplification). Worth a sandbox test if no other option pans out. |
-| 3. Post-conversion `.tflite` surgery | ✅ **Cheapest viable today** | Parse the flatbuffer, rewrite `RELU_0_TO_1` ops as `MAXIMUM(0)+MINIMUM(1)` pairs, and force `TRANSPOSE_CONV` opcode version to 3. Doable with the `flatbuffers` Python library + the TFLite schema in ~150 lines. Surgical fix that leaves both pinned versions untouched. Validates same day on real hardware. |
-| 4. Live with CPU | ✅ Current state | XNNPACK on Snapdragon 8 Gen 3 already runs the full PP-OCRv5 pipeline in ~1 second for the sample fixture. The real cost is real-time camera OCR throughput where multi-frame-per-second is desired; for single-image async API this is acceptable. |
-| 5. Switch conversion path (e.g. PaddleLite direct, or alternate paddle2tflite tool) | ⚠️ Big unknown | Different toolchain, different bugs. Heavy research investment. |
-| 6. Track upstream — file a LiteRT issue requesting GPU kernels for `RELU_0_TO_1` + `TRANSPOSE_CONV v4` | ✅ Free | Doesn't block anything; helps a future upgrade land sooner. |
+| 1. Bump LiteRT to a release with the missing kernels (`RELU_0_TO_1`, `TRANSPOSE_CONV v4`, `STRIDED_SLICE v4`, **5D RESHAPE/TRANSPOSE**) | ❌ NOT VIABLE | `com.google.ai.edge.litert:litert` latest GA on Google Maven is **2.1.5** (the version we already use). The companion `litert-gpu` artifact is stuck at 1.4.2 (legacy delegate path superseded by the GPU support baked into `litert:2.x`). Until Google publishes ≥ 2.2.x there is no newer LiteRT to bump to. Periodically re-check `https://dl.google.com/android/maven2/com/google/ai/edge/litert/litert/maven-metadata.xml`. |
+| 2. Downgrade onnx2tf to a version before the clamp canonicalisation pass landed | ✅ Now redundant | Post-conversion surgery (option 3) fixes the same problem without a version move. |
+| 3. Post-conversion `.tflite` surgery | ✅ **SHIPPED for the opcode-level blockers** | See `scripts/build-paddleocr-models/tflite_gpu_fixup.py`. det fully fixed; rec partially (5D blockers remain). |
+| 4. Live with CPU | ✅ Current effective state | Engine still routes to CPU because of (5). |
+| **5. Allow per-model GPU/CPU in `LiteRtPaddleOcrBackend`** | ⚠️ **THE NEXT STEP** | Today the backend uses a single `runner` for det+rec+cls and a single `backendLabel`; a per-model split is a medium-sized Kotlin refactor. Would let det+cls compile on GPU while rec stays CPU — det is where most wall-clock time is spent, so this is the big speedup. |
+| 6. rec 5D model surgery | ⚠️ Risky | Rewrite the QKV unpack `[B, T, 3*H*D] → [B, T, 3, H, D]` into a chain of 4D ops. Needs careful numerical equivalence testing. |
+| 7. File upstream LiteRT issue requesting 5D RESHAPE/TRANSPOSE support | ✅ Free | Doesn't block anything; helps a future LiteRT bump cover this without per-model surgery. |
 
-**Current decision: Option 3 (post-conversion .tflite surgery) is the
-cheapest path to GPU on PP-OCRv5 without moving either pinned
-version.**
+**Recommended next steps**: option 5 (per-model GPU/CPU in the
+backend) for the actual speedup, plus option 7 (file the upstream
+issue) so a future LiteRT bump can pick up the rest naturally.
 
 ## Why the conversion workflow still uses `-ofgd` and `-cgdc`
 

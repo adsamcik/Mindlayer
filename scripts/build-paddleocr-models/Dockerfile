@@ -53,10 +53,12 @@ RUN python -m venv /opt/venv-onnx2tf \
         "onnxsim==0.6.3" \
         "onnx==1.20.1" \
         "protobuf==4.25.5" \
-        "numpy==1.26.4"
+        "numpy==1.26.4" \
+        "tflite==2.18.0"
 
 COPY convert.sh /usr/local/bin/convert.sh
-RUN chmod +x /usr/local/bin/convert.sh
+COPY tflite_gpu_fixup.py /usr/local/bin/tflite_gpu_fixup.py
+RUN chmod +x /usr/local/bin/convert.sh /usr/local/bin/tflite_gpu_fixup.py
 
 ENV PADDLEOCR_REF=v3.5.0
 VOLUME ["/work/out"]

@@ -126,6 +126,24 @@ PY
         echo "::error::${kind} contains ONNX_LAYERNORMALIZATION custom op"
         exit 1
     fi
+
+    # Post-conversion GPU-compat surgery — rewrites RELU_0_TO_1 ops
+    # into MAXIMUM(0)+MINIMUM(1) chains and downgrades TRANSPOSE_CONV
+    # opcode v4 -> v3 so the LiteRT 2.1.5 on-device GPU delegate can
+    # compile the model. See docs/PADDLEOCR_GPU_INVESTIGATION.md.
+    #
+    # tflite_gpu_fixup.py lives next to this script — both are copied
+    # into /usr/local/bin by the Dockerfile, and both are typically
+    # mounted from /scripts in dev workflows. Use a relative dispatch
+    # that works in either layout.
+    fixup_py="$(dirname "$0")/tflite_gpu_fixup.py"
+    if [ ! -f "$fixup_py" ]; then
+        fixup_py="/usr/local/bin/tflite_gpu_fixup.py"
+    fi
+    tmp_in="paddleocr-ppocrv5-mobile-${kind}.tflite"
+    tmp_out="paddleocr-ppocrv5-mobile-${kind}.gpu.tflite"
+    /opt/venv-onnx2tf/bin/python "$fixup_py" "$tmp_in" "$tmp_out"
+    mv "$tmp_out" "$tmp_in"
 done
 
 echo "==> Stage character dictionary"
