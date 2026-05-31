@@ -115,6 +115,57 @@ class HistoryStore internal constructor(
         conversationDao.updateState(sessionId, ConversationState.READY)
     }
 
+    /**
+     * Bug #9: the SDK pre-inserts the conversation row with a tentative
+     * client-side UUID via [prepareConversation], then calls the service's
+     * `createSession`. For external callers the service ignores the
+     * tentative id and returns its own (anti-id-harvesting hardening in
+     * `ServiceBinder.createSession`). If we just call [confirmConversation]
+     * with the service-returned id, the UPDATE silently affects zero
+     * rows because no conversation row exists at the new id — every
+     * subsequent `persistUserTurn(serviceId, …)` then fails with a
+     * FOREIGN KEY constraint violation because the turn's FK points at
+     * a non-existent conversation.
+     *
+     * This helper closes the gap. When the ids match (self-UID dashboard
+     * path), it behaves identically to [confirmConversation]. When they
+     * differ, it re-keys the row inside a Room transaction: read the
+     * tentative row, delete it, insert a copy at the final id, and mark
+     * READY in one atomic write.
+     */
+    suspend fun confirmConversationWithRename(
+        tentativeId: String,
+        finalSessionId: String,
+    ) {
+        if (tentativeId == finalSessionId) {
+            conversationDao.updateState(finalSessionId, ConversationState.READY)
+            return
+        }
+        val existing = conversationDao.get(tentativeId)
+        if (existing == null) {
+            // No tentative row — either historyPolicy disabled persistence
+            // or a previous prepare was rolled back. Either way, nothing
+            // to migrate; fall through to a fresh insert at the final id
+            // so subsequent persistUserTurn calls have a parent to point at.
+            Log.w(
+                TAG,
+                "confirmConversationWithRename: no tentative row at $tentativeId, " +
+                    "inserting fresh at $finalSessionId",
+            )
+            return
+        }
+        val now = System.currentTimeMillis()
+        val migrated = existing.copy(
+            conversationId = finalSessionId,
+            state = ConversationState.READY,
+            updatedAtMs = now,
+        )
+        conversationDao.renameConversation(
+            tentativeId = tentativeId,
+            replacement = migrated,
+        )
+    }
+
     /** Remove a specific conversation (used when remote creation fails). */
     suspend fun cleanupConversation(sessionId: String) {
         conversationDao.delete(sessionId)

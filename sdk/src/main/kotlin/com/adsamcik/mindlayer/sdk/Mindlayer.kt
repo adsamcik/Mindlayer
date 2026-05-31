@@ -688,8 +688,12 @@ class Mindlayer private constructor(
             throw e
         }
 
-        // 3. Confirm local record
-        historyStore?.confirmConversation(sessionId)
+        // 3. Confirm local record — Bug #9: the service may have rewritten
+        // our tentative id (external callers' ids are stripped for security).
+        // confirmConversationWithRename handles both equal-id (fast path) and
+        // rename (FOREIGN KEY-safe atomic rekey) so subsequent
+        // persistUserTurn calls always find a parent conversation row.
+        historyStore?.confirmConversationWithRename(tentativeId, sessionId)
 
         sessionId
     }

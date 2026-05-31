@@ -52,6 +52,20 @@ interface ConversationDao {
     @Query("DELETE FROM conversations WHERE conversationId = :id")
     suspend fun delete(id: String)
 
+    /**
+     * Bug #9: re-key a CREATING conversation when the service returns a
+     * different session id than the one we tentatively inserted under.
+     * Atomic: delete the tentative row + insert the replacement in a
+     * single Room transaction so concurrent readers never see both rows
+     * (or neither). The replacement entity carries the new
+     * conversationId in its primary-key column.
+     */
+    @Transaction
+    suspend fun renameConversation(tentativeId: String, replacement: ConversationEntity) {
+        delete(tentativeId)
+        upsert(replacement)
+    }
+
     /** List all conversations, newest first. */
     @Query("SELECT * FROM conversations ORDER BY updatedAtMs DESC")
     suspend fun listAll(): List<ConversationEntity>
