@@ -4,12 +4,12 @@
   "models": [
     {
       "filename": "embedding-gemma-300m-v1.tflite",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sha256": "d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381",
       "role": "weights"
     },
     {
       "filename": "embedding-gemma-300m-v1.spm.model",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sha256": "d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7",
       "role": "tokenizer"
     }
   ]
