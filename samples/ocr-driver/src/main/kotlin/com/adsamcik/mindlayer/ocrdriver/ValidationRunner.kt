@@ -391,7 +391,7 @@ class ValidationRunner(
         block: suspend () -> String,
     ): ValidationScenarioResult {
         val started = System.nanoTime()
-        return try {
+        val result = try {
             val note = block()
             ValidationScenarioResult(
                 name = name,
@@ -414,6 +414,18 @@ class ValidationRunner(
                 note = "${t.javaClass.simpleName}: ${t.message ?: "(no message)"}",
             )
         }
+        // Inter-scenario pacing: every scenario consumes 1-2 rate-limit
+        // tokens (a heavy session scenario can burn 4-5). The bucket
+        // refills at ~1 token/sec at the default 60 RPM, so sleep
+        // [SCENARIO_PACING_DELAY_MS] between scenarios to let the
+        // bucket recover before the next one starts. Without this the
+        // cumulative load of 10 sequential scenarios drains the bucket
+        // mid-suite and the final scenarios false-fail with
+        // MLERR:5002 Rate limit exceeded (cosmetic harness issue, not
+        // a Mindlayer code bug — a real first-party app spaces its API
+        // calls across user actions and never hits this).
+        delay(SCENARIO_PACING_DELAY_MS)
+        return result
     }
 
     private fun readFixture(name: String): ByteArray =
@@ -434,5 +446,18 @@ class ValidationRunner(
          * of forceRefresh probes the warmup poll burns.
          */
         const val RATE_LIMIT_RECOVERY_DELAY_MS: Long = 3_000L
+
+        /**
+         * Delay inserted between every scenario so the per-UID 60 RPM
+         * rate-limit bucket refills (~1 token/sec) before the next
+         * scenario draws from it. Without this delay, running 10
+         * sequential scenarios back-to-back drains the bucket and the
+         * tail scenarios false-fail with MLERR:5002 — a harness
+         * artefact, not a Mindlayer code bug. 1500 ms gives ~1.5
+         * tokens of refill, enough to cover a typical scenario's
+         * 1-token AIDL call plus the per-scenario `getCapabilities`
+         * (0.25) feature-gate probe.
+         */
+        const val SCENARIO_PACING_DELAY_MS: Long = 1_500L
     }
 }

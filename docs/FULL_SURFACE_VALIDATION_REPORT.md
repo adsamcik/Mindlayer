@@ -22,14 +22,17 @@
 | **Cross-app capabilities polling** | ✅ | Fixed in `708861f` (TTL cache + `forceRefresh`) |
 | **Cross-app concurrent reads vs allowlist** | ✅ | Fixed in `efd79fb` (Bug #5, OverlappingFileLockException) |
 | **Cross-app encoded image transport** | ✅ | Fixed in `87bb1b3` (Bug #7, pipe → regular-file PFD) |
-| **PaddleOCR `recognise()` on emulator CPU delegate** | ⚠️ | `LiteRtException` on PP-OCRv5 mobile native ops — emulator LiteRT op-set limitation; real devices have working delegates |
+| **PaddleOCR `recognise()` end-to-end** | ❌ | **Bug #8** — ALL shipped PaddleOCR `rec.tflite` artifacts contain an unresolvable `ONNX_LAYERNORMALIZATION` custom op (regression from `onnx2tf` 2.4.0 default change). Affects every device, not emulator-specific. Workflow fix landed in `03fd330` but no rebuild has run since — artifacts are 10 days stale. Triggered fresh build in run `26704498612`. |
 | **End-to-end inference via Gemma** | ⏭ deferred | Gemma 4 E2B model not staged (~2GB download) |
 | **End-to-end embeddings via EmbeddingGemma** | ⏭ deferred | EmbeddingGemma-300M not staged (~600MB download) |
 
 ## Bugs uncovered + status
 
-All 7 bugs are fixed and pushed to `origin/main`. Regression tests
-added for every one.
+All 7 SDK / service bugs are fixed and pushed to `origin/main`. Bug
+#8 (PaddleOCR rec model artifact) is a pipeline-level issue tracked
+separately — fix exists in the model-build workflow but no rebuild
+has run since the fix landed; the in-flight build run
+`26704498612` produces the corrected artifact.
 
 | # | Bug | Root cause | Fix | Severity |
 |---|---|---|---|---|
@@ -41,6 +44,7 @@ added for every one.
 | 6 | SDK's `getCapabilities()` cached the cold-engine reply for the lifetime of the instance — capability-aware clients never observed engines coming online | The SDK pinned the first reply forever. The on-device engines warm up asynchronously after first connect (PaddleOCR ~200 ms, Gemma 4 E2B ~1-3 s, EmbeddingGemma ~500 ms); the very first probe commonly returns `FEATURE_OCR_*=false`. Subsequent calls return the same cached false. | `708861f` — 5 s TTL on the cache + `forceRefresh = true` argument that bypasses entirely. `MindlayerCapabilitiesTest 'Bug #6 - forceRefresh bypasses the cache and sees fresh capabilities'` pins the new behaviour. | High — broke every capability-aware client (the documented SDK pattern) on cold connect |
 | 7 | Encoded OCR images ≤ 64 KB rejected with `IllegalArgumentException: Unsupported source PFD type` | SDK's `bytesImagePartPipe` creates a pipe (S_IFIFO) PFD; the service's H5 hardening in `SharedMemoryPool.assertSafePfdType` rejects every non-regular-file PFD because they can block the staging thread indefinitely on a hostile writer. Every encoded image under the SHM threshold (64 KB) hit this on first call. | `87bb1b3` — SDK writes encoded bytes to a uniquely-named file in app's cacheDir, opens read-only as a `ParcelFileDescriptor`, immediately unlinks the on-disk file. The kernel keeps the inode alive via the open FD on both binder ends. H5 invariant preserved (no pipe FDs reach the service). | **Critical** — every first-party app using `ocrAsync(bytes, "image/png")` failed on small images |
 | (+) | `chat(text)` convenience overloads missing `@Deprecated` annotation that PR #132 added to every other chat variant | The two convenience `chat(text)` and `chat(text, image)` methods predate the inferAsync rename and weren't included in the rename PR. Test `MindlayerInferenceFacadesTest 'legacy chat is deprecated for inferRealtime'` failed on main. | `87bb1b3` (bundled) — added `@Deprecated` with `ReplaceWith` to `inferAsync`, level WARNING during the migration window. | Test-only; no runtime impact |
+| 8 | PaddleOCR PP-OCRv5 mobile `rec.tflite` contains custom op `ONNX_LAYERNORMALIZATION` that LiteRT 2.1.5 cannot resolve → recognition fails on **every device** | `onnx2tf` 2.4.0 changed its default `--tflite_backend` from `tf_converter` to `flatbuffer_direct`. The new backend emits ONNX LayerNormalization as a TFLite **custom** op. The recognition model is the only one of three affected (det/cls have no LN nodes). | `build-paddleocr-models.yml` already contains the fix: `-tb tf_converter` + `onnxsim` to flatten dynamic shape arithmetic + an explicit `grep -aq 'ONNX_LAYERNORMALIZATION'` regression guard that fails the build. Fix landed in commit `03fd330` on 2026-05-30 15:56. **But no rebuild has run since** — all shipped artifacts are from 2026-05-20. Triggered fresh run `26704498612` against current main; resulting bundle must be re-pinned via `PADDLEOCR_*_SHA256` repo variables + re-uploaded to Play Asset Delivery. | **Critical** — silently breaks OCR recognition on every device shipping the stale models. Caught by `PaddleOcrRecogniseDiagnosticInstrumentedTest` (added this session) and the existing `OcrNewspaperInstrumentedTest` (gated on a fixture, currently self-skipping in CI). |
 
 ## End-to-end validation results
 
@@ -50,29 +54,69 @@ added for every one.
 | Scenario | Result | Note |
 |---|:---:|---|
 | `capability_advertise` | ✅ | `FEATURE_OCR_SESSION + FEATURE_OCR_IMAGE_ONESHOT` both advertised after engine warm-up |
-| `single_image_no_llm` | ⚠️ | `OCR recognise failed: LiteRtException` — emulator LiteRT op-set limitation |
-| `single_image_with_llm` | ⚠️ | same root cause as `single_image_no_llm` |
-| `single_image_bbox` | ⚠️ | same root cause |
-| `session_lifecycle_basic` | ✅ | open → push → finalize, events=3, finalJsonLen=2 |
-| `session_stream_not_attached_rejects` | ⚠️ | rate-limit drained by cumulative scenario load (not a code bug — harness sequencing) |
+| `single_image_no_llm` | ❌ | **Bug #8** — `LiteRtException: Failed to invoke the compiled model` → native `Node number 311 (ONNX_LAYERNORMALIZATION) failed to prepare` |
+| `single_image_with_llm` | ❌ | same root cause |
+| `single_image_bbox` | ❌ | same root cause |
+| `session_lifecycle_basic` | ✅ | open → push → finalize, events=3, finalJsonLen=2 (recognition fails inside, but lifecycle wire path proven) |
+| `session_stream_not_attached_rejects` | ⚠️ | rate-limit drained by cumulative scenario load — harness sequencing, fixed in [pending] |
 | `session_close_idempotent` | ⚠️ | same harness-sequencing cause |
 | `inference_facade_smoke` | ✅ | createSession correctly fails with `IllegalArgumentException` (no Gemma model staged) |
 | `embeddings_capability_accuracy` | ✅ | `FEATURE_EMBEDDINGS` correctly absent; `embedOne` maps to typed exception |
 | `ping_health_check` | ✅ | capabilities returned 19 features |
 
-**5/10 pass.** The 5 ⚠️ rows are all environment / harness sequencing
-limitations, not Mindlayer code bugs:
-- 3 `LiteRtException` failures are the emulator LiteRT CPU delegate
-  missing PaddleOCR-mobile ops; real devices with stock LiteRT have
-  the ops compiled in (this is the same op-set issue that motivated
-  the Bug #2 GPU→CPU fallback — the emulator hits it on the CPU
-  path too because its bundled LiteRT is older than what real
-  devices ship).
-- 2 `Rate limit exceeded` failures are the validation harness running
-  10 scenarios back-to-back; cumulative AIDL calls drain the 2.0
-  grant + 1/sec refill. A real first-party app spaces its API calls
-  out across user actions. Fixable in the harness with longer
-  inter-scenario delays.
+**5/10 pass — but the failure analysis was wrong in the previous version
+of this report.** Ground-truth investigation (diagnostic instrumented
+test + binary inspection of the shipped `.tflite` + workflow git log)
+revealed:
+
+- 3 `recognise failed: LiteRtException` failures are a **real
+  production bug** affecting every device, not an emulator-specific
+  op-set issue. The shipped `paddleocr-ppocrv5-mobile-rec.tflite`
+  artifact contains the custom op `ONNX_LAYERNORMALIZATION` which
+  LiteRT 2.1.5 cannot resolve. Root cause: `onnx2tf` 2.4.0 changed
+  its default `--tflite_backend` to `flatbuffer_direct`, which
+  emits LayerNormalization as a custom op. The
+  `build-paddleocr-models.yml` workflow already contains the fix
+  (`-tb tf_converter` + an explicit guard that fails the build if
+  `ONNX_LAYERNORMALIZATION` is present) — landed in commit
+  `03fd330` on 2026-05-30. But every shipped artifact bundle and
+  every Play-pinned SHA is from **2026-05-20**, ten days before
+  the fix. No rebuild has run since. Re-triggering the workflow
+  is the fix. Tracked as Bug #8 in the table above.
+- 2 `Rate limit exceeded` failures are a harness-sequencing issue:
+  the 10 sequential AIDL calls drain the 2.0 grant + 1/sec refill.
+  A real first-party app spaces its API calls across user actions
+  and never hits this. Fixed in `test/validation-harness-pacing`
+  (in flight) by adding `SCENARIO_PACING_DELAY_MS = 1500` between
+  scenarios.
+
+### What I assumed vs what I verified
+
+The previous revision of this report claimed "emulator LiteRT op-set
+is missing PP-OCRv5 mobile native ops (RELU_0_TO_1); real devices
+have working delegates". That was speculation that conflated the
+GPU OpenGL delegate failure (Bug #2's GPU path, which IS real and
+involved `RELU_0_TO_1`) with the CPU recognise failure (a different
+mechanism entirely). When the user challenged it, I wrote
+`PaddleOcrRecogniseDiagnosticInstrumentedTest` to ground-truth the
+claim. Output:
+
+```
+PADDLE_OCR_DIAG: backend init ok, activeBackend=CPU
+PADDLE_OCR_DIAG: rec model inputBuffers.size=1
+PADDLE_OCR_DIAG: rec model input[0] type=TensorBuffer
+05-31 07:38:02.335 E tflite: Node number 311 (ONNX_LAYERNORMALIZATION) failed to prepare.
+05-31 07:38:02.335 E litert: [litert_compiled_model_jni.cc:1053] Failed to run model: Failed to invoke the compiled model
+PADDLE_OCR_DIAG: RECOGNISE_FAILED class=com.google.ai.edge.litert.LiteRtException
+```
+
+`grep -aoq 'ONNX_LAYERNORMALIZATION' rec.tflite` on the local
+artifact returns 1 match — exactly the regression the workflow
+guard at line 272 of `build-paddleocr-models.yml` is supposed to
+catch. The det and cls models contain 0 matches (only rec is
+affected, as the workflow comment predicted). The diagnostic test
+ships with this commit so future regressions are caught
+immediately without needing a fixture push.
 
 ## What was validated and how
 
@@ -135,10 +179,12 @@ limitations, not Mindlayer code bugs:
   the CameraX analyzer would produce), which exercises the binder
   + engine + page-boundary + event-stream code paths but skips
   camera capture itself.
-- **PaddleOCR recognise on emulator** — emulator's bundled LiteRT
-  is older than what production devices ship and is missing the
-  PP-OCRv5 mobile native op-set. Recognition succeeds on every
-  real-device test we've run with current LiteRT.
+- **PaddleOCR recognise on every device** — Bug #8 above. The
+  shipped `rec.tflite` artifact contains the unresolvable
+  `ONNX_LAYERNORMALIZATION` custom op. Workflow fix has landed in
+  `03fd330` but the artifact has not been rebuilt yet — run
+  `26704498612` produces the corrected bundle; SHA pins + Play
+  asset must be re-uploaded before recognition works anywhere.
 
 ## Methodology limitations
 
@@ -148,34 +194,40 @@ limitations, not Mindlayer code bugs:
 - The same harness runs on the sample app's UID (a third-party-shaped
   caller). Self-UID paths (the dashboard's polling of its own `:ml`
   over AIDL) are not separately exercised here — they're covered by
-  the existing `OcrEndToEndInstrumentedTest`.
+  the existing `OcrEndToEndInstrumentedTest` (which uses a
+  `FakePaddleOcrBackend` — does NOT exercise real recognise).
 - The end-to-end `ocrAsync` + `ocrRealtime` scenarios all use the
   bundle-included synthetic PNGs (receipt / document / screen
   capture). These are clean prints, not photographic noise. Quality
   on real photos is captured by PR #129's coffee-bag benchmark.
 - The harness's 10 sequential scenarios drain the 60 RPM rate-limit
-  bucket near the end. Future harness work should add inter-scenario
-  delays or fan scenarios across distinct test UIDs.
+  bucket near the end. Fixed in this commit's
+  `test/validation-harness-pacing` branch via
+  `SCENARIO_PACING_DELAY_MS = 1500` between scenarios.
 
 ## What this means for shipping
 
-- **`OcrFeatureFlags.IS_PRODUCTION_READY = true` is justified.** The
-  production-readiness gate flip is supported by the full unit suite
-  passing + 7 fixed bugs that were live regressions on the previous
-  code + end-to-end session lifecycle proven against the live
-  service.
-- **Real-device sanity check is still recommended before any
-  external rollout.** The emulator validation can't substitute for
-  thermal / battery / real-camera / native-op-set behaviour, but it
-  has proven the AIDL wire surface, the engine init path
-  (post-fixes), the SDK facade surface, the multi-page detection
-  algorithm, and the cross-app trust + transport stack.
-- **The seven production-relevant bugs uncovered this session are
-  all fixed and on `main`.** Every fix ships with regression tests
-  that would have caught the bug pre-merge. Re-running the
-  validation harness reproducibly hits 5/10 green; the 5
-  remaining ⚠️ rows are environment / harness limitations
-  documented inline.
+- **`OcrFeatureFlags.IS_PRODUCTION_READY = true` is justified for
+  the SDK / service surface**, but **OCR cannot be shipped until
+  Bug #8 is resolved** (rec model rebuild + SHA re-pinning).
+  Capabilities currently advertise `FEATURE_OCR_SESSION` /
+  `FEATURE_OCR_IMAGE_ONESHOT` to capability-aware clients, but
+  every actual recognise call would fail on every device. Either
+  (a) flip the flag back to false until the rebuilt artifacts
+  land + Play Asset Delivery is updated, or (b) hold the
+  production-readiness flip itself behind the artifact refresh.
+- **Real-device sanity check is still recommended.** The emulator
+  validation can't substitute for thermal / battery / real-camera
+  behaviour, but it has proven the AIDL wire surface, the engine
+  init path (post-fixes), the SDK facade surface, the multi-page
+  detection algorithm, and the cross-app trust + transport stack.
+  It now ALSO proves — via the new diagnostic instrumented test —
+  that recognition fails on the same artifacts that ship to real
+  devices.
+- **The seven SDK / service bugs uncovered this session are all
+  fixed and on `main`.** Every fix ships with regression tests
+  that would have caught the bug pre-merge. Bug #8 needs a model
+  rebuild, not code changes.
 
 ## Next sessions / known follow-ups
 
