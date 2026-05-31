@@ -131,7 +131,26 @@ class ConnectionManager {
      */
     private val livenessToken: IBinder = Binder()
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    /**
+     * Reconnect-scheduling scope. Runs on [Dispatchers.Default] so a service
+     * crash → reconnect storm (e.g. while a heavy multimodal model is being
+     * loaded by the service and the OS LMK kills it under memory pressure)
+     * does **not** churn the consuming app's main thread. The two scope users
+     * — [scheduleReconnect] and the inline reconnect launch — only do
+     * `delay(backoffMs)` + `doBind()`, neither of which has a Main affinity:
+     *  - `bindService()` can be called from any thread; the Android framework
+     *    delivers [ServiceConnection] callbacks on the consumer-supplied
+     *    Handler (Main by default) regardless of where bindService was called.
+     *  - `_state` is a [MutableStateFlow], thread-safe under arbitrary writers.
+     *
+     * Previously this used `Dispatchers.Main.immediate`. That choice predated
+     * the realisation that the reconnect loop runs frequently in real-world
+     * use (every service kill + binding-died + relink storm), and each
+     * `delay()`/`doBind()` hop charged the main thread, producing visible
+     * Choreographer frame skips and contributing to ANRs in the consuming
+     * app whenever the service crashed mid-inference.
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var backoffMs = INITIAL_BACKOFF_MS
     private var consecutiveFailures = 0
 
