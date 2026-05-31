@@ -9,6 +9,7 @@ import com.google.ai.edge.litertlm.EngineConfig
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.logging.safeLabelWithDetail
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -398,9 +399,15 @@ class EngineManager(
             } catch (t: Throwable) {
                 // F-006: never persist or surface raw native exception text.
                 // LiteRT-LM tokenizer/template exceptions can inline prompt
-                // fragments; safeLabel() returns class names only.
+                // fragments; safeLabel() returns class names only. The
+                // `safeDetailLogcat` variant (allowlist-gated) surfaces the
+                // native LiteRT/LiteRT-LM JNI status string for logcat only
+                // — never persisted, never crosses the AIDL boundary. The
+                // `safeDetail` value persisted via [InitFailure] and the
+                // log DB stays class-name-only.
                 val safeDetail = t.safeLabel()
-                MindlayerLog.w(TAG, "Backend $name failed: $safeDetail")
+                val safeDetailLogcat = t.safeLabelWithDetail()
+                MindlayerLog.w(TAG, "Backend $name failed: $safeDetailLogcat")
                 // F-077: every per-backend failure now categorises into a
                 // typed [InitFailure.BackendUnavailable] — replaces the
                 // GPU-only `lastGpuFailureReason` string. The dashboard

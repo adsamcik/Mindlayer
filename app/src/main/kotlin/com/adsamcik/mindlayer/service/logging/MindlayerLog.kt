@@ -132,6 +132,10 @@ fun Throwable.safeLabelWithDetail(maxMessageChars: Int = 160): String {
     val msg = message
     if (msg.isNullOrBlank()) return base
     val fqcn = this::class.java.name
+    // Note: `com.google.ai.edge.litert` matches BOTH the base LiteRT
+    // runtime (`com.google.ai.edge.litert.LiteRtException`) AND the
+    // LiteRT-LM wrapper (`com.google.ai.edge.litertlm.LiteRtLmJniException`)
+    // because the latter package literally starts with the former.
     val allow = fqcn.startsWith("com.google.ai.edge.litert") ||
         fqcn == "java.lang.IllegalArgumentException" ||
         fqcn == "java.lang.IllegalStateException" ||

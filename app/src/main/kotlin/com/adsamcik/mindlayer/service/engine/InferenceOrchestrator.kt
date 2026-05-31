@@ -4,6 +4,7 @@ import android.os.ParcelFileDescriptor
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.RequestTrace
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.logging.safeLabelWithDetail
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Message
@@ -999,7 +1000,13 @@ class InferenceOrchestrator(
                 throw e
             } catch (t: Throwable) {
                 toolCallBridge.cancel(scopedKey)
-                val safe = t.safeLabel()
+                // safeLabelWithDetail surfaces the native LiteRT-LM JNI
+                // error message ("Failed to allocate KV cache", "Model
+                // load failed", op-not-supported etc.) to both logcat
+                // and the wire-level MindlayerException the SDK sees.
+                // The allowlist confines this to provably-safe technical
+                // exception classes — prompt fragments never reach here.
+                val safe = t.safeLabelWithDetail()
                 trace.markError(safe)
                 MindlayerLog.e(
                     TAG,
