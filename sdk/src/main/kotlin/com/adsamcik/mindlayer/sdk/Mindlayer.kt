@@ -414,18 +414,21 @@ interface Mindlayer {
          * Construct a [Mindlayer] client bound to the on-device service and
          * begin the asynchronous bind handshake.
          *
-         * @param observer optional observer hook (Spike-E §3); accepted but
-         *   IGNORED in Mindlayer v1 — wiring lands in C2.
+         * @param observer optional observability hook (Spike-E §3). As of C2 it
+         *   is wired into the canonical call path: every [infer] / [ocr] /
+         *   [ocrSession] / [embed] is bracketed by one
+         *   [MindlayerObserver.onCallStart] / [MindlayerObserver.onCallEnd]
+         *   pair carrying redacted params only (sizes / shapes / flags).
          */
         fun connect(
             context: Context,
             historyPolicy: HistoryPolicy = HistoryPolicy.METADATA_ONLY,
-            @Suppress("UNUSED_PARAMETER") observer: MindlayerObserver? = null,
+            observer: MindlayerObserver? = null,
         ): Mindlayer {
             val mgr = ConnectionManager()
             mgr.connect(context)
             val store = HistoryStore(context, historyPolicy)
-            return MindlayerImpl(mgr, store)
+            return MindlayerImpl(mgr, store).also { it.observer = observer }
         }
     }
 }

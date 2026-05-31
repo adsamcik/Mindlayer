@@ -29,6 +29,18 @@ import java.io.IOException
  *
  * If the flow completes without a terminal event, the inference was cancelled
  * or the service connection was lost.
+ *
+ * ## C2 deviation status — kept (deferred to C3)
+ *
+ * Spike-E §1 names the canonical stream frame [InferenceEvent], and C1 already
+ * introduced that type with a deliberately different shape (e.g.
+ * `InferenceEvent.Started(sessionId)` / `InferenceEvent.TextDelta(text)` —
+ * no `seq`). This legacy `MindlayerEvent` is the *wire-frame* type the impl,
+ * [Conversation], and ~80 call sites still depend on (they read [TextDelta.seq],
+ * [Metrics], etc.). A `typealias MindlayerEvent = InferenceEvent` is therefore
+ * structurally impossible — the two carry different fields. Re-pointing
+ * [InferenceHandle.events] at [InferenceEvent] is stream-adaptation work that
+ * belongs with the behavioural wiring in C3, so the legacy type stays for now.
  */
 sealed class MindlayerEvent {
     /** Signals that the service has accepted the request and inference is beginning. */

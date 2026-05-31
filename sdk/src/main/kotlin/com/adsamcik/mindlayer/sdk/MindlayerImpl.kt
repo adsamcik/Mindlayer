@@ -13,6 +13,7 @@ import com.adsamcik.mindlayer.ServiceStatus
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.SessionInfo
 import com.adsamcik.mindlayer.ToolResult
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -166,7 +167,7 @@ enum class InferenceBackend(internal val value: String) {
 internal class MindlayerImpl(
     internal val connection: ConnectionManager,
     private val historyStore: HistoryStore?,
-) : Mindlayer {
+) : MindlayerHelpers() {
 
     companion object {
         private const val TAG = "MindlayerImpl"
@@ -230,6 +231,107 @@ internal class MindlayerImpl(
      */
     val recovery: SessionRecovery? =
         historyStore?.let { SessionRecovery(this, it) }
+
+    /**
+     * Optional observability hook (Spike-E §3). Set by [Mindlayer.connect] right
+     * after construction rather than via the constructor, because the SDK test
+     * suite reflectively resolves the 2-arg `(ConnectionManager, HistoryStore)`
+     * constructor; adding a third constructor parameter — even a defaulted one —
+     * would change the reflected signature and break those tests. A mutable
+     * property keeps construction unchanged while still allowing
+     * `connect(observer = …)` to wire telemetry exactly once.
+     */
+    internal var observer: MindlayerObserver? = null
+
+    /**
+     * Bracket a public canonical call with observer start/end events. Pure
+     * delegation to [instrumentCall]; defined here so the canonical overrides
+     * below read as one-liners. Zero overhead when [observer] is unset.
+     */
+    private suspend fun <R> instrument(
+        method: String,
+        params: Map<String, String>,
+        summarise: (R) -> String? = { null },
+        block: suspend () -> R,
+    ): R = instrumentCall(observer, method, params, summarise, block)
+
+    // ── Canonical builder-based API (Spike-E §0/§1) ────────────────────────
+    //
+    // C2 wires the observer chokepoint around each canonical entry point. The
+    // request builder is materialised eagerly so redacted telemetry params
+    // (sizes / shapes / flags only — never prompt text or bytes) can be derived
+    // before dispatch. The behavioural body that turns a recorded request into
+    // an AIDL round-trip lands in C3; until then each call reports start/end and
+    // then surfaces a typed NOT_SUPPORTED failure (so the observer still sees a
+    // well-formed Failure outcome rather than a raw `error()`/ISE).
+
+    override suspend fun infer(build: InferenceRequest.Builder.() -> Unit): InferenceHandle {
+        val request = InferenceRequest.Builder().apply(build)
+        return instrument(
+            method = "infer",
+            params = mapOf(
+                "promptLen" to CallParams.len(request.promptText),
+                "images" to request.imageInputs.size.toString(),
+                "hasAudio" to CallParams.has(request.audioFile),
+                "session" to CallParams.idPrefix(request.sessionId),
+            ),
+        ) {
+            throw MindlayerException(
+                message = "Mindlayer v1 — infer behaviour lands in C3",
+                code = MindlayerErrorCode.NOT_SUPPORTED,
+            )
+        }
+    }
+
+    override suspend fun ocr(build: OcrRequest.Builder.() -> Unit): OcrHandle.OneShot {
+        val request = OcrRequest.Builder().apply(build)
+        return instrument(
+            method = "ocr",
+            params = mapOf(
+                "hasImage" to CallParams.has(request.image),
+                "extract" to CallParams.has(request.extractionSchema),
+                "boxes" to request.emitBoundingBoxes.toString(),
+            ),
+        ) {
+            throw MindlayerException(
+                message = "Mindlayer v1 — ocr behaviour lands in C3",
+                code = MindlayerErrorCode.NOT_SUPPORTED,
+            )
+        }
+    }
+
+    override suspend fun ocrSession(build: OcrSessionRequest.Builder.() -> Unit): OcrHandle.MultiFrame {
+        val request = OcrSessionRequest.Builder().apply(build)
+        return instrument(
+            method = "ocrSession",
+            params = mapOf(
+                "maxFrames" to (request.maxFrames?.toString() ?: ""),
+                "extract" to CallParams.has(request.extractionSchema),
+            ),
+        ) {
+            throw MindlayerException(
+                message = "Mindlayer v1 — ocrSession behaviour lands in C3",
+                code = MindlayerErrorCode.NOT_SUPPORTED,
+            )
+        }
+    }
+
+    override suspend fun embed(build: EmbeddingRequest.Builder.() -> Unit): EmbeddingHandle {
+        val request = EmbeddingRequest.Builder().apply(build)
+        return instrument(
+            method = "embed",
+            params = mapOf(
+                "single" to CallParams.has(request.singleItem),
+                "batch" to (request.items?.size?.toString() ?: ""),
+                "deferred" to request.deferred.toString(),
+            ),
+        ) {
+            throw MindlayerException(
+                message = "Mindlayer v1 — embed behaviour lands in C3",
+                code = MindlayerErrorCode.NOT_SUPPORTED,
+            )
+        }
+    }
 
     /** Observable connection state. */
     override val connectionState: StateFlow<ConnectionState>

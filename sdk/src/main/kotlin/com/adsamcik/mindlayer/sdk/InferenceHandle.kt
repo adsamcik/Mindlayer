@@ -17,9 +17,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   `Flow<InferenceEvent>`. Keeping the existing frame type lets the impl,
  *   [Conversation], and the test suite compile unchanged in C1; C2 adapts the
  *   stream onto [InferenceEvent].
- * - [isCancelled] and [cancel] are retained on the handle. Spike E removes
- *   `cancel()` in favour of structured concurrency, but [Conversation] and the
- *   existing tests rely on explicit cancellation, so it stays for now.
+ * - [isCancelled] and [cancel] are retained on the handle but, as of C2, are
+ *   `@Deprecated(WARNING)`. Spike E §8.4 removes `cancel()` in favour of
+ *   structured concurrency (cancel the collecting coroutine and the AIDL
+ *   request is torn down via `awaitClose`); [Conversation] and the existing
+ *   tests still call them, so removal is deferred to C3 rather than breaking
+ *   the build now.
  *
  * The terminal `awaitX()` methods throw [NotImplementedError] in C1; behaviour
  * lands in C2.
@@ -35,9 +38,24 @@ sealed interface InferenceHandle {
     val events: Flow<MindlayerEvent>
 
     /** Client-side cancellation state. See [cancel]. */
+    @Deprecated(
+        message = "Cancellation flows through structured concurrency in Mindlayer v1 — " +
+            "cancel the coroutine collecting events instead. Scheduled for removal in C3.",
+        level = DeprecationLevel.WARNING,
+    )
     val isCancelled: Boolean
 
-    /** Cancel the inference request. Idempotent. */
+    /**
+     * Cancel the inference request. Idempotent.
+     *
+     * @deprecated Cancel the coroutine collecting [events] instead; the AIDL
+     *   request is torn down via the stream's `awaitClose`.
+     */
+    @Deprecated(
+        message = "Cancellation flows through structured concurrency in Mindlayer v1 — " +
+            "cancel the coroutine collecting events instead. Scheduled for removal in C3.",
+        level = DeprecationLevel.WARNING,
+    )
     suspend fun cancel()
 
     /** Plain text generation. */
@@ -75,6 +93,11 @@ internal class InferenceHandleImpl(
     private var cancelCallback: (suspend () -> Unit)? = null
     private var syncCancelCallback: (() -> Unit)? = null
 
+    @Deprecated(
+        message = "Cancellation flows through structured concurrency in Mindlayer v1 — " +
+            "cancel the coroutine collecting events instead. Scheduled for removal in C3.",
+        level = DeprecationLevel.WARNING,
+    )
     override val isCancelled: Boolean get() = cancelled.get()
 
     internal fun setCancelCallback(cb: suspend () -> Unit) {
@@ -91,6 +114,11 @@ internal class InferenceHandleImpl(
         syncCancelCallback = cb
     }
 
+    @Deprecated(
+        message = "Cancellation flows through structured concurrency in Mindlayer v1 — " +
+            "cancel the coroutine collecting events instead. Scheduled for removal in C3.",
+        level = DeprecationLevel.WARNING,
+    )
     override suspend fun cancel() {
         if (cancelled.getAndSet(true)) return
         cancelCallback?.invoke()

@@ -25,6 +25,17 @@ import java.io.File
  * dependency throws [NoClassDefFoundError]. The reified type [T] must be
  * `@Serializable`.
  *
+ * ## C2 deviation status — kept per LOCKED decision (Spike-E §8.2)
+ *
+ * The `:sdk` module keeps `kotlinx-serialization-json` as `implementation`
+ * (C1 deviation #2), not `compileOnly`. Flipping to `compileOnly` is a build-
+ * graph change that affects every consumer's runtime classpath and is sequenced
+ * with the consumer migration in C3; doing it now would break the in-tree
+ * `:app` consumer that has not yet migrated. The inline-at-call-site design
+ * above is already in place, so the eventual flip is dependency-only and
+ * source-compatible. `@file:Suppress("unused")` covers the public reified
+ * helpers that have no in-module caller yet.
+ *
  * Behaviour (the underlying `extractJson` / `awaitJson` calls) lands in C2; in
  * C1 these helpers compile but the primitives they delegate to throw.
  */
