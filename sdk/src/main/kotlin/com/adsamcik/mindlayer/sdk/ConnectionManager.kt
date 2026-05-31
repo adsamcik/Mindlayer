@@ -107,10 +107,36 @@ class ConnectionManager {
         /** Maximum consecutive failed rebind attempts before giving up. */
         const val MAX_RECONNECT_ATTEMPTS = 10
 
-        private const val BIND_FLAGS =
-            Context.BIND_AUTO_CREATE or
-            Context.BIND_IMPORTANT or
-            Context.BIND_ADJUST_WITH_ACTIVITY
+        private val BIND_FLAGS: Int = run {
+            // Base flags supported back to the SDK's minSdk:
+            // - BIND_AUTO_CREATE: start the service if it isn't running.
+            // - BIND_IMPORTANT: bound service should be brought to foreground
+            //   procstate / adj when this client is foreground (kill-safety).
+            // - BIND_ADJUST_WITH_ACTIVITY: binding tracks the calling
+            //   activity's lifecycle so the OS scales the service down when
+            //   the activity is gone.
+            var flags = Context.BIND_AUTO_CREATE or
+                Context.BIND_IMPORTANT or
+                Context.BIND_ADJUST_WITH_ACTIVITY
+            // BIND_INCLUDE_CAPABILITIES (API 31+, Android 12): the missing
+            // piece that prevents the Android 12+ cached-app freezer from
+            // freezing the Mindlayer service process while a foreground
+            // client is bound. Without it, `OomAdjuster.computeServiceHost-
+            // OomAdjLSP` propagates the client's procstate (BIND_IMPORTANT
+            // path) but explicitly skips capability inheritance — the
+            // freezer checks the capability bits, sees no foreground tie on
+            // the bound side, and freezes the process between AIDL calls.
+            // Once frozen, the next call surfaces as `NativeError` because
+            // the in-flight inference partial-state was suspended mid-flush.
+            // First-party cross-app integration already requires API 31+
+            // (the SecurityException-translation path below makes this an
+            // explicit terminal error on older devices), so we can add this
+            // flag unconditionally on supported runtimes.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                flags = flags or Context.BIND_INCLUDE_CAPABILITIES
+            }
+            flags
+        }
     }
 
     private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
