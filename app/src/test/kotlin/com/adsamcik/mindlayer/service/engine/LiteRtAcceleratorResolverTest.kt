@@ -15,13 +15,31 @@ class LiteRtAcceleratorResolverTest {
         assertEquals(listOf("GPU" to "selected"), decision.attempted)
     }
 
-    @Test fun embeddingsDowngradeUnsupportedNpuToCpu() {
+    @Test fun embeddingsDowngradeUnsupportedNpuToGpu() {
+        // Mirrors OCR/Chat policy: when NPU is requested but unavailable
+        // (API < 31 / SoC not allowlisted / native libs missing) the
+        // resolver now offers GPU as the next attempt instead of dropping
+        // straight to CPU. The runtime catches GPU compile failure and
+        // falls back to CPU on its own (LiteRtEmbeddingBackend).
         LiteRtAcceleratorResolver.setEnvironmentForTesting(apiLevel = 30, socModel = "sm8450", libs = listOf("libQnnHtp.so"))
         val decision = LiteRtAcceleratorResolver.resolveBackend("NPU", "embeddings")
-        assertEquals("CPU", decision.backend)
-        assertTrue(decision.reason.contains("NPU_API_BELOW_31"))
+        assertEquals("GPU", decision.backend)
+        assertTrue(decision.reason.startsWith("REQUESTED_NPU_UNSUPPORTED_GPU_FALLBACK_"))
         assertEquals("NPU" to "NPU_API_BELOW_31", decision.attempted.first())
-        assertEquals("CPU" to "selected", decision.attempted.last())
+        assertEquals("GPU" to "selected", decision.attempted.last())
+    }
+
+    @Test fun embeddingsDefaultsToGpuWhenNoNpu() {
+        LiteRtAcceleratorResolver.setEnvironmentForTesting(apiLevel = 33, socModel = "exynos9999", libs = emptyList())
+        val decision = LiteRtAcceleratorResolver.resolveBackend(null, "embeddings")
+        assertEquals("GPU", decision.backend)
+        assertTrue(decision.reason.startsWith("DEFAULT_GPU_NPU_UNSUPPORTED_"))
+    }
+
+    @Test fun embeddingsUnknownRequestFallsBackToGpu() {
+        val decision = LiteRtAcceleratorResolver.resolveBackend("DSP", "embeddings")
+        assertEquals("GPU", decision.backend)
+        assertEquals("UNKNOWN_REQUESTED_BACKEND_GPU_FALLBACK", decision.reason)
     }
 
     @Test fun embeddingsAllowAllowlistedNpuWithQnnLibrary() {
