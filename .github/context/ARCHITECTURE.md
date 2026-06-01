@@ -142,7 +142,7 @@ list cert hash parity.
 - Header (first frame): `StreamHeader { protocol = "mindlayer.stream.v1", requestId }` (`shared/.../Protocol.kt`).
 - Event types (`StreamEventType`): `start`, `token_delta`, `tool_call`, `tool_result`, `metrics`, `error`, `done`.
 
-**Cross-module contract invariant:** any change to the AIDL surface, `StreamEvent` shape, frame format, or `StreamEventType` constants must update `:app`, `:sdk`, `:shared`, and the corresponding tests in the same change. The AIDL files are duplicated under `app/src/main/aidl/` and `sdk/src/main/aidl/` and must stay byte-identical.
+**Cross-module contract invariant:** any change to the AIDL surface, `StreamEvent` shape, frame format, or `StreamEventType` constants must update `:app`, `:sdk`, `:shared`, and the corresponding tests in the same change. The AIDL **interface** files (`IMindlayerService.aidl` + `IClientCallback.aidl`) are duplicated under `app/src/main/aidl/` and `sdk/src/main/aidl/` and must stay byte-identical (`AidlContractDriftTest` enforces). **Parcelable** AIDL files live only in `sdk/src/main/aidl/` — `:app` pulls them in via `implementation(project(":sdk"))` so there is structurally nothing to mirror or drift.
 
 ## See also
 

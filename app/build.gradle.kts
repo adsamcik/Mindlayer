@@ -409,15 +409,20 @@ val validateLitertAbis by tasks.registering {
 
 val aidlContractDriftCheck by tasks.registering {
     group = "verification"
-    description = "Fails if :app and :sdk AIDL contracts differ byte-for-byte."
+    // Parcelable declarations live only in :sdk/src/main/aidl; :app's AIDL compiler
+    // imports them transitively via the :sdk implementation dependency. This task
+    // verifies that the two shared interface contracts haven't drifted between the
+    // copies kept in each module's source tree.
+    description = "Fails if :app and :sdk AIDL interface contracts differ byte-for-byte."
 
     val appAidlDir = rootProject.layout.projectDirectory.dir("app/src/main/aidl/com/adsamcik/mindlayer")
     val sdkAidlDir = rootProject.layout.projectDirectory.dir("sdk/src/main/aidl/com/adsamcik/mindlayer")
+    val interfaceFiles = listOf("IMindlayerService.aidl", "IClientCallback.aidl")
 
-    inputs.dir(appAidlDir)
+    inputs.files(interfaceFiles.map { appAidlDir.file(it) })
         .withPropertyName("appAidlContracts")
         .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
-    inputs.dir(sdkAidlDir)
+    inputs.files(interfaceFiles.map { sdkAidlDir.file(it) })
         .withPropertyName("sdkAidlContracts")
         .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
     val markerFile = layout.buildDirectory.file("aidl-contract-drift-check/success.txt")
@@ -427,25 +432,7 @@ val aidlContractDriftCheck by tasks.registering {
         val appDir = appAidlDir.asFile
         val sdkDir = sdkAidlDir.asFile
 
-        fun aidlFiles(dir: File): List<String> = dir.listFiles { file ->
-            file.isFile && file.extension == "aidl"
-        }?.map { it.name }?.sorted().orEmpty()
-
-        val appFiles = aidlFiles(appDir)
-        val sdkFiles = aidlFiles(sdkDir)
-        if (appFiles != sdkFiles) {
-            val onlyInApp = (appFiles - sdkFiles).sorted()
-            val onlyInSdk = (sdkFiles - appFiles).sorted()
-            throw GradleException(
-                buildString {
-                    appendLine(":app and :sdk AIDL file sets differ.")
-                    appendLine("  Only in app: ${onlyInApp.ifEmpty { listOf("<none>") }}")
-                    append("  Only in sdk: ${onlyInSdk.ifEmpty { listOf("<none>") }}")
-                },
-            )
-        }
-
-        appFiles.forEach { fileName ->
+        interfaceFiles.forEach { fileName ->
             val appFile = appDir.resolve(fileName)
             val sdkFile = sdkDir.resolve(fileName)
             val appBytes = appFile.readBytes()
@@ -458,7 +445,7 @@ val aidlContractDriftCheck by tasks.registering {
         }
 
         markerFile.get().asFile.apply { parentFile.mkdirs() }.writeText(
-            "checked=${appFiles.joinToString(",")}\n",
+            "checked=${interfaceFiles.joinToString(",")}\n",
         )
     }
 }
@@ -737,7 +724,7 @@ dependencies {
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.turbine)
     testImplementation(libs.room.testing)
-    testImplementation(project(":sdk"))
+    implementation(project(":sdk"))
 
     androidTestImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.core)

@@ -122,7 +122,7 @@ R8/proguard rules: `app/proguard-rules.pro`, `sdk/consumer-rules.pro`, `shared/c
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `SecurityException: App <pkg> not authorized — user approval required` | First-ever bind from this `(pkg, signingCertSha256)`. Pending entry has been recorded. | Open the Mindlayer dashboard and tap **Approve**. Future: `seedIfEmpty` will skip this for 1P apps. |
-| `BadParcelableException` at runtime when calling AIDL | AIDL files in `:app` and `:sdk` drifted. | Re-sync `app/src/main/aidl/com/adsamcik/mindlayer/*.aidl` with `sdk/src/main/aidl/com/adsamcik/mindlayer/*.aidl`. They must be byte-identical. |
+| `BadParcelableException` at runtime when calling AIDL | AIDL **interface** files in `:app` and `:sdk` drifted. | Re-sync `app/src/main/aidl/com/adsamcik/mindlayer/{IMindlayerService,IClientCallback}.aidl` with the same files in `sdk/src/main/aidl/`. They must be byte-identical. (Parcelables live only in `:sdk` and cannot drift.) |
 | Robolectric tests SIGSEGV (`G1SATBMarkQueueSet::filter`) | Wrong JDK on the Gradle test runtime. | Use Java 21 for Gradle (see Java 21 gotcha above). Don't auto-provision Temurin 17 toolchain. |
 | `IllegalStateException: SQLCipher not loaded` | First boot after install, native lib missing. | Code already guards with `try { System.loadLibrary("sqlcipher") } catch (_: UnsatisfiedLinkError) { }`. Ensure `libs.sqlcipher.android` is on the classpath. |
 | Engine init never returns | Backend-fallback chain is exhausted (NPU → GPU → CPU). | Check `EngineManager.lastGpuFailureReason`. Inspect `adb logcat -s "Mindlayer.EngineManager:D"`. |
