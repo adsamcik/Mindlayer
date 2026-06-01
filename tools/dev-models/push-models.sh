@@ -141,15 +141,34 @@ assert_device() {
 }
 
 assert_debuggable() {
+  # Sideload is only safe when the receiving service trusts the push
+  # target. Either the device is debuggable (every installed app
+  # becomes Debug.isDebuggable() == true) OR the debug variant of the
+  # Mindlayer service is installed (its BuildConfig.DEBUG is true
+  # regardless of device build type). Mirrors Assert-DebuggableDevice
+  # in push-models.ps1.
   local debuggable build_type
   debuggable="$(run_adb shell getprop ro.debuggable | tr -d '\r\n ')"
   build_type="$(run_adb shell getprop ro.build.type | tr -d '\r\n ')"
-  if [ "$debuggable" != "1" ] && [ "$build_type" != "userdebug" ] && [ "$build_type" != "eng" ]; then
-    echo "error: Mindlayer sideload requires a debuggable build/device." >&2
-    echo "       ro.debuggable='$debuggable' ro.build.type='$build_type'." >&2
-    echo "       Release 'user' builds also gate sideload via BuildConfig.DEBUG." >&2
-    exit 1
+  if [ "$debuggable" = "1" ] || [ "$build_type" = "userdebug" ] || [ "$build_type" = "eng" ]; then
+    return 0
   fi
+  # Device-level guard failed; fall back to package-level evidence.
+  if run_adb shell pm list packages "$SERVICE_PKG_DEBUG" 2>/dev/null | tr -d '\r' | grep -qx "package:$SERVICE_PKG_DEBUG"; then
+    echo "note: device is ro.debuggable='$debuggable' ro.build.type='$build_type'" >&2
+    echo "      (non-debuggable). Continuing because the debug variant" >&2
+    echo "      '$SERVICE_PKG_DEBUG' is installed; its runtime BuildConfig.DEBUG" >&2
+    echo "      gate is the authoritative check." >&2
+    return 0
+  fi
+  echo "error: Mindlayer sideload requires either a debuggable device" >&2
+  echo "       (ro.debuggable=1 or ro.build.type in {userdebug, eng}) OR" >&2
+  echo "       the debug variant '$SERVICE_PKG_DEBUG' to be installed." >&2
+  echo "       Got ro.debuggable='$debuggable' ro.build.type='$build_type'" >&2
+  echo "       and the debug service package is NOT installed." >&2
+  echo "       Install the debug build of :app first (./gradlew :app:installDebug)," >&2
+  echo "       or run on a debuggable device." >&2
+  exit 1
 }
 
 # Resolve the on-device push target. Sets REMOTE_DIR, USING_LEGACY_REMOTE_DIR,
