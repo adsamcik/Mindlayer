@@ -29,7 +29,7 @@ Android service app (`com.adsamcik.mindlayer.service`) that loads a single LLM (
 | `Conversation.cancelProcess()` (LiteRT-LM) to stop inference | Rely on Flow cancellation alone — native work continues |
 | Cross-process state via `filesDir` + atomic-rename + `FileLock` (see `AllowlistStore.kt`) | `SharedPreferences` for cross-process state |
 | Send media via `SharedMemoryPool` (`ImageTransfer`/`AudioTransfer`) | Pack >~1 MB into AIDL parcels — Binder limit is 1 MB |
-| Mirror AIDL files byte-identical between `app/src/main/aidl/` and `sdk/src/main/aidl/` | Edit only one side — guaranteed `BadParcelableException` |
+| Mirror AIDL **interface** files (`IMindlayerService.aidl` + `IClientCallback.aidl`) byte-identical between `app/src/main/aidl/` and `sdk/src/main/aidl/` | Edit only one interface side — guaranteed `BadParcelableException`. **Parcelables live in `:sdk` only** — do NOT copy them into `:app`. |
 | Promote service to FGS `specialUse` only during active inference | Stay foreground when idle |
 | Use `Throwable.safeLabel()` for inference-path exceptions, pass `throwable = null` | Log full stack traces from native LiteRT-LM errors — they can embed prompt text |
 | Keep `:app` + `:sdk` manifests free of `android.permission.INTERNET` | Add network permissions, Play Services deps, telemetry SDKs, or cloud fallback paths |
@@ -60,7 +60,7 @@ See `docs/AUTHORIZATION.md` for the full data flow, failure modes, and threat mo
 
 Whenever you change any of these, update **all** producers, consumers, and tests in the same change:
 
-- AIDL files (`app/src/main/aidl/com/adsamcik/mindlayer/*.aidl` ↔ `sdk/src/main/aidl/com/adsamcik/mindlayer/*.aidl`)
+- AIDL **interface** files (`app/src/main/aidl/com/adsamcik/mindlayer/{IMindlayerService,IClientCallback}.aidl` ↔ `sdk/src/main/aidl/com/adsamcik/mindlayer/{IMindlayerService,IClientCallback}.aidl`). **Parcelable AIDL files live only in `:sdk`** — `:app` pulls them in transitively via `implementation(project(":sdk"))`.
 - `StreamEvent` / `StreamEventType` / `StreamHeader` (`shared/.../Protocol.kt`) and the writer/reader pair (`TokenStreamWriter` / `TokenStreamReader`)
 - Frame format / `MAX_FRAME_BYTES` (duplicated in writer + reader on purpose)
 - `BIND_ML_SERVICE` permission name, service `<intent-filter>`, or process name `:ml`
@@ -167,7 +167,8 @@ Read-only operations (`git status`, `git log`, `git blame`) and zero-file invest
 
 | Task | Where to look |
 |---|---|
-| Add an AIDL method | `app/src/main/aidl/.../IMindlayerService.aidl` AND `sdk/src/main/aidl/.../IMindlayerService.aidl`; implement in `ServiceBinder.kt` (with `authorizeCall()` first); expose in `Mindlayer.kt`. |
+| Add an AIDL method | Edit `IMindlayerService.aidl` in **both** `app/src/main/aidl/.../` AND `sdk/src/main/aidl/.../` (byte-identical interface); implement in `ServiceBinder.kt` (with `authorizeCall()` first); expose in `Mindlayer.kt`. |
+| Add a new AIDL parcelable | Edit ONLY `sdk/src/main/aidl/com/adsamcik/mindlayer/NewType.aidl`; reference it from both interface copies (the imports also need to mirror); add `@Parcelize` companion in `:shared` (or `:sdk` if SDK-only). |
 | Add a stream event type | `shared/.../Protocol.kt::StreamEventType` constant; emit in `TokenStreamWriter`; handle in `TokenStreamReader`; update tests in both `:app` and `:sdk`. |
 | Add a Room column on the SDK history DB | Bump `MindlayerDatabase.version`, add a `Migration`, update `Entities.kt`. SQLCipher cross-install backup is unreadable by design. |
 | Add a logged event | Add `LogEvent`/`LogCategory` enum value; add a builder on `LogRepository`; never include prompt or output text. |

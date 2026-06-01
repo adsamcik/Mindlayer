@@ -10,7 +10,7 @@ If you want to change the AIDL surface, **read this document first**.
 
 | You want to… | Allowed? | How |
 |---|---|---|
-| Add a new method to `IMindlayerService` | ✅ | Append to the end of the AIDL. Mirror byte-identically between `:app` and `:sdk`. |
+| Add a new method to `IMindlayerService` | ✅ | Append to the end of the AIDL. Mirror byte-identically between `:app` and `:sdk` interface copies. |
 | Remove a method | ❌ | Methods are append-only. Deprecate via `@Deprecated` + no-op stub. |
 | Reorder methods | ❌ | Method positions are part of the wire contract. |
 | Add a field to an existing `@Parcelize` data class | ❌ | Wire-breaking. See "Parcelable evolution" below. |
@@ -32,7 +32,7 @@ Mindlayer has **four** wire surfaces. Each has its own evolution rules.
 - **Old SDKs calling new methods will get `AbstractMethodError`** at the binder stub. The SDK must catch this and fall back to a `v0Capabilities` baseline (see `v02-capabilities` work).
 - **New SDKs calling old services** are detected via `getCapabilities().supportedFeatures` / capability bits — once that ships. Until then, a new SDK against an old service must catch `AbstractMethodError`/`NoSuchMethodError` per call site.
 
-**Mirror invariant**: AIDL files in `app/src/main/aidl/com/adsamcik/mindlayer/` and `sdk/src/main/aidl/com/adsamcik/mindlayer/` must be **byte-identical**. The PR template asks for explicit confirmation of this.
+**Mirror invariant**: AIDL **interface** files (`IMindlayerService.aidl` + `IClientCallback.aidl`) in `app/src/main/aidl/com/adsamcik/mindlayer/` and `sdk/src/main/aidl/com/adsamcik/mindlayer/` must be **byte-identical**. **Parcelable** AIDL files live only in `sdk/src/main/aidl/com/adsamcik/mindlayer/`; `:app` resolves them via `implementation(project(":sdk"))`. The PR template asks for explicit confirmation of this; `AidlContractDriftTest` enforces it on every unit-test run.
 
 ### 2. `@Parcelize` data classes
 
@@ -168,7 +168,7 @@ Real failure modes observed when AIDL discipline lapses:
 When changing the AIDL surface:
 
 1. **Read this document.** Confirm your change is in the "allowed" column.
-2. **Mirror AIDL files** byte-identically between `app/src/main/aidl/` and `sdk/src/main/aidl/`. CI will reject mismatches.
+2. **Mirror AIDL interface files** byte-identically between `app/src/main/aidl/` and `sdk/src/main/aidl/` (`IMindlayerService.aidl` + `IClientCallback.aidl` only). New / changed **parcelables** go only in `sdk/src/main/aidl/`. CI + `AidlContractDriftTest` will reject mismatches.
 3. **Add tests** that round-trip the new Parcelable / method through `Parcel.marshall` + `unmarshall` to verify wire compat.
 4. **Document the new feature flag** in this file's table if you're adding capability-gated behavior.
 5. **Bump `MindlayerErrorCode`** if you're adding a typed error path. Mirror the symbolic name in `nameOf()` + `categoryOf()`.
@@ -179,7 +179,7 @@ If this document is wrong, **fix the document in the same PR as the code change*
 
 `IMindlayerService` appends `inferDeferred`, `fetchDeferredResult`, `cancelDeferredInference`, and `acknowledgeDeferredResult` after the existing v0.4 callback methods. `IClientCallback` appends `onDeferredInferenceComplete`. Existing transaction codes are preserved because no existing method was reordered or renumbered.
 
-New parcelables: `DeferredHandle` and `DeferredResult`. The AIDL declaration files are mirrored byte-for-byte between `app/src/main/aidl` and `sdk/src/main/aidl`.
+New parcelables: `DeferredHandle` and `DeferredResult`. The AIDL declaration files live in `sdk/src/main/aidl/` and are pulled into `:app` transitively via `implementation(project(":sdk"))`.
 
 Capability flag: `ServiceCapabilities.FEATURE_DEFERRED_INFERENCE`
 (`"deferred_inference"`). New SDKs must check it and throw
