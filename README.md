@@ -95,7 +95,7 @@ adb shell am start -n com.adsamcik.mindlayer.service/.ui.MainActivity
 | `sdk-camerax/` | Optional CameraX OCR adapter (`OcrImageAnalyzer`) |
 | `shared/` | Shared Parcelable types + streaming protocol |
 | `gemma_model/` | Play for On-device AI pack for Gemma 4 E2B |
-| `embeddinggemma_model/` | Play for On-device AI pack for EmbeddingGemma |
+| `gemma_embed_model/` | Play for On-device AI pack for EmbeddingGemma |
 | `paddleocr_model/` | Play for On-device AI pack for PaddleOCR PP-OCRv5 |
 
 ## Capability matrix
@@ -137,3 +137,4 @@ In short: you are free to use, modify, and distribute this software, including o
 ### Deferred async inference
 
 Mindlayer supports fire-and-fetch-later flows for long-running work. Submit with `mindlayer.chatDeferred(sessionId, text)`, subscribe to `mindlayer.deferredCompletions()` for push notification, then call `fetchDeferredResult(requestId)`. Results are SQLCipher-encrypted at rest, scoped per UID, quota-limited, and expire after 24 hours by default.
+

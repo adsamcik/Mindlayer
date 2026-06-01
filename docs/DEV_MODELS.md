@@ -1,7 +1,7 @@
 # Dev model sideload
 
 Mindlayer ships three on-device AI models as Play install-time **AI
-Asset Packs** (`:gemma_model`, `:embeddinggemma_model`,
+Asset Packs** (`:gemma_model`, `:gemma_embed_model`,
 `:paddleocr_model`). In production that's the right choice — packs
 are integrity-verified and lifecycle-managed by the Play installer.
 In development it's painful: every `installDebug` shoves multi-GB of
@@ -224,7 +224,7 @@ hashes:
 | Module | Manifest |
 |---|---|
 | `gemma_model` | [`gemma_model/src/main/assets/model_integrity.json`](../gemma_model/src/main/assets/model_integrity.json) |
-| `embeddinggemma_model` | [`embeddinggemma_model/src/main/assets/embedding_model_integrity.json`](../embeddinggemma_model/src/main/assets/embedding_model_integrity.json) |
+| `gemma_embed_model` | [`gemma_embed_model/src/main/assets/embedding_model_integrity.json`](../gemma_embed_model/src/main/assets/embedding_model_integrity.json) |
 | `paddleocr_model` | [`paddleocr_model/src/main/assets/paddleocr_model_integrity.json`](../paddleocr_model/src/main/assets/paddleocr_model_integrity.json) |
 
 The script reads them and applies an advisory check:
@@ -287,3 +287,4 @@ not for security testing.
 - Engine code: `app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/`.
 - Privacy invariants:
   [`.github/instructions/privacy-offline.instructions.md`](../.github/instructions/privacy-offline.instructions.md).
+

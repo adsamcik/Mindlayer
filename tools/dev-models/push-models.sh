@@ -32,7 +32,7 @@ EMBEDDING_FILES=(
   'embedding-gemma-300m-v1.tflite'
   'embedding-gemma-300m-v1.spm.model'
 )
-EMBEDDING_MANIFEST='embeddinggemma_model/src/main/assets/embedding_model_integrity.json'
+EMBEDDING_MANIFEST='gemma_embed_model/src/main/assets/embedding_model_integrity.json'
 
 PADDLE_FILES=(
   'paddleocr-ppocrv5-mobile-det.tflite'
@@ -354,3 +354,4 @@ else
   for msg in "${FAILURES[@]}"; do echo "  - $msg"; done
   exit 1
 fi
+

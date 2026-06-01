@@ -1,42 +1,13 @@
-# PaddleOCR PP-OCRv5 mobile asset pack — assets directory
+# AI Pack assets directory.
+#
+# This file exists to keep the directory in git so AGP's
+# :app:assetPackReleasePreBundleTask does not fail with
+# "path does not exist" when the model artifacts are absent locally.
+#
+# The content of this .gitkeep is INTENTIONALLY IDENTICAL across all
+# three AI Pack modules (:gemma_model, :gemma_embed_model,
+# :paddleocr_model). bundletool's EntryClashValidator rejects entries
+# at the same relative path that differ in byte content, and an asset
+# pack's .gitkeep would otherwise clash. Per-pack documentation lives
+# in the module's README.md (one level up).
 
-This `assets/` directory holds the four runtime artifacts that the
-service-side OCR engine (PR C) loads when handling the multi-frame OCR
-session API:
-
-- `paddleocr-ppocrv5-mobile-det.tflite` — text-line detection
-- `paddleocr-ppocrv5-mobile-rec.tflite` — text recognition
-- `paddleocr-ppocrv5-mobile-cls.tflite` — text-orientation classifier
-- `paddleocr-ppocrv5-mobile-dict.txt`  — character dictionary
-
-The four `.tflite` and `.txt` payload files are **deliberately not
-committed** (see `/.gitignore`: `*.tflite`, `paddleocr-ppocrv5-mobile-*`).
-They are produced by the build-time conversion pipeline in
-`.github/workflows/build-paddleocr-models.yml`:
-
-    PaddleOCR PP-OCRv5 mobile (Paddle format)
-            v  paddle2onnx 2.1.0
-    ONNX  (intermediate, never shipped)
-            v  onnx2tf 2.4.0
-    .tflite x 3  (det / rec / cls)
-    + dict.txt   (verbatim from PaddleOCR repo)
-
-All three conversion tools are pinned community releases that satisfy the
-7-day soak rule (`/.github/instructions/privacy-offline.instructions.md`
-section "Soak rule").
-
-`paddleocr_model_integrity.json` is the manifest the service consumes to
-verify each artifact's SHA-256 at load time (mirrors `gemma_model` and
-`embeddinggemma_model`).
-
-This `.gitkeep` exists so that the `paddleocr_model` AI Pack module
-produces a valid (mostly-empty) asset pack at build time even when the
-`.tflite` artifacts are absent locally. Without it, AGP's
-`:app:assetPackReleasePreBundleTask` fails with *"path does not exist"*
-and breaks the release AAB build in CI - identical to
-`gemma_model/src/main/assets/.gitkeep`.
-
-Do not commit any `.tflite` files here. Do not commit the raw
-`paddleocr-ppocrv5-mobile-*.txt` dictionary either; the workflow
-re-downloads it at publish time and the SHA-256 is the only thing pinned
-in tree.

@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Phase A intentionally ships no bundled embedding model. In normal installs
  * discovery therefore returns an empty list until Phase D adds the
- * `embeddinggemma_model` Asset Pack containing `embedding-*.tflite`, a
+ * `gemma_embed_model` Asset Pack containing `embedding-*.tflite`, a
  * `sentencepiece.model` tokenizer, and integrity metadata.
  *
  * Trust ranking mirrors [ModelRegistry]: Play AI Pack assets, `filesDir`,
@@ -352,3 +352,4 @@ object EmbeddingModelRegistry {
         val sha256: String?,
     )
 }
+

@@ -94,7 +94,7 @@ $EmbeddingFiles = @(
     'embedding-gemma-300m-v1.tflite',
     'embedding-gemma-300m-v1.spm.model'
 )
-$EmbeddingManifest = 'embeddinggemma_model/src/main/assets/embedding_model_integrity.json'
+$EmbeddingManifest = 'gemma_embed_model/src/main/assets/embedding_model_integrity.json'
 
 $PaddleFiles = @(
     'paddleocr-ppocrv5-mobile-det.tflite',
@@ -452,3 +452,4 @@ if ($failures.Count -eq 0) {
     foreach ($f in $failures) { Write-Host "  - $f" }
     exit 1
 }
+

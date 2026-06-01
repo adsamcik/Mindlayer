@@ -10,7 +10,7 @@ This file is the single source of truth that:
   manifest value when no `-PmodelSha256` / `-PembeddingModelSha256` /
   `-PembeddingTokenizerSha256` is passed. See
   `gemma_model/build.gradle.kts` and
-  `embeddinggemma_model/build.gradle.kts`'s
+  `gemma_embed_model/build.gradle.kts`'s
   `generate*ModelIntegrityManifest` tasks.
 - **Build-time-injected models** (PaddleOCR PP-OCRv5 mobile) use as the
   reference values plugged into the
@@ -26,8 +26,8 @@ This file is the single source of truth that:
 | Artifact | Role | SHA-256 |
 |---|---|---|
 | `gemma_model/src/main/assets/gemma-4-E2B-it.litertlm` | Gemma chat (LiteRT-LM 0.12.0) | `181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c` |
-| `embeddinggemma_model/src/main/assets/embedding-gemma-300m-v1.tflite` | EmbeddingGemma weights | `d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381` |
-| `embeddinggemma_model/src/main/assets/embedding-gemma-300m-v1.spm.model` | EmbeddingGemma SentencePiece tokenizer | `d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7` |
+| `gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.tflite` | EmbeddingGemma weights | `d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381` |
+| `gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.spm.model` | EmbeddingGemma SentencePiece tokenizer | `d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7` |
 | `paddleocr-ppocrv5-mobile-det.tflite` *(from workflow run `26704498612`)* | PaddleOCR detection | `03a5b639ef85b30fe0b227fd06c99e23caa1772ac85081350cdb63a4fb5f252b` |
 | `paddleocr-ppocrv5-mobile-rec.tflite` *(from workflow run `26704498612`)* | PaddleOCR recognition | `374ab36289ab5a2b798bb41d8b85641e28e2cb1e65298da65e4e0c2498194d2b` |
 | `paddleocr-ppocrv5-mobile-cls.tflite` *(from workflow run `26704498612`)* | PaddleOCR orientation classifier | `76a292681fb774f5f89f6d50e1312757f6857cfaefab6953ef657040e8364093` |
@@ -40,9 +40,9 @@ This file is the single source of truth that:
 $shas = [ordered]@{
   "gemma_model/src/main/assets/gemma-4-E2B-it.litertlm" =
     "181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c"
-  "embeddinggemma_model/src/main/assets/embedding-gemma-300m-v1.tflite" =
+  "gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.tflite" =
     "d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381"
-  "embeddinggemma_model/src/main/assets/embedding-gemma-300m-v1.spm.model" =
+  "gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.spm.model" =
     "d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7"
 }
 foreach ($p in $shas.Keys) {
@@ -58,8 +58,8 @@ foreach ($p in $shas.Keys) {
 # bash
 declare -A SHAS=(
   ["gemma_model/src/main/assets/gemma-4-E2B-it.litertlm"]="181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c"
-  ["embeddinggemma_model/src/main/assets/embedding-gemma-300m-v1.tflite"]="d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381"
-  ["embeddinggemma_model/src/main/assets/embedding-gemma-300m-v1.spm.model"]="d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7"
+  ["gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.tflite"]="d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381"
+  ["gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.spm.model"]="d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7"
 )
 for p in "${!SHAS[@]}"; do
   [[ -f "$p" ]] || { echo "missing: $p"; continue; }
@@ -128,3 +128,4 @@ The integrity-manifest tests in `:app:testDebugUnitTest` validate
 that the committed values match a 64-hex pattern (no length / case
 drift) but do NOT pin the SHA value itself — so step 2 above can
 land in a single commit without test churn.
+
