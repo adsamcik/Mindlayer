@@ -1225,8 +1225,20 @@ class SharedMemoryPool(cacheDir: File) {
      * cross-UID staging-file deletion). The canonical-path check is
      * defence in depth in case [File] on some filesystem normalises the
      * random component.
+     *
+     * Defensively re-creates [stagingDir] on every call. The pool only
+     * runs `mkdirs()` once at construction (line 244), but Android's
+     * cache-trimming policy is allowed to delete anything under
+     * [Context.getCacheDir] at any time — and aggressively does so under
+     * disk pressure. Without this re-create, the next [stageFromPfd]
+     * write throws `FileNotFoundException(open failed: ENOENT)`, which
+     * the binder surfaces as the misleading `ocrImage decode failed`.
+     * `mkdirs()` is idempotent and effectively a no-op when the
+     * directory already exists, so the cost on the hot path is one
+     * `stat` syscall.
      */
     private fun createStagingFile(prefix: String, extension: String): File {
+        stagingDir.mkdirs()
         val uuid = UUID.randomUUID().toString()
         val staged = File(stagingDir, "${prefix}_$uuid.$extension")
         check(staged.canonicalPath.startsWith(stagingDirCanonical + File.separator)) {
