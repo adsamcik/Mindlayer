@@ -2681,14 +2681,23 @@ class ServiceBinder(
      *
      * Wire errors:
      *  - [com.adsamcik.mindlayer.shared.MindlayerErrorCode.INVALID_REQUEST]
-     *    on validator failure or MediaPart decode failure.
+     *    on validator failure or MediaPart decode failure
+     *    (BitmapFactory returned null, pixel-bomb guard, wrong KIND).
      *  - [com.adsamcik.mindlayer.shared.MindlayerErrorCode.SERVICE_UNAVAILABLE]
      *    when the OCR engine is not wired or not ready (model bundle
      *    missing, init still in flight, init failed).
      *  - [com.adsamcik.mindlayer.shared.MindlayerErrorCode.LOW_MEMORY]
-     *    when the engine declined recognition for memory reasons.
+     *    when the engine declined recognition for memory reasons, or
+     *    when staging/decode hit an [OutOfMemoryError].
      *  - [com.adsamcik.mindlayer.shared.MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED]
-     *    when SharedMemory staging was rejected by the pool.
+     *    when SharedMemory staging was rejected by the pool, or when
+     *    the stage-write itself failed with an [java.io.IOException]
+     *    (disk full, cache-dir trimmed, pipe broken). SDKs should back
+     *    off and retry — neither bucket is the caller's fault.
+     *  - [com.adsamcik.mindlayer.shared.MindlayerErrorCode.INTERNAL] on
+     *    any other unexpected throwable from the extraction pipeline.
+     *    Caller-fault failures route to INVALID_REQUEST above, so this
+     *    bucket should remain empty in steady state.
      */
     override fun ocrImage(
         image: com.adsamcik.mindlayer.MediaPart,
@@ -2756,7 +2765,53 @@ class ServiceBinder(
                 MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
                 "shm_pool_exhausted reason=${e.reason} retryAfterMs=${e.retryAfterMs}",
             )
+        } catch (e: OutOfMemoryError) {
+            // Image decode or RGBA→Y conversion can OOM on a large frame
+            // even after validation. Route as LOW_MEMORY so the SDK knows
+            // to back off rather than blame the caller. Bug #2028 also
+            // surfaces native OOM here when LiteRT-LM allocations race
+            // OCR — both want the same recovery hint.
+            try { image.source.close() } catch (_: Throwable) { /* fine */ }
+            MindlayerLog.w(
+                TAG,
+                "ocrImage Y-plane extraction OOM: ${e.safeLabel()}",
+                requestId = scopedKey,
+                throwable = null,
+            )
+            throw typedBinderException(
+                MindlayerErrorCode.LOW_MEMORY,
+                "ocrImage decode out-of-memory: ${e.safeLabel()}",
+            )
+        } catch (e: java.io.IOException) {
+            // Stage-write failure — covers FileNotFoundException from a
+            // cache-trimmed media_staging dir (the failure mode fixed in
+            // SharedMemoryPool 89323ee, kept defensive here), disk-full
+            // EIO, pipe-broken EPIPE, and the rare PFD EBADF. None of
+            // these are caller's fault, so map to TRANSIENT_RESOURCE_EXHAUSTED
+            // — the SDK's retry policy will treat it the same as a
+            // pool-exhausted backoff. Distinct from MediaPart decode
+            // failures (returns null → wireError → SecurityException with
+            // INVALID_REQUEST, already caught above).
+            try { image.source.close() } catch (_: Throwable) { /* fine */ }
+            MindlayerLog.w(
+                TAG,
+                "ocrImage Y-plane stage I/O failed: ${e.safeLabelWithDetail()}",
+                requestId = scopedKey,
+                throwable = null,
+            )
+            throw typedBinderException(
+                MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
+                "ocrImage stage failed: ${e.safeLabelWithDetail()}",
+            )
         } catch (t: Throwable) {
+            // By elimination, this is genuinely unexpected — NOT a
+            // validation/decode failure (caught above as SecurityException
+            // — the extractor's wireError(...) produces that), NOT a
+            // stage-write I/O failure (caught above as IOException), NOT
+            // OOM (caught above), NOT shared-memory exhaustion (caught
+            // above). Labelling this INVALID_REQUEST would mislead SDK
+            // consumers into thinking the caller did something wrong, so
+            // route to INTERNAL instead.
             try { image.source.close() } catch (_: Throwable) { /* fine */ }
             MindlayerLog.w(
                 TAG,
@@ -2765,8 +2820,8 @@ class ServiceBinder(
                 throwable = null,
             )
             throw typedBinderException(
-                MindlayerErrorCode.INVALID_REQUEST,
-                "ocrImage decode failed: ${t.safeLabelWithDetail()}",
+                MindlayerErrorCode.INTERNAL,
+                "ocrImage extraction failed: ${t.safeLabelWithDetail()}",
             )
         }
 

@@ -1231,8 +1231,11 @@ class SharedMemoryPool(cacheDir: File) {
      * cache-trimming policy is allowed to delete anything under
      * [Context.getCacheDir] at any time — and aggressively does so under
      * disk pressure. Without this re-create, the next [stageFromPfd]
-     * write throws `FileNotFoundException(open failed: ENOENT)`, which
-     * the binder surfaces as the misleading `ocrImage decode failed`.
+     * write throws `FileNotFoundException(open failed: ENOENT)`. The
+     * binder now classifies that as `MLERR:5004:ocrImage stage failed`
+     * (TRANSIENT_RESOURCE_EXHAUSTED) — see ServiceBinder.ocrImage. Prior
+     * to the disambiguation work this surfaced as the misleading
+     * `MLERR:3001:ocrImage decode failed` (INVALID_REQUEST).
      * `mkdirs()` is idempotent and effectively a no-op when the
      * directory already exists, so the cost on the hot path is one
      * `stat` syscall.

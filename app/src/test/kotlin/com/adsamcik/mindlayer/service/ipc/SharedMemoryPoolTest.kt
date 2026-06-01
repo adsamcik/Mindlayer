@@ -236,7 +236,12 @@ class SharedMemoryPoolTest {
         // and verify the second staging still succeeds and the file is
         // really written. Before the createStagingFile.mkdirs() fix this
         // second stage threw FileNotFoundException(ENOENT) which the
+        // Before the createStagingFile.mkdirs() fix this second stage
+        // threw FileNotFoundException(ENOENT) which the
         // binder wrapped (misleadingly) as "ocrImage decode failed".
+        // After the binder disambiguation work the same condition would
+        // now surface as MLERR:5004:ocrImage stage failed
+        // (TRANSIENT_RESOURCE_EXHAUSTED) instead.
         val firstPng = validPngBytes()
         val firstResult = pool.stageImage(
             "req-resilient-1",
