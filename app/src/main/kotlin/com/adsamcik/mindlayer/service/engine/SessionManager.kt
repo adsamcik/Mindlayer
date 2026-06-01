@@ -1007,11 +1007,45 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         if (initJob.get()?.isActive == true) return
         val job = initScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             try {
-                MindlayerLog.i(TAG, "Background engine init starting (backend=$preferredBackend, maxTokens=$maxTokens)")
+                // LiteRT-LM #2028 process-restart workaround. See full
+                // rationale in ServiceBinder.startEngineWarmup. A prior
+                // process may have recorded an EngineRestartStore intent
+                // (thermal switch or memory-pressure unload) just before
+                // killing itself.
+                //
+                // Defensive against:
+                //  - store-IO failure (catch any throwable → fall back
+                //    to the caller's preferredBackend)
+                //  - mockk(relaxed = true) of EngineManager that
+                //    auto-generates a relaxed-mock RestartIntent instead
+                //    of returning null. attemptCount > 0 guard rejects
+                //    those (EngineRestartStore.record always writes
+                //    attemptCount.coerceAtLeast(1), so 0 is impossible
+                //    for a real persisted intent).
+                val intent = @Suppress("TooGenericExceptionCaught") try {
+                    engineManager.consumePendingRestartIntent()?.takeIf { it.attemptCount > 0 }
+                } catch (_: Throwable) {
+                    null
+                }
+                val backend = intent?.targetBackend ?: preferredBackend
+                val tokens = intent?.maxTokens ?: maxTokens
+                if (intent != null) {
+                    MindlayerLog.i(
+                        TAG,
+                        "ensureInitStarted honoring restart intent: reason=${intent.reason}, " +
+                            "targetBackend=${intent.targetBackend ?: "<default>"}, " +
+                            "attempt=${intent.attemptCount}",
+                    )
+                }
+                MindlayerLog.i(TAG, "Background engine init starting (backend=$backend, maxTokens=$tokens)")
                 engineManager.initialize(
-                    preferredBackend = preferredBackend,
-                    maxTokens = maxTokens,
+                    preferredBackend = backend,
+                    maxTokens = tokens,
                 )
+                if (intent != null) {
+                    @Suppress("TooGenericExceptionCaught")
+                    try { engineManager.clearPendingRestartIntent() } catch (_: Throwable) { /* best-effort */ }
+                }
                 // F-071: clear any previously-cached terminal failure so
                 // a recovered situation (e.g. user closed background apps
                 // between attempts) can serve sessions normally.

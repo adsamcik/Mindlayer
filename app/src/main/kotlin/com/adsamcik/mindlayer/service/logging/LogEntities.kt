@@ -86,6 +86,7 @@ enum class LogEvent(val key: String) {
     ENGINE_INIT("engine_init"),
     ENGINE_INIT_SUCCESS("engine_init_success"),
     ENGINE_SHUTDOWN("engine_shutdown"),
+    ENGINE_RESTART("engine_restart"),
     OCR_BACKEND_READY("ocr_backend_ready"),
     OCR_BACKEND_SHUTDOWN("ocr_backend_shutdown"),
     OCR_FRAME_PROCESSED("ocr_frame_processed"),

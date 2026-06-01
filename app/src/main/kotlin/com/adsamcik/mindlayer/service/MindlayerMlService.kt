@@ -497,11 +497,34 @@ class MindlayerMlService : Service() {
                 orchestrator.awaitAllJobs(timeoutMs = 5_000)
             }
             sessionManager.applyMemoryPressure(level)
-            val unloaded = engineManager.shutdownIfIdle {
-                !sessionManager.hasActiveStreaming()
-            }
-            if (unloaded) {
+            // Process-restart instead of in-process engine shutdown.
+            // Same LiteRT-LM #2028 reason as the thermal-switch path:
+            // shutdownIfIdle would null the Engine and the next
+            // initialize() (kicked off by the next client bind) would
+            // SIGSEGV in liblitertlm_jni.so. shutdownAndRestart()
+            // persists a "default-chain" restart intent and kills our
+            // process, freeing the entire native heap rather than just
+            // the LiteRT engine allocations.
+            //
+            // We still preserve the streaming-aware contract from
+            // shutdownIfIdle: if any session is mid-stream the predicate
+            // fails and we skip the restart. Predicate evaluated under
+            // EngineManager's mutex so a fresh start-of-inference cannot
+            // race the restart decision.
+            if (!sessionManager.hasActiveStreaming()) {
+                // Lazy-invalidate idle sessions; they re-warm on next
+                // access after the post-restart engine init.
                 sessionManager.invalidateIdleSessionsForBackendSwitch()
+                engineManager.shutdownAndRestart(
+                    reason = "memory_pressure_emergency",
+                    targetBackend = null,
+                )
+                // Unreachable; process is gone.
+            } else {
+                MindlayerLog.i(
+                    TAG,
+                    "Memory pressure EMERGENCY but active streaming — skipping engine restart",
+                )
             }
             return
         }
@@ -628,13 +651,28 @@ class MindlayerMlService : Service() {
         serviceScope.launch {
             try {
                 // Wait for any coroutine that slipped in before we took the
-                // lock to finish — avoids closing a Conversation mid-inference.
+                // lock to finish — avoids killing the process mid-inference.
                 orchestrator.awaitAllJobs()
-                // Lazy-invalidate idle sessions; they re-warm on next access after the backend changes.
+                // Lazy-invalidate idle sessions; they re-warm on next access
+                // after the post-restart engine init.
                 sessionManager.invalidateIdleSessionsForBackendSwitch()
-                engineManager.switchBackend(target)
-                logRepository.logBackendSwitch(fromBackend, engineManager.currentBackend, "complete")
-                MindlayerLog.i(TAG, "Backend switch complete: now on ${engineManager.currentBackend}")
+                // Process-restart instead of in-process switchBackend: the
+                // latter triggers LiteRT-LM #2028 SIGSEGV on the second
+                // recreate of the LiteRT engine inside the `:ml` process.
+                // shutdownAndRestart() persists the target backend to
+                // EngineRestartStore, calls Process.killProcess(myPid()),
+                // and Android auto-restarts the service on the next bind.
+                // The new process consumes the intent in startEngineWarmup
+                // and inits against `target`.
+                //
+                // NB: this call DOES NOT RETURN — it ends the process. The
+                // "complete" log line below is intentionally not reached;
+                // the post-restart engine init logs its own completion via
+                // the existing initialize() instrumentation.
+                engineManager.shutdownAndRestart(
+                    reason = "thermal_switch",
+                    targetBackend = target,
+                )
             } catch (t: Throwable) {
                 logRepository.logBackendSwitch(fromBackend, target, "failed")
                 MindlayerLog.e(TAG, "Backend switch failed: ${t.safeLabel()}")

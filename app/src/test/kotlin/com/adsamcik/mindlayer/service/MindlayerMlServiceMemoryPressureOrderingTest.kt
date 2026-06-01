@@ -64,7 +64,7 @@ class MindlayerMlServiceMemoryPressureOrderingTest {
             )
         }
         sessionManager = SessionManager(mockk(relaxed = true), engineManager, memoryBudget)
-        coEvery { engineManager.shutdownIfIdle(any()) } returns true
+        coEvery { engineManager.shutdownAndRestart(any(), any(), any()) } returns Unit
         ReflectionHelpers.setField(service, "ocrSessionManager", ocrSessionManager)
         ReflectionHelpers.setField(service, "paddleOcrEngine", paddleOcrEngine)
         ReflectionHelpers.setField(service, "embeddingEngine", embeddingEngine)
@@ -80,7 +80,7 @@ class MindlayerMlServiceMemoryPressureOrderingTest {
             ocrSessionManager.drainForMemoryPressure()
             paddleOcrEngine.unloadForMemoryPressure()
             embeddingEngine.unloadForMemoryPressure()
-            engineManager.shutdownIfIdle(any())
+            engineManager.shutdownAndRestart(reason = "memory_pressure_emergency", targetBackend = null, maxTokens = any())
         }
     }
 
@@ -111,3 +111,4 @@ class MindlayerMlServiceMemoryPressureOrderingTest {
         coVerify(exactly = 1) { embeddingEngine.unloadForMemoryPressure() }
     }
 }
+

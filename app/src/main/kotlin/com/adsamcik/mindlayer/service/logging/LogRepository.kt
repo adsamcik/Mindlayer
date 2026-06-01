@@ -385,6 +385,53 @@ class LogRepository(
     }
 
     /**
+     * Log a process-restart event triggered by
+     * [com.adsamcik.mindlayer.service.engine.EngineManager.shutdownAndRestart].
+     *
+     * Distinct from [logEngineShutdown] because the latter persists "engine
+     * `close()`'d in-process", while this event documents "process killed
+     * and re-spawned to obtain a fresh native engine (LiteRT-LM #2028
+     * workaround)". Both write to [LogCategory.ENGINE] so the dashboard's
+     * engine timeline renders them inline.
+     *
+     * `reason` and `targetBackend` are short opaque labels the caller
+     * provides verbatim. The caller is responsible for redaction; this
+     * method does not inspect either string.
+     *
+     * **F-006 invariant:** only enum-shaped labels are persisted (the
+     * reason names are a closed set produced by `MindlayerMlService` /
+     * `EngineManager`), and there is no exception message in the row.
+     */
+    fun logEngineRestart(
+        reason: String,
+        targetBackend: String?,
+        currentBackend: String,
+        attemptCount: Int,
+    ) {
+        val extraJson = buildString {
+            append('{')
+            append("\"reason\":\"")
+            append(reason)
+            append("\",")
+            append("\"attemptCount\":")
+            append(attemptCount)
+            if (targetBackend != null) {
+                append(",\"targetBackend\":\"")
+                append(targetBackend)
+                append('"')
+            }
+            append('}')
+        }
+        log(LogEntry(
+            timestampMs = System.currentTimeMillis(),
+            category = LogCategory.ENGINE,
+            event = LogEvent.ENGINE_RESTART.key,
+            backend = currentBackend,
+            extraJson = extraJson,
+        ))
+    }
+
+    /**
      * F-077: persist a categorised init-failure row so the dashboard can
      * render variant-specific remediation copy.
      *

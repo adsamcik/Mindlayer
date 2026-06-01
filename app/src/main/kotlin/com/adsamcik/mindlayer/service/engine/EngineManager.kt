@@ -68,6 +68,32 @@ class EngineManager(
     private val logRepository: com.adsamcik.mindlayer.service.logging.LogRepository? = null,
 ) {
 
+    /**
+     * Factory for the persistent restart-intent store. Lazy via [restartStore]
+     * so tests that never exercise [shutdownAndRestart] / [consumePendingRestartIntent]
+     * don't pay the construction cost (and don't NPE on mock contexts that
+     * don't stub `applicationContext.filesDir`). Tests that exercise the
+     * restart paths should set this BEFORE first use, e.g. to a
+     * `FakeEngineRestartStore` backed by a tmpdir.
+     */
+    @VisibleForTesting
+    internal var restartStoreFactory: () -> EngineRestartStore = { EngineRestartStore(context) }
+    private val restartStore: EngineRestartStore by lazy { restartStoreFactory() }
+
+    /**
+     * Test seam for [shutdownAndRestart]. Production: kills our own
+     * process; the service auto-restarts on the next bind. Tests override
+     * to a no-op or recording lambda so [shutdownAndRestart] can return
+     * and assertions can fire.
+     *
+     * `android.os.Process.killProcess(myPid())` is the documented restart
+     * hammer for services that need a fresh native heap.
+     */
+    @VisibleForTesting
+    internal var processKiller: () -> Unit = {
+        android.os.Process.killProcess(android.os.Process.myPid())
+    }
+
     companion object {
         private const val TAG = "EngineManager"
 
@@ -580,9 +606,146 @@ class EngineManager(
     }
 
     /**
-     * Switch to a different backend (e.g. thermal-fallback from GPU → CPU).
-     * The current engine is shut down first.
+     * Restart the `:ml` service process to obtain a fresh native engine
+     * state, instead of doing an in-process `shutdown() + initialize()`.
+     *
+     * # Why this exists
+     *
+     * LiteRT-LM bug [#2028](https://github.com/google-ai-edge/LiteRT-LM/issues/2028)
+     * — Gemma 4 E2B on CPU running inside an `android:process=":ml"`
+     * isolated service SIGSEGVs in `liblitertlm_jni.so` on the SECOND
+     * call to `Engine.close()` + new `Engine()` in the same process. The
+     * native runtime's dispatch-delegate registry retains pointers into
+     * freed memory across the close/recreate boundary; the next init
+     * reads garbage out of `magic_number_utils.cc` and crashes.
+     *
+     * Until the upstream fix lands we sidestep the in-process recreate
+     * path entirely: record the desired post-restart state to
+     * [restartStore], drain in-flight work, then call [processKiller]
+     * (production: `Process.killProcess(myPid())`). Android auto-restarts
+     * the service the next time a client binds; the fresh process reads
+     * the intent and starts engine warmup against [targetBackend].
+     *
+     * # Behaviour
+     *
+     * - **Persistence first**: the intent is written under the engine
+     *   mutex and before any draining, so a client whose bind races our
+     *   kill will at worst trigger a fresh restart against the same
+     *   intent (idempotent — [EngineRestartStore] dedupes against the
+     *   same target).
+     * - **No in-process shutdown**: callers that previously did
+     *   `engineManager.shutdown()` + `engineManager.initialize(target)`
+     *   should now call this method instead. The native engine is
+     *   never `close()`d in the doomed process — we just exit.
+     * - **One-way**: after [processKiller] returns we will not. Code
+     *   placed after this call inside the same coroutine will not run.
+     *
+     * # Loop prevention
+     *
+     * [EngineRestartStore.consume] returns `null` once the same target
+     * backend has been requested [EngineRestartStore.MAX_RESTART_ATTEMPTS]
+     * times in a row without a `clear()` (i.e. without a successful
+     * post-restart init). The post-restart service then falls back to
+     * the default backend chain.
+     *
+     * @param reason short opaque label (e.g. `"thermal_switch"`,
+     *   `"memory_pressure"`, `"manual"`). Persisted verbatim — must not
+     *   contain prompt text or user content.
+     * @param targetBackend backend the post-restart init should prefer;
+     *   `null` uses the default chain (GPU → CPU).
+     * @param maxTokens KV-cache budget to apply on the post-restart
+     *   init.
      */
+    suspend fun shutdownAndRestart(
+        reason: String,
+        targetBackend: String? = null,
+        maxTokens: Int = 4096,
+    ): Unit = mutex.withLock {
+        MindlayerLog.w(
+            TAG,
+            "Engine process-restart requested: reason=$reason, " +
+                "currentBackend=$currentBackend, targetBackend=${targetBackend ?: "<default>"}",
+        )
+        // Persist the intent first. If the persistent write fails the
+        // post-restart engine falls back to its default chain — safe and
+        // correct, just not what the caller asked for. Persistence
+        // failures are not fatal here; we still proceed to restart.
+        val intent = restartStore.record(
+            reason = reason,
+            targetBackend = targetBackend,
+            maxTokens = maxTokens,
+        )
+        if (intent == null) {
+            MindlayerLog.w(
+                TAG,
+                "Engine restart intent persistence failed; post-restart will use default backend chain",
+            )
+        }
+        logRepository?.logEngineRestart(
+            reason = reason,
+            targetBackend = targetBackend,
+            currentBackend = currentBackend,
+            attemptCount = intent?.attemptCount ?: 0,
+        )
+        // Drain native state best-effort BEFORE killing the process: this
+        // is intentionally NOT a `close()` call (that's the path #2028
+        // explodes on). We simply flip the in-memory state so any
+        // late-arriving caller on the same coroutine sees Idle and
+        // exits early rather than racing the kill.
+        _state.value = EngineState.Idle
+        // Hand-off to Android. The service is bindAutoCreate'd so the
+        // next client bind brings us back; the new process consumes the
+        // restart intent in its onCreate path.
+        processKiller()
+        // Unreachable in production; defensive in tests where
+        // processKiller is a no-op.
+    }
+
+    /**
+     * Returns and clears the persisted restart intent recorded by an
+     * earlier process via [shutdownAndRestart]. Callers (typically
+     * [com.adsamcik.mindlayer.service.MindlayerMlService] during
+     * `onCreate`) should call this exactly once on service startup and
+     * pass the returned [EngineRestartStore.RestartIntent.targetBackend]
+     * to [initialize] as the preferred backend.
+     *
+     * Returns `null` when no intent is recorded or the loop-prevention
+     * cap ([EngineRestartStore.MAX_RESTART_ATTEMPTS]) has been hit; the
+     * caller should then init with `preferredBackend = null` (default
+     * chain).
+     */
+    fun consumePendingRestartIntent(): EngineRestartStore.RestartIntent? =
+        restartStore.consume()
+
+    /**
+     * Clear any pending restart intent without consuming it. Called
+     * after a successful post-restart [initialize] so a subsequent
+     * unrelated init failure doesn't fall back to "attempt 2 of the
+     * same target." Idempotent.
+     */
+    fun clearPendingRestartIntent() = restartStore.clear()
+
+    /**
+     * Switch to a different backend (e.g. thermal-fallback from GPU → CPU).
+     *
+     * **DO NOT use this in production code paths** — the in-process
+     * `shutdown() + initialize()` it performs is the exact sequence that
+     * triggers LiteRT-LM #2028 SIGSEGV on the second iteration. New code
+     * should call [shutdownAndRestart] with the desired `targetBackend`
+     * instead, which gets a fresh native process via Android service
+     * auto-restart.
+     *
+     * Retained only for the test seam (`switchBackend` is the entry
+     * point exercised by `EngineManagerTest.backendChainFallbackTest`,
+     * which mocks the LiteRT-LM Engine and so does not trip #2028).
+     */
+    @VisibleForTesting
+    @Deprecated(
+        message = "In-process backend switch is unsafe per LiteRT-LM #2028. " +
+            "Use shutdownAndRestart(reason, targetBackend) instead — production " +
+            "callers (MindlayerMlService) have already migrated.",
+        replaceWith = ReplaceWith("shutdownAndRestart(reason, newBackend, maxTokens)"),
+    )
     suspend fun switchBackend(
         newBackend: String,
         maxTokens: Int = 4096,

@@ -68,7 +68,7 @@ class MindlayerMlServiceConcurrentEmergencyTest {
             )
         }
         sessionManager = SessionManager(mockk(relaxed = true), engineManager, memoryBudget)
-        coEvery { engineManager.shutdownIfIdle(any()) } returns true
+        coEvery { engineManager.shutdownAndRestart(any(), any(), any()) } returns Unit
         ReflectionHelpers.setField(service, "ocrSessionManager", ocrSessionManager)
         ReflectionHelpers.setField(service, "paddleOcrEngine", paddleOcrEngine)
         ReflectionHelpers.setField(service, "embeddingEngine", embeddingEngine)
@@ -96,7 +96,7 @@ class MindlayerMlServiceConcurrentEmergencyTest {
         coVerify(exactly = 1) { ocrSessionManager.drainForMemoryPressure() }
         coVerify(exactly = 1) { paddleOcrEngine.unloadForMemoryPressure() }
         coVerify(exactly = 1) { embeddingEngine.unloadForMemoryPressure() }
-        coVerify(exactly = 1) { engineManager.shutdownIfIdle(any()) }
+        coVerify(exactly = 1) { engineManager.shutdownAndRestart(reason = "memory_pressure_emergency", targetBackend = null, maxTokens = any()) }
     }
 
     @Test fun paddleOcrUnloadFailureDoesNotStopEmbeddingUnloadOrEngineShutdown() = runTest {
@@ -108,7 +108,7 @@ class MindlayerMlServiceConcurrentEmergencyTest {
         coVerify(exactly = 1) { ocrSessionManager.drainForMemoryPressure() }
         coVerify(exactly = 1) { paddleOcrEngine.unloadForMemoryPressure() }
         coVerify(exactly = 1) { embeddingEngine.unloadForMemoryPressure() }
-        coVerify(exactly = 1) { engineManager.shutdownIfIdle(any()) }
+        coVerify(exactly = 1) { engineManager.shutdownAndRestart(reason = "memory_pressure_emergency", targetBackend = null, maxTokens = any()) }
     }
 
     @Test fun ocrDrainFailurePropagatesAndReleasesSingleFlightMutex() = runTest {
@@ -127,7 +127,7 @@ class MindlayerMlServiceConcurrentEmergencyTest {
         coVerify(exactly = 2) { ocrSessionManager.drainForMemoryPressure() }
         coVerify(exactly = 1) { paddleOcrEngine.unloadForMemoryPressure() }
         coVerify(exactly = 1) { embeddingEngine.unloadForMemoryPressure() }
-        coVerify(exactly = 1) { engineManager.shutdownIfIdle(any()) }
+        coVerify(exactly = 1) { engineManager.shutdownAndRestart(reason = "memory_pressure_emergency", targetBackend = null, maxTokens = any()) }
     }
 
     @Test fun embeddingUnloadFailurePropagatesAndReleasesSingleFlightMutex() = runTest {
@@ -145,6 +145,7 @@ class MindlayerMlServiceConcurrentEmergencyTest {
         coVerify(exactly = 2) { ocrSessionManager.drainForMemoryPressure() }
         coVerify(exactly = 2) { paddleOcrEngine.unloadForMemoryPressure() }
         coVerify(exactly = 2) { embeddingEngine.unloadForMemoryPressure() }
-        coVerify(exactly = 1) { engineManager.shutdownIfIdle(any()) }
+        coVerify(exactly = 1) { engineManager.shutdownAndRestart(reason = "memory_pressure_emergency", targetBackend = null, maxTokens = any()) }
     }
 }
+
