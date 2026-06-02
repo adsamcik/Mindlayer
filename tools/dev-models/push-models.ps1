@@ -54,6 +54,14 @@
     branch and for old API-30-or-earlier devices where /data/local/tmp
     listing still works.
 
+.PARAMETER Force
+    Skip the "remote already has a file of the same size" optimization
+    and push every file unconditionally. Useful when a model file has
+    been re-built locally with the same name + size but different
+    content (rare — model versions normally bump filenames). Without
+    this flag the script `adb shell stat -c %s`-checks the remote and
+    skips the multi-GB push when sizes match.
+
 .EXAMPLE
     .\push-models.ps1 -All -Cache D:\mindlayer-models
 
@@ -69,7 +77,8 @@ param(
     [string]$Cache,
     [string]$Device,
     [switch]$DryRun,
-    [switch]$PreferLegacyTmp
+    [switch]$PreferLegacyTmp,
+    [switch]$Force
 )
 
 Set-StrictMode -Version Latest
@@ -353,11 +362,35 @@ function Push-OneFile {
     $localSize = (Get-Item -LiteralPath $LocalPath).Length
     $argsPush = @('push', $LocalPath, $remote)
     $argsLs   = @('shell', 'ls', '-l', $remote)
+    $argsStat = @('shell', 'stat', '-c', '%s', $remote)
 
     if ($DryRun) {
         Write-Host "  [dry-run] adb $((Get-AdbArgs) + $argsPush -join ' ')"
         Write-Host "  [dry-run] adb $((Get-AdbArgs) + $argsLs   -join ' ')"
         return $true
+    }
+
+    # Skip already-pushed files whose size matches the local cache.
+    # `adb push` is roughly 80 MB/s on a good USB-3 link — pushing a
+    # 2.4 GB Gemma model is 30+ seconds you can avoid every iteration.
+    # `stat -c %s` is the Android toybox stat invocation; missing-file
+    # exits non-zero, which we treat as "needs pushing".
+    if (-not $Force) {
+        $s = Invoke-AdbCapture -AdbArgs $argsStat
+        if ($s.ExitCode -eq 0) {
+            $remoteSize = $null
+            $stdout = $s.Output.Trim()
+            if ($stdout -match '^\d+$') {
+                $remoteSize = [int64]$stdout
+            }
+            if ($null -ne $remoteSize -and $remoteSize -eq $localSize) {
+                Write-Host "  skip: already on device with matching size ($remoteSize bytes). Use -Force to override."
+                return $true
+            }
+            if ($null -ne $remoteSize) {
+                Write-Host "  size differs (remote=$remoteSize, local=$localSize); re-pushing."
+            }
+        }
     }
 
     Write-Host "  pushing $Filename ($localSize bytes) -> $remote"

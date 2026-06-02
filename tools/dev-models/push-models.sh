@@ -50,12 +50,13 @@ CACHE="${MINDLAYER_MODEL_CACHE:-}"
 DEVICE=''
 DRY_RUN=0
 PREFER_LEGACY_TMP=0
+FORCE=0
 
 usage() {
   cat <<'EOF'
 Usage: push-models.sh [--gemma] [--embeddings] [--paddleocr] [--all]
                       [--cache <dir>] [--device <serial>] [--dry-run]
-                      [--prefer-legacy-tmp]
+                      [--prefer-legacy-tmp] [--force]
 
   --gemma              Push the chat model (Gemma 4 E2B .litertlm).
   --embeddings         Push EmbeddingGemma weights + tokenizer.
@@ -69,6 +70,11 @@ Usage: push-models.sh [--gemma] [--embeddings] [--paddleocr] [--all]
   --prefer-legacy-tmp  Force the legacy /data/local/tmp/ push target
                        regardless of installed-service detection. Useful
                        for the API <= 30 fallback and for testing.
+  --force              Skip the "remote already has a file of the same
+                       size" optimization and push every file
+                       unconditionally. Without --force the script
+                       'adb shell stat -c %s'-checks the remote and
+                       skips the multi-GB push when sizes match.
 EOF
 }
 
@@ -82,6 +88,7 @@ while [ $# -gt 0 ]; do
     --device)             shift; DEVICE="${1:-}" ;;
     --dry-run)            DRY_RUN=1 ;;
     --prefer-legacy-tmp)  PREFER_LEGACY_TMP=1 ;;
+    --force)              FORCE=1 ;;
     -h|--help)            usage; exit 0 ;;
     *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
   esac
@@ -291,6 +298,24 @@ push_one() {
     echo "  [dry-run] adb $(adb_args | tr '\n' ' ')shell ls -l $remote"
     return 0
   fi
+
+  # Skip already-pushed files whose size matches the local cache.
+  # `adb push` is roughly 80 MB/s on a good USB-3 link — pushing a
+  # 2.4 GB Gemma model is 30+ seconds you can avoid every iteration.
+  # `stat -c %s` is the Android toybox stat invocation; missing-file
+  # exits non-zero, which we treat as "needs pushing".
+  if [ "$FORCE" -eq 0 ]; then
+    local remote_size
+    remote_size="$(run_adb shell stat -c %s "$remote" 2>/dev/null | tr -d '\r\n ')"
+    if [ -n "$remote_size" ] && [ "$remote_size" = "$local_size" ]; then
+      echo "  skip: already on device with matching size ($remote_size bytes). Use --force to override."
+      return 0
+    fi
+    if [ -n "$remote_size" ]; then
+      echo "  size differs (remote=$remote_size, local=$local_size); re-pushing."
+    fi
+  fi
+
   echo "  pushing $filename ($local_size bytes) -> $remote"
   if ! run_adb push "$local_path" "$remote" >/dev/null; then
     return 1

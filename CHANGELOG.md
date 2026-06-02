@@ -28,6 +28,22 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 ## [Unreleased]
 
 ### Added
+- **`scripts/dev-install.{ps1,sh}`** — one-shot wrapper that builds
+  a code-only debug APK (AI Asset Packs excluded), `adb install -r`s
+  it (preserving `externalFilesDir`), and pushes only the missing
+  model files via the existing `tools/dev-models/push-models.{ps1,sh}`.
+  Replaces the manual three-step loop that several agents and devs
+  kept getting wrong — see the "On-device install + AI Pack delivery"
+  section in `.github/copilot-instructions.md` for the forbidden
+  moves it prevents (`adb install -r app-debug.apk` without a model
+  push, `adb uninstall` wiping ~3 GB of pushed models, etc.).
+
+  - `push-models.{ps1,sh}` now skip already-pushed files when the
+    remote size matches the local cache; pass `--force` / `-Force`
+    to override. The default behaviour saves the ~30-second Gemma
+    re-push on every iteration.
+
+### Added
 - **Gemma 4 audio contract surfaced.** New `GemmaAudioSpec` in `:shared`
   documents the audio frontend constants (16 kHz mono float32, 32 ms
   frames, 30 s per-clip cap, 25 tok/s budget) sourced directly from
