@@ -278,7 +278,28 @@ class EngineManager(
         lastInitFailure = null
 
         val path = target.path
-        val cacheDir = context.cacheDir.resolve("litert_cache").also { it.mkdirs() }
+        // F-{cache-contamination}: wipe the per-attempt LiteRT-LM cache
+        // directory before init. The Phase-0 spike (commit ad1e199) found
+        // that a previously failed init can leave a partially-written
+        // compiled-model cache in this directory; subsequent inits then
+        // fail with `NOT_FOUND: TF_LITE_PREFILL_DECODE not found in the
+        // model`, which surfaces as an utterly misleading "model is
+        // corrupted" error even though the model file is intact. The cost
+        // of always wiping is one re-compile on cold start; the win is a
+        // crashed init never silently bricks the next attempt.
+        val cacheDir = context.cacheDir.resolve("litert_cache").also { dir ->
+            if (dir.exists()) {
+                runCatching { dir.deleteRecursively() }
+                    .onFailure { t ->
+                        MindlayerLog.w(
+                            TAG,
+                            "Failed to wipe litert_cache before init: ${t.safeLabel()}",
+                            throwable = null,
+                        )
+                    }
+            }
+            dir.mkdirs()
+        }
 
         // F-002: verify the on-disk model SHA-256 matches the build-time
         // manifest before handing it to native init. APK signing protects
