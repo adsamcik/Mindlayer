@@ -15,20 +15,13 @@ import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.SessionInfo
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Manages [Conversation] lifecycle, enforces device-aware limits, and evicts
@@ -67,6 +60,8 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     private val logRepository: com.adsamcik.mindlayer.service.logging.LogRepository? = null,
     initDispatcher: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1),
 ) {
+
+    private val initCoordinator = EngineInitCoordinator(engineManager, initDispatcher)
 
     companion object {
         private const val TAG = "SessionManager"
@@ -175,41 +170,6 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         emergencyStreamCanceller = canceller
     }
 
-
-    // F-018: dedicated single-threaded slot for engine init. Coalesces
-    // concurrent first callers so binder threads never block on the
-    // ~5–10 s LiteRT-LM init path. See ensureInitStarted().
-    private val initScope = CoroutineScope(SupervisorJob() + initDispatcher)
-    private val initJob = AtomicReference<Job?>(null)
-
-    /**
-     * F-071/H-4/H-E1: terminal initialisation failure cached from the most
-     * recent background init job, together with the wall-clock at which
-     * it was recorded and a per-variant `retryAfterMs`. All init-failure
-     * variants are retained so callers do not loop forever on
-     * `ENGINE_INITIALIZING` after a fatal cold-start failure.
-     *
-     * The cache is cleared on successful `engineManager.initialize()`
-     * return so a recovered situation (user closes background apps) can
-     * re-attempt without service restart. It is also cleared lazily on
-     * the next [createSession] once `failedAtMs + retryAfterMs` elapses,
-     * giving the service in-process recovery without waiting for a
-     * full restart.
-     *
-     * Per-variant retry policy (see [retryAfterMsFor]):
-     *  - `LowMemory`         → 30 s
-     *  - `BackendUnavailable`→ 60 s
-     *  - `NativeError`       → 60 s
-     *  - `ModelMissing`      → permanent (`Long.MAX_VALUE`)
-     *  - `IntegrityMismatch` → permanent (`Long.MAX_VALUE`)
-     */
-    private data class CachedInitError(
-        val throwable: Throwable,
-        val failedAtElapsedMs: Long,
-        val retryAfterMs: Long,
-    )
-
-    private val lastInitError = AtomicReference<CachedInitError?>(null)
 
     val sessionCount: Int get() = sessions.size
 
@@ -344,31 +304,21 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             // LowMemory while the user has Chrome open) recover in-process.
             // Permanent variants (ModelMissing / IntegrityMismatch) keep
             // an effectively-infinite retryAfter so we don't churn.
-            val cachedError = lastInitError.get()
-            if (cachedError != null) {
-                val ageMs = SystemClock.elapsedRealtime() - cachedError.failedAtElapsedMs
-                if (ageMs < cachedError.retryAfterMs) {
-                    throw cachedError.throwable
-                }
-                // TTL elapsed: discard the cached failure and fall through
-                // to a fresh init attempt. CAS so a concurrent successful
-                // init that already nulled the field is not clobbered.
-                lastInitError.compareAndSet(cachedError, null)
-            }
+            initCoordinator.pollCachedFailure()?.let { throw it.throwable }
             // PR-B: kick off a single coalesced init job, then block this
             // first caller until EngineManager reports Ready or Failed. This
             // replaces the old fast-fail/retry loop for cold createSession.
-            ensureInitStarted(config.backend, effectiveMaxTokens)
+            initCoordinator.startInitIfNeeded(config.backend, effectiveMaxTokens)
             when (val state = runBlocking { engineManager.awaitReady(SESSION_INIT_AWAIT_TIMEOUT_MS) }) {
                 is EngineState.Ready -> Unit
                 is EngineState.Failed -> {
-                    if (state.cause.isSyntheticInitTimeout()) {
+                    if (initCoordinator.isSyntheticInitTimeout(state.cause)) {
                         throw EngineNotReadyException(
                             retryAfterMs = INIT_RETRY_AFTER_MS,
                         )
                     }
-                    runBlocking { initJob.get()?.join() }
-                    throw lastInitError.get()?.throwable
+                    initCoordinator.awaitCurrentInitJob()
+                    throw initCoordinator.peekCachedFailure()?.throwable
                         ?: IllegalStateException("Engine init failed: ${state.cause}")
                 }
                 EngineState.Idle, EngineState.Initializing -> throw EngineNotReadyException(
@@ -1007,119 +957,10 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
 
     /** Destroy all sessions. Called during service teardown. */
     fun shutdown() {
-        // F-018: cancel any pending init job and tear down the dedicated
-        // dispatcher scope so we don't leak the worker thread.
-        initScope.cancel()
-        initJob.set(null)
-        // F-071: drop any cached terminal init failure so a fresh
-        // service instance can re-attempt cleanly.
-        lastInitError.set(null)
+        initCoordinator.shutdown()
         val ids = sessions.keys.toList()
         for (id in ids) {
             destroySession(id)
-        }
-    }
-
-    /**
-     * H-E1: per-variant retry policy for a cached init failure. Transient
-     * causes get a finite window so the service recovers in-process;
-     * structural causes (missing model file, integrity mismatch) are
-     * effectively permanent because retrying without operator action
-     * would just churn.
-     */
-    private fun retryAfterMsFor(failure: InitFailure?): Long = when (failure) {
-        is InitFailure.LowMemory -> 30_000L
-        is InitFailure.BackendUnavailable -> 60_000L
-        is InitFailure.NativeError -> 60_000L
-        InitFailure.ModelMissing -> Long.MAX_VALUE
-        InitFailure.IntegrityMismatch -> Long.MAX_VALUE
-        null -> 60_000L
-    }
-
-    private fun InitFailure.isSyntheticInitTimeout(): Boolean =
-        this is InitFailure.NativeError && safeLabel == "init timeout"
-
-    /**
-     * F-018: idempotently kick off a background engine init. If a job is
-     * already in flight, do nothing. The CAS race-handler guarantees that
-     * two binder threads hitting this simultaneously only spawn one
-     * underlying init.
-     */
-    private fun ensureInitStarted(preferredBackend: String?, maxTokens: Int) {
-        if (initJob.get()?.isActive == true) return
-        val job = initScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
-            try {
-                // LiteRT-LM #2028 process-restart workaround. See full
-                // rationale in ServiceBinder.startEngineWarmup. A prior
-                // process may have recorded an EngineRestartStore intent
-                // (thermal switch or memory-pressure unload) just before
-                // killing itself.
-                //
-                // Defensive against:
-                //  - store-IO failure (catch any throwable → fall back
-                //    to the caller's preferredBackend)
-                //  - mockk(relaxed = true) of EngineManager that
-                //    auto-generates a relaxed-mock RestartIntent instead
-                //    of returning null. attemptCount > 0 guard rejects
-                //    those (EngineRestartStore.record always writes
-                //    attemptCount.coerceAtLeast(1), so 0 is impossible
-                //    for a real persisted intent).
-                val intent = @Suppress("TooGenericExceptionCaught") try {
-                    engineManager.consumePendingRestartIntent()?.takeIf { it.attemptCount > 0 }
-                } catch (_: Throwable) {
-                    null
-                }
-                val backend = intent?.targetBackend ?: preferredBackend
-                val tokens = intent?.maxTokens ?: maxTokens
-                if (intent != null) {
-                    MindlayerLog.i(
-                        TAG,
-                        "ensureInitStarted honoring restart intent: reason=${intent.reason}, " +
-                            "targetBackend=${intent.targetBackend ?: "<default>"}, " +
-                            "attempt=${intent.attemptCount}",
-                    )
-                }
-                MindlayerLog.i(TAG, "Background engine init starting (backend=$backend, maxTokens=$tokens)")
-                engineManager.initialize(
-                    preferredBackend = backend,
-                    maxTokens = tokens,
-                )
-                if (intent != null) {
-                    @Suppress("TooGenericExceptionCaught")
-                    try { engineManager.clearPendingRestartIntent() } catch (_: Throwable) { /* best-effort */ }
-                }
-                // F-071: clear any previously-cached terminal failure so
-                // a recovered situation (e.g. user closed background apps
-                // between attempts) can serve sessions normally.
-                lastInitError.set(null)
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                // H-4/H-E1: cache every terminal init failure variant with
-                // a per-category TTL so callers see a deterministic typed
-                // error instead of looping on ENGINE_INITIALIZING — and so
-                // a recoverable failure (LowMemory, transient native) gets
-                // retried automatically once the TTL elapses.
-                val retryAfterMs = retryAfterMsFor(engineManager.lastInitFailure)
-                lastInitError.set(
-                    CachedInitError(
-                        throwable = t,
-                        failedAtElapsedMs = SystemClock.elapsedRealtime(),
-                        retryAfterMs = retryAfterMs,
-                    )
-                )
-                MindlayerLog.w(
-                    TAG,
-                    "Background engine init failed (retryAfterMs=$retryAfterMs): ${t.safeLabel()}",
-                    throwable = null,
-                )
-            }
-        }
-        if (initJob.compareAndSet(null, job)) {
-            job.invokeOnCompletion { initJob.compareAndSet(job, null) }
-            job.start()
-        } else {
-            // Lost the race — another thread already started a job.
-            job.cancel()
         }
     }
 
