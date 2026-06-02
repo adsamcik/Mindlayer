@@ -96,42 +96,42 @@ class SessionManagerThinkingModeTest {
 
     @Test
     fun `parseThinkingOptIn accepts nested enable=true`() {
-        assertTrue(sessionManager.parseThinkingOptIn("""{"thinking":{"enable":true}}"""))
+        assertTrue(SessionConfigValidator.parseThinkingOptIn("""{"thinking":{"enable":true}}"""))
     }
 
     @Test
     fun `parseThinkingOptIn returns false for nested enable=false`() {
-        assertFalse(sessionManager.parseThinkingOptIn("""{"thinking":{"enable":false}}"""))
+        assertFalse(SessionConfigValidator.parseThinkingOptIn("""{"thinking":{"enable":false}}"""))
     }
 
     @Test
     fun `parseThinkingOptIn accepts bare-boolean shorthand`() {
-        assertTrue(sessionManager.parseThinkingOptIn("""{"thinking":true}"""))
+        assertTrue(SessionConfigValidator.parseThinkingOptIn("""{"thinking":true}"""))
     }
 
     @Test
     fun `parseThinkingOptIn returns false when thinking key missing`() {
-        assertFalse(sessionManager.parseThinkingOptIn("""{"token_batch":true}"""))
+        assertFalse(SessionConfigValidator.parseThinkingOptIn("""{"token_batch":true}"""))
     }
 
     @Test
     fun `parseThinkingOptIn returns false on null and blank input`() {
-        assertFalse(sessionManager.parseThinkingOptIn(null))
-        assertFalse(sessionManager.parseThinkingOptIn(""))
-        assertFalse(sessionManager.parseThinkingOptIn("   "))
+        assertFalse(SessionConfigValidator.parseThinkingOptIn(null))
+        assertFalse(SessionConfigValidator.parseThinkingOptIn(""))
+        assertFalse(SessionConfigValidator.parseThinkingOptIn("   "))
     }
 
     @Test
     fun `parseThinkingOptIn returns false on malformed JSON (fail-open)`() {
-        assertFalse(sessionManager.parseThinkingOptIn("not json"))
-        assertFalse(sessionManager.parseThinkingOptIn("""{"thinking":{"enable":}}"""))
+        assertFalse(SessionConfigValidator.parseThinkingOptIn("not json"))
+        assertFalse(SessionConfigValidator.parseThinkingOptIn("""{"thinking":{"enable":}}"""))
     }
 
     @Test
     fun `parseThinkingOptIn coexists with token_batch opt-in`() {
         // Both flags should be parseable from one envelope (orthogonal).
         val both = """{"thinking":{"enable":true},"token_batch":true}"""
-        assertTrue(sessionManager.parseThinkingOptIn(both))
+        assertTrue(SessionConfigValidator.parseThinkingOptIn(both))
     }
 
     // ---- createSession plumbing -------------------------------------------

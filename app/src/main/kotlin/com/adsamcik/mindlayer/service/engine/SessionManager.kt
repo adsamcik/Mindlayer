@@ -9,10 +9,7 @@ import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Message
-import com.google.ai.edge.litertlm.OpenApiTool
 import com.google.ai.edge.litertlm.SamplerConfig
-import com.google.ai.edge.litertlm.ToolProvider
-import com.google.ai.edge.litertlm.tool
 import com.adsamcik.mindlayer.HistoryTurn
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.SessionInfo
@@ -29,13 +26,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
@@ -245,7 +235,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
      */
     @Synchronized
     fun createSession(config: SessionConfig, ownerToken: Any?): String {
-        validateSessionConfig(config)
+        SessionConfigValidator.validateSessionConfig(config)
         cleanupExpiredSessions()
         val sessionId = config.sessionId ?: UUID.randomUUID().toString()
         if (sessions.containsKey(sessionId)) {
@@ -396,7 +386,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         )
 
         // Parse client-supplied tool definitions (OpenAPI JSON array)
-        val parsedTools = parseToolDefinitions(config.toolsJson)
+        val parsedTools = SessionConfigValidator.parseToolDefinitions(config.toolsJson)
         val tools = parsedTools?.providers
         val declaredToolNames = parsedTools?.names ?: emptySet()
 
@@ -485,7 +475,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         // context across tool calls within a single turn, which is the
         // exact behaviour that distinguishes "turn boundary" from
         // "any sendMessage boundary"). See docs/THINKING.md.
-        val preferThinking = parseThinkingOptIn(config.extraContextJson)
+        val preferThinking = SessionConfigValidator.parseThinkingOptIn(config.extraContextJson)
         val effectiveSystemPrompt = effectiveSystemPromptWithoutThink
         val thinkingChannels: List<Channel> = if (preferThinking) {
             listOf(
@@ -590,7 +580,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             ownerToken = ownerToken,
             ownerUid = ownerUid,
             allowedToolNames = allowedToolNames,
-            preferBatchedDeltas = parseTokenBatchOptIn(config.extraContextJson),
+            preferBatchedDeltas = SessionConfigValidator.parseTokenBatchOptIn(config.extraContextJson),
             preferThinking = preferThinking,
         )
         // F-008: putIfAbsent rejects a request to create a session whose id
@@ -1039,19 +1029,6 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         return ids
     }
 
-    /**
-     * Validate client-supplied sampler + token parameters AND every
-     * client-controlled string. Throws [IllegalArgumentException] for
-     * out-of-range values — callers at the AIDL boundary translate this
-     * into a [SecurityException]. Delegates the byte budgets to
-     * [com.adsamcik.mindlayer.service.security.IpcInputValidator] so
-     * tests of either path see identical limits.
-     */
-    private fun validateSessionConfig(config: SessionConfig) {
-        com.adsamcik.mindlayer.service.security.IpcInputValidator
-            .validateSessionConfig(config)
-    }
-
     /** Destroy all sessions. Called during service teardown. */
     fun shutdown() {
         // F-018: cancel any pending init job and tear down the dedicated
@@ -1168,143 +1145,6 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             // Lost the race — another thread already started a job.
             job.cancel()
         }
-    }
-
-    // ---- Tool definition parsing -------------------------------------------
-
-    /**
-     * F-036: container for both the [ToolProvider] instances and the
-     * declared tool-name set. The name set is consumed by
-     * [SessionHandle.allowedToolNames] so the orchestrator can drop any
-     * tool call the model fabricates outside of this allowlist.
-     */
-    internal data class ParsedTools(
-        val providers: List<ToolProvider>,
-        val names: Set<String>,
-    )
-
-    /**
-     * Parse a JSON array of OpenAPI-style tool descriptions into [ToolProvider]
-     * instances and capture the declared names.
-     *
-     * Each element is treated as an independent tool description JSON string.
-     * In manual mode (`automaticToolCalling = false`) the `execute()` method is
-     * never invoked by the framework — the model emits tool calls that the
-     * client handles externally.
-     */
-    /**
-     * v0.5: parse the `extraContextJson.token_batch` opt-in flag.
-     * **Fail-open**: any parse error / non-object / missing key returns
-     * `false` so existing callers with malformed extraContextJson don't
-     * regress.
-     */
-    private fun parseTokenBatchOptIn(extraContextJson: String?): Boolean {
-        if (extraContextJson.isNullOrBlank()) return false
-        return try {
-            val element = Json.parseToJsonElement(extraContextJson)
-            val obj = element as? JsonObject ?: return false
-            val flag = obj["token_batch"] as? kotlinx.serialization.json.JsonPrimitive
-                ?: return false
-            flag.booleanOrNull == true
-        } catch (_: Throwable) {
-            false
-        }
-    }
-
-    /**
-     * v1.1: parse the `extraContextJson.thinking.enable` opt-in flag for
-     * Gemma 4 thinking mode. Accepts the canonical nested form:
-     *
-     * ```json
-     * { "thinking": { "enable": true } }
-     * ```
-     *
-     * The bare-boolean shorthand `{ "thinking": true }` is also honoured
-     * for caller convenience (mirrors how `token_batch` is wired).
-     *
-     * **Fail-open**: any parse error / non-object / missing key returns
-     * `false` so existing callers with malformed extraContextJson don't
-     * regress (matches [parseTokenBatchOptIn]).
-     */
-    internal fun parseThinkingOptIn(extraContextJson: String?): Boolean {
-        if (extraContextJson.isNullOrBlank()) return false
-        return try {
-            val element = Json.parseToJsonElement(extraContextJson)
-            val obj = element as? JsonObject ?: return false
-            val node = obj["thinking"] ?: return false
-            when (node) {
-                is kotlinx.serialization.json.JsonPrimitive -> node.booleanOrNull == true
-                is JsonObject -> {
-                    val flag = node["enable"] as? kotlinx.serialization.json.JsonPrimitive
-                        ?: return false
-                    flag.booleanOrNull == true
-                }
-                else -> false
-            }
-        } catch (_: Throwable) {
-            false
-        }
-    }
-
-    private fun parseToolDefinitions(toolsJson: String?): ParsedTools? {
-        if (toolsJson.isNullOrBlank()) return null
-
-        return try {
-            val array = Json.parseToJsonElement(toolsJson) as JsonArray
-            if (array.isEmpty()) return null
-
-            val names = mutableSetOf<String>()
-            val providers = array.map { element ->
-                val obj = element.jsonObject
-                // F-066 / L9 — client-supplied tool names beginning with "__"
-                // are reserved for internal use (e.g. the synthetic
-                // `__structured_output` tool). Reject them at parse time
-                // so they cannot collide with engine machinery.
-                val nameElement = obj["name"]
-                val name: String? = if (nameElement is kotlinx.serialization.json.JsonPrimitive) {
-                    if (nameElement.isString) nameElement.content else null
-                } else null
-                val reservedPrefix = com.adsamcik.mindlayer.service.security.IpcInputValidator
-                    .RESERVED_TOOL_PREFIX
-                require(name == null || !name.startsWith(reservedPrefix)) {
-                    "tool name '$name' uses reserved prefix"
-                }
-                if (name != null) names.add(name)
-                val description = obj.toString()
-                tool(JsonDefinedTool(description))
-            }
-            MindlayerLog.d(TAG, "Parsed ${providers.size} tool definition(s)")
-            ParsedTools(providers = providers, names = names)
-        } catch (e: IllegalArgumentException) {
-            // L9 — reserved-name rejections must surface to the client so the
-            // session is rejected, not silently created without tools.
-            throw e
-        } catch (t: Throwable) {
-            MindlayerLog.e(TAG, "Failed to parse toolsJson: ${t.safeLabel()}")
-            null
-        }
-    }
-
-    /**
-     * L9 — names beginning with `__` are reserved for framework-injected
-     * helper tools (currently `__structured_output`). Client-supplied tools
-     * must not collide with this namespace.
-     */
-    private fun isReservedToolName(name: String): Boolean =
-        name == StructuredOutputHelper.TOOL_NAME || name.startsWith("__")
-
-    /**
-     * Lightweight [OpenApiTool] backed by a pre-serialised JSON description.
-     *
-     * [execute] is never called in manual mode — the model's tool-call output
-     * is forwarded to the client, which returns results via AIDL.
-     */
-    private class JsonDefinedTool(
-        private val descriptionJson: String,
-    ) : OpenApiTool {
-        override fun getToolDescriptionJsonString(): String = descriptionJson
-        override fun execute(paramsJsonString: String): String =
-            error("Manual tool mode — execute() should not be called by the framework")
     }
 
     // ---- SessionHandle -----------------------------------------------------
