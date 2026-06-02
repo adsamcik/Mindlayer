@@ -43,7 +43,6 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
     to override. The default behaviour saves the ~30-second Gemma
     re-push on every iteration.
 
-### Added
 - **Gemma 4 audio contract surfaced.** New `GemmaAudioSpec` in `:shared`
   documents the audio frontend constants (16 kHz mono float32, 32 ms
   frames, 30 s per-clip cap, 25 tok/s budget) sourced directly from
@@ -64,6 +63,31 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   supported MIME types, limits, quick-start code, and the explicit
   "not yet supported" list (multi-audio prompts, ≥30 s clips,
   specialized translation helper).
+- **Gemma 4 thinking mode** — opt-in surface that exposes the model's
+  internal reasoning trace alongside the user-visible answer. See
+  [docs/THINKING.md](docs/THINKING.md) for the full architecture and
+  usage guide.
+
+  - **SDK:** new `enableThinking()` builder hook on both
+    `ConversationBuilder` (high-level DSL) and `SessionConfigBuilder`
+    (low-level), new `InferenceEvent.ThoughtDelta` sealed subtype, new
+    Flow operators `thoughtDeltas()` and `answerOnly()`.
+  - **Service:** when `extraContextJson.thinking = { "enable": true }`,
+    the LiteRT-LM `ConversationConfig` is built with a `thought`
+    channel and the Gemma `<|think|>` system marker is prepended. The
+    pipe negotiates `mindlayer.stream.v3` so the reader can decode the
+    new `THOUGHT_DELTA` / `THOUGHT_DELTA_BATCH` events.
+  - **Capability:** advertised via the new
+    `ServiceCapabilities.FEATURE_THINKING_MODE` flag. Old SDKs / old
+    services silently degrade — the opt-in JSON is ignored and the
+    stream stays on v1/v2 without any thought events emitted.
+  - **Multi-turn:** thoughts are routed away from the user-visible
+    answer at the LiteRT-LM channel level and never enter the SDK's
+    history database. They DO currently remain in the model's KV
+    cache across user turns (LiteRT-LM 0.12.0 default) — see the
+    "KV-cache caveat" in [docs/THINKING.md](docs/THINKING.md) for the
+    follow-up plan; callers with long thinking-enabled conversations
+    should recycle sessions to keep the working context fresh.
 - **`docs/ROADMAP.md`** — single source of truth for outstanding work
   across Phases 6-8 (device-gated `IS_PRODUCTION_READY` flip criteria,
   real model artifact pipeline, ICDAR2015 numeric validation harness,

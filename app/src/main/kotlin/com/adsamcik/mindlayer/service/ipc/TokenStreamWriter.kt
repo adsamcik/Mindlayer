@@ -152,6 +152,26 @@ class TokenStreamWriter private constructor(
     private var tokenBatchLastSeq: Long = -1L
 
     /**
+     * v1.1 thinking-mode state. Set via [enableThinking]; non-thinking
+     * writers never emit [StreamEventType.THOUGHT_DELTA] frames. When
+     * enabled (with or without [batchingEnabled]) the header negotiates
+     * [com.adsamcik.mindlayer.shared.StreamProtocol.V3].
+     */
+    private var thinkingEnabled: Boolean = false
+
+    /**
+     * v1.1 thought-fragment batching state. Mirrors the token-batch
+     * structure but is independent: thoughts can coalesce into a
+     * THOUGHT_DELTA_BATCH frame while a separate TOKEN_DELTA_BATCH
+     * coalesces answer tokens. Only active when both [thinkingEnabled]
+     * and [batchingEnabled] are set.
+     */
+    private val thoughtBatchTexts = mutableListOf<String>()
+    private var thoughtBatchFirstTimestamp: Long = 0L
+    private var thoughtBatchByteCount: Int = 0
+    private var thoughtBatchLastSeq: Long = -1L
+
+    /**
      * Switch this writer to v2 protocol mode and enable the
      * [StreamEventType.TOKEN_DELTA_BATCH] coalescing buffer. Must be
      * called **before** [writeHeader] so the header advertises v2.
@@ -159,6 +179,22 @@ class TokenStreamWriter private constructor(
     fun enableBatching() {
         require(!closed) { "writer is closed" }
         batchingEnabled = true
+    }
+
+    /**
+     * v1.1: switch this writer to v3 protocol mode so the header
+     * advertises [com.adsamcik.mindlayer.shared.StreamProtocol.V3] and
+     * [writeThoughtDelta] is permitted. Must be called **before**
+     * [writeHeader].
+     *
+     * Independent of [enableBatching]: callers can ask for thinking
+     * without batching (one THOUGHT_DELTA / TOKEN_DELTA per chunk), or
+     * for both (batched thought + answer streams that drain
+     * independently on every non-text event).
+     */
+    fun enableThinking() {
+        require(!closed) { "writer is closed" }
+        thinkingEnabled = true
     }
 
     /**
@@ -174,10 +210,10 @@ class TokenStreamWriter private constructor(
     // ---- Public API --------------------------------------------------------
 
     suspend fun writeHeader(requestId: String) {
-        val protocol = if (batchingEnabled) {
-            com.adsamcik.mindlayer.shared.StreamProtocol.V2
-        } else {
-            com.adsamcik.mindlayer.shared.StreamProtocol.V1
+        val protocol = when {
+            thinkingEnabled -> com.adsamcik.mindlayer.shared.StreamProtocol.V3
+            batchingEnabled -> com.adsamcik.mindlayer.shared.StreamProtocol.V2
+            else -> com.adsamcik.mindlayer.shared.StreamProtocol.V1
         }
         val header = StreamHeader(protocol = protocol, requestId = requestId)
         writeFrame(json.encodeToString(StreamHeader.serializer(), header))
@@ -185,6 +221,10 @@ class TokenStreamWriter private constructor(
 
     suspend fun writeTokenDelta(seq: Long, text: String) {
         if (!batchingEnabled) {
+            // Drain any pending thoughts before an out-of-band answer
+            // delta so the SDK consumer sees thoughts and answer in
+            // their true emission order on the wire.
+            flushThoughtBatch()
             writeEvent(seq, StreamEventType.TOKEN_DELTA, buildJsonObject { put("text", text) })
             return
         }
@@ -205,6 +245,13 @@ class TokenStreamWriter private constructor(
             }
         }
 
+        // When thoughts have been accumulating but the model just produced
+        // an answer fragment, drain the thought batch so consumer ordering
+        // matches the model's emission order.
+        if (thoughtBatchTexts.isNotEmpty()) {
+            flushThoughtBatch()
+        }
+
         // Fresh batch: capture start timestamp.
         if (tokenBatchTexts.isEmpty()) {
             tokenBatchFirstTimestamp = now
@@ -215,8 +262,60 @@ class TokenStreamWriter private constructor(
         tokenBatchLastSeq = seq
     }
 
+    /**
+     * v1.1: write one fragment of the model's reasoning channel
+     * (Gemma 4 thinking mode). Only valid when [enableThinking] was
+     * called BEFORE [writeHeader] — the v3 stream protocol is the only
+     * stream type allowed to carry [StreamEventType.THOUGHT_DELTA].
+     *
+     * When batching is also enabled, thought fragments coalesce into a
+     * [StreamEventType.THOUGHT_DELTA_BATCH] frame using the same
+     * size/count/latency caps as [writeTokenDelta]. The two buffers are
+     * independent and flush in emission order on every non-text event.
+     */
+    suspend fun writeThoughtDelta(seq: Long, text: String) {
+        require(thinkingEnabled) {
+            "writeThoughtDelta called on a writer that did not call enableThinking()"
+        }
+        if (!batchingEnabled) {
+            // Drain any pending answer tokens so consumer ordering
+            // matches model emission order.
+            flushTokenBatch()
+            writeEvent(seq, StreamEventType.THOUGHT_DELTA, buildJsonObject { put("text", text) })
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        val incomingBytes = text.toByteArray(Charsets.UTF_8).size
+
+        if (thoughtBatchTexts.isNotEmpty()) {
+            val wouldExceedCount = thoughtBatchTexts.size >= BATCH_MAX_TOKENS
+            val wouldExceedBytes = thoughtBatchByteCount + incomingBytes > BATCH_MAX_BYTES
+            val wouldExceedLatency = now - thoughtBatchFirstTimestamp >= BATCH_MAX_LATENCY_MS
+            if (wouldExceedCount || wouldExceedBytes || wouldExceedLatency) {
+                flushThoughtBatch()
+            }
+        }
+
+        // Drain pending answer tokens BEFORE buffering more thought text
+        // so a `answer answer thought thought answer` model emits in that
+        // visible order on the wire.
+        if (tokenBatchTexts.isNotEmpty()) {
+            flushTokenBatch()
+        }
+
+        if (thoughtBatchTexts.isEmpty()) {
+            thoughtBatchFirstTimestamp = now
+            thoughtBatchByteCount = 0
+        }
+        thoughtBatchTexts += text
+        thoughtBatchByteCount += incomingBytes
+        thoughtBatchLastSeq = seq
+    }
+
     suspend fun writeToolCall(seq: Long, callId: String, name: String, argsJson: String) {
         flushTokenBatch()
+        flushThoughtBatch()
         writeEvent(seq, StreamEventType.TOOL_CALL, buildJsonObject {
             put("callId", callId)
             put("name", name)
@@ -226,16 +325,19 @@ class TokenStreamWriter private constructor(
 
     suspend fun writeMetrics(seq: Long, metrics: JsonObject) {
         flushTokenBatch()
+        flushThoughtBatch()
         writeEvent(seq, StreamEventType.METRICS, metrics)
     }
 
     suspend fun writeDone(seq: Long, finishReason: String) {
         flushTokenBatch()
+        flushThoughtBatch()
         writeEvent(seq, StreamEventType.DONE, buildJsonObject { put("finish_reason", finishReason) })
     }
 
     suspend fun writeError(seq: Long, code: String, message: String, codeInt: Int? = null) {
         flushTokenBatch()
+        flushThoughtBatch()
         writeEvent(seq, StreamEventType.ERROR, buildJsonObject {
             put("code", code)
             codeInt?.let { put("codeInt", it) }
@@ -263,17 +365,22 @@ class TokenStreamWriter private constructor(
         // elsewhere; the existing per-session mutex guarantees no
         // concurrent writer is touching `output`. If the pipe is already
         // dead the IOException catch in writeFrame swallows it.
-        if (tokenBatchTexts.isNotEmpty()) {
+        if (tokenBatchTexts.isNotEmpty() || thoughtBatchTexts.isNotEmpty()) {
             try {
-                kotlinx.coroutines.runBlocking { flushTokenBatch() }
+                kotlinx.coroutines.runBlocking {
+                    flushTokenBatch()
+                    flushThoughtBatch()
+                }
             } catch (t: Throwable) {
                 MindlayerLog.w(
                     TAG,
-                    "Failed to drain pending token batch on close: ${t.safeLabel()}",
+                    "Failed to drain pending token/thought batch on close: ${t.safeLabel()}",
                 )
                 // Clear so a subsequent close() doesn't re-attempt.
                 tokenBatchTexts.clear()
                 tokenBatchByteCount = 0
+                thoughtBatchTexts.clear()
+                thoughtBatchByteCount = 0
             }
         }
         // F-020 + H4: independent timed-flush/close. Each runs through
@@ -313,10 +420,12 @@ class TokenStreamWriter private constructor(
         code: Int = MindlayerErrorCode.INTERNAL,
     ) {
         try {
-            // Drain pending batched tokens before the terminal error frame
-            // so the consumer gets every token the model produced before
-            // the abort, in order, ahead of the error.
+            // Drain pending batched tokens AND thoughts before the
+            // terminal error frame so the consumer gets every token
+            // the model produced before the abort, in order, ahead of
+            // the error.
             flushTokenBatch()
+            flushThoughtBatch()
         } catch (_: Throwable) {
             // Best-effort — fall through to writeError regardless.
         }
@@ -359,6 +468,36 @@ class TokenStreamWriter private constructor(
         writeEvent(
             lastSeq,
             StreamEventType.TOKEN_DELTA_BATCH,
+            buildJsonObject {
+                put(
+                    "texts",
+                    kotlinx.serialization.json.JsonArray(
+                        texts.map { JsonPrimitive(it) }
+                    )
+                )
+            },
+        )
+    }
+
+    /**
+     * v1.1: drain the pending thought batch as a single
+     * [StreamEventType.THOUGHT_DELTA_BATCH] frame, then reset state.
+     * Idempotent — empty buffer (or a writer without thinking enabled)
+     * is a no-op. Called from the same places [flushTokenBatch] is so
+     * the thought stream maintains the same emission-order +
+     * size/count/latency guarantees as the answer stream.
+     */
+    private suspend fun flushThoughtBatch() {
+        if (!thinkingEnabled || !batchingEnabled || thoughtBatchTexts.isEmpty()) return
+        val texts = thoughtBatchTexts.toList()
+        val lastSeq = thoughtBatchLastSeq
+        thoughtBatchTexts.clear()
+        thoughtBatchByteCount = 0
+        thoughtBatchLastSeq = -1L
+        thoughtBatchFirstTimestamp = 0L
+        writeEvent(
+            lastSeq,
+            StreamEventType.THOUGHT_DELTA_BATCH,
             buildJsonObject {
                 put(
                     "texts",

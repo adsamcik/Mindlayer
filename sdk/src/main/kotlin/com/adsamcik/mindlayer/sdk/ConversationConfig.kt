@@ -15,6 +15,7 @@ class ConversationConfig internal constructor(
     internal val topK: Int = 40,
     internal val topP: Float = 0.95f,
     internal val expiration: Duration = 14.days,
+    internal val enableThinking: Boolean = false,
 )
 
 /**
@@ -34,6 +35,7 @@ class ConversationBuilder {
     private var topK: Int = 40
     private var topP: Float = 0.95f
     private var expiration: Duration = 14.days
+    private var enableThinking: Boolean = false
 
     /** System instruction defining the model's behavior. */
     fun systemPrompt(prompt: String) { systemPrompt = prompt }
@@ -80,5 +82,29 @@ class ConversationBuilder {
         expiration = days.days
     }
 
-    internal fun build() = ConversationConfig(systemPrompt, maxTokens, temperature, topK, topP, expiration)
+    /**
+     * v1.1: opt this conversation into Gemma 4 thinking mode. The model's
+     * `<|channel>thought ... <channel|>` reasoning trace is routed away
+     * from the user-visible answer and surfaced separately on the event
+     * stream as [com.adsamcik.mindlayer.sdk.InferenceEvent.ThoughtDelta]
+     * (when the connected service advertises
+     * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_THINKING_MODE]).
+     *
+     * Default: off. Safe to set when the service predates this feature —
+     * the opt-in is silently ignored, no `ThoughtDelta` events are
+     * emitted, and the answer text is unchanged. See
+     * [com.adsamcik.mindlayer.sdk.SessionConfigBuilder.enableThinking]
+     * for the lower-level surface.
+     */
+    fun enableThinking(enabled: Boolean = true) { enableThinking = enabled }
+
+    internal fun build() = ConversationConfig(
+        systemPrompt = systemPrompt,
+        maxTokens = maxTokens,
+        temperature = temperature,
+        topK = topK,
+        topP = topP,
+        expiration = expiration,
+        enableThinking = enableThinking,
+    )
 }

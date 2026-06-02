@@ -3689,6 +3689,51 @@ class SessionConfigBuilder {
     }
 
     /**
+     * v1.1: opt this session into Gemma 4 thinking mode. When enabled,
+     * the service prepends the Gemma `<|think|>` system marker and
+     * configures a LiteRT-LM channel that routes the model's
+     * `<|channel>thought ... <channel|>` block away from the
+     * user-visible answer. The SDK pipe negotiates
+     * [com.adsamcik.mindlayer.shared.StreamProtocol.V3] so the reader
+     * can decode the new
+     * [com.adsamcik.mindlayer.sdk.InferenceEvent.ThoughtDelta] events
+     * alongside the existing [com.adsamcik.mindlayer.sdk.InferenceEvent.TextDelta]
+     * stream.
+     *
+     * Callers that only want the final answer can keep collecting
+     * [com.adsamcik.mindlayer.sdk.InferenceHandle.events] as today —
+     * the per-subtype `await*()` terminals already discard
+     * [com.adsamcik.mindlayer.sdk.InferenceEvent.ThoughtDelta] by
+     * default. To render the reasoning trace, pipe events through
+     * [com.adsamcik.mindlayer.sdk.thoughtDeltas] or filter the raw
+     * flow yourself.
+     *
+     * Capability-gated via
+     * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_THINKING_MODE].
+     * If the connected service does not advertise the flag this call
+     * is still safe — the opt-in JSON is ignored, the stream stays on
+     * v1/v2, and no `ThoughtDelta` events are emitted. Callers that
+     * care about confirming thinking mode is actually live should
+     * check capabilities first.
+     *
+     * Default: off (no separate thought channel).
+     */
+    fun enableThinking(enabled: Boolean = true) {
+        val envelope = kotlinx.serialization.json.buildJsonObject {
+            put(
+                "thinking",
+                kotlinx.serialization.json.buildJsonObject {
+                    put(
+                        "enable",
+                        kotlinx.serialization.json.JsonPrimitive(enabled),
+                    )
+                },
+            )
+        }
+        extraContextJson = mergeExtraContext(extraContextJson, envelope)
+    }
+
+    /**
      * Pre-populate conversation history for session recovery.
      * Turns are injected into the model's context at creation time.
      */
