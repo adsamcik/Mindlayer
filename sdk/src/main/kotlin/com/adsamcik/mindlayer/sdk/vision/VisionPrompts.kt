@@ -50,11 +50,16 @@ object VisionPrompts {
     /**
      * Canonical Gemma 4 object-detection prompt.
      *
-     * The shape `"detect X, output only ```json"` is the exact form the
-     * docs use (e.g. `"detect person and car, output only \`\`\`json"`)
-     * and the form the model is most strongly trained on. Deviating from
-     * this template tends to produce prose instead of the structured
-     * `box_2d` array.
+     * The shape includes an explicit `box_2d` schema hint. The docs' shorter
+     * `"detect X, output only ``\````json"` form ([source][source]) works on
+     * the larger Gemma 4 variants but the on-device E2B in our pipeline
+     * empirically falls back to an extracted-content string array
+     * (`["4", "2"]`) without the explicit schema. The longer form below is
+     * what survives the smaller-variant + LiteRT-LM 0.12.0 quantization on
+     * the emulator — verified against the dashboard's image-inference test
+     * harness; see PR #138.
+     *
+     * [source]: https://ai.google.dev/gemma/docs/capabilities/vision/image
      *
      * @param labels object classes to detect; non-empty. Trimmed entries
      *   joined with `, ` (no Oxford comma).
@@ -75,8 +80,10 @@ object VisionPrompts {
             "each label must be <= $MAX_LABEL_LENGTH chars"
         }
         val joined = cleaned.joinToString(", ")
-        val cap = maxObjects?.let { " Return at most $it." } ?: ""
-        return "detect $joined, output only ```json$cap"
+        val cap = maxObjects?.let { " Return at most $it entries." } ?: ""
+        return "Detect every visible $joined. Return only ```json with the shape " +
+            "[{\"box_2d\": [y1, x1, y2, x2], \"label\": \"...\"}] " +
+            "where coordinates are normalized to a 0..1000 grid.$cap"
     }
 
     /**

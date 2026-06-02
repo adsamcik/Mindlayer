@@ -35,6 +35,15 @@ class VisionPromptsTest {
         assertTrue("expected '..., car, traffic light'", prompt.contains("car, traffic light"))
         // JSON bias is critical — without it Gemma produces prose
         assertContainsIgnoreCase(prompt, "json")
+        // The explicit box_2d schema hint is required: the on-device E2B
+        // variant falls back to a content string array without it
+        // (verified end-to-end on emulator, PR #138). Lock it in.
+        assertTrue("prompt must reference 'box_2d'", prompt.contains("box_2d"))
+        assertTrue(
+            "prompt must spell out the [y1, x1, y2, x2] schema",
+            prompt.contains("[y1, x1, y2, x2]"),
+        )
+        assertTrue("prompt must mention the 0..1000 grid", prompt.contains("0..1000"))
     }
 
     @Test
