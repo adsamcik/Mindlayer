@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.Build
@@ -43,11 +44,13 @@ enum class ConnectionState {
 
     /**
      * Service rejected our `registerClient` call — the calling app is not on
-     * the user-approved allowlist. The binding is torn down. The client must
-     * wait for user approval in the Mindlayer dashboard and call [connect]
-     * again. This is a terminal state until the caller explicitly retries;
-     * we do not auto-reconnect because that would poll the service and hit
-     * the rate limit.
+     * the user-approved allowlist. The binding is torn down. We do NOT
+     * auto-reconnect (that would poll the service and hit the rate limit),
+     * but on the next consumer-initiated call to [ConnectionManager.awaitConnected]
+     * we rebind once (subject to [REJECTION_RECHECK_COOLDOWN_MS]) and ask
+     * the service again. This is what makes the "user approves in dashboard
+     * → next API call works" flow seamless without requiring the consumer
+     * app to be force-stopped to clear stale SDK state.
      */
     REJECTED_NOT_APPROVED,
 
@@ -90,9 +93,10 @@ class ConnectionManager {
          * Debug-build suffix the service APK gets when built with `assembleDebug`
          * (`applicationIdSuffix = ".debug"` in `app/build.gradle.kts`). The cross-app
          * SDK transparently retries the bind against the suffixed package when
-         * the canonical one is missing, so first-party developer / driver apps
-         * can iterate against a locally-installed debug service without a
-         * separate signing keystore.
+         * the canonical one is missing, but **only when the consuming app is
+         * itself debuggable** (`ApplicationInfo.FLAG_DEBUGGABLE`). Release
+         * client APKs cannot opt into this fallback — preventing a production
+         * app from silently binding to an attacker-installed `.debug` service.
          */
         private const val SERVICE_PKG_DEBUG_SUFFIX = ".debug"
 
@@ -105,10 +109,55 @@ class ConnectionManager {
         /** Maximum consecutive failed rebind attempts before giving up. */
         const val MAX_RECONNECT_ATTEMPTS = 10
 
-        private const val BIND_FLAGS =
-            Context.BIND_AUTO_CREATE or
-            Context.BIND_IMPORTANT or
-            Context.BIND_ADJUST_WITH_ACTIVITY
+        /**
+         * Minimum interval between two on-demand rejection re-checks triggered by
+         * [awaitConnected]. When the service rejected the consumer (state
+         * [ConnectionState.REJECTED_NOT_APPROVED]) the most likely cause is that
+         * the user hasn't yet approved the caller in the Mindlayer dashboard.
+         * The user typically approves seconds after the first rejection, so on
+         * the **next** consumer call we re-bind once and ask the service again,
+         * which surfaces the new approval automatically — no force-stop required.
+         *
+         * The floor prevents back-to-back caller code (e.g. an ensureCapability()
+         * helper that retries internally on every failure) from spinning fresh
+         * binds at the per-UID rate-limit on the service side. One second is
+         * comfortably above the rate-limit window (per-UID throttle is measured
+         * in seconds) and well below human approve-then-retry latency, so the
+         * happy path always re-checks while a misbehaving client cannot
+         * weaponise the recheck into a poll.
+         */
+        internal const val REJECTION_RECHECK_COOLDOWN_MS = 1_000L
+
+        private val BIND_FLAGS: Int = run {
+            // Base flags supported back to the SDK's minSdk:
+            // - BIND_AUTO_CREATE: start the service if it isn't running.
+            // - BIND_IMPORTANT: bound service should be brought to foreground
+            //   procstate / adj when this client is foreground (kill-safety).
+            // - BIND_ADJUST_WITH_ACTIVITY: binding tracks the calling
+            //   activity's lifecycle so the OS scales the service down when
+            //   the activity is gone.
+            var flags = Context.BIND_AUTO_CREATE or
+                Context.BIND_IMPORTANT or
+                Context.BIND_ADJUST_WITH_ACTIVITY
+            // BIND_INCLUDE_CAPABILITIES (API 31+, Android 12): the missing
+            // piece that prevents the Android 12+ cached-app freezer from
+            // freezing the Mindlayer service process while a foreground
+            // client is bound. Without it, `OomAdjuster.computeServiceHost-
+            // OomAdjLSP` propagates the client's procstate (BIND_IMPORTANT
+            // path) but explicitly skips capability inheritance — the
+            // freezer checks the capability bits, sees no foreground tie on
+            // the bound side, and freezes the process between AIDL calls.
+            // Once frozen, the next call surfaces as `NativeError` because
+            // the in-flight inference partial-state was suspended mid-flush.
+            // First-party cross-app integration already requires API 31+
+            // (the SecurityException-translation path below makes this an
+            // explicit terminal error on older devices), so we can add this
+            // flag unconditionally on supported runtimes.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                flags = flags or Context.BIND_INCLUDE_CAPABILITIES
+            }
+            flags
+        }
     }
 
     private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
@@ -129,9 +178,48 @@ class ConnectionManager {
      */
     private val livenessToken: IBinder = Binder()
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    /**
+     * Reconnect-scheduling scope. Runs on [Dispatchers.Default] so a service
+     * crash → reconnect storm (e.g. while a heavy multimodal model is being
+     * loaded by the service and the OS LMK kills it under memory pressure)
+     * does **not** churn the consuming app's main thread. The two scope users
+     * — [scheduleReconnect] and the inline reconnect launch — only do
+     * `delay(backoffMs)` + `doBind()`, neither of which has a Main affinity:
+     *  - `bindService()` can be called from any thread; the Android framework
+     *    delivers [ServiceConnection] callbacks on the consumer-supplied
+     *    Handler (Main by default) regardless of where bindService was called.
+     *  - `_state` is a [MutableStateFlow], thread-safe under arbitrary writers.
+     *
+     * Previously this used `Dispatchers.Main.immediate`. That choice predated
+     * the realisation that the reconnect loop runs frequently in real-world
+     * use (every service kill + binding-died + relink storm), and each
+     * `delay()`/`doBind()` hop charged the main thread, producing visible
+     * Choreographer frame skips and contributing to ANRs in the consuming
+     * app whenever the service crashed mid-inference.
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var backoffMs = INITIAL_BACKOFF_MS
     private var consecutiveFailures = 0
+
+    /**
+     * Wall-clock millis of the last [awaitConnected]-triggered re-bind that
+     * was launched in response to a [ConnectionState.REJECTED_NOT_APPROVED]
+     * state. Used to floor consecutive on-demand re-checks at
+     * [REJECTION_RECHECK_COOLDOWN_MS] so a tight retry loop in the consumer
+     * can't weaponise the recheck into a poll. `0L` means no recheck has
+     * been launched yet, so the next [awaitConnected] is free to recheck.
+     */
+    @Volatile
+    private var lastRejectionRecheckAt: Long = 0L
+
+    /**
+     * Test seam: returns the current monotonic millis. Overridden in tests so
+     * we can drive the cooldown without sleeping. Default is wall-clock
+     * because the cooldown only matters between user-driven calls and the
+     * elapsed time we want to gate on is the same notion the human user
+     * perceives — clock drift would only loosen, not tighten, the guard.
+     */
+    internal var clockMillis: () -> Long = System::currentTimeMillis
 
     /**
      * True once [MAX_RECONNECT_ATTEMPTS] consecutive rebind attempts have
@@ -156,6 +244,10 @@ class ConnectionManager {
             consecutiveFailures = 0
             backoffMs = INITIAL_BACKOFF_MS
         }
+        // Explicit connect() is the caller's "reset everything" signal — drop
+        // any prior rejection-recheck timestamp so the next bind is treated
+        // as a fresh attempt rather than a debounced recheck.
+        lastRejectionRecheckAt = 0L
         boundContext = context.applicationContext
         doBind()
     }
@@ -202,6 +294,13 @@ class ConnectionManager {
         timeoutMs: Long = DEFAULT_CONNECT_TIMEOUT_MS,
     ): IMindlayerService = try {
         withTimeout(timeoutMs) {
+            // Tracks whether we've already retried the bind once for the
+            // REJECTED_NOT_APPROVED path in this single call. After one
+            // rebind, a second rejection is treated as authoritative — we
+            // don't loop indefinitely waiting for approval (the caller is
+            // already inside their own timeout budget).
+            var rejectionRebindAttempted = false
+
             while (true) {
                 _state.first {
                     it == ConnectionState.CONNECTED ||
@@ -209,6 +308,43 @@ class ConnectionManager {
                     it == ConnectionState.BIND_GAVE_UP
                 }
                 if (_state.value == ConnectionState.REJECTED_NOT_APPROVED) {
+                    // The most common reason we land here is that the user
+                    // approved the caller in the Mindlayer dashboard between
+                    // the first bind (which got rejected) and this call.
+                    // Re-bind once and ask the service again rather than
+                    // surfacing a stale rejection that would force the
+                    // consumer app to be force-stopped to clear SDK state.
+                    //
+                    // Gated by REJECTION_RECHECK_COOLDOWN_MS so a tight
+                    // retry loop in the consumer can't poll the service.
+                    // Once we've rebound once inside this awaitConnected
+                    // call, a second REJECTED is authoritative and we
+                    // throw — the user clearly hasn't approved yet.
+                    val now = clockMillis()
+                    val canRecheck = !rejectionRebindAttempted &&
+                        boundContext != null &&
+                        (now - lastRejectionRecheckAt) >= REJECTION_RECHECK_COOLDOWN_MS
+                    if (canRecheck) {
+                        lastRejectionRecheckAt = now
+                        rejectionRebindAttempted = true
+                        Log.i(
+                            TAG,
+                            "awaitConnected: REJECTED_NOT_APPROVED — rebinding once " +
+                                "in case the user just approved (cooldown ${REJECTION_RECHECK_COOLDOWN_MS}ms)",
+                        )
+                        // Clean up the rejected binding state then rebind.
+                        // doUnbind is a no-op if we're already unbound (the
+                        // rejected-onServiceConnected path already calls it).
+                        doUnbind()
+                        _state.value = ConnectionState.CONNECTING
+                        doBind()
+                        // Loop and re-await the next terminal state. The
+                        // rebound bind will land in CONNECTED (approved),
+                        // REJECTED_NOT_APPROVED (still not approved →
+                        // throws below on next iteration), or BIND_GAVE_UP
+                        // (also caught below).
+                        continue
+                    }
                     throw MindlayerException(
                         message = "Mindlayer rejected this app — user approval required in the Mindlayer dashboard",
                         code = MindlayerErrorCode.PERMISSION_DENIED,
@@ -327,6 +463,11 @@ class ConnectionManager {
                 }
 
                 _state.value = ConnectionState.CONNECTED
+                // Successful registration — reset the rejection-recheck floor
+                // so a future REJECTED_NOT_APPROVED (e.g. user revokes approval
+                // after a hot restart) gets a fresh recheck window rather than
+                // inheriting a stale timestamp from a previous failed bind.
+                lastRejectionRecheckAt = 0L
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
@@ -350,14 +491,21 @@ class ConnectionManager {
 
         // Resolve which service-package to bind to. Prefer the canonical
         // release package; fall back to the .debug-suffixed variant when
-        // it's the only one installed (developer iteration). This makes
-        // the SDK usable against a locally-built debug service APK
-        // without forcing every dev to provision a release keystore.
+        // it's the only one installed AND the consuming app is itself a
+        // debug build (FLAG_DEBUGGABLE). The flag is set by the build
+        // system for `debug` build types and cannot be turned on for a
+        // release-signed APK, so a production client can never silently
+        // bind to a `.debug` service that an attacker installed.
         val pm = ctx.packageManager
+        val callerIsDebuggable =
+            (ctx.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        val debugPkg = SERVICE_PKG + SERVICE_PKG_DEBUG_SUFFIX
         val resolvedPkg = when {
             pm.isPackageInstalled(SERVICE_PKG) -> SERVICE_PKG
-            pm.isPackageInstalled(SERVICE_PKG + SERVICE_PKG_DEBUG_SUFFIX) ->
-                SERVICE_PKG + SERVICE_PKG_DEBUG_SUFFIX
+            callerIsDebuggable && pm.isPackageInstalled(debugPkg) -> {
+                Log.i(TAG, "Resolved Mindlayer service to debug fallback $debugPkg (caller is debuggable)")
+                debugPkg
+            }
             else -> SERVICE_PKG // last resort — bind will fail with the canonical name
         }
         val intent = Intent().apply {

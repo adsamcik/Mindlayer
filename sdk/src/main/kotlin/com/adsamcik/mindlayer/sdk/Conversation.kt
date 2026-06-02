@@ -27,7 +27,7 @@ import kotlin.coroutines.coroutineContext
  * Implements [AutoCloseable] for use-with-resources patterns.
  */
 class Conversation internal constructor(
-    private val client: Mindlayer,
+    private val client: MindlayerImpl,
     private val config: ConversationConfig,
 ) : AutoCloseable {
     @Volatile private var sessionId: String? = null
@@ -122,7 +122,7 @@ class Conversation internal constructor(
         // Cancel handles first so the service stops generating tokens before we
         // tear down the session. Both calls are best-effort — they no-op when no
         // service binder is currently connected.
-        handles.forEach { runCatching { it.cancelSync() } }
+        handles.forEach { runCatching { (it as InferenceHandleImpl).cancelSync() } }
 
         if (sid != null) {
             try {
@@ -211,18 +211,18 @@ class Conversation internal constructor(
         var result: String? = null
         handle.events.collect { event ->
             when (event) {
-                is MindlayerEvent.TextDelta -> accumulator.append(event.text)
-                is MindlayerEvent.Done -> {
+                is InferenceEvent.TextDelta -> accumulator.append(event.text)
+                is InferenceEvent.Done -> {
                     result = event.fullText ?: accumulator.toString()
                 }
-                is MindlayerEvent.Error -> throw MindlayerException.fromStreamError(
+                is InferenceEvent.Error -> throw MindlayerException.fromStreamError(
                     message = event.message,
                     codeName = event.code,
                     seq = event.seq,
                     tsMs = event.tsMs,
                 )
-                is MindlayerEvent.ToolCall -> throw MindlayerException(
-                    message = Mindlayer.TOOL_CALL_IN_ONESHOT_MSG,
+                is InferenceEvent.ToolCall -> throw MindlayerException(
+                    message = MindlayerImpl.TOOL_CALL_IN_ONESHOT_MSG,
                     codeName = "UNSUPPORTED_TOOL_CALL",
                 )
                 else -> { /* Started, Metrics — ignored */ }

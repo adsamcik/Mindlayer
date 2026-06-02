@@ -260,6 +260,57 @@ class DashboardViewModelTest {
         } as IMindlayerService
     }
 
+    @Test
+    fun `runImageInferenceTest records AIDL call sequence`() = runTest {
+        val calls = mutableListOf<String>()
+        val service = testService(calls)
+
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val viewModel = DashboardViewModel()
+        viewModel.setServiceForTest(service)
+        viewModel.markReadyForTest()
+
+        viewModel.runImageInferenceTest(context)
+
+        viewModel.uiState.awaitState {
+            shadowOf(Looper.getMainLooper()).idle()
+            !it.imageInferenceTest.isRunning
+        }
+        assertEquals(
+            listOf("prewarmAndAwait:GPU:180000", "createSession", "infer", "destroySession"),
+            calls,
+        )
+    }
+
+    @Test
+    fun `runImageInferenceTest records failure on prewarm exception`() = runTest {
+        val service = Proxy.newProxyInstance(
+            IMindlayerService::class.java.classLoader,
+            arrayOf(IMindlayerService::class.java),
+        ) { _, method, _ ->
+            when (method.name) {
+                "asBinder" -> Binder()
+                "prewarmAndAwait" -> throw RuntimeException("engine init failed")
+                else -> null
+            }
+        } as IMindlayerService
+
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val viewModel = DashboardViewModel()
+        viewModel.setServiceForTest(service)
+        viewModel.markReadyForTest()
+
+        viewModel.runImageInferenceTest(context)
+
+        val state = viewModel.uiState.awaitState {
+            shadowOf(Looper.getMainLooper()).idle()
+            !it.imageInferenceTest.isRunning &&
+                it.imageInferenceTest.status.startsWith("Image inference test failed")
+        }
+        assertEquals(DashboardMessageTone.ERROR, state.imageInferenceTest.tone)
+        assertTrue(state.imageInferenceTest.output.isNotBlank())
+    }
+
     private fun DashboardViewModel.setServiceForTest(service: IMindlayerService) {
         val field = DashboardViewModel::class.java.getDeclaredField("service")
         field.isAccessible = true
@@ -279,5 +330,25 @@ class DashboardViewModelTest {
             backend = "GPU",
         )
     }
+
+    private fun DashboardViewModel.setSdkClientForTest(sdk: com.adsamcik.mindlayer.sdk.Mindlayer) {
+        val field = DashboardViewModel::class.java.getDeclaredField("sdkClientForTest")
+        field.isAccessible = true
+        field.set(this, sdk)
+    }
+
+    // ── SDK facade tests ─────────────────────────────────────────────────────
+    //
+    // Removed during the v1 SDK rework (C3, commit 3022302). The previous
+    // tests mocked the legacy / @Deprecated(HIDDEN) Mindlayer API
+    // (sdk.awaitConnected() no-arg, sdk.createSession(...),
+    // sdk.inferAsync(...), sdk.inferRealtime(...), sdk.generateWithImage(...),
+    // sdk.ocrAsync(...)). All of those are HIDDEN on the v1 interface, so
+    // the tests no longer compile. The production code in DashboardViewModel
+    // has been migrated to mindlayer.infer { ephemeralSession; text; image;
+    // outputText() } and mindlayer.ocr { ... }, but no equivalent tests
+    // have been written yet — TODO: re-author against the v1 builder API
+    // using mockk relaxed Mindlayer + flowOf<InferenceEvent>(...) etc.
+    // Tracked in plan.md.
 
 }

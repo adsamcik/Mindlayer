@@ -179,6 +179,38 @@ data class DashboardUiState(
      * the constant is bumped.
      */
     val ocrFailureCooldownMs: Long = OcrAcceleratorFailureCache.DEFAULT_COOLDOWN_MS,
+    /**
+     * Image + Text (Gemma multimodal) verification state — independent of
+     * [isTestRunning], [embeddingTest], and [ocrTest]. Exercises the LLM
+     * engine via [com.adsamcik.mindlayer.IMindlayerService.infer] with an
+     * [com.adsamcik.mindlayer.ImageTransfer] attachment so the dashboard can
+     * confirm the multimodal AIDL path responds end-to-end.
+     */
+    val imageInferenceTest: EngineTestState = EngineTestState(),
+    /**
+     * SDK infer-async verification state — exercises the SDK facade's
+     * [com.adsamcik.mindlayer.sdk.Mindlayer.inferAsync] single-shot path.
+     */
+    val sdkInferAsyncTest: EngineTestState = EngineTestState(),
+    /**
+     * SDK infer-realtime verification state — exercises the SDK facade's
+     * [com.adsamcik.mindlayer.sdk.Mindlayer.inferRealtime] streaming path
+     * and verifies that [com.adsamcik.mindlayer.sdk.InferenceEvent] events
+     * are delivered correctly.
+     */
+    val sdkInferRealtimeTest: EngineTestState = EngineTestState(),
+    /**
+     * SDK generate-with-image verification state — exercises the SDK facade's
+     * stateless [com.adsamcik.mindlayer.sdk.Mindlayer.generateWithImage] path
+     * with the same fixture bitmap used by [imageInferenceTest].
+     */
+    val sdkGenerateWithImageTest: EngineTestState = EngineTestState(),
+    /**
+     * OCR + LLM extraction verification state — exercises the SDK facade's
+     * [com.adsamcik.mindlayer.sdk.Mindlayer.ocrAsync] one-shot path with
+     * [com.adsamcik.mindlayer.OcrImageOptions.runLlmExtraction] enabled.
+     */
+    val ocrLlmExtractionTest: EngineTestState = EngineTestState(),
 ) {
     fun statusFreshness(nowMs: Long = System.currentTimeMillis()): DashboardFreshness =
         freshnessOf(lastStatusUpdateMs, nowMs, STATUS_STALE_AFTER_MS)
@@ -261,20 +293,107 @@ data class DashboardUiState(
     fun canRunOcrTest(): Boolean = ocrTestReadinessIssue() == null
 
     /**
+     * Returns the reason image inference verification can't run right now,
+     * or null when the image inference ``Test`` button should be enabled.
+     * Uses the same loose policy as [ocrTestReadinessIssue]: the test
+     * issues its own prewarm and does not require a prior status sample.
+     */
+    fun imageInferenceTestReadinessIssue(): String? = when {
+        imageInferenceTest.isRunning -> "An image inference test is already running."
+        connectionState == DashboardConnectionState.CONNECTING -> {
+            "Service is connecting. Wait for the binder to attach before testing."
+        }
+
+        connectionState == DashboardConnectionState.DISCONNECTED -> {
+            "Reconnect the service before running a test."
+        }
+
+        else -> null
+    }
+
+    fun canRunImageInferenceTest(): Boolean = imageInferenceTestReadinessIssue() == null
+
+    fun sdkInferAsyncTestReadinessIssue(): String? = when {
+        sdkInferAsyncTest.isRunning -> "An SDK infer-async test is already running."
+        connectionState == DashboardConnectionState.CONNECTING -> {
+            "Service is connecting. Wait for the binder to attach before testing."
+        }
+
+        connectionState == DashboardConnectionState.DISCONNECTED -> {
+            "Reconnect the service before running a test."
+        }
+
+        else -> null
+    }
+
+    fun canRunSdkInferAsyncTest(): Boolean = sdkInferAsyncTestReadinessIssue() == null
+
+    fun sdkInferRealtimeTestReadinessIssue(): String? = when {
+        sdkInferRealtimeTest.isRunning -> "An SDK infer-realtime test is already running."
+        connectionState == DashboardConnectionState.CONNECTING -> {
+            "Service is connecting. Wait for the binder to attach before testing."
+        }
+
+        connectionState == DashboardConnectionState.DISCONNECTED -> {
+            "Reconnect the service before running a test."
+        }
+
+        else -> null
+    }
+
+    fun canRunSdkInferRealtimeTest(): Boolean = sdkInferRealtimeTestReadinessIssue() == null
+
+    fun sdkGenerateWithImageTestReadinessIssue(): String? = when {
+        sdkGenerateWithImageTest.isRunning -> "An SDK generate-with-image test is already running."
+        connectionState == DashboardConnectionState.CONNECTING -> {
+            "Service is connecting. Wait for the binder to attach before testing."
+        }
+
+        connectionState == DashboardConnectionState.DISCONNECTED -> {
+            "Reconnect the service before running a test."
+        }
+
+        else -> null
+    }
+
+    fun canRunSdkGenerateWithImageTest(): Boolean = sdkGenerateWithImageTestReadinessIssue() == null
+
+    fun ocrLlmExtractionTestReadinessIssue(): String? = when {
+        ocrLlmExtractionTest.isRunning -> "An OCR + LLM extraction test is already running."
+        connectionState == DashboardConnectionState.CONNECTING -> {
+            "Service is connecting. Wait for the binder to attach before testing."
+        }
+
+        connectionState == DashboardConnectionState.DISCONNECTED -> {
+            "Reconnect the service before running a test."
+        }
+
+        else -> null
+    }
+
+    fun canRunOcrLlmExtractionTest(): Boolean = ocrLlmExtractionTestReadinessIssue() == null
+
+    /**
      * Whether the "Verify all engines" button on the welcome card
-     * should be enabled. Disabled while ANY of the three engines is
+     * should be enabled. Disabled while ANY of the four engines is
      * already running a test (so the orchestrator's sequencing isn't
      * fighting a manual single-engine run).
      */
     fun canRunAllVerifications(): Boolean =
         !isTestRunning && !embeddingTest.isRunning && !ocrTest.isRunning &&
+            !imageInferenceTest.isRunning && !sdkInferAsyncTest.isRunning &&
+            !sdkInferRealtimeTest.isRunning && !sdkGenerateWithImageTest.isRunning &&
+            !ocrLlmExtractionTest.isRunning &&
             connectionState == DashboardConnectionState.CONNECTED
 
     val isAnyTestRunning: Boolean
-        get() = isTestRunning || embeddingTest.isRunning || ocrTest.isRunning
+        get() = isTestRunning || embeddingTest.isRunning || ocrTest.isRunning ||
+            imageInferenceTest.isRunning || sdkInferAsyncTest.isRunning ||
+            sdkInferRealtimeTest.isRunning || sdkGenerateWithImageTest.isRunning ||
+            ocrLlmExtractionTest.isRunning
 
     /**
-     * Summarises the verification state across all three engines for
+     * Summarises the verification state across all four engines for
      * the dashboard's welcome card pill / colour. Returns a tone +
      * a string-resource id the UI can resolve to localised copy.
      */
@@ -282,7 +401,9 @@ data class DashboardUiState(
         if (isAnyTestRunning) return DashboardMessageTone.INFO
         val toneOf = { test: EngineTestState -> test.tone.takeIf { test.lastCompletedAtMs != null } }
         val chatTone = if (lastTestCompletedAtMs != null) testStatusTone else null
-        val tones = listOfNotNull(chatTone, toneOf(embeddingTest), toneOf(ocrTest))
+        val tones = listOfNotNull(chatTone, toneOf(embeddingTest), toneOf(ocrTest), toneOf(imageInferenceTest),
+            toneOf(sdkInferAsyncTest), toneOf(sdkInferRealtimeTest),
+            toneOf(sdkGenerateWithImageTest), toneOf(ocrLlmExtractionTest))
         if (tones.isEmpty()) return DashboardMessageTone.NEUTRAL
         return when {
             tones.any { it == DashboardMessageTone.ERROR } -> DashboardMessageTone.ERROR

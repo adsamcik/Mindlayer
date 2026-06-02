@@ -846,12 +846,23 @@ class SharedMemoryPool(cacheDir: File) {
      * fds where EOF semantics are unreliable). Otherwise reads until EOF.
      */
     private fun stageFromPfd(pfd: ParcelFileDescriptor, outFile: File, knownSize: Int?) {
-        // H5 — reject FIFOs / sockets / character devices that would block the
-        // staging thread indefinitely. SharedMemory regions go through the
-        // dedicated reconstructSharedMemory path and are validated by the
-        // SharedMemory.fromFileDescriptor API, so this guard runs only on
-        // the generic PFD copy path.
-        assertSafePfdType(pfd)
+        // H5 — reject FIFOs / sockets that would block the staging thread
+        // indefinitely. The original concern (per the assertSafePfdType
+        // comment) is that read-until-EOF on a hostile FIFO never returns,
+        // pinning the orchestrator coroutine.
+        //
+        // The bounded path (knownSize != null, i.e. SharedMemory-backed
+        // encoded images) reads exactly knownSize bytes via readExactly, so
+        // even a character-device ashmem FD can't hang the staging thread.
+        // Raw-pixel SharedMemory transfers go through reconstructSharedMemory
+        // (see stageImage), but encoded SharedMemory transfers fall here —
+        // those legitimately come over as S_IFCHR ashmem FDs. Skipping the
+        // type check on the bounded path lets the OCR `ocrAsync(bytes, mime)`
+        // call work for images > OCR_INLINE_PIPE_THRESHOLD_BYTES (64 KB), the
+        // SDK's default transport for non-trivial OCR payloads.
+        if (knownSize == null) {
+            assertSafePfdType(pfd)
+        }
         try {
             if (knownSize != null) {
                 require(knownSize in 1..MAX_MEDIA_BYTES) {
@@ -947,13 +958,22 @@ class SharedMemoryPool(cacheDir: File) {
     }
 
     private fun requireFdSizeAtLeast(pfd: ParcelFileDescriptor, expectedBytes: Int) {
-        val statSize = try {
-            Os.fstat(pfd.fileDescriptor).st_size
+        val st = try {
+            Os.fstat(pfd.fileDescriptor)
         } catch (e: ErrnoException) {
             throw IllegalArgumentException("Unable to stat media source", e)
         }
-        require(statSize >= expectedBytes) {
-            "Media source size ($statSize B) smaller than declared payloadBytes ($expectedBytes B)"
+        // SharedMemory ashmem FDs report st_size=0 regardless of the actual
+        // mapped region size — the kernel doesn't expose ashmem region size via
+        // fstat. We must trust the SDK-declared payloadBytes and let readExactly
+        // catch any truncation via EOF. Same reasoning as the type check in
+        // stageFromPfd: SharedMemory transfers come in as character devices.
+        val isCharDevice = OsConstants.S_IFMT != 0 &&
+            OsConstants.S_IFCHR != 0 &&
+            (st.st_mode and OsConstants.S_IFMT) == OsConstants.S_IFCHR
+        if (isCharDevice) return
+        require(st.st_size >= expectedBytes) {
+            "Media source size (${st.st_size} B) smaller than declared payloadBytes ($expectedBytes B)"
         }
     }
 
@@ -1205,8 +1225,23 @@ class SharedMemoryPool(cacheDir: File) {
      * cross-UID staging-file deletion). The canonical-path check is
      * defence in depth in case [File] on some filesystem normalises the
      * random component.
+     *
+     * Defensively re-creates [stagingDir] on every call. The pool only
+     * runs `mkdirs()` once at construction (line 244), but Android's
+     * cache-trimming policy is allowed to delete anything under
+     * [Context.getCacheDir] at any time — and aggressively does so under
+     * disk pressure. Without this re-create, the next [stageFromPfd]
+     * write throws `FileNotFoundException(open failed: ENOENT)`. The
+     * binder now classifies that as `MLERR:5004:ocrImage stage failed`
+     * (TRANSIENT_RESOURCE_EXHAUSTED) — see ServiceBinder.ocrImage. Prior
+     * to the disambiguation work this surfaced as the misleading
+     * `MLERR:3001:ocrImage decode failed` (INVALID_REQUEST).
+     * `mkdirs()` is idempotent and effectively a no-op when the
+     * directory already exists, so the cost on the hot path is one
+     * `stat` syscall.
      */
     private fun createStagingFile(prefix: String, extension: String): File {
+        stagingDir.mkdirs()
         val uuid = UUID.randomUUID().toString()
         val staged = File(stagingDir, "${prefix}_$uuid.$extension")
         check(staged.canonicalPath.startsWith(stagingDirCanonical + File.separator)) {

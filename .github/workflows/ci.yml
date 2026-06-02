@@ -387,8 +387,8 @@ jobs:
             "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-rec.tflite"
             "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-cls.tflite"
             "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-dict.txt"
-            "embeddinggemma_model/src/main/assets/embedding-gemma-300m-v1.tflite"
-            "embeddinggemma_model/src/main/assets/embedding-gemma-300m-v1.spm.model"
+            "gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.tflite"
+            "gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.spm.model"
           )
           missing=()
           for path in "${required_files[@]}"; do
@@ -464,3 +464,4 @@ jobs:
           name: release-bundle
           path: app/build/outputs/bundle/release/*.aab
           retention-days: 30
+

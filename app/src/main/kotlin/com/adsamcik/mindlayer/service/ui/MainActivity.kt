@@ -90,6 +90,11 @@ class MainActivity : ComponentActivity() {
                                     onTestInference = { dashboardViewModel.runTestInference() },
                                     onTestEmbeddings = { dashboardViewModel.runEmbeddingTest() },
                                     onTestOcr = { dashboardViewModel.runOcrTest(context) },
+                                    onTestImageInference = { dashboardViewModel.runImageInferenceTest(context) },
+                                    onTestSdkInferAsync = { dashboardViewModel.runSdkInferAsyncTest(context) },
+                                    onTestSdkInferRealtime = { dashboardViewModel.runSdkInferRealtimeTest(context) },
+                                    onTestSdkGenerateWithImage = { dashboardViewModel.runSdkGenerateWithImageTest(context) },
+                                    onTestOcrLlmExtraction = { dashboardViewModel.runOcrLlmExtractionTest(context) },
                                     onClearOcrFailureCache = { dashboardViewModel.clearOcrFailureCache() },
                                     onRunAllVerifications = { dashboardViewModel.runAllVerifications(context) },
                                     onNavigateToHistory = {

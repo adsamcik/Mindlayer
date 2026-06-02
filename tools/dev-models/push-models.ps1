@@ -94,7 +94,7 @@ $EmbeddingFiles = @(
     'embedding-gemma-300m-v1.tflite',
     'embedding-gemma-300m-v1.spm.model'
 )
-$EmbeddingManifest = 'embeddinggemma_model/src/main/assets/embedding_model_integrity.json'
+$EmbeddingManifest = 'gemma_embed_model/src/main/assets/embedding_model_integrity.json'
 
 $PaddleFiles = @(
     'paddleocr-ppocrv5-mobile-det.tflite',
@@ -168,13 +168,61 @@ function Assert-DeviceConnected {
 }
 
 function Assert-DebuggableDevice {
+    <#
+        Sideload is only safe when the receiving service trusts the
+        push target. There are two equivalent ways to express that
+        trust:
+
+         1. The DEVICE is debuggable
+            (`ro.debuggable=1` or `ro.build.type in {userdebug, eng}`).
+            On such a device, every installed app — even release
+            builds — is `Debug.isDebuggable() == true`, so the
+            runtime registries' `BuildConfig.DEBUG` gate would pass.
+
+         2. The MINDLAYER SERVICE installed is the debug variant
+            (`com.adsamcik.mindlayer.service.debug`). The `.debug`
+            package suffix is only produced by Gradle's `debug`
+            buildType, which sets `BuildConfig.DEBUG = true`. Whether
+            the device itself is a Play Store user-build is
+            irrelevant — the runtime gate is satisfied because the
+            APK was built debug.
+
+        Either condition is sufficient. The strict device-only check
+        used to break the dev workflow on Play Store emulators (very
+        common, since AOSP-only emulator images lack Play Services that
+        Mindlayer needs for some flows).
+
+        Release builds with the `.service` (no `.debug`) package
+        installed on a non-debuggable device are still rejected
+        because the runtime gate would refuse to load sideloaded
+        models.
+    #>
     $debuggable = (Invoke-AdbCapture -AdbArgs @('shell', 'getprop', 'ro.debuggable')).Output.Trim()
     $buildType  = (Invoke-AdbCapture -AdbArgs @('shell', 'getprop', 'ro.build.type')).Output.Trim()
-    if ($debuggable -ne '1' -and $buildType -notin @('userdebug', 'eng')) {
-        throw "Mindlayer sideload requires a debuggable build/device. " +
-              "Got ro.debuggable='$debuggable' ro.build.type='$buildType'. " +
-              "Release ('user') builds also gate sideload via BuildConfig.DEBUG."
+    if ($debuggable -eq '1' -or $buildType -in @('userdebug', 'eng')) {
+        return
     }
+    # Device-level guard failed; fall back to package-level evidence.
+    $r = Invoke-AdbCapture -AdbArgs @('shell', 'pm', 'list', 'packages', $ServicePkgDebug)
+    if ($r.ExitCode -eq 0) {
+        $lines = $r.Output -split "`r?`n" | ForEach-Object { $_.Trim() }
+        if ($lines -contains "package:$ServicePkgDebug") {
+            Write-Host (
+                "Device is ro.debuggable='$debuggable' ro.build.type='$buildType' " +
+                "(non-debuggable). Continuing anyway because the debug variant " +
+                "'$ServicePkgDebug' is installed and its runtime BuildConfig.DEBUG " +
+                "gate is the authoritative check."
+            ) -ForegroundColor Yellow
+            return
+        }
+    }
+    throw "Mindlayer sideload requires either a debuggable device " +
+          "(ro.debuggable=1 or ro.build.type in {userdebug, eng}) OR the " +
+          "debug variant '$ServicePkgDebug' to be installed. Got " +
+          "ro.debuggable='$debuggable' ro.build.type='$buildType' " +
+          "and the debug service package is NOT installed. " +
+          "Install the debug build of :app first (./gradlew :app:installDebug), " +
+          "or run on a debuggable device."
 }
 
 function Resolve-RemoteDir {
@@ -452,3 +500,4 @@ if ($failures.Count -eq 0) {
     foreach ($f in $failures) { Write-Host "  - $f" }
     exit 1
 }
+

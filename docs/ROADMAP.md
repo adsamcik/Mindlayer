@@ -182,8 +182,8 @@ Pre-release artifacts are intentionally **not in git** (size + license):
 | Artifact | Module | SHA gate property |
 |---|---|---|
 | `gemma-4-E2B-it.litertlm` | `:gemma_model` | `-PmodelSha256=<hex>` (Gemma chat) |
-| `embedding-gemma-300m-v1.tflite` | `:embeddinggemma_model` | `-PembeddingModelSha256=<hex>` |
-| `embedding-gemma-300m-v1.spm.model` | `:embeddinggemma_model` | `-PembeddingTokenizerSha256=<hex>` |
+| `embedding-gemma-300m-v1.tflite` | `:gemma_embed_model` | `-PembeddingModelSha256=<hex>` |
+| `embedding-gemma-300m-v1.spm.model` | `:gemma_embed_model` | `-PembeddingTokenizerSha256=<hex>` |
 | `paddleocr-ppocrv5-mobile-det.tflite` | `:paddleocr_model` | `-PpaddleocrDetSha256=<hex>` |
 | `paddleocr-ppocrv5-mobile-rec.tflite` | `:paddleocr_model` | `-PpaddleocrRecSha256=<hex>` |
 | `paddleocr-ppocrv5-mobile-cls.tflite` (optional) | `:paddleocr_model` | `-PpaddleocrClsSha256=<hex>` |
@@ -367,3 +367,4 @@ ring buffer with explicit user-initiated export (similar to
 | The dev environment + JDK gotcha | `.github/context/DEVELOPMENT.md` |
 | Code-of-conduct + contributing | `CONTRIBUTING.md` |
 | What's changed and when | `CHANGELOG.md` (this file is the *next-up* list, not the changelog) |
+

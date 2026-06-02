@@ -129,7 +129,7 @@ val validateReleasePaddleOcrSha256 by tasks.registering {
 
 // Phase D #1 (release-validation): mirror the Gemma + PaddleOCR release
 // SHA guards for the two EmbeddingGemma AI-pack artifacts. The
-// :embeddinggemma_model module's own generateEmbeddingModelIntegrityManifest
+// :gemma_embed_model module's own generateEmbeddingModelIntegrityManifest
 // task already fails release builds if either -PembeddingModelSha256 or
 // -PembeddingTokenizerSha256 is missing/malformed; this validator adds
 // the same defense-in-depth cross-check on the :app side, ensuring the
@@ -137,7 +137,7 @@ val validateReleasePaddleOcrSha256 by tasks.registering {
 // cross-check, a buggy CI script could silently regenerate the manifest
 // with zero hashes while still passing the per-module guard.
 val validateReleaseEmbeddingSha256 by tasks.registering {
-    dependsOn(":embeddinggemma_model:generateEmbeddingModelIntegrityManifest")
+    dependsOn(":gemma_embed_model:generateEmbeddingModelIntegrityManifest")
     group = "verification"
     description = "Fails release builds unless -PembeddingModelSha256 and -PembeddingTokenizerSha256 are 64-hex SHA-256 digests matching the embedding_model_integrity.json manifest."
     doLast {
@@ -150,10 +150,10 @@ val validateReleaseEmbeddingSha256 by tasks.registering {
                 "Release builds require -P${missing.joinToString("=<64 hex> -P")}=<64 hex>",
             )
         }
-        val manifest = rootProject.file("embeddinggemma_model/src/main/assets/embedding_model_integrity.json")
+        val manifest = rootProject.file("gemma_embed_model/src/main/assets/embedding_model_integrity.json")
         if (!manifest.isFile) {
             throw GradleException(
-                "Release builds require embeddinggemma_model/src/main/assets/embedding_model_integrity.json.",
+                "Release builds require gemma_embed_model/src/main/assets/embedding_model_integrity.json.",
             )
         }
         val text = manifest.readText()
@@ -559,7 +559,7 @@ android {
             if (enabled) add(pack)
         }
         bundle("mindlayer.bundleGemma", ":gemma_model")
-        bundle("mindlayer.bundleEmbeddings", ":embeddinggemma_model")
+        bundle("mindlayer.bundleEmbeddings", ":gemma_embed_model")
         bundle("mindlayer.bundlePaddleocr", ":paddleocr_model")
     }
     assetPacks += bundledAssetPacks
@@ -742,3 +742,4 @@ dependencies {
     // `settings.gradle.kts` (Apache 2.0).
     androidTestImplementation(libs.tesseract4android)
 }
+

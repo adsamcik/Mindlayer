@@ -1,7 +1,7 @@
 package com.adsamcik.mindlayer.service.integration
 
 import android.util.Log
-import com.adsamcik.mindlayer.sdk.MindlayerEvent
+import com.adsamcik.mindlayer.sdk.InferenceEvent
 import com.adsamcik.mindlayer.service.engine.StructuredOutputHelper
 import com.adsamcik.mindlayer.service.engine.ToolCallBridge
 import com.adsamcik.mindlayer.shared.StreamEvent

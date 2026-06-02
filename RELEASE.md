@@ -101,8 +101,8 @@ $paddleRecSha256 = (Get-FileHash "paddleocr_model\src\main\assets\paddleocr-ppoc
 $paddleClsSha256 = (Get-FileHash "paddleocr_model\src\main\assets\paddleocr-ppocrv5-mobile-cls.tflite" -Algorithm SHA256).Hash.ToLowerInvariant()
 $paddleDictSha256 = (Get-FileHash "paddleocr_model\src\main\assets\paddleocr-ppocrv5-mobile-dict.txt" -Algorithm SHA256).Hash.ToLowerInvariant()
 
-$embeddingModelSha256 = (Get-FileHash "embeddinggemma_model\src\main\assets\embedding-gemma-300m-v1.tflite" -Algorithm SHA256).Hash.ToLowerInvariant()
-$embeddingTokenizerSha256 = (Get-FileHash "embeddinggemma_model\src\main\assets\embedding-gemma-300m-v1.spm.model" -Algorithm SHA256).Hash.ToLowerInvariant()
+$embeddingModelSha256 = (Get-FileHash "gemma_embed_model\src\main\assets\embedding-gemma-300m-v1.tflite" -Algorithm SHA256).Hash.ToLowerInvariant()
+$embeddingTokenizerSha256 = (Get-FileHash "gemma_embed_model\src\main\assets\embedding-gemma-300m-v1.spm.model" -Algorithm SHA256).Hash.ToLowerInvariant()
 
 ./gradlew.bat clean :app:bundleRelease `
   -PmodelSha256=$modelSha256 `
@@ -125,7 +125,7 @@ This is the file you upload to Play. It is:
 * **Signed** with your release key (because `keystore.properties` is present).
 * **Minified and shrunk** via R8 using `app/proguard-rules.pro`.
 * **Packaged with install-time AI packs** declared in `app/build.gradle.kts`:
-  `:gemma_model`, `:embeddinggemma_model`, and `:paddleocr_model`.
+  `:gemma_model`, `:gemma_embed_model`, and `:paddleocr_model`.
 
 > ⚠️ The Gemma `.litertlm`, PaddleOCR `.tflite`/dictionary files, and
 > EmbeddingGemma artifacts are **not** checked into git. For a Play Store
@@ -365,3 +365,4 @@ Once F-078 (extended emulator matrix) and F-079
 (litertlm-aar-abi-inspection) land, items in the checklist that those
 gates fully cover should be removed. The list above is the **upper bound**
 — too long means people skip it.
+

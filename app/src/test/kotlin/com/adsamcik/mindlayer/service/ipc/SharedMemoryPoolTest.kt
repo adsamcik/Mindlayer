@@ -227,6 +227,77 @@ class SharedMemoryPoolTest {
         pool.stageImage("req-short-read", transfer)
     }
 
+    @Test
+    fun `stageImage re-creates staging dir when Android cache trimming deletes it`() {
+        // Android's cache-trimming policy is allowed to delete any file or
+        // directory under cacheDir under disk pressure. Reproduce: stage one
+        // image (succeeds, ensures staging dir exists), then wipe the
+        // staging dir to mimic a system-driven cleanup, then stage again
+        // and verify the second staging still succeeds and the file is
+        // really written. Before the createStagingFile.mkdirs() fix this
+        // second stage threw FileNotFoundException(ENOENT) which the
+        // Before the createStagingFile.mkdirs() fix this second stage
+        // threw FileNotFoundException(ENOENT) which the
+        // binder wrapped (misleadingly) as "ocrImage decode failed".
+        // After the binder disambiguation work the same condition would
+        // now surface as MLERR:5004:ocrImage stage failed
+        // (TRANSIENT_RESOURCE_EXHAUSTED) instead.
+        val firstPng = validPngBytes()
+        val firstResult = pool.stageImage(
+            "req-resilient-1",
+            ImageTransfer(
+                requestId = "req-resilient-1",
+                width = 0,
+                height = 0,
+                pixelFormat = 0,
+                rowStride = 0,
+                payloadBytes = firstPng.size,
+                source = createPfdFromBytes(firstPng, "png"),
+                isSharedMemory = false,
+                mimeType = "image/png",
+            ),
+        )
+        assertTrue("First staging should write a file", File(firstResult.filePath).exists())
+
+        val stagingDir = File(cacheDir, "media_staging")
+        assertTrue("Staging dir should exist after first stage", stagingDir.isDirectory)
+        stagingDir.listFiles()?.forEach { it.delete() }
+        assertTrue(
+            "Staging dir should be deletable to simulate cache trimming",
+            stagingDir.delete(),
+        )
+        assertFalse("Staging dir should not exist after wipe", stagingDir.exists())
+
+        val secondPng = validPngBytes()
+        val secondResult = pool.stageImage(
+            "req-resilient-2",
+            ImageTransfer(
+                requestId = "req-resilient-2",
+                width = 0,
+                height = 0,
+                pixelFormat = 0,
+                rowStride = 0,
+                payloadBytes = secondPng.size,
+                source = createPfdFromBytes(secondPng, "png"),
+                isSharedMemory = false,
+                mimeType = "image/png",
+            ),
+        )
+        val secondStaged = File(secondResult.filePath)
+        assertTrue(
+            "Staging dir should be re-created on second stage",
+            stagingDir.isDirectory,
+        )
+        assertTrue(
+            "Staged file should exist on disk after cache trim recovery",
+            secondStaged.exists(),
+        )
+        assertTrue(
+            "Staged file content should match the source after recovery",
+            secondPng.contentEquals(secondStaged.readBytes()),
+        )
+    }
+
     // =========================================================================
     // cleanup(scopedKey)
     // =========================================================================

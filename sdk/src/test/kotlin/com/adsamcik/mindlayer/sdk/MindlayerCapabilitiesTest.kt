@@ -36,7 +36,7 @@ class MindlayerCapabilitiesTest {
 
     private lateinit var mockService: IMindlayerService
     private lateinit var mockConnection: ConnectionManager
-    private lateinit var mindlayer: Mindlayer
+    private lateinit var mindlayer: MindlayerImpl
 
     private val sampleCaps = ServiceCapabilities(
         apiVersion = 1,
@@ -196,10 +196,37 @@ class MindlayerCapabilitiesTest {
         assertEquals(false, caps.supports(ServiceCapabilities.FEATURE_TOKEN_BATCH))
     }
 
+    @Test
+    fun `awaitConnected(timeout) returns Capabilities adapted from the service`() = runTest {
+        every { mockService.capabilities } returns sampleCaps
+
+        val caps = mindlayer.awaitConnected(kotlin.time.Duration.INFINITE)
+
+        assertEquals(sampleCaps.supportedFeatures, caps.supportedFeatures)
+        assertTrue(caps.supports(ServiceCapabilities.FEATURE_TYPED_ERRORS))
+        assertTrue(caps.supports(ServiceCapabilities.FEATURE_TOOL_RESULTS))
+    }
+
+    @Test
+    fun `awaitConnected(timeout) rejects a non-positive timeout`() = runTest {
+        every { mockService.capabilities } returns sampleCaps
+
+        var thrown: Throwable? = null
+        try {
+            mindlayer.awaitConnected(kotlin.time.Duration.ZERO)
+        } catch (e: Throwable) {
+            thrown = e
+        }
+        assertTrue(
+            "zero timeout should be rejected, got $thrown",
+            thrown is IllegalArgumentException,
+        )
+    }
+
     // ---- Helpers --------------------------------------------------------
 
-    private fun buildMindlayer(conn: ConnectionManager, historyStore: HistoryStore?): Mindlayer {
-        val ctor = Mindlayer::class.java.getDeclaredConstructor(
+    private fun buildMindlayer(conn: ConnectionManager, historyStore: HistoryStore?): MindlayerImpl {
+        val ctor = MindlayerImpl::class.java.getDeclaredConstructor(
             ConnectionManager::class.java,
             HistoryStore::class.java,
         )

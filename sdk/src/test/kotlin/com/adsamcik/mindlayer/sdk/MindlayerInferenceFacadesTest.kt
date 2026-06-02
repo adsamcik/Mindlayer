@@ -53,7 +53,7 @@ class MindlayerInferenceFacadesTest {
     private lateinit var db: MindlayerDatabase
     private lateinit var mockService: IMindlayerService
     private lateinit var mockConnection: ConnectionManager
-    private lateinit var mindlayer: Mindlayer
+    private lateinit var mindlayer: MindlayerImpl
 
     @Before
     fun setUp() {
@@ -104,8 +104,8 @@ class MindlayerInferenceFacadesTest {
         unmockkAll()
     }
 
-    private fun buildMindlayer(conn: ConnectionManager): Mindlayer {
-        val ctor = Mindlayer::class.java.getDeclaredConstructor(
+    private fun buildMindlayer(conn: ConnectionManager): MindlayerImpl {
+        val ctor = MindlayerImpl::class.java.getDeclaredConstructor(
             ConnectionManager::class.java,
             HistoryStore::class.java,
         )
@@ -203,8 +203,8 @@ class MindlayerInferenceFacadesTest {
                 dep,
             )
             assertEquals(
-                "Overload $method deprecation level should remain WARNING during migration",
-                DeprecationLevel.WARNING,
+                "Overload $method deprecation level should be HIDDEN in Mindlayer v1",
+                DeprecationLevel.HIDDEN,
                 dep!!.level,
             )
         }

@@ -1,94 +1,154 @@
 package com.adsamcik.mindlayer.sdk
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Handle for an in-flight inference request. Provides:
- * - [requestId] for tracking and correlation
- * - [events] flow of inference events
- * - [cancel] to stop inference on both client and service side
+ * Cold handle for an inference call.
  *
- * Returned by [Mindlayer.chat], [Mindlayer.chatWithImage], [Mindlayer.chatWithAudio].
+ * The subtype is determined by the request's output mode: [Text] for plain
+ * generation, [Structured] for schema-constrained JSON, and [Tools] for
+ * tool-calling. The canonical [Mindlayer.infer] returns the matching subtype
+ * so common call sites avoid a cast.
  *
- * Usage:
- * ```
- * val handle = mindlayer.chat(sessionId, "Hello!")
- * handle.events.collect { event ->
- *     when (event) {
- *         is MindlayerEvent.TextDelta -> print(event.text)
- *         is MindlayerEvent.Done -> println()
- *         else -> {}
- *     }
- * }
- * ```
+ * ## Cancellation (Spike-E §8.4)
  *
- * To cancel:
- * ```
- * handle.cancel()
- * ```
+ * There is no `cancel()` on the handle. Cancellation flows through structured
+ * concurrency: cancel the coroutine collecting [events] and the AIDL request is
+ * torn down via the stream's `awaitClose`. Cleanup paths internal to the SDK
+ * (notably [Conversation.close]) tear an in-flight request down through the
+ * impl's package-private sync-cancel machinery.
  */
-class InferenceHandle(
+sealed interface InferenceHandle {
     /** Unique request ID, available immediately (before collection starts). */
-    val requestId: String,
+    val requestId: String
+
+    /** Session this request runs in. Empty string when not yet assigned. */
+    val sessionId: String
 
     /** Cold flow of inference events. Collect exactly once. */
-    val events: Flow<MindlayerEvent>,
-) {
-    private val cancelled = AtomicBoolean(false)
-    private var cancelCallback: (suspend () -> Unit)? = null
-    private var syncCancelCallback: (() -> Unit)? = null
+    val events: Flow<InferenceEvent>
 
-    /**
-     * Whether [cancel] has been called on this handle.
-     *
-     * **Note:** This reflects the client-side cancellation state, not whether
-     * the service has finished processing. Use this to avoid redundant [cancel]
-     * calls. Monitor [events] for [MindlayerEvent.Done] or [MindlayerEvent.Error]
-     * to detect actual completion.
-     */
-    val isCancelled: Boolean get() = cancelled.get()
-
-    internal fun setCancelCallback(cb: suspend () -> Unit) {
-        cancelCallback = cb
+    /** Plain text generation. */
+    interface Text : InferenceHandle {
+        suspend fun awaitText(): String
     }
 
+    /** Schema-constrained JSON generation. */
+    interface Structured : InferenceHandle {
+        suspend fun awaitJson(): JsonObject
+    }
+
+    /** Tool-calling generation. */
+    interface Tools : InferenceHandle {
+        suspend fun awaitToolCalls(): List<ToolCall>
+
+        /** Submit a result for a tool call ID surfaced in [events]. */
+        suspend fun submitToolResult(callId: String, resultJson: String)
+    }
+}
+
+/**
+ * Production [InferenceHandle]. Implements all three output subtypes
+ * simultaneously; the canonical builder returns it typed to the subtype that
+ * matches the request's output mode. Carries the package-private sync-cancel
+ * machinery used by the streaming impl and [Conversation].
+ */
+internal class InferenceHandleImpl(
+    override val requestId: String,
+    override val events: Flow<InferenceEvent>,
+    override val sessionId: String = "",
+) : InferenceHandle, InferenceHandle.Text, InferenceHandle.Structured, InferenceHandle.Tools {
+
+    private val cancelled = AtomicBoolean(false)
+    private var syncCancelCallback: (() -> Unit)? = null
+
+    /** Read-only cancellation state for internal callers and the test suite. */
+    internal val isCancelled: Boolean get() = cancelled.get()
+
     /**
-     * Sets a non-suspend cancel callback used by [cancelSync].
-     *
-     * Cleanup paths (notably [Conversation.close], which is non-suspend by the
-     * [AutoCloseable] contract) must be able to cancel without blocking on
-     * `awaitConnected()`. The sync callback is expected to do best-effort work
-     * against the currently-cached service binder and silently no-op when no
-     * connection is available — the session-side request will be cleaned up
-     * when its session is destroyed.
+     * Sets a non-suspend cancel callback used by [cancelSync]. Cleanup paths
+     * (notably [Conversation.close]) must cancel without blocking on
+     * `awaitConnected()`; the sync callback does best-effort work against the
+     * cached binder and silently no-ops when no connection is available.
      */
     internal fun setSyncCancelCallback(cb: () -> Unit) {
         syncCancelCallback = cb
     }
 
-    /**
-     * Cancel the inference request. Idempotent — safe to call multiple times.
-     *
-     * This reaches through to the service's native [cancelProcess()] to stop
-     * the LiteRT-LM inference loop, not just close the pipe.
-     */
-    suspend fun cancel() {
-        if (cancelled.getAndSet(true)) return // already cancelled
-        cancelCallback?.invoke()
+    /** Non-suspend teardown for synchronous cleanup paths. Idempotent. */
+    internal fun cancelSync() {
+        if (cancelled.getAndSet(true)) return
+        syncCancelCallback?.invoke()
     }
 
+    override suspend fun awaitText(): String = collectText()
+
+    override suspend fun awaitJson(): JsonObject = parseLenientJson(collectText())
+
+    override suspend fun awaitToolCalls(): List<ToolCall> {
+        val calls = mutableListOf<ToolCall>()
+        events.throwOnError().collect { event ->
+            if (event is InferenceEvent.ToolCall) {
+                calls += ToolCall(
+                    callId = event.callId,
+                    name = event.toolName,
+                    argsJson = event.arguments,
+                )
+            }
+        }
+        return calls
+    }
+
+    override suspend fun submitToolResult(callId: String, resultJson: String) =
+        throw NotImplementedError(
+            "Mindlayer v1 — InferenceHandle.Tools.submitToolResult() is not wired in 1.0.0-alpha01; " +
+                "use the streaming onToolCall(...) handler on the request builder instead.",
+        )
+
     /**
-     * Non-suspend variant of [cancel] for synchronous cleanup paths such as
-     * [Conversation.close]. Mutually idempotent with [cancel] — both share
-     * the same `cancelled` flag, so calling either after the other is a no-op.
-     *
-     * Best-effort: when no service binder is currently connected the cancel
-     * is silently dropped. The corresponding service-side request is cleaned
-     * up automatically when its owning session is destroyed.
+     * Collect the event stream and accumulate generated text. Prefers the
+     * concatenated [InferenceEvent.TextDelta]s; falls back to
+     * [InferenceEvent.Done.fullText] for sources that only report a terminal
+     * payload. Surfaces an [InferenceEvent.Error] frame as a [MindlayerException].
      */
-    internal fun cancelSync() {
-        if (cancelled.getAndSet(true)) return // already cancelled
-        syncCancelCallback?.invoke()
+    private suspend fun collectText(): String {
+        val sb = StringBuilder()
+        var doneFullText: String? = null
+        events.throwOnError().collect { event ->
+            when (event) {
+                is InferenceEvent.TextDelta -> sb.append(event.text)
+                is InferenceEvent.Done -> doneFullText = event.fullText
+                else -> Unit
+            }
+        }
+        return if (sb.isNotEmpty()) sb.toString() else (doneFullText ?: "")
+    }
+
+    private companion object {
+        private val lenientJson = Json { ignoreUnknownKeys = true; isLenient = true }
+
+        /**
+         * Parse model output into a [JsonObject], tolerating the markdown
+         * fences and surrounding prose that instruction-tuned models often add
+         * around schema-constrained JSON.
+         */
+        fun parseLenientJson(raw: String): JsonObject {
+            val stripped = raw.trim()
+                .removePrefix("```json")
+                .removePrefix("```")
+                .removeSuffix("```")
+                .trim()
+            val candidate = outermostBraces(stripped) ?: stripped
+            return lenientJson.parseToJsonElement(candidate) as JsonObject
+        }
+
+        private fun outermostBraces(text: String): String? {
+            val start = text.indexOf('{')
+            val end = text.lastIndexOf('}')
+            return if (start in 0 until end) text.substring(start, end + 1) else null
+        }
     }
 }

@@ -574,4 +574,5 @@ S25 Ultra spike measurements for EmbeddingGemma-300M:
 
 ### Asset Pack delivery
 
-The `:embeddinggemma_model` Play AI Pack is install-time delivery and carries both `embedding-gemma-300m-v1.tflite` and `embedding-gemma-300m-v1.spm.model`. The service advertises `FEATURE_EMBEDDINGS` only after extraction and SHA-256 verification succeed.
+The `:gemma_embed_model` Play AI Pack is install-time delivery and carries both `embedding-gemma-300m-v1.tflite` and `embedding-gemma-300m-v1.spm.model`. The service advertises `FEATURE_EMBEDDINGS` only after extraction and SHA-256 verification succeed.
+

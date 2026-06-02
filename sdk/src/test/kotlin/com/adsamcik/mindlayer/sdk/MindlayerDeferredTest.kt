@@ -43,7 +43,7 @@ class MindlayerDeferredTest {
 
     private lateinit var mockService: IMindlayerService
     private lateinit var mockConnection: ConnectionManager
-    private lateinit var mindlayer: Mindlayer
+    private lateinit var mindlayer: MindlayerImpl
 
     /** Caps that advertise FEATURE_DEFERRED_INFERENCE. */
     private val deferredCaps = ServiceCapabilities(
@@ -198,8 +198,8 @@ class MindlayerDeferredTest {
         )
     }
 
-    private fun buildMindlayer(conn: ConnectionManager): Mindlayer {
-        val ctor = Mindlayer::class.java.getDeclaredConstructor(
+    private fun buildMindlayer(conn: ConnectionManager): MindlayerImpl {
+        val ctor = MindlayerImpl::class.java.getDeclaredConstructor(
             ConnectionManager::class.java,
             HistoryStore::class.java,
         )

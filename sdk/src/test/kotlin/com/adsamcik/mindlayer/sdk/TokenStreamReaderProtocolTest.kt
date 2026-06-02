@@ -53,8 +53,8 @@ class TokenStreamReaderProtocolTest {
         assertTrue(
             "expected Started + Done, got $events",
             events.size == 2 &&
-                events[0] is MindlayerEvent.Started &&
-                events[1] is MindlayerEvent.Done,
+                events[0] is InferenceEvent.Started &&
+                events[1] is InferenceEvent.Done,
         )
     }
 
@@ -68,8 +68,8 @@ class TokenStreamReaderProtocolTest {
         val pfd = pfdFor(frames)
 
         val first = TokenStreamReader.readStream(pfd).first()
-        assertTrue("expected Error, got $first", first is MindlayerEvent.Error)
-        val err = first as MindlayerEvent.Error
+        assertTrue("expected Error, got $first", first is InferenceEvent.Error)
+        val err = first as InferenceEvent.Error
         assertEquals("PROTOCOL_MISMATCH", err.code)
         assertTrue(
             "message should mention the unsupported protocol, got '${err.message}'",
@@ -91,8 +91,8 @@ class TokenStreamReaderProtocolTest {
         assertTrue(
             "expected Started + Done on v2, got $events",
             events.size == 2 &&
-                events[0] is MindlayerEvent.Started &&
-                events[1] is MindlayerEvent.Done,
+                events[0] is InferenceEvent.Started &&
+                events[1] is InferenceEvent.Done,
         )
     }
 

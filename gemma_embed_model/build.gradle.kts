@@ -142,7 +142,7 @@ tasks.configureEach {
 }
 
 aiPack {
-    packName = "embeddinggemma_model"
+    packName = "gemma_embed_model"
     dynamicDelivery {
         deliveryType = "install-time"
     }
@@ -154,4 +154,5 @@ tasks.register("assembleDebug") {
     description = "Alias for assemble so CI gates can target debug-like AI-pack builds."
     dependsOn("assemble")
 }
+
 

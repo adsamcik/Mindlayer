@@ -106,7 +106,7 @@ class TokenStreamReaderTest {
      * Mirrors the guarded implementation exactly so regression tests validate
      * the same error-handling paths.
      */
-    private fun readStreamFromInputStream(input: InputStream): Flow<MindlayerEvent> = flow {
+    private fun readStreamFromInputStream(input: InputStream): Flow<InferenceEvent> = flow {
         val dis = DataInputStream(BufferedInputStream(input))
         try {
             while (true) {
@@ -116,35 +116,35 @@ class TokenStreamReaderTest {
                     break
                 }
 
-                var terminalError: MindlayerEvent.Error? = null
-                val parsedEvent: MindlayerEvent? = try {
+                var terminalError: InferenceEvent.Error? = null
+                val parsedEvent: InferenceEvent? = try {
                     require(len in 0..MAX_FRAME_BYTES) { "Invalid frame length: $len" }
                     val payload = ByteArray(len)
                     dis.readFully(payload)
                     parseFrame(payload.decodeToString())
                 } catch (e: EOFException) {
-                    terminalError = MindlayerEvent.Error(
+                    terminalError = InferenceEvent.Error(
                         message = "Protocol error: truncated frame",
                         code = "PROTOCOL_ERROR_EOF",
                         seq = -1,
                     )
                     null
                 } catch (e: IllegalArgumentException) {
-                    terminalError = MindlayerEvent.Error(
+                    terminalError = InferenceEvent.Error(
                         message = "Protocol error: invalid frame length",
                         code = "PROTOCOL_ERROR_LENGTH",
                         seq = -1,
                     )
                     null
                 } catch (e: kotlinx.serialization.SerializationException) {
-                    terminalError = MindlayerEvent.Error(
+                    terminalError = InferenceEvent.Error(
                         message = "Protocol error: invalid frame encoding",
                         code = "PROTOCOL_ERROR_JSON",
                         seq = -1,
                     )
                     null
                 } catch (e: Throwable) {
-                    terminalError = MindlayerEvent.Error(
+                    terminalError = InferenceEvent.Error(
                         message = "Protocol error",
                         code = "PROTOCOL_ERROR",
                         seq = -1,
@@ -156,7 +156,7 @@ class TokenStreamReaderTest {
                     terminalError != null -> { emit(terminalError); break }
                     parsedEvent == null -> {
                         emit(
-                            MindlayerEvent.Error(
+                            InferenceEvent.Error(
                                 message = "Protocol error: unrecognised frame",
                                 code = "PROTOCOL_ERROR_JSON",
                                 seq = -1,
@@ -173,14 +173,14 @@ class TokenStreamReaderTest {
     }.flowOn(Dispatchers.IO)
 
     /** Mirrors TokenStreamReader.parseFrame. */
-    private fun parseFrame(jsonStr: String): MindlayerEvent? {
+    private fun parseFrame(jsonStr: String): InferenceEvent? {
         return try {
             val streamEvent = json.decodeFromString<StreamEvent>(jsonStr)
             mapEvent(streamEvent)
         } catch (_: Exception) {
             try {
                 val header = json.decodeFromString<StreamHeader>(jsonStr)
-                MindlayerEvent.Started(header.requestId)
+                InferenceEvent.Started(header.requestId)
             } catch (_: Exception) {
                 null
             }
@@ -188,35 +188,35 @@ class TokenStreamReaderTest {
     }
 
     /** Mirrors TokenStreamReader.mapEvent. */
-    private fun mapEvent(event: StreamEvent): MindlayerEvent = when (event.type) {
-        StreamEventType.TOKEN_DELTA -> MindlayerEvent.TextDelta(
+    private fun mapEvent(event: StreamEvent): InferenceEvent = when (event.type) {
+        StreamEventType.TOKEN_DELTA -> InferenceEvent.TextDelta(
             text = event.payload["text"]?.jsonPrimitive?.contentOrNull ?: "",
             seq = event.seq,
         )
-        StreamEventType.TOOL_CALL -> MindlayerEvent.ToolCall(
+        StreamEventType.TOOL_CALL -> InferenceEvent.ToolCall(
             toolName = event.payload["name"]?.jsonPrimitive?.contentOrNull ?: "",
             arguments = event.payload["args"]?.jsonPrimitive?.contentOrNull ?: "{}",
             callId = event.payload["callId"]?.jsonPrimitive?.contentOrNull ?: "",
             seq = event.seq,
         )
-        StreamEventType.METRICS -> MindlayerEvent.Metrics(
+        StreamEventType.METRICS -> InferenceEvent.Metrics(
             prefillToksPerSec = event.payload["prefillToksPerSec"]?.jsonPrimitive?.floatOrNull,
             decodeToksPerSec = event.payload["decodeToksPerSec"]?.jsonPrimitive?.floatOrNull,
             thermalBand = event.payload["thermalBand"]?.jsonPrimitive?.contentOrNull,
             seq = event.seq,
         )
-        StreamEventType.ERROR -> MindlayerEvent.Error(
+        StreamEventType.ERROR -> InferenceEvent.Error(
             message = event.payload["message"]?.jsonPrimitive?.contentOrNull ?: "Unknown error",
             code = event.payload["code"]?.jsonPrimitive?.contentOrNull,
             seq = event.seq,
             codeInt = event.payload["codeInt"]?.jsonPrimitive?.intOrNull,
         )
-        StreamEventType.DONE -> MindlayerEvent.Done(
+        StreamEventType.DONE -> InferenceEvent.Done(
             finishReason = event.payload["finish_reason"]?.jsonPrimitive?.contentOrNull ?: "unknown",
             fullText = event.payload["full_text"]?.jsonPrimitive?.contentOrNull,
             seq = event.seq,
         )
-        else -> MindlayerEvent.Unknown(type = event.type, seq = event.seq)
+        else -> InferenceEvent.Unknown(type = event.type, seq = event.seq)
     }
 
     // =========================================================================
@@ -230,8 +230,8 @@ class TokenStreamReaderTest {
             payload = buildJsonObject { put("text", "hello") },
         )
         val result = mapEvent(event)
-        assertTrue(result is MindlayerEvent.TextDelta)
-        assertEquals("hello", (result as MindlayerEvent.TextDelta).text)
+        assertTrue(result is InferenceEvent.TextDelta)
+        assertEquals("hello", (result as InferenceEvent.TextDelta).text)
         assertEquals(1L, result.seq)
     }
 
@@ -245,7 +245,7 @@ class TokenStreamReaderTest {
                 put("args", """{"k":"v"}""")
             },
         )
-        val result = mapEvent(event) as MindlayerEvent.ToolCall
+        val result = mapEvent(event) as InferenceEvent.ToolCall
         assertEquals("fn_name", result.toolName)
         assertEquals("""{"k":"v"}""", result.arguments)
         assertEquals("c1", result.callId)
@@ -262,7 +262,7 @@ class TokenStreamReaderTest {
                 put("thermalBand", "nominal")
             },
         )
-        val result = mapEvent(event) as MindlayerEvent.Metrics
+        val result = mapEvent(event) as InferenceEvent.Metrics
         assertEquals(100.5f, result.prefillToksPerSec!!, 0.01f)
         assertEquals(50.0f, result.decodeToksPerSec!!, 0.01f)
         assertEquals("nominal", result.thermalBand)
@@ -277,7 +277,7 @@ class TokenStreamReaderTest {
                 put("message", "Request timed out")
             },
         )
-        val result = mapEvent(event) as MindlayerEvent.Error
+        val result = mapEvent(event) as InferenceEvent.Error
         assertEquals("timeout", result.code)
         assertEquals("Request timed out", result.message)
         assertEquals(4L, result.seq)
@@ -293,7 +293,7 @@ class TokenStreamReaderTest {
                 put("message", "memory pressure")
             },
         )
-        val result = mapEvent(event) as MindlayerEvent.Error
+        val result = mapEvent(event) as InferenceEvent.Error
         assertEquals("LOW_MEMORY", result.code)
         assertEquals(com.adsamcik.mindlayer.shared.MindlayerErrorCode.LOW_MEMORY, result.codeInt)
     }
@@ -304,7 +304,7 @@ class TokenStreamReaderTest {
             seq = 5, type = StreamEventType.DONE, tsMs = 0,
             payload = buildJsonObject { put("finish_reason", "stop") },
         )
-        val result = mapEvent(event) as MindlayerEvent.Done
+        val result = mapEvent(event) as InferenceEvent.Done
         assertEquals("stop", result.finishReason)
         assertNull(result.fullText)
         assertEquals(5L, result.seq)
@@ -321,7 +321,7 @@ class TokenStreamReaderTest {
             seq = 0, type = "start", tsMs = 0,
             payload = buildJsonObject { put("requestId", "req-99") },
         )
-        val result = mapEvent(event) as MindlayerEvent.Unknown
+        val result = mapEvent(event) as InferenceEvent.Unknown
         assertEquals("start", result.type)
     }
 
@@ -335,7 +335,7 @@ class TokenStreamReaderTest {
             seq = 10, type = StreamEventType.TOKEN_DELTA, tsMs = 0,
             payload = JsonObject(emptyMap()),
         )
-        val result = mapEvent(event) as MindlayerEvent.TextDelta
+        val result = mapEvent(event) as InferenceEvent.TextDelta
         assertEquals("", result.text)
     }
 
@@ -345,7 +345,7 @@ class TokenStreamReaderTest {
             seq = 11, type = StreamEventType.TOOL_CALL, tsMs = 0,
             payload = JsonObject(emptyMap()),
         )
-        val result = mapEvent(event) as MindlayerEvent.ToolCall
+        val result = mapEvent(event) as InferenceEvent.ToolCall
         assertEquals("", result.toolName)
         assertEquals("{}", result.arguments)
         assertEquals("", result.callId)
@@ -357,7 +357,7 @@ class TokenStreamReaderTest {
             seq = 12, type = StreamEventType.METRICS, tsMs = 0,
             payload = JsonObject(emptyMap()),
         )
-        val result = mapEvent(event) as MindlayerEvent.Metrics
+        val result = mapEvent(event) as InferenceEvent.Metrics
         assertNull(result.prefillToksPerSec)
         assertNull(result.decodeToksPerSec)
         assertNull(result.thermalBand)
@@ -369,7 +369,7 @@ class TokenStreamReaderTest {
             seq = 13, type = StreamEventType.ERROR, tsMs = 0,
             payload = buildJsonObject { put("message", "oops") },
         )
-        val result = mapEvent(event) as MindlayerEvent.Error
+        val result = mapEvent(event) as InferenceEvent.Error
         assertNull(result.code)
         assertEquals("oops", result.message)
     }
@@ -380,7 +380,7 @@ class TokenStreamReaderTest {
             seq = 14, type = StreamEventType.DONE, tsMs = 0,
             payload = JsonObject(emptyMap()),
         )
-        val result = mapEvent(event) as MindlayerEvent.Done
+        val result = mapEvent(event) as InferenceEvent.Done
         assertEquals("unknown", result.finishReason)
     }
 
@@ -394,7 +394,7 @@ class TokenStreamReaderTest {
             seq = 20, type = "some_future_type", tsMs = 0,
             payload = buildJsonObject { put("data", "whatever") },
         )
-        val result = mapEvent(event) as MindlayerEvent.Unknown
+        val result = mapEvent(event) as InferenceEvent.Unknown
         assertEquals("some_future_type", result.type)
         assertEquals(20L, result.seq)
     }
@@ -407,8 +407,8 @@ class TokenStreamReaderTest {
     fun `parseFrame with StreamHeader returns Started`() {
         val headerJson = buildStreamHeaderJson("req-parse-1")
         val result = parseFrame(headerJson)
-        assertTrue(result is MindlayerEvent.Started)
-        assertEquals("req-parse-1", (result as MindlayerEvent.Started).requestId)
+        assertTrue(result is InferenceEvent.Started)
+        assertEquals("req-parse-1", (result as InferenceEvent.Started).requestId)
     }
 
     @Test
@@ -419,8 +419,8 @@ class TokenStreamReaderTest {
             payload = buildJsonObject { put("text", "world") },
         )
         val result = parseFrame(eventJson)
-        assertTrue(result is MindlayerEvent.TextDelta)
-        assertEquals("world", (result as MindlayerEvent.TextDelta).text)
+        assertTrue(result is InferenceEvent.TextDelta)
+        assertEquals("world", (result as InferenceEvent.TextDelta).text)
     }
 
     @Test
@@ -458,11 +458,11 @@ class TokenStreamReaderTest {
         val events = readStreamFromInputStream(pipeIn).toList()
 
         assertEquals(3, events.size)
-        assertTrue(events[0] is MindlayerEvent.Started)
-        assertTrue(events[1] is MindlayerEvent.TextDelta)
-        assertEquals("hi", (events[1] as MindlayerEvent.TextDelta).text)
-        assertTrue(events[2] is MindlayerEvent.Done)
-        assertEquals("stop", (events[2] as MindlayerEvent.Done).finishReason)
+        assertTrue(events[0] is InferenceEvent.Started)
+        assertTrue(events[1] is InferenceEvent.TextDelta)
+        assertEquals("hi", (events[1] as InferenceEvent.TextDelta).text)
+        assertTrue(events[2] is InferenceEvent.Done)
+        assertEquals("stop", (events[2] as InferenceEvent.Done).finishReason)
     }
 
     // =========================================================================
@@ -497,8 +497,8 @@ class TokenStreamReaderTest {
         val events = readStreamFromInputStream(pipeIn).toList()
 
         assertEquals("Expected exactly one event", 1, events.size)
-        val error = events[0] as? MindlayerEvent.Error
-            ?: error("Expected MindlayerEvent.Error, got ${events[0]}")
+        val error = events[0] as? InferenceEvent.Error
+            ?: error("Expected InferenceEvent.Error, got ${events[0]}")
         assertEquals("PROTOCOL_ERROR_LENGTH", error.code)
     }
 
@@ -512,8 +512,8 @@ class TokenStreamReaderTest {
         val events = readStreamFromInputStream(pipeIn).toList()
 
         assertEquals("Expected exactly one event", 1, events.size)
-        val error = events[0] as? MindlayerEvent.Error
-            ?: error("Expected MindlayerEvent.Error, got ${events[0]}")
+        val error = events[0] as? InferenceEvent.Error
+            ?: error("Expected InferenceEvent.Error, got ${events[0]}")
         assertEquals("PROTOCOL_ERROR_LENGTH", error.code)
     }
 
@@ -529,8 +529,8 @@ class TokenStreamReaderTest {
         val events = readStreamFromInputStream(pipeIn).toList()
 
         assertEquals("Expected exactly one event", 1, events.size)
-        val error = events[0] as? MindlayerEvent.Error
-            ?: error("Expected MindlayerEvent.Error, got ${events[0]}")
+        val error = events[0] as? InferenceEvent.Error
+            ?: error("Expected InferenceEvent.Error, got ${events[0]}")
         assertEquals("PROTOCOL_ERROR_EOF", error.code)
     }
 
@@ -546,8 +546,8 @@ class TokenStreamReaderTest {
         val events = readStreamFromInputStream(pipeIn).toList()
 
         assertEquals("Expected exactly one event", 1, events.size)
-        val error = events[0] as? MindlayerEvent.Error
-            ?: error("Expected MindlayerEvent.Error, got ${events[0]}")
+        val error = events[0] as? InferenceEvent.Error
+            ?: error("Expected InferenceEvent.Error, got ${events[0]}")
         assertEquals("PROTOCOL_ERROR_JSON", error.code)
     }
 }

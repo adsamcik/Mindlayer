@@ -247,7 +247,7 @@ class TokenStreamWriter private constructor(
      * Write an [StreamEventType.ERROR] frame using a typed wire code from
      * [MindlayerErrorCode]. Prefer this overload over the raw-string
      * [writeError] so the SDK side can react via
-     * [com.adsamcik.mindlayer.sdk.MindlayerEvent.Error.code] symbolic names.
+     * [com.adsamcik.mindlayer.sdk.InferenceEvent.Error.code] symbolic names.
      */
     suspend fun writeError(seq: Long, code: Int, message: String) {
         val name = MindlayerErrorCode.nameOf(code) ?: "INTERNAL"
@@ -302,7 +302,7 @@ class TokenStreamWriter private constructor(
      * Close the pipe after emitting a final [StreamEventType.ERROR] frame.
      *
      * The [code] should come from [MindlayerErrorCode] so the SDK side sees a
-     * symbolic [com.adsamcik.mindlayer.sdk.MindlayerEvent.Error.code]. The
+     * symbolic [com.adsamcik.mindlayer.sdk.InferenceEvent.Error.code]. The
      * default [MindlayerErrorCode.INTERNAL] is the safe choice when the
      * call site is a generic catch — prefer a more specific code at the
      * call site so client-side retry logic has signal.

@@ -14,7 +14,7 @@ import java.io.File
  * `embedding-gemma-300m-v1.spm.model` file when it is locally present.
  *
  * The tokenizer artifact is gitignored (Play AI Pack distribution; see
- * `embeddinggemma_model/build.gradle.kts`), so on a fresh CI runner or a
+ * `gemma_embed_model/build.gradle.kts`), so on a fresh CI runner or a
  * developer machine without the AI Pack staged, these tests skip via
  * [assumeTrue] rather than fail — matching the same pattern used for
  * gemma + paddleocr tests that depend on the unconditionally-gitignored
@@ -30,7 +30,7 @@ class SentencePieceUnigramTokenizerTest {
 
     /** Hand-resolved path to the in-tree `.spm.model` file. */
     private val tokenizerFile: File =
-        File("../embeddinggemma_model/src/main/assets/embedding-gemma-300m-v1.spm.model")
+        File("../gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.spm.model")
 
     @Test
     fun `loads Gemma SentencePiece model and reports a non-trivial vocab`() {
@@ -119,3 +119,4 @@ class SentencePieceUnigramTokenizerTest {
         }
     }
 }
+

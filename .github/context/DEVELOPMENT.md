@@ -13,7 +13,7 @@
 | Kotlin | 2.3.21 (KSP 2.3.8) | `kotlin.code.style=official` |
 | Compose | BOM 2026.04.01, Material3 1.5.0-alpha18 | |
 | LiteRT-LM | 0.12.0 (`com.google.ai.edge.litertlm:litertlm-android`) + LiteRT 2.1.5 | |
-| Model files | Gemma `.litertlm`, EmbeddingGemma `.tflite` + tokenizer, PaddleOCR PP-OCRv5 assets | **NOT in git.** Delivered via install-time Play AI Packs (`:gemma_model`, `:embeddinggemma_model`, `:paddleocr_model`) or staged manually for dev/release. |
+| Model files | Gemma `.litertlm`, EmbeddingGemma `.tflite` + tokenizer, PaddleOCR PP-OCRv5 assets | **NOT in git.** Delivered via install-time Play AI Packs (`:gemma_model`, `:gemma_embed_model`, `:paddleocr_model`) or staged manually for dev/release. |
 | Emulator/device | API 26+, GPU recommended (Vulkan/OpenCL); Robolectric covers `:test` | Native libs `libvndksupport.so`, `libOpenCL.so` declared `required="false"`. |
 
 ## Common Commands
@@ -57,7 +57,7 @@ adb shell am start -n com.adsamcik.mindlayer.service.debug/com.adsamcik.mindlaye
 (Note the `.debug` `applicationIdSuffix` — debug builds end in `…service.debug`.)
 
 For Play Store builds the model files are delivered via the `:gemma_model`,
-`:embeddinggemma_model`, and `:paddleocr_model` install-time AI packs — see
+`:gemma_embed_model`, and `:paddleocr_model` install-time AI packs — see
 `RELEASE.md`.
 
 ## Environment / properties
@@ -112,7 +112,7 @@ Production builds can be signed locally or by CI when signing secrets are config
 1. Drop `keystore.properties` (with `storeFile`, `storePassword`, `keyAlias`, `keyPassword`) at the repo root.
 2. Compute the Gemma, PaddleOCR, and EmbeddingGemma SHA-256 values and pass the seven `-P*Sha256` properties documented in `RELEASE.md`.
 3. `./gradlew :app:bundleRelease` produces `app/build/outputs/bundle/release/app-release.aab`.
-4. Upload to Play Console with the `:gemma_model`, `:embeddinggemma_model`, and `:paddleocr_model` install-time asset packs.
+4. Upload to Play Console with the `:gemma_model`, `:gemma_embed_model`, and `:paddleocr_model` install-time asset packs.
 5. Tag the commit `vX.Y.Z` to trigger SDK publishing and optional GitHub Release AAB attachment.
 
 R8/proguard rules: `app/proguard-rules.pro`, `sdk/consumer-rules.pro`, `shared/consumer-rules.pro`.
@@ -142,3 +142,4 @@ adb logcat -s "Mindlayer.InferenceOrchestrator:D"
 # Capture full structured trace for one request
 adb logcat -s "Mindlayer.*:D" | grep "req=req-12345"
 ```
+

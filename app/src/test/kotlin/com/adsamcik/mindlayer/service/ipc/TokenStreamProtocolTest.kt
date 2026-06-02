@@ -1,7 +1,7 @@
 package com.adsamcik.mindlayer.service.ipc
 
 import app.cash.turbine.test
-import com.adsamcik.mindlayer.sdk.MindlayerEvent
+import com.adsamcik.mindlayer.sdk.InferenceEvent
 import com.adsamcik.mindlayer.shared.StreamEvent
 import com.adsamcik.mindlayer.shared.StreamEventType
 import com.adsamcik.mindlayer.shared.StreamHeader
@@ -104,9 +104,9 @@ class TokenStreamProtocolTest {
     /**
      * Pure-JVM reader that mirrors TokenStreamReader.readStream but reads from
      * a plain [InputStream] instead of a [ParcelFileDescriptor].
-     * Returns a cold Flow of [MindlayerEvent].
+     * Returns a cold Flow of [InferenceEvent].
      */
-    private fun readStreamFromInputStream(input: InputStream): Flow<MindlayerEvent> = flow {
+    private fun readStreamFromInputStream(input: InputStream): Flow<InferenceEvent> = flow {
         val dis = DataInputStream(BufferedInputStream(input))
         try {
             while (true) {
@@ -130,14 +130,14 @@ class TokenStreamProtocolTest {
     }.flowOn(Dispatchers.IO)
 
     /** Mirrors TokenStreamReader.parseFrame. */
-    private fun parseFrame(jsonStr: String): MindlayerEvent? {
+    private fun parseFrame(jsonStr: String): InferenceEvent? {
         return try {
             val streamEvent = json.decodeFromString<StreamEvent>(jsonStr)
             mapEvent(streamEvent)
         } catch (_: Exception) {
             try {
                 val header = json.decodeFromString<StreamHeader>(jsonStr)
-                MindlayerEvent.Started(header.requestId)
+                InferenceEvent.Started(header.requestId)
             } catch (_: Exception) {
                 null
             }
@@ -145,34 +145,34 @@ class TokenStreamProtocolTest {
     }
 
     /** Mirrors TokenStreamReader.mapEvent. */
-    private fun mapEvent(event: StreamEvent): MindlayerEvent = when (event.type) {
-        StreamEventType.TOKEN_DELTA -> MindlayerEvent.TextDelta(
+    private fun mapEvent(event: StreamEvent): InferenceEvent = when (event.type) {
+        StreamEventType.TOKEN_DELTA -> InferenceEvent.TextDelta(
             text = event.payload["text"]?.jsonPrimitive?.contentOrNull ?: "",
             seq = event.seq,
         )
-        StreamEventType.TOOL_CALL -> MindlayerEvent.ToolCall(
+        StreamEventType.TOOL_CALL -> InferenceEvent.ToolCall(
             toolName = event.payload["name"]?.jsonPrimitive?.contentOrNull ?: "",
             arguments = event.payload["args"]?.jsonPrimitive?.contentOrNull ?: "{}",
             callId = event.payload["callId"]?.jsonPrimitive?.contentOrNull ?: "",
             seq = event.seq,
         )
-        StreamEventType.METRICS -> MindlayerEvent.Metrics(
+        StreamEventType.METRICS -> InferenceEvent.Metrics(
             prefillToksPerSec = event.payload["prefillToksPerSec"]?.jsonPrimitive?.floatOrNull,
             decodeToksPerSec = event.payload["decodeToksPerSec"]?.jsonPrimitive?.floatOrNull,
             thermalBand = event.payload["thermalBand"]?.jsonPrimitive?.contentOrNull,
             seq = event.seq,
         )
-        StreamEventType.ERROR -> MindlayerEvent.Error(
+        StreamEventType.ERROR -> InferenceEvent.Error(
             message = event.payload["message"]?.jsonPrimitive?.contentOrNull ?: "Unknown error",
             code = event.payload["code"]?.jsonPrimitive?.contentOrNull,
             seq = event.seq,
         )
-        StreamEventType.DONE -> MindlayerEvent.Done(
+        StreamEventType.DONE -> InferenceEvent.Done(
             finishReason = event.payload["finish_reason"]?.jsonPrimitive?.contentOrNull ?: "unknown",
             fullText = event.payload["full_text"]?.jsonPrimitive?.contentOrNull,
             seq = event.seq,
         )
-        else -> MindlayerEvent.TextDelta(text = "", seq = event.seq)
+        else -> InferenceEvent.TextDelta(text = "", seq = event.seq)
     }
 
     // =========================================================================
@@ -275,7 +275,7 @@ class TokenStreamProtocolTest {
     }
 
     // =========================================================================
-    // StreamEvent → JSON → MindlayerEvent mapping tests
+    // StreamEvent → JSON → InferenceEvent mapping tests
     // =========================================================================
 
     @Test
@@ -286,8 +286,8 @@ class TokenStreamProtocolTest {
             payload = buildJsonObject { put("text", "Hello") },
         )
         val event = parseFrame(eventJson)
-        assertTrue(event is MindlayerEvent.TextDelta)
-        val td = event as MindlayerEvent.TextDelta
+        assertTrue(event is InferenceEvent.TextDelta)
+        val td = event as InferenceEvent.TextDelta
         assertEquals("Hello", td.text)
         assertEquals(42L, td.seq)
     }
@@ -303,7 +303,7 @@ class TokenStreamProtocolTest {
                 put("callId", "call-123")
             },
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.ToolCall
+        val event = parseFrame(eventJson) as InferenceEvent.ToolCall
         assertEquals("search_web", event.toolName)
         assertEquals("""{"q":"test"}""", event.arguments)
         assertEquals("call-123", event.callId)
@@ -321,7 +321,7 @@ class TokenStreamProtocolTest {
                 put("thermalBand", "nominal")
             },
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.Metrics
+        val event = parseFrame(eventJson) as InferenceEvent.Metrics
         assertEquals(120.5f, event.prefillToksPerSec!!, 0.01f)
         assertEquals(45.3f, event.decodeToksPerSec!!, 0.01f)
         assertEquals("nominal", event.thermalBand)
@@ -338,7 +338,7 @@ class TokenStreamProtocolTest {
                 put("code", "OOM")
             },
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.Error
+        val event = parseFrame(eventJson) as InferenceEvent.Error
         assertEquals("Out of memory", event.message)
         assertEquals("OOM", event.code)
         assertEquals(99L, event.seq)
@@ -354,7 +354,7 @@ class TokenStreamProtocolTest {
                 put("full_text", "Hello world")
             },
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.Done
+        val event = parseFrame(eventJson) as InferenceEvent.Done
         assertEquals("stop", event.finishReason)
         assertEquals("Hello world", event.fullText)
         assertEquals(100L, event.seq)
@@ -367,7 +367,7 @@ class TokenStreamProtocolTest {
             type = StreamEventType.DONE,
             payload = buildJsonObject { put("finish_reason", "length") },
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.Done
+        val event = parseFrame(eventJson) as InferenceEvent.Done
         assertEquals("length", event.finishReason)
         assertNull(event.fullText)
     }
@@ -384,14 +384,14 @@ class TokenStreamProtocolTest {
             type = "start",
             payload = buildJsonObject { put("requestId", "req-abc") },
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.TextDelta
+        val event = parseFrame(eventJson) as InferenceEvent.TextDelta
         assertEquals("", event.text)
     }
 
     @Test
     fun `StreamHeader maps to Started with requestId`() {
         val headerJson = buildStreamHeaderJson("req-xyz-789")
-        val event = parseFrame(headerJson) as MindlayerEvent.Started
+        val event = parseFrame(headerJson) as InferenceEvent.Started
         assertEquals("req-xyz-789", event.requestId)
     }
 
@@ -402,7 +402,7 @@ class TokenStreamProtocolTest {
             type = "some_future_event_type",
             payload = buildJsonObject { put("data", "irrelevant") },
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.TextDelta
+        val event = parseFrame(eventJson) as InferenceEvent.TextDelta
         assertEquals("", event.text)
         assertEquals(77L, event.seq)
     }
@@ -418,7 +418,7 @@ class TokenStreamProtocolTest {
             type = StreamEventType.TOKEN_DELTA,
             payload = JsonObject(emptyMap()),
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.TextDelta
+        val event = parseFrame(eventJson) as InferenceEvent.TextDelta
         assertEquals("", event.text)
     }
 
@@ -429,7 +429,7 @@ class TokenStreamProtocolTest {
             type = StreamEventType.TOOL_CALL,
             payload = JsonObject(emptyMap()),
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.ToolCall
+        val event = parseFrame(eventJson) as InferenceEvent.ToolCall
         assertEquals("", event.toolName)
         assertEquals("{}", event.arguments)
         assertEquals("", event.callId)
@@ -442,7 +442,7 @@ class TokenStreamProtocolTest {
             type = StreamEventType.METRICS,
             payload = JsonObject(emptyMap()),
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.Metrics
+        val event = parseFrame(eventJson) as InferenceEvent.Metrics
         assertNull(event.prefillToksPerSec)
         assertNull(event.decodeToksPerSec)
         assertNull(event.thermalBand)
@@ -455,7 +455,7 @@ class TokenStreamProtocolTest {
             type = StreamEventType.ERROR,
             payload = JsonObject(emptyMap()),
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.Error
+        val event = parseFrame(eventJson) as InferenceEvent.Error
         assertEquals("Unknown error", event.message)
         assertNull(event.code)
     }
@@ -467,7 +467,7 @@ class TokenStreamProtocolTest {
             type = StreamEventType.DONE,
             payload = JsonObject(emptyMap()),
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.Done
+        val event = parseFrame(eventJson) as InferenceEvent.Done
         assertEquals("unknown", event.finishReason)
         assertNull(event.fullText)
     }
@@ -479,7 +479,7 @@ class TokenStreamProtocolTest {
             type = "start",
             payload = JsonObject(emptyMap()),
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.TextDelta
+        val event = parseFrame(eventJson) as InferenceEvent.TextDelta
         assertEquals("", event.text)
     }
 
@@ -494,7 +494,7 @@ class TokenStreamProtocolTest {
                 put("another_unknown", 42)
             },
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.TextDelta
+        val event = parseFrame(eventJson) as InferenceEvent.TextDelta
         assertEquals("hi", event.text)
         assertEquals(1L, event.seq)
     }
@@ -503,7 +503,7 @@ class TokenStreamProtocolTest {
     fun `extra unknown keys at StreamEvent level are ignored`() {
         // Manually construct JSON with extra top-level keys
         val rawJson = """{"seq":1,"type":"token_delta","tsMs":1000,"payload":{"text":"ok"},"extraField":"ignored"}"""
-        val event = parseFrame(rawJson) as MindlayerEvent.TextDelta
+        val event = parseFrame(rawJson) as InferenceEvent.TextDelta
         assertEquals("ok", event.text)
     }
 
@@ -515,7 +515,7 @@ class TokenStreamProtocolTest {
             type = StreamEventType.TOKEN_DELTA,
             payload = buildJsonObject { put("text", longText) },
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.TextDelta
+        val event = parseFrame(eventJson) as InferenceEvent.TextDelta
         assertEquals(longText, event.text)
     }
 
@@ -527,7 +527,7 @@ class TokenStreamProtocolTest {
             type = StreamEventType.TOKEN_DELTA,
             payload = buildJsonObject { put("text", unicodeText) },
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.TextDelta
+        val event = parseFrame(eventJson) as InferenceEvent.TextDelta
         assertEquals(unicodeText, event.text)
     }
 
@@ -553,7 +553,7 @@ class TokenStreamProtocolTest {
             type = StreamEventType.TOKEN_DELTA,
             payload = buildJsonObject { put("text", specialText) },
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.TextDelta
+        val event = parseFrame(eventJson) as InferenceEvent.TextDelta
         assertEquals(specialText, event.text)
     }
 
@@ -565,7 +565,7 @@ class TokenStreamProtocolTest {
             type = StreamEventType.TOKEN_DELTA,
             payload = buildJsonObject { put("text", text) },
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.TextDelta
+        val event = parseFrame(eventJson) as InferenceEvent.TextDelta
         assertEquals(text, event.text)
     }
 
@@ -576,7 +576,7 @@ class TokenStreamProtocolTest {
             type = StreamEventType.TOKEN_DELTA,
             payload = buildJsonObject { put("text", "") },
         )
-        val event = parseFrame(eventJson) as MindlayerEvent.TextDelta
+        val event = parseFrame(eventJson) as InferenceEvent.TextDelta
         assertEquals("", event.text)
     }
 
@@ -641,7 +641,7 @@ class TokenStreamProtocolTest {
         // The reader should emit the first event, then hit EOFException on readFully
         // which may terminate the flow. We verify the stream ends without crashing,
         // and the first event may or may not have been delivered depending on timing.
-        val events = mutableListOf<MindlayerEvent>()
+        val events = mutableListOf<InferenceEvent>()
         try {
             readStreamFromInputStream(pipeIn).collect { events.add(it) }
         } catch (_: EOFException) {
@@ -651,8 +651,8 @@ class TokenStreamProtocolTest {
         }
         assertTrue("Should have 0 or 1 events (got ${events.size})", events.size <= 1)
         if (events.isNotEmpty()) {
-            assertTrue(events[0] is MindlayerEvent.TextDelta)
-            assertEquals("first", (events[0] as MindlayerEvent.TextDelta).text)
+            assertTrue(events[0] is InferenceEvent.TextDelta)
+            assertEquals("first", (events[0] as InferenceEvent.TextDelta).text)
         }
     }
 
@@ -712,7 +712,7 @@ class TokenStreamProtocolTest {
     }
 
     // =========================================================================
-    // Roundtrip integration: write frames → read as Flow<MindlayerEvent>
+    // Roundtrip integration: write frames → read as Flow<InferenceEvent>
     // =========================================================================
 
     @Test
@@ -753,18 +753,18 @@ class TokenStreamProtocolTest {
 
         readStreamFromInputStream(pipeIn).test {
             val started = awaitItem()
-            assertTrue("Expected Started, got $started", started is MindlayerEvent.Started)
-            assertEquals("req-001", (started as MindlayerEvent.Started).requestId)
+            assertTrue("Expected Started, got $started", started is InferenceEvent.Started)
+            assertEquals("req-001", (started as InferenceEvent.Started).requestId)
 
-            val t1 = awaitItem() as MindlayerEvent.TextDelta
+            val t1 = awaitItem() as InferenceEvent.TextDelta
             assertEquals("Hello", t1.text)
             assertEquals(1L, t1.seq)
 
-            val t2 = awaitItem() as MindlayerEvent.TextDelta
+            val t2 = awaitItem() as InferenceEvent.TextDelta
             assertEquals(" world", t2.text)
             assertEquals(2L, t2.seq)
 
-            val done = awaitItem() as MindlayerEvent.Done
+            val done = awaitItem() as InferenceEvent.Done
             assertEquals("stop", done.finishReason)
             assertEquals(3L, done.seq)
 
@@ -852,32 +852,32 @@ class TokenStreamProtocolTest {
 
         readStreamFromInputStream(pipeIn).test {
             // Header → Started
-            val header = awaitItem() as MindlayerEvent.Started
+            val header = awaitItem() as InferenceEvent.Started
             assertEquals("req-all", header.requestId)
 
             // Token delta
-            val td = awaitItem() as MindlayerEvent.TextDelta
+            val td = awaitItem() as InferenceEvent.TextDelta
             assertEquals("Hi", td.text)
 
             // Tool call
-            val tc = awaitItem() as MindlayerEvent.ToolCall
+            val tc = awaitItem() as InferenceEvent.ToolCall
             assertEquals("calculator", tc.toolName)
             assertEquals("""{"x":1}""", tc.arguments)
             assertEquals("c-1", tc.callId)
 
             // Metrics
-            val m = awaitItem() as MindlayerEvent.Metrics
+            val m = awaitItem() as InferenceEvent.Metrics
             assertEquals(100.0f, m.prefillToksPerSec!!, 0.1f)
             assertEquals(50.0f, m.decodeToksPerSec!!, 0.1f)
             assertEquals("nominal", m.thermalBand)
 
             // Error
-            val err = awaitItem() as MindlayerEvent.Error
+            val err = awaitItem() as InferenceEvent.Error
             assertEquals("rate limited", err.message)
             assertEquals("RATE_LIMIT", err.code)
 
             // Done
-            val done = awaitItem() as MindlayerEvent.Done
+            val done = awaitItem() as InferenceEvent.Done
             assertEquals("stop", done.finishReason)
             assertEquals("Hi", done.fullText)
 
@@ -916,10 +916,10 @@ class TokenStreamProtocolTest {
         writer.start()
 
         readStreamFromInputStream(pipeIn).test {
-            val e1 = awaitItem() as MindlayerEvent.TextDelta
+            val e1 = awaitItem() as InferenceEvent.TextDelta
             assertEquals("before", e1.text)
             // Malformed frame is skipped
-            val e2 = awaitItem() as MindlayerEvent.TextDelta
+            val e2 = awaitItem() as InferenceEvent.TextDelta
             assertEquals("after", e2.text)
             awaitComplete()
         }
@@ -946,9 +946,9 @@ class TokenStreamProtocolTest {
         }
         writer.start()
 
-        val flow: Flow<MindlayerEvent> = readStreamFromInputStream(pipeIn)
+        val flow: Flow<InferenceEvent> = readStreamFromInputStream(pipeIn)
         flow.test {
-            val td = awaitItem() as MindlayerEvent.TextDelta
+            val td = awaitItem() as InferenceEvent.TextDelta
             assertEquals(unicodeText, td.text)
             awaitComplete()
         }
@@ -962,7 +962,7 @@ class TokenStreamProtocolTest {
         val pipeOut = PipedOutputStream(pipeIn)
         pipeOut.close()
 
-        val flow: Flow<MindlayerEvent> = readStreamFromInputStream(pipeIn)
+        val flow: Flow<InferenceEvent> = readStreamFromInputStream(pipeIn)
         flow.test {
             awaitComplete()
         }
@@ -989,10 +989,10 @@ class TokenStreamProtocolTest {
         }
         writer.start()
 
-        val events: List<MindlayerEvent> = readStreamFromInputStream(pipeIn).toList()
+        val events: List<InferenceEvent> = readStreamFromInputStream(pipeIn).toList()
         assertEquals(frameCount, events.size)
         events.forEachIndexed { idx, event ->
-            val td = event as MindlayerEvent.TextDelta
+            val td = event as InferenceEvent.TextDelta
             assertEquals("tok${idx + 1}", td.text)
             assertEquals((idx + 1).toLong(), td.seq)
         }
@@ -1015,7 +1015,7 @@ class TokenStreamProtocolTest {
         }
         writer.start()
 
-        val flow: Flow<MindlayerEvent> = readStreamFromInputStream(pipeIn)
+        val flow: Flow<InferenceEvent> = readStreamFromInputStream(pipeIn)
         flow.test {
             val error = awaitError()
             assertTrue(
@@ -1039,7 +1039,7 @@ class TokenStreamProtocolTest {
         }
         writer.start()
 
-        val flow: Flow<MindlayerEvent> = readStreamFromInputStream(pipeIn)
+        val flow: Flow<InferenceEvent> = readStreamFromInputStream(pipeIn)
         flow.test {
             val error = awaitError()
             assertTrue(error is IllegalArgumentException)

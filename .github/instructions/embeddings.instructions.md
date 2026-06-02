@@ -6,7 +6,7 @@ applyTo: |
   sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/InMemoryVectorIndex.kt
   shared/src/main/kotlin/com/adsamcik/mindlayer/Embedding*.kt
   shared/src/main/kotlin/com/adsamcik/mindlayer/VectorBlobHandle.kt
-  embeddinggemma_model/**
+  gemma_embed_model/**
 ---
 
 ## Threat model
@@ -52,3 +52,4 @@ Pure-Kotlin client-process helper; not a vector store; no persistence; scope <10
 ## DeferredStore migration
 
 `kind` distinguishes chat vs embedding; `blob_path`/`blob_bytes`/`per_item_metadata_json` carry embedding payloads; `blob_bytes` counts against per-UID byte quota.
+

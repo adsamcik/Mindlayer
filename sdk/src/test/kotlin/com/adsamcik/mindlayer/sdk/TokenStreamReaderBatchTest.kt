@@ -26,7 +26,7 @@ import java.nio.file.Files
  *
  *  - Accept `mindlayer.stream.v2` headers (v0.5 protocol).
  *  - Expand a single `TOKEN_DELTA_BATCH` envelope into N per-token
- *    `MindlayerEvent.TextDelta` emissions in order, with synthesised
+ *    `InferenceEvent.TextDelta` emissions in order, with synthesised
  *    contiguous seq values ending at the envelope's seq.
  *  - Tolerate empty `texts` arrays (no events emitted).
  *  - Continue to handle v1 streams identically (regression check).
@@ -73,12 +73,12 @@ class TokenStreamReaderBatchTest {
 
         // Expect: Started + 3 TextDelta + Done
         assertEquals("event count", 5, events.size)
-        assertTrue(events[0] is MindlayerEvent.Started)
-        val deltas = events.drop(1).take(3).map { it as MindlayerEvent.TextDelta }
+        assertTrue(events[0] is InferenceEvent.Started)
+        val deltas = events.drop(1).take(3).map { it as InferenceEvent.TextDelta }
         assertEquals(listOf("hello", " ", "world"), deltas.map { it.text })
         // Synthesised seqs: last = envelope seq (12), prior count backward.
         assertEquals(listOf(10L, 11L, 12L), deltas.map { it.seq })
-        assertTrue(events[4] is MindlayerEvent.Done)
+        assertTrue(events[4] is InferenceEvent.Done)
     }
 
     @Test
@@ -108,8 +108,8 @@ class TokenStreamReaderBatchTest {
 
         // Started + Done; no TextDelta from empty batch.
         assertEquals(2, events.size)
-        assertTrue(events[0] is MindlayerEvent.Started)
-        assertTrue(events[1] is MindlayerEvent.Done)
+        assertTrue(events[0] is InferenceEvent.Started)
+        assertTrue(events[1] is InferenceEvent.Done)
     }
 
     @Test
@@ -131,7 +131,7 @@ class TokenStreamReaderBatchTest {
         val events = TokenStreamReader.readStream(pfd).toList()
 
         assertEquals(2, events.size) // Started + 1 TextDelta
-        val delta = events[1] as MindlayerEvent.TextDelta
+        val delta = events[1] as InferenceEvent.TextDelta
         assertEquals("solo", delta.text)
         assertEquals(5L, delta.seq)
     }

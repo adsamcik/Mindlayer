@@ -41,6 +41,7 @@ include(":sdk-camera-launcher")
 include(":shared")
 include(":lint-checks")
 include(":gemma_model")
-include(":embeddinggemma_model")
+include(":gemma_embed_model")
 include(":paddleocr_model")
 include(":samples:ocr-driver")
+

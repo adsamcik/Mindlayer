@@ -28,7 +28,7 @@ object StreamEventType {
      *
      * Only emitted on streams whose [StreamHeader.protocol] is
      * `mindlayer.stream.v2`. v1 streams must NEVER carry this event type
-     * (old readers see it as `MindlayerEvent.Unknown` and silently drop
+     * (old readers see it as `InferenceEvent.Unknown` and silently drop
      * the contained text — that's the only place silent text loss is
      * possible, and the v1/v2 split prevents it).
      */

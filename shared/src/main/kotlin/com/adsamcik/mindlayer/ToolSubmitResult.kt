@@ -24,7 +24,7 @@ data class ToolSubmitResult(
 
         /**
          * The tool result was queued for the model. The inference flow
-         * will resume and emit further [MindlayerEvent] frames.
+         * will resume and emit further [InferenceEvent] frames.
          */
         const val ACCEPTED: Int = 1
 
