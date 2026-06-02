@@ -28,11 +28,40 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 ## [Unreleased]
 
 ### Added
+- **Gemma 4 audio contract surfaced.** New `GemmaAudioSpec` in `:shared`
+  documents the audio frontend constants (16 kHz mono float32, 32 ms
+  frames, 30 s per-clip cap, 25 tok/s budget) sourced directly from
+  Google's [Gemma audio capabilities page](https://ai.google.dev/gemma/docs/capabilities/audio).
+  Cross-references in `app/.../engine/ContextBudget.kt` now forward to
+  the shared constants so token math has one source of truth.
+- **Canonical ASR helper.** `Mindlayer.transcribe(audio, language)`
+  (no caller-supplied prompt) uses Google's recommended ASR prompt
+  via the new `com.adsamcik.mindlayer.sdk.GemmaAudioPrompts` builder.
+  Existing `transcribe(prompt, audio)` is unchanged for callers who
+  want general-purpose audio understanding.
+- **`FEATURE_AUDIO_INPUT` capability flag** (`"audio_input"`)
+  advertised by `MindlayerMlService`. SDKs can probe it via
+  `ServiceCapabilities.supports(FEATURE_AUDIO_INPUT)` before issuing
+  audio inferences. Documented in `docs/AIDL_STABILITY.md` and
+  `docs/AUDIO.md`.
+- **`docs/AUDIO.md`** — single-page reference for the audio surface:
+  supported MIME types, limits, quick-start code, and the explicit
+  "not yet supported" list (multi-audio prompts, ≥30 s clips,
+  specialized translation helper).
 - **`docs/ROADMAP.md`** — single source of truth for outstanding work
   across Phases 6-8 (device-gated `IS_PRODUCTION_READY` flip criteria,
   real model artifact pipeline, ICDAR2015 numeric validation harness,
   Phase 7 product polish backlog, Phase 8 speculative items).
   Cross-linked from `README.md`.
+
+### Changed
+- **`IpcInputValidator` audio duration cap tightened** from 60 minutes
+  to `GemmaAudioSpec.MAX_DURATION_MS` (30 s) — matches Gemma 4's
+  documented per-clip maximum. Applies to both
+  `validateAudioTransfer(AudioTransfer)` and the multi-part
+  `validateAudioPart(MediaPart)` path. Callers with longer recordings
+  must chunk client-side; the engine would have silently truncated
+  above 30 s anyway.
 
 ### Fixed
 - **`MediaTransfer` SharedMemory path on targetSdk 30+** — `fromBitmap` /

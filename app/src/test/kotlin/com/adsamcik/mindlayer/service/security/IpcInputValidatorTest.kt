@@ -220,6 +220,52 @@ class IpcInputValidatorTest {
     }
 
     @Test
+    fun `validateAudioTransfer rejects duration over Gemma 30s cap`() {
+        // 1 ms over Gemma 4's documented per-clip maximum. Pre-tightening
+        // (60-minute cap), this would silently pass and the engine would
+        // truncate; the validator now fails closed.
+        val overCap = com.adsamcik.mindlayer.GemmaAudioSpec.MAX_DURATION_MS + 1
+        val xfer = AudioTransfer(
+            requestId = "abc",
+            mimeType = "audio/wav",
+            source = pfd(),
+            durationMs = overCap,
+        )
+        val ex = assertThrows(IllegalArgumentException::class.java) {
+            IpcInputValidator.validateAudioTransfer(xfer)
+        }
+        assertTrue(
+            "error mentions the Gemma cap: ${ex.message}",
+            ex.message!!.contains("Gemma"),
+        )
+    }
+
+    @Test
+    fun `validateAudioTransfer accepts duration exactly at Gemma cap`() {
+        val xfer = AudioTransfer(
+            requestId = "abc",
+            mimeType = "audio/wav",
+            source = pfd(),
+            durationMs = com.adsamcik.mindlayer.GemmaAudioSpec.MAX_DURATION_MS,
+        )
+        IpcInputValidator.validateAudioTransfer(xfer)
+    }
+
+    @Test
+    fun `validateAudioTransfer accepts null duration`() {
+        // Null duration is intentionally allowed; the service-side budget
+        // (estimateTokensForAudio) bills the full 30 s ceiling so callers
+        // cannot bypass the input-tokens gate by omitting metadata.
+        val xfer = AudioTransfer(
+            requestId = "abc",
+            mimeType = "audio/wav",
+            source = pfd(),
+            durationMs = null,
+        )
+        IpcInputValidator.validateAudioTransfer(xfer)
+    }
+
+    @Test
     fun `validateAudioTransfer rejects payloadBytes over media cap`() {
         val xfer = AudioTransfer(
             requestId = "abc",
