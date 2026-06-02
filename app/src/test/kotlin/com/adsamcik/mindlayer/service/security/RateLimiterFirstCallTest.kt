@@ -30,9 +30,10 @@ class RateLimiterFirstCallTest {
         // lets the first two cost-1.0 calls through; the third must
         // fail. This pins the burst-prevention contract: the grant does
         // NOT silently reopen the F-027 evasion hole — once consumed,
-        // refill governs as today.
+        // refill governs as today. Pin grant=2.0 explicitly so the
+        // semantic test is independent of the default.
         val clock = FakeClock(now = 555_000L)
-        val rl = RateLimiter(maxRequestsPerMinute = 60, timeSource = clock)
+        val rl = RateLimiter(maxRequestsPerMinute = 60, initialFirstCallTokens = 2.0, timeSource = clock)
         assertTrue("first call consumes 1.0 of grant", rl.tryAcquire(1000, cost = 1.0))
         assertTrue("second call consumes rest of grant", rl.tryAcquire(1000, cost = 1.0))
         assertFalse("third call without refill rejects", rl.tryAcquire(1000, cost = 1.0))
@@ -40,7 +41,7 @@ class RateLimiterFirstCallTest {
 
     @Test
     fun `first-call cost 1_0 succeeds with default INITIAL_FIRST_CALL_TOKENS`() {
-        // Default constructor → INITIAL_FIRST_CALL_TOKENS = 2.0.
+        // Default constructor → INITIAL_FIRST_CALL_TOKENS = 10.0.
         // The canonical registerClient first-call (cost 1.0) succeeds
         // without waiting on refill cadence.
         val clock = FakeClock(now = 1L)
@@ -54,9 +55,9 @@ class RateLimiterFirstCallTest {
         //   1. registerClient (cost 1.0)
         //   2. getCapabilities (cost 0.25)
         //   3. (optional) a second getCapabilities for feature gating
-        // Total ≈ 1.5. The 2.0 grant must accommodate this whole handshake
-        // so first-time first-party callers don't need to ride out a
-        // refill cycle before the SDK becomes usable.
+        // Total ≈ 1.5. The 10.0 grant comfortably accommodates this whole
+        // handshake plus several immediate inference calls so first-time
+        // first-party callers don't need to ride out a refill cycle.
         val clock = FakeClock(now = 1L)
         val rl = RateLimiter(timeSource = clock)
         assertTrue("registerClient", rl.tryAcquire(uid = 10_251, cost = 1.0))
@@ -68,9 +69,10 @@ class RateLimiterFirstCallTest {
     fun `first-call cost 0_25 succeeds and leaves 1_75 for follow-up calls`() {
         // Cheap polling call (cost 0.25) — bucket grant 2.0 consumed
         // down to 1.75. Eight cheap calls (8 × 0.25 = 2.0) exactly fit
-        // the grant; a ninth on a frozen clock must reject.
+        // the grant; a ninth on a frozen clock must reject. Pin grant=2.0
+        // explicitly so the 8-call boundary is exact regardless of default.
         val clock = FakeClock(now = 1L)
-        val rl = RateLimiter(maxRequestsPerMinute = 60, timeSource = clock)
+        val rl = RateLimiter(maxRequestsPerMinute = 60, initialFirstCallTokens = 2.0, timeSource = clock)
         repeat(8) { i ->
             assertTrue("cheap call #$i must fit in the 2.0 grant", rl.tryAcquire(uid = 1000, cost = 0.25))
         }
@@ -81,9 +83,10 @@ class RateLimiterFirstCallTest {
     fun `first-call cost 4_0 rejects (grant is exactly 2_0)`() {
         // An expensive opening call exceeds the 2.0 grant. The grant is
         // still bounded — a flooder cannot manufacture more than 2 tokens
-        // of opening headroom.
+        // of opening headroom. Pin grant=2.0 explicitly to lock in the
+        // bound semantic regardless of default.
         val clock = FakeClock(now = 1L)
-        val rl = RateLimiter(maxRequestsPerMinute = 60, timeSource = clock)
+        val rl = RateLimiter(maxRequestsPerMinute = 60, initialFirstCallTokens = 2.0, timeSource = clock)
         assertFalse(rl.tryAcquire(uid = 1000, cost = 4.0))
     }
 
@@ -158,6 +161,7 @@ class RateLimiterFirstCallTest {
         val rl = RateLimiter(
             maxRequestsPerMinute = 60,
             idleEvictMs = 10 * 60 * 1000L, // 10 min — production default
+            initialFirstCallTokens = 2.0,
             timeSource = clock,
         )
         // First call gets the grant.
@@ -185,9 +189,10 @@ class RateLimiterFirstCallTest {
     fun `independent UIDs each get their own first-call grant`() {
         // Two different UIDs binding for the first time at the same
         // instant must both succeed. Confirms the grant is per-bucket,
-        // not a global allowance.
+        // not a global allowance. Pin grant=2.0 so the per-UID drain
+        // math is exact regardless of default bumps.
         val clock = FakeClock(now = 42L)
-        val rl = RateLimiter(maxRequestsPerMinute = 60, timeSource = clock)
+        val rl = RateLimiter(maxRequestsPerMinute = 60, initialFirstCallTokens = 2.0, timeSource = clock)
         assertTrue(rl.tryAcquire(uid = 1001))
         assertTrue(rl.tryAcquire(uid = 1002))
         assertTrue(rl.tryAcquire(uid = 1003))
@@ -204,9 +209,10 @@ class RateLimiterFirstCallTest {
         // cost = 0.0 is clamped to MIN_COST (0.05). The grant is 2.0,
         // so up to 40 zero-cost-but-clamped first calls can squeeze
         // through before the grant exhausts. Bounded by the clamp,
-        // which is the F-064 invariant.
+        // which is the F-064 invariant. Pin grant=2.0 explicitly so the
+        // 40-call bound is exact regardless of default.
         val clock = FakeClock(now = 1L)
-        val rl = RateLimiter(maxRequestsPerMinute = 60, timeSource = clock)
+        val rl = RateLimiter(maxRequestsPerMinute = 60, initialFirstCallTokens = 2.0, timeSource = clock)
         var allowed = 0
         repeat(100) {
             if (rl.tryAcquire(uid = 1000, cost = 0.0)) allowed++
@@ -217,13 +223,14 @@ class RateLimiterFirstCallTest {
     }
 
     @Test
-    fun `default constructor exposes INITIAL_FIRST_CALL_TOKENS = 2_0`() {
+    fun `default constructor exposes INITIAL_FIRST_CALL_TOKENS = 10_0`() {
         // Lock the production default so an accidental change to the
-        // companion const fails CI loudly. The bound here matches what
-        // F-027 permits: the grant must accommodate the documented
-        // connect handshake (registerClient + getCapabilities = 1.25)
-        // without re-opening the burst-after-eviction calculation by
-        // approaching the per-minute capacity.
-        assertEquals(2.0, RateLimiter.INITIAL_FIRST_CALL_TOKENS, 0.0)
+        // companion const fails CI loudly. The grant must accommodate
+        // the documented connect handshake (registerClient +
+        // getCapabilities = 1.25) PLUS a small burst of immediate
+        // inference calls (developer iteration, test harness batch
+        // runs) without re-opening the burst-after-eviction calculation
+        // by approaching the per-minute capacity (default 300).
+        assertEquals(10.0, RateLimiter.INITIAL_FIRST_CALL_TOKENS, 0.0)
     }
 }
