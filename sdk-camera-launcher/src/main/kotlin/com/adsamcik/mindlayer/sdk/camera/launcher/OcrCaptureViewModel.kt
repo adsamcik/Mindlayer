@@ -243,6 +243,7 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
 
     private var pendingAnalysisUseCase: ImageAnalysis? = null
 
+    @Suppress("DEPRECATION")
     private suspend fun startRealtimeSession() {
         val request = request ?: return
         val client = mindlayer ?: return
@@ -304,6 +305,7 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
     }
 
     @MainThread
+    @Suppress("DEPRECATION")
     fun onCapture() {
         val request = request ?: return
         if (request.mode != OcrCaptureMode.Async) return

@@ -96,6 +96,7 @@ class ValidationRunner(
      * fails one scenario but does not short-circuit the rest. Returns the
      * full report regardless of any failures.
      */
+    @Suppress("DEPRECATION")
     suspend fun runAll(): ValidationReport {
         val results = mutableListOf<ValidationScenarioResult>()
 
@@ -336,21 +337,20 @@ class ValidationRunner(
             val advertised = ServiceCapabilities.FEATURE_EMBEDDINGS in caps.supportedFeatures
             if (!advertised) {
                 // Engine missing — confirm SDK throws FEATURE_NOT_SUPPORTED when
-                // we try to use the embedOne facade. Clean error mapping is the
+                // we try to use the vector facade. Clean error mapping is the
                 // contract here.
                 val errorClass = try {
-                    @Suppress("DEPRECATION")
-                    mindlayer.embedOne("validation probe — embeddings engine likely missing")
+                    mindlayer.vector("validation probe — embeddings engine likely missing")
                     "no exception (engine actually loaded?)"
                 } catch (t: Throwable) {
                     t.javaClass.simpleName
                 }
-                "FEATURE_EMBEDDINGS absent (engine missing); embedOne mapped to: $errorClass"
+                "FEATURE_EMBEDDINGS absent (engine missing); vector mapped to: $errorClass"
             } else {
                 // Engine present — make a tiny call and confirm we get a vector back.
-                val vec = mindlayer.embedOne("hello")
-                check(vec.isNotEmpty()) { "embedOne returned empty vector" }
-                "FEATURE_EMBEDDINGS advertised; embedOne returned ${vec.size}-dim vector"
+                val vec = mindlayer.vector("hello")
+                check(vec.isNotEmpty()) { "vector returned empty vector" }
+                "FEATURE_EMBEDDINGS advertised; vector returned ${vec.size}-dim vector"
             }
         }
 
@@ -415,16 +415,14 @@ class ValidationRunner(
             if (ServiceCapabilities.FEATURE_EMBEDDINGS !in caps.supportedFeatures) {
                 return@scenario "engine missing — FEATURE_EMBEDDINGS not advertised"
             }
-            @Suppress("DEPRECATION")
-            val v1 = mindlayer.embedOne("The cat sits on the mat.")
-            check(v1.isNotEmpty()) { "embedOne returned empty vector" }
-            check(v1.all { it.isFinite() }) { "embedOne returned NaN/Inf in vector" }
+            val v1 = mindlayer.vector("The cat sits on the mat.")
+            check(v1.isNotEmpty()) { "vector returned empty vector" }
+            check(v1.all { it.isFinite() }) { "vector returned NaN/Inf in vector" }
             val norm = kotlin.math.sqrt(v1.fold(0.0) { acc, x -> acc + x.toDouble() * x }).toFloat()
             check(norm in 0.9f..1.1f) { "vector not L2-normalised (norm=$norm)" }
             // Distinguishability check: a topically-different sentence
             // should NOT produce an identical vector.
-            @Suppress("DEPRECATION")
-            val v2 = mindlayer.embedOne("Quantum mechanics describes particles.")
+            val v2 = mindlayer.vector("Quantum mechanics describes particles.")
             check(v2.size == v1.size) { "vector dimension mismatch ${v1.size} vs ${v2.size}" }
             var cosine = 0.0
             for (i in v1.indices) cosine += v1[i].toDouble() * v2[i].toDouble()
