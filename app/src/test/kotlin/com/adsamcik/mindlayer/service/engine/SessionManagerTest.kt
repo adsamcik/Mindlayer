@@ -154,7 +154,7 @@ class SessionManagerTest {
     @Test
     fun `streaming session gets +1000 priority`() {
         val handle = buildHandle(isStreaming = true)
-        val priority = sessionManager.calculatePriority(handle)
+        val priority = EvictionPolicy.calculatePriority(handle)
         assertTrue("Streaming should add 1000", priority >= 1000)
     }
 
@@ -165,7 +165,7 @@ class SessionManagerTest {
             isPinned = true,
             lastAccessedElapsedMs = SystemClock.elapsedRealtime() - 200_000L,
         )
-        val priority = sessionManager.calculatePriority(handle)
+        val priority = EvictionPolicy.calculatePriority(handle)
         assertEquals(400, priority)
     }
 
@@ -175,7 +175,7 @@ class SessionManagerTest {
         val handle = buildHandle(
             lastAccessedElapsedMs = SystemClock.elapsedRealtime() - 10_000L,
         )
-        val priority = sessionManager.calculatePriority(handle)
+        val priority = EvictionPolicy.calculatePriority(handle)
         assertEquals(300, priority)
     }
 
@@ -185,7 +185,7 @@ class SessionManagerTest {
         val handle = buildHandle(
             lastAccessedElapsedMs = SystemClock.elapsedRealtime() - 60_000L,
         )
-        val priority = sessionManager.calculatePriority(handle)
+        val priority = EvictionPolicy.calculatePriority(handle)
         assertEquals(150, priority)
     }
 
@@ -194,7 +194,7 @@ class SessionManagerTest {
         val handle = buildHandle(
             lastAccessedElapsedMs = SystemClock.elapsedRealtime() - 200_000L,
         )
-        val priority = sessionManager.calculatePriority(handle)
+        val priority = EvictionPolicy.calculatePriority(handle)
         assertEquals(0, priority)
     }
 
@@ -204,7 +204,7 @@ class SessionManagerTest {
             clientPriorityHint = 75,
             lastAccessedElapsedMs = SystemClock.elapsedRealtime() - 200_000L,
         )
-        val priority = sessionManager.calculatePriority(handle)
+        val priority = EvictionPolicy.calculatePriority(handle)
         assertEquals(75, priority)
     }
 
@@ -214,7 +214,7 @@ class SessionManagerTest {
             clientPriorityHint = 999,
             lastAccessedElapsedMs = SystemClock.elapsedRealtime() - 200_000L,
         )
-        val priority = sessionManager.calculatePriority(handle)
+        val priority = EvictionPolicy.calculatePriority(handle)
         assertEquals(100, priority)
     }
 
@@ -224,7 +224,7 @@ class SessionManagerTest {
             clientPriorityHint = -50,
             lastAccessedElapsedMs = SystemClock.elapsedRealtime() - 200_000L,
         )
-        val priority = sessionManager.calculatePriority(handle)
+        val priority = EvictionPolicy.calculatePriority(handle)
         assertEquals(0, priority)
     }
 
@@ -236,7 +236,7 @@ class SessionManagerTest {
             lastAccessedElapsedMs = SystemClock.elapsedRealtime() - 5_000L, // within 30s
             clientPriorityHint = 50,
         )
-        val priority = sessionManager.calculatePriority(handle)
+        val priority = EvictionPolicy.calculatePriority(handle)
         // 1000 (streaming) + 400 (pinned) + 300 (recent 30s) + 50 (hint) = 1750
         assertEquals(1750, priority)
     }
@@ -248,7 +248,7 @@ class SessionManagerTest {
             lastAccessedElapsedMs = SystemClock.elapsedRealtime() - 60_000L, // within 2m
             clientPriorityHint = 80,
         )
-        val priority = sessionManager.calculatePriority(handle)
+        val priority = EvictionPolicy.calculatePriority(handle)
         // 400 (pinned) + 150 (recent 2m) + 80 (hint) = 630
         assertEquals(630, priority)
     }
@@ -259,7 +259,7 @@ class SessionManagerTest {
             lastAccessedElapsedMs = SystemClock.elapsedRealtime() - 200_000L,
             clientPriorityHint = 0,
         )
-        val priority = sessionManager.calculatePriority(handle)
+        val priority = EvictionPolicy.calculatePriority(handle)
         assertEquals(0, priority)
     }
 

@@ -851,33 +851,16 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     // ---- Priority & eviction -----------------------------------------------
 
     /**
-     * Compute a numeric priority for [handle]. Higher values mean the session
-     * is more important and should be evicted last.
-     */
-    fun calculatePriority(handle: SessionHandle): Int {
-        var p = 0
-        if (handle.isStreaming) p += 1000
-        if (handle.isPinned) p += 400
-        val recencyMs = SystemClock.elapsedRealtime() - handle.lastAccessedElapsedMs
-        if (recencyMs < 30_000) p += 300
-        else if (recencyMs < 120_000) p += 150
-        p += handle.clientPriorityHint.coerceIn(0, 100)
-        return p
-    }
-
-    /**
      * Evict the single lowest-priority non-streaming session.
      * @return `true` if a session was evicted.
      */
     private fun evictLowestPriority(): Boolean {
-        val victim = sessions.values
-            .filter { !it.isStreaming }
-            .minByOrNull { calculatePriority(it) }
+        val victim = EvictionPolicy.selectLowestPriorityVictim(sessions.values)
             ?: return false
 
         MindlayerLog.w(
             TAG,
-            "Evicting session (priority=${calculatePriority(victim)})",
+            "Evicting session (priority=${EvictionPolicy.calculatePriority(victim)})",
             sessionId = victim.sessionId,
         )
         logRepository?.logSessionEvicted(victim.sessionId, "lowest_priority")
@@ -886,14 +869,12 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     }
 
     private fun evictLowestPriorityOwnedByUid(ownerUid: Int): Boolean {
-        val victim = sessions.values
-            .filter { !it.isStreaming && it.ownerUid == ownerUid }
-            .minByOrNull { calculatePriority(it) }
+        val victim = EvictionPolicy.selectLowestPriorityVictim(sessions.values, ownerUid = ownerUid)
             ?: return false
 
         MindlayerLog.w(
             TAG,
-            "Evicting caller-owned session (priority=${calculatePriority(victim)})",
+            "Evicting caller-owned session (priority=${EvictionPolicy.calculatePriority(victim)})",
             sessionId = victim.sessionId,
         )
         logRepository?.logSessionEvicted(victim.sessionId, "caller_capacity")
@@ -909,12 +890,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
      * finish or the client must cancel.
      */
     fun evictUnderPressure() {
-        val nonStreaming = sessions.values
-            .filter { !it.isStreaming && !it.isPinned }
-            .sortedBy { calculatePriority(it) }
-
-        // Keep the single highest-priority non-streaming, non-pinned session
-        val toEvict = if (nonStreaming.size > 1) nonStreaming.dropLast(1) else emptyList()
+        val toEvict = EvictionPolicy.selectPressureEvictionVictims(sessions.values)
 
         for (handle in toEvict) {
             MindlayerLog.w(TAG, "Pressure-evicting session", sessionId = handle.sessionId)
