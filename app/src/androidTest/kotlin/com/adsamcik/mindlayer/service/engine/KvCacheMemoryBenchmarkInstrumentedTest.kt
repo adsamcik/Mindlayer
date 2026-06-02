@@ -110,7 +110,138 @@ class KvCacheMemoryBenchmarkInstrumentedTest {
             "smoke" -> runSmoke()
             "sweep" -> runSweepPoint()
             "multisession" -> runMultiSession()
-            else -> error("Unknown phase '$phase'. Use smoke|sweep|multisession.")
+            "spike_close_create" -> runCloseCreateSpike()
+            else -> error("Unknown phase '$phase'. Use smoke|sweep|multisession|spike_close_create.")
+        }
+    }
+
+    /**
+     * Phase-0 de-risking spike for hot-swap: validate that
+     * `engine.createConversation(...)` → `conversation.close()` → repeat works
+     * cleanly across many iterations on the same `Engine` instance, without
+     * native crashes, JNI exceptions, or memory creep.
+     *
+     * If this passes, hot-swap multi-session is viable. If it fails, we'd need
+     * to fall back to "process restart per session swap" (existing infra) or
+     * abandon multi-session entirely on LiteRT-LM 0.12.0.
+     */
+    private fun runCloseCreateSpike() {
+        val modelFile = locateGemmaModel() ?: skipMissingModel()
+        val iterations = arg("iterations")?.toIntOrNull() ?: 20
+        val maxNumTokens = arg("maxNumTokens")?.toIntOrNull() ?: 4096
+        val outFile = openCsv("spike_close_create.csv")
+        if (!outFile.exists()) {
+            outFile.writeText(
+                "iter,phase,success,duration_ms,rss_kb,pss_kb,pdirty_kb,nheap_kb,error\n",
+            )
+        }
+
+        Log.i(TAG, "spike: maxNumTokens=$maxNumTokens iterations=$iterations")
+
+        val engine = Engine(
+            EngineConfig(
+                modelPath = modelFile.absolutePath,
+                backend = Backend.CPU(),
+                visionBackend = null,
+                maxNumTokens = maxNumTokens,
+                maxNumImages = 1,
+                cacheDir = File(ctx.cacheDir, "kv-bench-cache").apply { mkdirs() }.absolutePath,
+            )
+        )
+        val engineInitStart = SystemClock.elapsedRealtime()
+        engine.initialize()
+        val engineInitMs = SystemClock.elapsedRealtime() - engineInitStart
+        Log.i(TAG, "spike: engine init in ${engineInitMs}ms")
+
+        var lastErrorOnCreate = 0
+        var lastErrorOnClose = 0
+        try {
+            for (i in 1..iterations) {
+                val createStart = SystemClock.elapsedRealtime()
+                var conv: com.google.ai.edge.litertlm.Conversation? = null
+                var createOk = true
+                var createError = ""
+                try {
+                    conv = engine.createConversation(ConversationConfig())
+                } catch (t: Throwable) {
+                    createOk = false
+                    createError = "${t.javaClass.simpleName}:${t.message?.take(120)}"
+                    lastErrorOnCreate++
+                    Log.w(TAG, "spike iter=$i createConversation FAILED: $t")
+                }
+                val createMs = SystemClock.elapsedRealtime() - createStart
+                val createSnap = readMemorySnapshot()
+                appendSpikeRow(outFile, i, "create", createOk, createMs, createSnap, createError)
+                Log.i(
+                    TAG,
+                    "spike iter=$i create ok=$createOk in ${createMs}ms rss=${createSnap.rssKb}kB pdirty=${createSnap.privateDirtyKb}kB",
+                )
+                if (!createOk) continue
+
+                val closeStart = SystemClock.elapsedRealtime()
+                var closeOk = true
+                var closeError = ""
+                try {
+                    conv?.close()
+                } catch (t: Throwable) {
+                    closeOk = false
+                    closeError = "${t.javaClass.simpleName}:${t.message?.take(120)}"
+                    lastErrorOnClose++
+                    Log.w(TAG, "spike iter=$i close FAILED: $t")
+                }
+                val closeMs = SystemClock.elapsedRealtime() - closeStart
+                val closeSnap = readMemorySnapshot()
+                appendSpikeRow(outFile, i, "close", closeOk, closeMs, closeSnap, closeError)
+                Log.i(
+                    TAG,
+                    "spike iter=$i close ok=$closeOk in ${closeMs}ms rss=${closeSnap.rssKb}kB",
+                )
+            }
+        } finally {
+            try {
+                engine.close()
+            } catch (t: Throwable) {
+                Log.w(TAG, "spike: engine.close threw: $t")
+            }
+        }
+
+        val verdict = if (lastErrorOnCreate == 0 && lastErrorOnClose == 0) {
+            "PASS — hot-swap viable on LiteRT-LM 0.12.0"
+        } else {
+            "FAIL — createErrors=$lastErrorOnCreate, closeErrors=$lastErrorOnClose"
+        }
+        Log.i(TAG, "spike VERDICT: $verdict")
+        if (lastErrorOnCreate > 0 || lastErrorOnClose > 0) {
+            throw AssertionError("spike: $verdict; see CSV for per-iter detail")
+        }
+    }
+
+    private fun appendSpikeRow(
+        outFile: File,
+        iter: Int,
+        phase: String,
+        success: Boolean,
+        durationMs: Long,
+        snap: MemorySnapshot,
+        error: String,
+    ) {
+        val row = buildString {
+            append(iter); append(',')
+            append(phase); append(',')
+            append(if (success) 1 else 0); append(',')
+            append(durationMs); append(',')
+            append(snap.rssKb); append(',')
+            append(snap.pssKb); append(',')
+            append(snap.privateDirtyKb); append(',')
+            append(snap.nativeHeapKb); append(',')
+            append('"'); append(error.replace('"', '\'')); append('"')
+            append('\n')
+        }
+        Log.i(TAG, "SPIKE_ROW: ${row.trimEnd()}")
+        try {
+            outFile.appendText(row)
+        } catch (t: Throwable) {
+            Log.w(TAG, "spike CSV write failed: $t")
         }
     }
 
@@ -181,6 +312,10 @@ class KvCacheMemoryBenchmarkInstrumentedTest {
             Thread.sleep(2_000L)
             val postInit = readMemorySnapshot()
             outFile.appendText(formatMultisessionRow(maxNumTokens, 0, "after_init", initMs, baseline, postInit))
+            Log.i(
+                TAG,
+                "MULTI_ROW: " + formatMultisessionRow(maxNumTokens, 0, "after_init", initMs, baseline, postInit).trimEnd(),
+            )
 
             val convs = mutableListOf<com.google.ai.edge.litertlm.Conversation>()
             for (i in 1..numConversations) {
@@ -189,17 +324,16 @@ class KvCacheMemoryBenchmarkInstrumentedTest {
                 Thread.sleep(500L)
                 val afterCreate = readMemorySnapshot()
                 outFile.appendText(formatMultisessionRow(maxNumTokens, i, "after_create", 0L, baseline, afterCreate))
+                Log.i(
+                    TAG,
+                    "MULTI_ROW: " + formatMultisessionRow(maxNumTokens, i, "after_create", 0L, baseline, afterCreate).trimEnd(),
+                )
             }
-
-            convs.forEachIndexed { idx, conv ->
-                runBlocking {
-                    val msg = Message.user(Contents.of("Hi"))
-                    conv.sendMessageAsync(msg.contents).collectIgnoringOutput()
-                }
-                Thread.sleep(500L)
-                val afterSend = readMemorySnapshot()
-                outFile.appendText(formatMultisessionRow(maxNumTokens, idx + 1, "after_send", 0L, baseline, afterSend))
-            }
+            // sendMessageAsync intentionally skipped — Gemma can produce a long
+            // response for even short prompts, and our measurement question
+            // (does createConversation allocate KV?) is already answered by
+            // pre-send memory deltas. Decode-side memory is bounded by
+            // EngineConfig.maxNumTokens which is pre-allocated.
         } finally {
             try {
                 engine.close()
@@ -278,20 +412,27 @@ class KvCacheMemoryBenchmarkInstrumentedTest {
                 "postInit=$postInit peakRss=${peakRss.get()} peakPss=${peakPss.get()}",
         )
 
-        outFile.appendText(
-            formatMeasureRow(
-                phase = phase,
-                maxNumTokens = maxNumTokens,
-                rep = rep,
-                initMs = initMs,
-                initOk = initFailure == null,
-                initError = initFailure?.let { "${it.javaClass.simpleName}:${it.message?.take(120)}" } ?: "",
-                baseline = baseline,
-                postInit = postInit,
-                peakRssKb = peakRss.get(),
-                peakPssKb = peakPss.get(),
-            )
+        val row = formatMeasureRow(
+            phase = phase,
+            maxNumTokens = maxNumTokens,
+            rep = rep,
+            initMs = initMs,
+            initOk = initFailure == null,
+            initError = initFailure?.let { "${it.javaClass.simpleName}:${it.message?.take(120)}" } ?: "",
+            baseline = baseline,
+            postInit = postInit,
+            peakRssKb = peakRss.get(),
+            peakPssKb = peakPss.get(),
         )
+        // Emit to logcat as source-of-truth — file write may silently fail if
+        // externalFilesDir is unavailable on this Android build.
+        Log.i(TAG, "CSV_ROW: ${row.trimEnd()}")
+        try {
+            outFile.appendText(row)
+            Log.i(TAG, "CSV file write OK: ${outFile.absolutePath} size=${outFile.length()}")
+        } catch (t: Throwable) {
+            Log.w(TAG, "CSV file write FAILED for ${outFile.absolutePath}: $t")
+        }
 
         // Clean up — close may itself throw on a partially-initialised handle
         // (LiteRT-LM hazard). Swallow so the CSV row is the test's verdict.
@@ -307,8 +448,17 @@ class KvCacheMemoryBenchmarkInstrumentedTest {
     // --- helpers --------------------------------------------------------------
 
     private fun openCsv(name: String): File {
-        val dir = File(ctx.getExternalFilesDir(null), "kv-bench").apply { mkdirs() }
-        return File(dir, name)
+        val external = ctx.getExternalFilesDir(null)
+        val internal = ctx.filesDir
+        val root = external ?: internal
+        val dir = File(root, "kv-bench").apply { mkdirs() }
+        val file = File(dir, name)
+        Log.i(
+            TAG,
+            "openCsv($name): external=$external internal=$internal " +
+                "chosen=$root dirExists=${dir.isDirectory} file=$file",
+        )
+        return file
     }
 
     private fun skipMissingModel(): Nothing {
