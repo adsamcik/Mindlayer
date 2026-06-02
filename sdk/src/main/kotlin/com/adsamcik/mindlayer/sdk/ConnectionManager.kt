@@ -44,11 +44,13 @@ enum class ConnectionState {
 
     /**
      * Service rejected our `registerClient` call — the calling app is not on
-     * the user-approved allowlist. The binding is torn down. The client must
-     * wait for user approval in the Mindlayer dashboard and call [connect]
-     * again. This is a terminal state until the caller explicitly retries;
-     * we do not auto-reconnect because that would poll the service and hit
-     * the rate limit.
+     * the user-approved allowlist. The binding is torn down. We do NOT
+     * auto-reconnect (that would poll the service and hit the rate limit),
+     * but on the next consumer-initiated call to [ConnectionManager.awaitConnected]
+     * we rebind once (subject to [REJECTION_RECHECK_COOLDOWN_MS]) and ask
+     * the service again. This is what makes the "user approves in dashboard
+     * → next API call works" flow seamless without requiring the consumer
+     * app to be force-stopped to clear stale SDK state.
      */
     REJECTED_NOT_APPROVED,
 
@@ -106,6 +108,25 @@ class ConnectionManager {
 
         /** Maximum consecutive failed rebind attempts before giving up. */
         const val MAX_RECONNECT_ATTEMPTS = 10
+
+        /**
+         * Minimum interval between two on-demand rejection re-checks triggered by
+         * [awaitConnected]. When the service rejected the consumer (state
+         * [ConnectionState.REJECTED_NOT_APPROVED]) the most likely cause is that
+         * the user hasn't yet approved the caller in the Mindlayer dashboard.
+         * The user typically approves seconds after the first rejection, so on
+         * the **next** consumer call we re-bind once and ask the service again,
+         * which surfaces the new approval automatically — no force-stop required.
+         *
+         * The floor prevents back-to-back caller code (e.g. an ensureCapability()
+         * helper that retries internally on every failure) from spinning fresh
+         * binds at the per-UID rate-limit on the service side. One second is
+         * comfortably above the rate-limit window (per-UID throttle is measured
+         * in seconds) and well below human approve-then-retry latency, so the
+         * happy path always re-checks while a misbehaving client cannot
+         * weaponise the recheck into a poll.
+         */
+        internal const val REJECTION_RECHECK_COOLDOWN_MS = 1_000L
 
         private val BIND_FLAGS: Int = run {
             // Base flags supported back to the SDK's minSdk:
@@ -181,6 +202,26 @@ class ConnectionManager {
     private var consecutiveFailures = 0
 
     /**
+     * Wall-clock millis of the last [awaitConnected]-triggered re-bind that
+     * was launched in response to a [ConnectionState.REJECTED_NOT_APPROVED]
+     * state. Used to floor consecutive on-demand re-checks at
+     * [REJECTION_RECHECK_COOLDOWN_MS] so a tight retry loop in the consumer
+     * can't weaponise the recheck into a poll. `0L` means no recheck has
+     * been launched yet, so the next [awaitConnected] is free to recheck.
+     */
+    @Volatile
+    private var lastRejectionRecheckAt: Long = 0L
+
+    /**
+     * Test seam: returns the current monotonic millis. Overridden in tests so
+     * we can drive the cooldown without sleeping. Default is wall-clock
+     * because the cooldown only matters between user-driven calls and the
+     * elapsed time we want to gate on is the same notion the human user
+     * perceives — clock drift would only loosen, not tighten, the guard.
+     */
+    internal var clockMillis: () -> Long = System::currentTimeMillis
+
+    /**
      * True once [MAX_RECONNECT_ATTEMPTS] consecutive rebind attempts have
      * failed without a successful [onServiceConnected]. No further reconnects
      * are scheduled. Call [connect] to reset and retry.
@@ -203,6 +244,10 @@ class ConnectionManager {
             consecutiveFailures = 0
             backoffMs = INITIAL_BACKOFF_MS
         }
+        // Explicit connect() is the caller's "reset everything" signal — drop
+        // any prior rejection-recheck timestamp so the next bind is treated
+        // as a fresh attempt rather than a debounced recheck.
+        lastRejectionRecheckAt = 0L
         boundContext = context.applicationContext
         doBind()
     }
@@ -249,6 +294,13 @@ class ConnectionManager {
         timeoutMs: Long = DEFAULT_CONNECT_TIMEOUT_MS,
     ): IMindlayerService = try {
         withTimeout(timeoutMs) {
+            // Tracks whether we've already retried the bind once for the
+            // REJECTED_NOT_APPROVED path in this single call. After one
+            // rebind, a second rejection is treated as authoritative — we
+            // don't loop indefinitely waiting for approval (the caller is
+            // already inside their own timeout budget).
+            var rejectionRebindAttempted = false
+
             while (true) {
                 _state.first {
                     it == ConnectionState.CONNECTED ||
@@ -256,6 +308,43 @@ class ConnectionManager {
                     it == ConnectionState.BIND_GAVE_UP
                 }
                 if (_state.value == ConnectionState.REJECTED_NOT_APPROVED) {
+                    // The most common reason we land here is that the user
+                    // approved the caller in the Mindlayer dashboard between
+                    // the first bind (which got rejected) and this call.
+                    // Re-bind once and ask the service again rather than
+                    // surfacing a stale rejection that would force the
+                    // consumer app to be force-stopped to clear SDK state.
+                    //
+                    // Gated by REJECTION_RECHECK_COOLDOWN_MS so a tight
+                    // retry loop in the consumer can't poll the service.
+                    // Once we've rebound once inside this awaitConnected
+                    // call, a second REJECTED is authoritative and we
+                    // throw — the user clearly hasn't approved yet.
+                    val now = clockMillis()
+                    val canRecheck = !rejectionRebindAttempted &&
+                        boundContext != null &&
+                        (now - lastRejectionRecheckAt) >= REJECTION_RECHECK_COOLDOWN_MS
+                    if (canRecheck) {
+                        lastRejectionRecheckAt = now
+                        rejectionRebindAttempted = true
+                        Log.i(
+                            TAG,
+                            "awaitConnected: REJECTED_NOT_APPROVED — rebinding once " +
+                                "in case the user just approved (cooldown ${REJECTION_RECHECK_COOLDOWN_MS}ms)",
+                        )
+                        // Clean up the rejected binding state then rebind.
+                        // doUnbind is a no-op if we're already unbound (the
+                        // rejected-onServiceConnected path already calls it).
+                        doUnbind()
+                        _state.value = ConnectionState.CONNECTING
+                        doBind()
+                        // Loop and re-await the next terminal state. The
+                        // rebound bind will land in CONNECTED (approved),
+                        // REJECTED_NOT_APPROVED (still not approved →
+                        // throws below on next iteration), or BIND_GAVE_UP
+                        // (also caught below).
+                        continue
+                    }
                     throw MindlayerException(
                         message = "Mindlayer rejected this app — user approval required in the Mindlayer dashboard",
                         code = MindlayerErrorCode.PERMISSION_DENIED,
@@ -374,6 +463,11 @@ class ConnectionManager {
                 }
 
                 _state.value = ConnectionState.CONNECTED
+                // Successful registration — reset the rejection-recheck floor
+                // so a future REJECTED_NOT_APPROVED (e.g. user revokes approval
+                // after a hot restart) gets a fresh recheck window rather than
+                // inheriting a stale timestamp from a previous failed bind.
+                lastRejectionRecheckAt = 0L
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
