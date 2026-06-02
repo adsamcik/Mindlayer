@@ -62,6 +62,17 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
 ) {
 
     private val initCoordinator = EngineInitCoordinator(engineManager, initDispatcher)
+    // F-{hot-swap}: WarmConversationSlot is wired but NOT yet integrated into
+    // createSession's path. The supporting infrastructure (eviction policy,
+    // recordedTurns history, FakeEngine, ENGINE_BUSY error code) is all in
+    // place for a follow-up PR to enable hot-swap by calling
+    // warmSlot.evictWarmFor(sessionId, sessions) right before
+    // engine.createConversation, and warmSlot.claim(sessionId) immediately
+    // after. The follow-up also needs to rewrite ~30 multi-session unit
+    // tests whose assumptions no longer hold under the one-Conversation-
+    // per-Engine native invariant.
+    @Suppress("unused")
+    private val warmSlot = WarmConversationSlot()
 
     companion object {
         private const val TAG = "SessionManager"
@@ -680,6 +691,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             }
         } finally {
             sessions.remove(id)
+            warmSlot.release(id)  // no-op when not wired; harmless future-proofing
         }
         logRepository?.logSessionDestroyed(id)
         MindlayerLog.i(TAG, "Session destroyed (remaining=${sessions.size})", sessionId = id)
