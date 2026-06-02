@@ -146,6 +146,30 @@ interface Mindlayer {
         configure: SessionScope.() -> Unit = {},
     ): String = error("Mindlayer v1 — C2 lands behaviour")
 
+    /**
+     * Transcribe the speech in [audio] using Gemma 4's documented ASR
+     * prompt — no newlines, digits for numbers.
+     * Source: https://ai.google.dev/gemma/docs/capabilities/audio
+     *
+     * @param language Human-readable language name passed verbatim into
+     *   the recommended `"in {LANGUAGE} into {LANGUAGE} text"` phrasing
+     *   (e.g. `"English"`, `"German"`). When `null` (the default), the
+     *   model receives the "in its original language" variant and
+     *   autodetects.
+     *
+     * Audio is capped at
+     * [com.adsamcik.mindlayer.GemmaAudioSpec.MAX_DURATION_MS] per clip;
+     * longer recordings must be chunked caller-side. See `docs/AUDIO.md`
+     * for the full supported/not-yet-supported split.
+     *
+     * Equivalent to `transcribe(GemmaAudioPrompts.transcriptionPrompt(language), audio, configure)`.
+     */
+    suspend fun transcribe(
+        audio: File,
+        language: String? = null,
+        configure: SessionScope.() -> Unit = {},
+    ): String = error("Mindlayer v1 — C2 lands behaviour")
+
     suspend fun extractJson(
         prompt: String,
         schema: JsonSchema,

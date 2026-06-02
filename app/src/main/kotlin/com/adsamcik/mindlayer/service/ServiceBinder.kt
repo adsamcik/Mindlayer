@@ -300,6 +300,15 @@ class ServiceBinder(
             // gate and charges zero rate-limit cost; co-signed peers in
             // pending-approval can use it for liveness probes.
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_HEALTH_CHECK,
+            // Single-clip audio input. The transport (FEATURE_SHARED_MEMORY_MEDIA)
+            // and the multi-attachment shape (FEATURE_MEDIA_LIST) are
+            // already advertised above; FEATURE_AUDIO_INPUT specifically
+            // tells SDK callers the engine consumes the audio modality
+            // and respects the Gemma audio contract (≤30 s per clip,
+            // 25 tok/s budget). Multi-audio remains rejected by
+            // IpcInputValidator until the engine path lands — see
+            // docs/AUDIO.md for the supported / not-yet-supported split.
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_AUDIO_INPUT,
         )
 
         /** Allowed characters for caller-supplied identifiers (sessionId/requestId). */

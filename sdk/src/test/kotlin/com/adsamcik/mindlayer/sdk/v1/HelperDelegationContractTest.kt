@@ -97,13 +97,61 @@ class HelperDelegationContractTest {
         val audio = File("clip.wav")
         val build = slot<InferenceRequest.Builder.() -> Unit>()
         coEvery { sut.infer(capture(build)) } returns textHandle("hello world")
-        coEvery { sut.transcribe(any(), any(), any()) } coAnswers { callOriginal() }
+        coEvery { sut.transcribe(any<String>(), any(), any()) } coAnswers { callOriginal() }
 
         val result = sut.transcribe("transcribe this", audio)
 
         assertEquals("hello world", result)
         val b = InferenceRequest.Builder().apply(build.captured)
         assertEquals("transcribe this", b.promptText)
+        assertSame(audio, b.audioFile)
+    }
+
+    @Test
+    fun `transcribe(audio, language) delegates with canonical Gemma ASR prompt`() = runTest {
+        val sut = helpers()
+        val audio = File("clip.wav")
+        val build = slot<InferenceRequest.Builder.() -> Unit>()
+        coEvery { sut.infer(capture(build)) } returns textHandle("transcribed")
+        // Both overloads must callOriginal: the (audio, language) overload
+        // delegates to (prompt, audio, configure), which delegates to infer.
+        coEvery { sut.transcribe(any<String>(), any(), any()) } coAnswers { callOriginal() }
+        coEvery {
+            sut.transcribe(any<File>(), any<String>(), any())
+        } coAnswers { callOriginal() }
+
+        val result = sut.transcribe(audio = audio, language = "English")
+
+        assertEquals("transcribed", result)
+        val b = InferenceRequest.Builder().apply(build.captured)
+        val expectedPrompt =
+            com.adsamcik.mindlayer.sdk.GemmaAudioPrompts.transcriptionPrompt("English")
+        assertEquals(expectedPrompt, b.promptText)
+        assertSame(audio, b.audioFile)
+    }
+
+    @Test
+    fun `transcribe(audio) without language uses original-language ASR prompt`() = runTest {
+        val sut = helpers()
+        val audio = File("clip.wav")
+        val build = slot<InferenceRequest.Builder.() -> Unit>()
+        coEvery { sut.infer(capture(build)) } returns textHandle("transcribed")
+        coEvery { sut.transcribe(any<String>(), any(), any()) } coAnswers { callOriginal() }
+        // any<String>() matches the nullable language parameter, including
+        // the null we pass here — mockk's runtime matcher accepts null
+        // values for nullable Kotlin parameters even with a non-null type
+        // argument (which is required at compile time because reified type
+        // parameters must be subtype of Any).
+        coEvery {
+            sut.transcribe(any<File>(), any<String>(), any())
+        } coAnswers { callOriginal() }
+
+        sut.transcribe(audio)
+
+        val b = InferenceRequest.Builder().apply(build.captured)
+        val expectedPrompt =
+            com.adsamcik.mindlayer.sdk.GemmaAudioPrompts.transcriptionPrompt(null)
+        assertEquals(expectedPrompt, b.promptText)
         assertSame(audio, b.audioFile)
     }
 

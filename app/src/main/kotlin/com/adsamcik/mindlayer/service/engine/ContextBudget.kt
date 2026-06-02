@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.service.engine
 
 import com.adsamcik.mindlayer.AudioTransfer
+import com.adsamcik.mindlayer.GemmaAudioSpec
 import com.adsamcik.mindlayer.ImageTransfer
 
 /**
@@ -57,19 +58,23 @@ const val IMAGE_TOKENS_ESTIMATE: Int = 256
  * rate. The audio encoder produces ~25 tokens/second; we round up via ceil
  * seconds so a 100 ms clip still costs at least one second of budget.
  *
- * Source: Gemma technical report § "Audio" — Universal Speech Model encoder
- * emits one token per 40 ms frame ≈ 25 tokens/second.
+ * Source: Gemma audio capabilities page (`docs/AUDIO.md`); the same value
+ * is re-exported from `:shared` as [GemmaAudioSpec.TOKENS_PER_SECOND] so
+ * SDK callers can do client-side budget arithmetic without depending on
+ * the service module. Keep the two in sync — this constant intentionally
+ * forwards [GemmaAudioSpec.TOKENS_PER_SECOND] rather than re-declaring.
  */
-const val AUDIO_TOKENS_PER_SECOND_ESTIMATE: Int = 25
+const val AUDIO_TOKENS_PER_SECOND_ESTIMATE: Int = GemmaAudioSpec.TOKENS_PER_SECOND
 
 /**
  * Fallback duration assumed for [AudioTransfer.durationMs] == null. We can't
  * trust the caller to tag duration honestly (and they can omit it entirely),
- * so the fallback floors a meaningful chunk of audio. 30 s × 25 tok/s = 750
- * tokens — large enough to deter "omit duration to bypass" patterns yet
- * small enough that legitimate short clips with missing metadata still pass.
+ * so the fallback floors a meaningful chunk of audio — exactly Gemma's
+ * documented per-clip maximum ([GemmaAudioSpec.MAX_DURATION_MS]). Sized to
+ * the engine cap means "omit duration to bypass budget" still costs the
+ * full ceiling: 30 s × 25 tok/s = 750 tokens.
  */
-const val AUDIO_FALLBACK_DURATION_MS: Long = 30_000L
+const val AUDIO_FALLBACK_DURATION_MS: Long = GemmaAudioSpec.MAX_DURATION_MS
 
 /**
  * Per-turn chat-template overhead — Gemma's `<start_of_turn>user`,

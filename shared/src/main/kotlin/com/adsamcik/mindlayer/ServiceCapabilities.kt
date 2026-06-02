@@ -246,6 +246,29 @@ data class ServiceCapabilities(
          */
         const val FEATURE_HEALTH_CHECK: String = "health_check"
 
+        /**
+         * v1.0: single-clip audio input accepted via `infer(...)` /
+         * `inferMulti(...)` with one [com.adsamcik.mindlayer.MediaPart]
+         * of kind [com.adsamcik.mindlayer.MediaPart.KIND_AUDIO] (or
+         * the legacy `AudioTransfer` shape). Clips are capped at
+         * [com.adsamcik.mindlayer.GemmaAudioSpec.MAX_DURATION_MS] and
+         * accept the MIME types listed in `docs/AUDIO.md`.
+         *
+         * **Single-clip only.** Multi-audio prompts are not advertised;
+         * `IpcInputValidator` rejects requests with `audioCount > 1`
+         * until the multi-media engine path lands. SDKs that need to
+         * stitch multiple clips must issue one inference per clip and
+         * fold results client-side.
+         *
+         * Co-existing capabilities `FEATURE_SHARED_MEMORY_MEDIA` (the
+         * transport) and `FEATURE_MEDIA_LIST` (the `inferMulti` shape)
+         * remain orthogonal — `FEATURE_AUDIO_INPUT` specifically tells
+         * callers that the engine *consumes* the audio modality and
+         * respects the Gemma audio contract documented in
+         * `docs/AUDIO.md`.
+         */
+        const val FEATURE_AUDIO_INPUT: String = "audio_input"
+
         // ---- Future OCR flags (documented but not yet advertised) ---------
 
         /**

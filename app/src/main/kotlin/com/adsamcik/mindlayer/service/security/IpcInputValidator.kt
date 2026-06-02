@@ -3,6 +3,7 @@ package com.adsamcik.mindlayer.service.security
 import com.adsamcik.mindlayer.AudioTransfer
 import com.adsamcik.mindlayer.EmbeddingRequest
 import com.adsamcik.mindlayer.EmbeddingTask
+import com.adsamcik.mindlayer.GemmaAudioSpec
 import com.adsamcik.mindlayer.HistoryTurn
 import com.adsamcik.mindlayer.ImageTransfer
 import com.adsamcik.mindlayer.OcrFrameMeta
@@ -374,8 +375,9 @@ object IpcInputValidator {
             }
         }
         transfer.durationMs?.let {
-            require(it in 0..(60L * 60L * 1000L)) {
-                "durationMs out of bounds: $it"
+            require(it in 0..GemmaAudioSpec.MAX_DURATION_MS) {
+                "durationMs out of bounds: $it (Gemma 4 cap is " +
+                    "${GemmaAudioSpec.MAX_DURATION_MS} ms; chunk longer audio caller-side)"
             }
         }
     }
@@ -558,8 +560,9 @@ object IpcInputValidator {
             "media[$index].audio mimeType not supported: ${part.mimeType}"
         }
         part.durationMs?.let {
-            require(it in 0..(60L * 60L * 1000L)) {
-                "media[$index].durationMs out of bounds: $it"
+            require(it in 0..GemmaAudioSpec.MAX_DURATION_MS) {
+                "media[$index].durationMs out of bounds: $it (Gemma 4 cap is " +
+                    "${GemmaAudioSpec.MAX_DURATION_MS} ms; chunk longer audio caller-side)"
             }
         }
     }

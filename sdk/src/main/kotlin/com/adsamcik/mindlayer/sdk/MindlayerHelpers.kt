@@ -59,6 +59,16 @@ internal abstract class MindlayerHelpers : Mindlayer {
             audio(audio)
         }.let { (it as InferenceHandle.Text).awaitText() }
 
+    final override suspend fun transcribe(
+        audio: File,
+        language: String?,
+        configure: SessionScope.() -> Unit,
+    ): String = transcribe(
+        prompt = GemmaAudioPrompts.transcriptionPrompt(language),
+        audio = audio,
+        configure = configure,
+    )
+
     final override suspend fun extractJson(
         prompt: String,
         schema: JsonSchema,
