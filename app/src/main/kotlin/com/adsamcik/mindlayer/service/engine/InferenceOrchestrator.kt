@@ -132,6 +132,22 @@ class InferenceOrchestrator(
         return if (parts.isEmpty()) null else parts.joinToString("") { it.text }
     }
 
+    /**
+     * v1.1: extract the Gemma 4 thinking-channel fragment from a chunk,
+     * or `null` when the session is not thinking-enabled or the chunk
+     * carried no channel content. The lookup uses
+     * [SessionManager.THINKING_CHANNEL_NAME] so the wire key
+     * (`"thought"`) stays in one place.
+     *
+     * Returns `null` rather than empty string so call sites can use a
+     * single `if (!thoughtText.isNullOrEmpty())` guard.
+     */
+    private fun Message.thoughtText(thinkingEnabled: Boolean): String? {
+        if (!thinkingEnabled) return null
+        val fragment = channels[SessionManager.THINKING_CHANNEL_NAME]
+        return if (fragment.isNullOrEmpty()) null else fragment
+    }
+
     // F-009: orchestrator runs on Dispatchers.IO (default). The IO pool is
     // sized for blocking work (~64 threads on Android), so even a worst-case
     // wedged-pipe burst cannot exhaust workers within the writer's 5s
@@ -526,11 +542,14 @@ class InferenceOrchestrator(
             handle.activeRequestId = scopedKey
             handle.isStreaming = true
             val writer = writerFactory(pipeWriteEnd)
-            // v0.5: opt the writer into TOKEN_DELTA_BATCH coalescing if the
-            // session was created with `extraContextJson.token_batch=true`.
-            // Must happen BEFORE writeHeader so the header advertises v2.
+            // v0.5 / v1.1: opt the writer into TOKEN_DELTA_BATCH coalescing
+            // and/or v3 thinking stream protocol BEFORE writeHeader so the
+            // header advertises the right wire version.
             if (handle.preferBatchedDeltas) {
                 writer.enableBatching()
+            }
+            if (handle.preferThinking) {
+                writer.enableThinking()
             }
             var foregroundEntered = false
             val inferenceStartNs = System.nanoTime()
@@ -639,7 +658,38 @@ class InferenceOrchestrator(
 
                 // --- First round: stream user message -----------------------
                 trace.markPrefillStart()
-                handle.conversation.sendMessageAsync(contents).collect { chunk ->
+                // v1.1: when thinking is on, pass the chat-template
+                // variable on the per-send extraContext too. LiteRT-LM
+                // 0.12.0 reads `enable_thinking` from both the
+                // ConversationConfig.extraContext (set at session
+                // creation, applies to every send) AND the per-send
+                // map; passing it in both places is the documented
+                // belt-and-braces pattern for Gemma thinking templates
+                // (the Jinja `{%- if enable_thinking ... -%}` block
+                // is re-evaluated on every render).
+                val perSendExtraContext: Map<String, Any> = if (handle.preferThinking) {
+                    mapOf(SessionManager.THINKING_TEMPLATE_KEY to true)
+                } else {
+                    emptyMap()
+                }
+                handle.conversation.sendMessageAsync(contents, perSendExtraContext).collect { chunk ->
+                    // v1.1: drain Gemma 4 thinking-channel fragments
+                    // BEFORE answer text so the SDK sees thoughts and
+                    // answer in the same order the model produced them.
+                    // The thought channel is only configured on
+                    // thinking-enabled sessions (handle.preferThinking
+                    // == true); on every other session the channels map
+                    // is empty and this is a no-op cost-free hot path.
+                    val thoughtText = chunk.thoughtText(handle.preferThinking)
+                    if (!thoughtText.isNullOrEmpty()) {
+                        writer.writeThoughtDelta(seq, thoughtText)
+                        seq++
+                        handle.estimatedTokens++
+                        if (!firstTokenSeen) {
+                            trace.markFirstToken()
+                            firstTokenSeen = true
+                        }
+                    }
                     val text = chunk.text()
                     if (!text.isNullOrEmpty()) {
                         if (isPromptValidate) {
@@ -846,8 +896,19 @@ class InferenceOrchestrator(
                         Content.ToolResponse(name, ToolOutputSanitizer.wrap(name, result))
                     }
                     val response = handle.conversation.sendMessage(
-                        Message.tool(Contents.of(toolResponses))
+                        Message.tool(Contents.of(toolResponses)),
+                        perSendExtraContext,
                     )
+
+                    // v1.1: emit any thinking-channel fragment the model
+                    // produced while reasoning about the tool result
+                    // BEFORE the answer continuation.
+                    val responseThought = response.thoughtText(handle.preferThinking)
+                    if (!responseThought.isNullOrEmpty()) {
+                        writer.writeThoughtDelta(seq, responseThought)
+                        seq++
+                        handle.estimatedTokens++
+                    }
 
                     // Write the model's continuation text
                     val text = response.text()

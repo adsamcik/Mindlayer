@@ -142,6 +142,7 @@ Stable feature-flag strings allocated:
 | `"typed_diagnostics"` | `getDiagnosticsTyped()` returns a typed snapshot. |
 | `"eviction_callback"` | `subscribeEvictionNotices(...)` is implemented. |
 | `"token_batch"` | Pipe emits `mindlayer.stream.v2` with `TOKEN_DELTA_BATCH`. |
+| `"thinking_mode"` | Gemma 4 thinking-mode opt-in is honoured: pipe negotiates `mindlayer.stream.v3` and emits `THOUGHT_DELTA` / `THOUGHT_DELTA_BATCH` for sessions created with `extraContextJson.thinking = { "enable": true }`. See [`docs/THINKING.md`](THINKING.md). |
 | `"deferred_inference"` | Durable deferred inference with fetch, cancel, acknowledge, and completion callback. |
 | `"embeddings"` | Text embeddings are available across inline, batch, SharedMemory, and deferred batch endpoints. |
 | `"ocr_session"` | Multi-frame OCR session API (`create/push/stream/finalize/close/state/limits`) is callable. |

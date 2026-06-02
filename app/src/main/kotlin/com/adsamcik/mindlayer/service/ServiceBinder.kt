@@ -280,6 +280,13 @@ class ServiceBinder(
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TOKEN_BATCH,
+            // v1.1: Gemma 4 thinking mode — extraContextJson.thinking
+            // opt-in routes the model's <|channel>thought ... <channel|>
+            // block through StreamProtocol.V3 thought_delta frames so
+            // SDK callers can render reasoning separately from the
+            // user-visible answer. See SessionManager.parseThinkingOptIn
+            // and ServiceCapabilities.FEATURE_THINKING_MODE.
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_THINKING_MODE,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_EVICTION_CALLBACK,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DEFERRED_INFERENCE,
             // Phase 2 #6: ZXing barcode anchor injected into the OCR

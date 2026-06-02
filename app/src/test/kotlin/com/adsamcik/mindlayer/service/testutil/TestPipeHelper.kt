@@ -83,6 +83,21 @@ object TestPipeHelper {
                 text = event.payload["text"]?.jsonPrimitive?.contentOrNull,
                 seq = event.seq,
             )
+            // v1.1 Gemma 4 thinking-mode frames — surface as their own
+            // `kind` so orchestrator tests can assert the routing
+            // (chunk.channels["thought"] → THOUGHT_DELTA on the wire).
+            StreamEventType.THOUGHT_DELTA -> ParsedEvent(
+                kind = "thought_delta",
+                text = event.payload["text"]?.jsonPrimitive?.contentOrNull,
+                seq = event.seq,
+            )
+            StreamEventType.THOUGHT_DELTA_BATCH -> ParsedEvent(
+                kind = "thought_delta_batch",
+                // We keep the JSON-array string here so the test asserts
+                // on the wire shape, not the expanded per-fragment list.
+                text = event.payload["texts"]?.toString(),
+                seq = event.seq,
+            )
             StreamEventType.DONE -> ParsedEvent(
                 kind = "done",
                 finishReason = event.payload["finish_reason"]?.jsonPrimitive?.contentOrNull,

@@ -165,6 +165,48 @@ data class ServiceCapabilities(
         /** v0.5: pipe emits `mindlayer.stream.v2` with batched token deltas. */
         const val FEATURE_TOKEN_BATCH: String = "token_batch"
 
+        /**
+         * v1.1: Gemma 4 thinking mode. When the caller creates a session
+         * with `extraContextJson.thinking = { "enable": true }`, the
+         * service:
+         *
+         *  1. Configures a LiteRT-LM channel that intercepts the model's
+         *     `<|channel>thought ... <channel|>` block and routes it
+         *     away from the user-visible answer.
+         *  2. Prepends the Gemma `<|think|>` system marker so the model
+         *     enters thinking mode before producing the answer.
+         *  3. Negotiates [com.adsamcik.mindlayer.shared.StreamProtocol.V3]
+         *     on the pipe so the SDK reader can decode
+         *     [com.adsamcik.mindlayer.shared.StreamEventType.THOUGHT_DELTA] /
+         *     [com.adsamcik.mindlayer.shared.StreamEventType.THOUGHT_DELTA_BATCH]
+         *     events.
+         *
+         * Thoughts are routed away from the user-visible answer at
+         * the LiteRT-LM channel level and are never written to the
+         * SDK history database. **KV-cache caveat (v1.1):** LiteRT-LM
+         * retains channel content in the model's KV cache across user
+         * turns by default — the Gemma "strip thoughts before next
+         * turn" guidance is **not** satisfied automatically in this
+         * release. A follow-up PR will enable
+         * `ExperimentalFlags.filterChannelContentFromKvCache` after
+         * verifying its behaviour around tool-round boundaries (Gemma
+         * requires thoughts to stay in context across tool calls within
+         * one turn). Callers with long thinking conversations should
+         * recycle sessions to keep the working context fresh. See
+         * `docs/THINKING.md` for details.
+         *
+         * Old SDKs that pre-date this flag can still create sessions:
+         * the opt-in JSON is ignored and they see a normal V1/V2
+         * stream.
+         *
+         * Old services that don't advertise this flag will silently
+         * ignore the `thinking` opt-in (no channel configured, no V3
+         * negotiation, no THOUGHT_DELTA events) — capability-aware SDKs
+         * should not assume the answer is thought-free unless they see
+         * this flag.
+         */
+        const val FEATURE_THINKING_MODE: String = "thinking_mode"
+
         /** v0.6: durable deferred inference with fetch and completion callback. */
         const val FEATURE_DEFERRED_INFERENCE: String = "deferred_inference"
 
