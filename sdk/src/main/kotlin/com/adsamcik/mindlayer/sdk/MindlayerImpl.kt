@@ -806,7 +806,7 @@ internal class MindlayerImpl(
      * }
      * ```
      */
-    suspend fun getCapabilities(forceRefresh: Boolean = false): ServiceCapabilities {
+    override suspend fun getCapabilities(forceRefresh: Boolean): ServiceCapabilities {
         if (!forceRefresh) {
             val cached = cachedCapabilities
             if (cached != null) {
@@ -1070,7 +1070,7 @@ internal class MindlayerImpl(
     }
 
     /** Destroy a session and free server-side resources. */
-    suspend fun destroySession(sessionId: String) {
+    override suspend fun destroySession(sessionId: String) {
         withTypedErrors(sessionId = sessionId) { it.destroySession(sessionId) }
     }
 
@@ -1089,7 +1089,8 @@ internal class MindlayerImpl(
      *  sessions are server state, history is encrypted local persistence
      *  with a different threat model.
      */
-    suspend fun listSessions(): List<SessionInfo> {
+    /** List all live server-side sessions owned by this caller. */
+    override suspend fun listSessions(): List<SessionInfo> {
         return withTypedErrors { it.listSessions() }
     }
 
@@ -2250,7 +2251,7 @@ internal class MindlayerImpl(
     // -- Service status -------------------------------------------------------
 
     /** Get the current service status (engine loaded, thermals, etc.). */
-    suspend fun getStatus(): ServiceStatus {
+    override suspend fun getStatus(): ServiceStatus {
         return withTypedErrors { it.status }
     }
 
@@ -2282,7 +2283,7 @@ internal class MindlayerImpl(
      * Throws the same typed errors as any other AIDL call (network
      * down, service crashed, etc.) on persistent failure.
      */
-    suspend fun ping(): com.adsamcik.mindlayer.HealthCheck {
+    override suspend fun ping(): com.adsamcik.mindlayer.HealthCheck {
         return try {
             withTypedErrors { it.ping() }
         } catch (_: NoSuchMethodError) {
@@ -2335,7 +2336,7 @@ internal class MindlayerImpl(
      * returns `null` when talking to a pre-v0.4 service. Callers wanting
      * the human-readable JSON dump should use [getDiagnostics].
      */
-    suspend fun getDiagnosticsTyped(): com.adsamcik.mindlayer.DiagnosticsSnapshot? {
+    override suspend fun getDiagnosticsTyped(): com.adsamcik.mindlayer.DiagnosticsSnapshot? {
         val caps = getCapabilities()
         if (!caps.supports(com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS)) {
             return null

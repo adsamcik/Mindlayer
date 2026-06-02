@@ -82,6 +82,39 @@ interface Mindlayer {
     /** Engine introspection: selected model, perf stats, backend, etc. */
     suspend fun getEngineInfo(): com.adsamcik.mindlayer.EngineInfo
 
+    /**
+     * Negotiated service capabilities including [com.adsamcik.mindlayer.ServiceCapabilities.apiVersion],
+     * supported features, rate limits, and embedding model metadata. Cached by
+     * default with a short TTL; pass [forceRefresh] = `true` after engines have
+     * had time to warm up so feature flags gated on init (OCR, embeddings)
+     * appear once they're really up.
+     *
+     * Distinct from [awaitConnected]'s [Capabilities] return: that's a thin
+     * supported-features-only view; this returns the full AIDL parcelable for
+     * consumers that need the lower-level fields (rate limits, dims, etc.).
+     */
+    suspend fun getCapabilities(
+        forceRefresh: Boolean = false,
+    ): com.adsamcik.mindlayer.ServiceCapabilities
+
+    /** Lightweight service status snapshot (lighter than [getEngineInfo]). */
+    suspend fun getStatus(): com.adsamcik.mindlayer.ServiceStatus
+
+    /** Round-trip health probe. Returns the service's reply. */
+    suspend fun ping(): com.adsamcik.mindlayer.HealthCheck
+
+    /**
+     * Typed diagnostics snapshot — engine, service, OCR, embedding sub-metrics —
+     * or `null` if the service is too old or the call was refused.
+     */
+    suspend fun getDiagnosticsTyped(): com.adsamcik.mindlayer.DiagnosticsSnapshot?
+
+    /** Live server-side sessions owned by this caller. See [com.adsamcik.mindlayer.SessionInfo]. */
+    suspend fun listSessions(): List<com.adsamcik.mindlayer.SessionInfo>
+
+    /** Destroy a single live session and release server-side resources. */
+    suspend fun destroySession(sessionId: String)
+
     // ── Canonical builder-based API (Spike-E §0/§1) ────────────────────────
 
     suspend fun infer(build: InferenceRequest.Builder.() -> Unit): InferenceHandle =
@@ -157,9 +190,10 @@ interface Mindlayer {
     // ── Legacy HIDDEN methods (impl-only; invisible to new source) ─────────
 
     @Deprecated(
-        message = "Use infer { session(...) } (Mindlayer v1)",
-        replaceWith = ReplaceWith("infer { session(...); prompt(...) }"),
-        level = DeprecationLevel.HIDDEN,
+        message = "Use infer { session(...) } / openSession { } (Mindlayer v1). " +
+            "Kept visible for testers and consumers that need explicit session lifecycle.",
+        replaceWith = ReplaceWith("openSession { /* configure */ }"),
+        level = DeprecationLevel.WARNING,
     )
     suspend fun createSession(
         configure: SessionConfigBuilder.() -> Unit = {},
@@ -209,9 +243,10 @@ interface Mindlayer {
     ): InferenceHandle
 
     @Deprecated(
-        message = "Use ask { } / infer { } (Mindlayer v1)",
+        message = "Use ask { } / infer { } (Mindlayer v1). " +
+            "Kept visible for testers and consumers that drive named sessions explicitly.",
         replaceWith = ReplaceWith("ask(text)"),
-        level = DeprecationLevel.HIDDEN,
+        level = DeprecationLevel.WARNING,
     )
     suspend fun inferAsync(
         sessionId: String,
@@ -372,9 +407,10 @@ interface Mindlayer {
     ): String
 
     @Deprecated(
-        message = "Use ocrSession { } (Mindlayer v1)",
+        message = "Use ocrSession { } (Mindlayer v1). Kept visible for consumers that " +
+            "drive the legacy OcrSession type (e.g. via OcrImageAnalyzer in :sdk-camerax).",
         replaceWith = ReplaceWith("ocrSession { profile(profile) }"),
-        level = DeprecationLevel.HIDDEN,
+        level = DeprecationLevel.WARNING,
     )
     suspend fun ocrRealtime(
         profile: OcrProfile,
@@ -389,9 +425,11 @@ interface Mindlayer {
     suspend fun ocrRealtime(config: com.adsamcik.mindlayer.OcrSessionConfig): OcrSession
 
     @Deprecated(
-        message = "Use ocr { } / readText(...) (Mindlayer v1)",
-        replaceWith = ReplaceWith("ocr { bytes(bytes, mimeType); options(options) }"),
-        level = DeprecationLevel.HIDDEN,
+        message = "Use ocr { } / readText(...) (Mindlayer v1). Kept visible for consumers " +
+            "that need the legacy OcrImageResult shape with explicit ocrDurationMs / " +
+            "llmDurationMs / extractionFields fields.",
+        replaceWith = ReplaceWith("ocr { image(bytes, mimeType) }.awaitResult()"),
+        level = DeprecationLevel.WARNING,
     )
     suspend fun ocrAsync(
         bytes: ByteArray,
