@@ -100,3 +100,4 @@ logcat*.txt
 adb-*.log
 
 .pr5-msg.txt
+kv-bench-artifacts/
