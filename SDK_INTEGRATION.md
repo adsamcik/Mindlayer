@@ -166,6 +166,49 @@ handle.events.collect { event ->
 }
 ```
 
+### Vision tasks (object detection, captioning, locating)
+
+For higher-level vision workflows the SDK ships typed helpers in
+`com.adsamcik.mindlayer.sdk.vision` that wrap Gemma 4's native
+[vision capabilities](https://ai.google.dev/gemma/docs/capabilities/vision):
+
+```kotlin
+import com.adsamcik.mindlayer.sdk.vision.*
+
+// Object detection — Gemma emits {"box_2d": [y1, x1, y2, x2], "label": ...} JSON
+// in a 0..1000 grid; the helper parses it into typed DetectedObjects with
+// normalized 0..1 coordinates you can project onto any image size.
+val people = mindlayer.detectObjects(bitmap, labels = listOf("person", "car"))
+for (obj in people) {
+    val rect = obj.box.toPixelRect(bitmap.width, bitmap.height)
+    canvas.drawRect(rect, paint)
+}
+
+// Strict variant — distinguish "no objects" from "model didn't comply"
+when (val r = mindlayer.detectObjectsResult(bitmap, listOf("dog"))) {
+    is DetectionResult.Success           -> useObjects(r.objects)
+    DetectionResult.NoStructuredOutput   -> logPromptDrift()
+    is DetectionResult.ParseError        -> logParseFailure(r.message)
+}
+
+// Locate a single thing by free-form description
+val redCar = mindlayer.locateObject(bitmap, "the red car on the left")
+
+// Caption / describe with documented best-practice prompts
+val caption = mindlayer.captionImage(bitmap, CaptionStyle.Short)
+val long = mindlayer.describeImage(bitmap, DescribeDetail.Long, focus = "the lighting")
+
+// Approximate counting (per Gemma docs, dense scenes are not exact)
+val n = mindlayer.countItems(bitmap, "people")
+```
+
+The helpers use the existing `infer { image(...) }` path and add no service,
+wire, or model requirements. They work today against any model that
+`ModelInfo.supportsVision = true` advertises (Gemma 4 family). Heavy-weight
+OCR for documents is still served by the separate PaddleOCR pipeline via
+[`mindlayer.ocr { ... }`](#ocr); detection-shaped tasks should use the
+helpers above.
+
 ### Audio + text
 
 ```kotlin
