@@ -1032,6 +1032,63 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         @Volatile var activeRequestId: String? = null
         @Volatile var backendInvalidated: Boolean = false
 
+        /**
+         * Rolling per-session conversation history seeded from
+         * `config.initialHistory` and appended to via [appendTurn] after
+         * every successful inference turn. Used by the
+         * `WarmConversationSlot` (Phase 4) to seed a fresh `Conversation`
+         * with the same context when this session is swapped back in
+         * after another session has held the engine's single native slot.
+         *
+         * Mutated only under [mutex] (held by `InferenceOrchestrator`'s
+         * single-writer path). Read via [snapshotRecordedTurns] which
+         * copies the buffer to insulate readers from concurrent
+         * mutation.
+         *
+         * The buffer is **token-budget enforced**: see [appendTurn].
+         */
+        private val recordedTurns: ArrayDeque<HistoryTurn> = ArrayDeque<HistoryTurn>().apply {
+            config.initialHistory?.let { addAll(it) }
+        }
+
+        /**
+         * Append a turn to [recordedTurns]. When the running estimated-token
+         * cost of the buffer exceeds [HISTORY_BUDGET_FRACTION] × the
+         * session's [effectiveMaxTokens], the oldest turns are dropped
+         * (FIFO) until the buffer is back within budget. This keeps the
+         * replay-on-swap cost bounded — the buffer is exactly what a fresh
+         * `Conversation` would be seeded with via `initialMessages`.
+         *
+         * MUST be called while holding [mutex]. The mutex is single-writer
+         * per the InferenceOrchestrator contract, so a `synchronized` block
+         * here would be redundant — but callers from outside the
+         * InferenceOrchestrator path must acquire [mutex] themselves.
+         *
+         * Token estimate uses the same `chars / 4` heuristic as
+         * [InferenceOrchestrator] (LiteRT-LM 0.12.0 does not expose an
+         * offline tokenizer).
+         */
+        fun appendTurn(role: String, text: String) {
+            recordedTurns.addLast(HistoryTurn(role = role, text = text))
+            val budgetTokens = (effectiveMaxTokens * HISTORY_BUDGET_FRACTION).toInt()
+                .coerceAtLeast(MIN_HISTORY_BUDGET_TOKENS)
+            var runningTokens = recordedTurns.sumOf { (it.text.length / 4).coerceAtLeast(1) }
+            while (runningTokens > budgetTokens && recordedTurns.size > 1) {
+                val dropped = recordedTurns.removeFirst()
+                runningTokens -= (dropped.text.length / 4).coerceAtLeast(1)
+            }
+        }
+
+        /**
+         * Immutable copy of [recordedTurns] suitable for handing to
+         * `ConversationConfig(initialMessages = ...)` without exposing the
+         * underlying mutable buffer. MUST be called while holding [mutex].
+         */
+        fun snapshotRecordedTurns(): List<HistoryTurn> = recordedTurns.toList()
+
+        /** Test-only accessor exposing the current buffered turn count. */
+        internal val recordedTurnCount: Int get() = recordedTurns.size
+
         /** Refresh both wall-clock and elapsed-realtime timestamps. */
         fun recordAccess() {
             lastAccessedAtMs = System.currentTimeMillis()
@@ -1049,6 +1106,25 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             isStreaming = isStreaming,
             expirationMs = expirationMs,
         )
+
+        companion object {
+            /**
+             * Fraction of [effectiveMaxTokens] reserved for replay history.
+             * 0.5 leaves at least half the context window for the system
+             * prompt + tool definitions + the next user input. Replay of
+             * a near-full history would otherwise leave no room for a new
+             * turn and trigger an immediate context overflow on swap-in.
+             */
+            const val HISTORY_BUDGET_FRACTION: Double = 0.5
+
+            /**
+             * Floor on the history budget for sessions with a tiny
+             * [effectiveMaxTokens] (e.g. EMERGENCY pressure ceiling at
+             * 2 048 tokens). Always keep room for at least the most recent
+             * few turns so a swap-in doesn't lose every prior message.
+             */
+            const val MIN_HISTORY_BUDGET_TOKENS: Int = 256
+        }
     }
 
     private fun ownerUidFor(ownerToken: Any?): Int? = when (ownerToken) {

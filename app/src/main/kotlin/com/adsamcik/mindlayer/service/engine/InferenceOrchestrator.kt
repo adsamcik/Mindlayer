@@ -655,6 +655,16 @@ class InferenceOrchestrator(
                     if (isPromptValidate) StringBuilder() else null
                 val toolRoutingProseBuffer =
                     if (isToolRouting) StringBuilder() else null
+                // Phase 3: buffer the assistant's normal-streaming text so
+                // we can record the turn into SessionHandle.recordedTurns
+                // for replay-on-hot-swap (Phase 4). Only allocated for the
+                // simple streaming path; structured-output modes already
+                // have responseBuffer / toolRoutingProseBuffer.
+                val recordedAssistantBuffer = if (!isPromptValidate && !isToolRouting) {
+                    StringBuilder()
+                } else {
+                    null
+                }
 
                 // --- First round: stream user message -----------------------
                 trace.markPrefillStart()
@@ -698,6 +708,7 @@ class InferenceOrchestrator(
                             toolRoutingProseBuffer!!.append(text)
                         } else {
                             writer.writeTokenDelta(seq, text)
+                            recordedAssistantBuffer?.append(text)
                             seq++
                         }
                         handle.estimatedTokens++
@@ -976,6 +987,23 @@ class InferenceOrchestrator(
                 trace.markPipeWriteComplete()
                 handle.turnCount++
                 handle.recordAccess()
+                // Phase 3: record the turn into the per-session history so
+                // it can be replayed on hot-swap (Phase 4). We only do this
+                // for the simple streaming path — structured-output and
+                // tool-call modes have additional state (tool responses,
+                // validated payloads) that need separate handling. Their
+                // replay support is a follow-up; for now, mark those sessions
+                // as "history-incomplete" implicitly by not recording.
+                if (recordedAssistantBuffer != null) {
+                    val userText = meta.textContent ?: ""
+                    if (userText.isNotEmpty()) {
+                        handle.appendTurn(com.adsamcik.mindlayer.shared.Role.USER, userText)
+                    }
+                    val assistantText = recordedAssistantBuffer.toString()
+                    if (assistantText.isNotEmpty()) {
+                        handle.appendTurn(com.adsamcik.mindlayer.shared.Role.MODEL, assistantText)
+                    }
+                }
 
                 // Log inference completion with metrics
                 val durationMs = (System.nanoTime() - inferenceStartNs) / 1_000_000
