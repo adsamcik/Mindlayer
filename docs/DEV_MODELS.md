@@ -17,6 +17,32 @@ iterate normally.
 
 ## TL;DR
 
+If you don't want to think about it, use the wrapper:
+
+```powershell
+# Windows PowerShell — full loop in one command
+$env:MINDLAYER_MODEL_CACHE = 'D:\mindlayer-models'
+.\scripts\dev-install.ps1
+```
+
+```bash
+# macOS / Linux
+export MINDLAYER_MODEL_CACHE=/data/mindlayer-models
+./scripts/dev-install.sh
+```
+
+`scripts/dev-install` builds a code-only APK (no AI packs), runs
+`adb install -r` (which preserves the app's `externalFilesDir` and
+the models you've already pushed), and then runs `push-models` for
+any model file that's missing or size-mismatched. Subsequent runs
+skip the multi-GB push when the device is already current. See
+`.github/copilot-instructions.md` § "On-device install + AI Pack
+delivery" for the **forbidden moves** (`adb install -r app-debug.apk`
+without a model push; `adb uninstall com.adsamcik.mindlayer.service.debug`
+which wipes ~3 GB of pushed models) and why they break dev iteration.
+
+If you want to drive the steps manually:
+
 ```powershell
 # One-time per machine: where your model cache lives.
 $env:MINDLAYER_MODEL_CACHE = 'D:\mindlayer-models'
