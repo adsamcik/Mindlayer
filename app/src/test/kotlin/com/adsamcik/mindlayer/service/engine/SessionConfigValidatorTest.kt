@@ -1,16 +1,25 @@
 package com.adsamcik.mindlayer.service.engine
 
+import android.util.Log
 import com.adsamcik.mindlayer.SessionConfig
+import io.mockk.every
+import io.mockk.mockkStatic
+import io.mockk.unmockkAll
+import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /**
- * Unit tests for [SessionConfigValidator]. Pure-function helpers — no Android
- * mocks needed. These tests live alongside the validator so refactor
- * regressions surface immediately, and so the more elaborate
+ * Unit tests for [SessionConfigValidator]. Pure-function helpers — most paths
+ * need no Android mocks, but the malformed-JSON catch logs via
+ * [com.adsamcik.mindlayer.service.logging.MindlayerLog] (which delegates to
+ * `android.util.Log`), so we stub the static call up-front. These tests live
+ * alongside the validator so refactor regressions surface immediately, and so
+ * the more elaborate
  * [com.adsamcik.mindlayer.service.security.IpcInputValidatorTest] retains its
  * focus on byte-budget edge cases.
  *
@@ -18,6 +27,20 @@ import org.junit.Test
  * `IpcInputValidatorTest` since this validator just delegates to it.
  */
 class SessionConfigValidatorTest {
+
+    @Before
+    fun setUp() {
+        mockkStatic(Log::class)
+        every { Log.i(any(), any()) } returns 0
+        every { Log.d(any(), any()) } returns 0
+        every { Log.w(any<String>(), any<String>()) } returns 0
+        every { Log.w(any<String>(), any<String>(), any()) } returns 0
+        every { Log.e(any(), any()) } returns 0
+        every { Log.e(any(), any(), any()) } returns 0
+    }
+
+    @After
+    fun tearDown() = unmockkAll()
 
     // ---- parseTokenBatchOptIn ------------------------------------------------
 
@@ -90,6 +113,19 @@ class SessionConfigValidatorTest {
     }
 
     @Test
+    fun `parseToolDefinitions returns null on malformed JSON`() {
+        // The malformed-JSON path is delicate: kotlinx.serialization throws
+        // JsonDecodingException, which extends IllegalArgumentException
+        // (via SerializationException). The validator catches
+        // SerializationException BEFORE IllegalArgumentException so the
+        // documented "returns null on parse error" contract holds, and
+        // reserved-name require()-IAE keeps surfacing for security.
+        assertNull(SessionConfigValidator.parseToolDefinitions("[{not_json"))
+        assertNull(SessionConfigValidator.parseToolDefinitions("not even an array"))
+        assertNull(SessionConfigValidator.parseToolDefinitions("{"))
+    }
+
+    @Test
     fun `parseToolDefinitions throws on reserved-prefix tool name`() {
         // L9 / F-066: client-supplied names with the reserved "__" prefix
         // must be rejected so the synthetic __structured_output tool name
@@ -105,13 +141,6 @@ class SessionConfigValidatorTest {
             ex.message?.contains("reserved prefix") == true,
         )
     }
-
-    // TODO(follow-up): kotlinx.serialization throws JsonDecodingException
-    // which extends IllegalArgumentException, so the current
-    // parseToolDefinitions surfaces malformed JSON as a thrown IAE instead
-    // of the documented "returns null on parse error". Separate from this
-    // extraction PR — fix when refactoring the catch order to distinguish
-    // SerializationException (→ null) from require()-IAE (→ throw).
 
     // ---- validateSessionConfig (thin delegate) -------------------------------
 
