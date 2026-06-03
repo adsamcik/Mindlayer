@@ -5,6 +5,8 @@ import com.adsamcik.mindlayer.shared.StreamEventType
 import com.adsamcik.mindlayer.shared.StreamHeader
 import com.adsamcik.mindlayer.shared.StreamProtocol
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -69,7 +71,7 @@ class TokenStreamReaderBatchTest {
             wireFrame(json.encodeToString(StreamEvent.serializer(), done)),
         )
         val pfd = pfdFor(frames)
-        val events = TokenStreamReader.readStream(pfd).toList()
+        val events = TokenStreamReader.readStream(pfd, UnconfinedTestDispatcher()).toList()
 
         // Expect: Started + 3 TextDelta + Done
         assertEquals("event count", 5, events.size)
@@ -104,7 +106,7 @@ class TokenStreamReaderBatchTest {
             wireFrame(json.encodeToString(StreamEvent.serializer(), done)),
         )
         val pfd = pfdFor(frames)
-        val events = TokenStreamReader.readStream(pfd).toList()
+        val events = TokenStreamReader.readStream(pfd, UnconfinedTestDispatcher()).toList()
 
         // Started + Done; no TextDelta from empty batch.
         assertEquals(2, events.size)
@@ -128,7 +130,7 @@ class TokenStreamReaderBatchTest {
             wireFrame(json.encodeToString(StreamEvent.serializer(), batch)),
         )
         val pfd = pfdFor(frames)
-        val events = TokenStreamReader.readStream(pfd).toList()
+        val events = TokenStreamReader.readStream(pfd, UnconfinedTestDispatcher()).toList()
 
         assertEquals(2, events.size) // Started + 1 TextDelta
         val delta = events[1] as InferenceEvent.TextDelta
