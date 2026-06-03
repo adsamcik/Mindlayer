@@ -4,6 +4,7 @@ import android.os.SystemClock
 import com.adsamcik.mindlayer.HistoryTurn
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.shared.Role
+import com.google.ai.edge.litertlm.ConversationConfig
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -133,6 +134,7 @@ class SessionHandleHistoryTest {
             config = config,
             createdAtMs = 0L,
             effectiveMaxTokens = effectiveMaxTokens,
+            baseConversationConfig = ConversationConfig(),
         )
     }
 }

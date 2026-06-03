@@ -93,11 +93,25 @@ class InferencePipelineTest {
     // -- Pipe wiring via writerFactory ---------------------------------------
 
     /**
-     * Queue of [PipedOutputStream]s. Each [createPipe] enqueues one; the
-     * custom [writerFactory] dequeues it and creates a [TokenStreamWriter]
-     * backed by that stream instead of a real [ParcelFileDescriptor].
+     * Queue of [PipedOutputStream]s for tests that only create ONE pipe per
+     * inference — kept for backward compatibility with the single-pipe
+     * tests in this suite.
      */
     private val outputStreamQueue = ConcurrentLinkedQueue<OutputStream>()
+
+    /**
+     * Identity map from a per-test [ParcelFileDescriptor] mock to its
+     * backing output stream. Used by [createPipe]'s concurrent variant
+     * to guarantee that header/tokens written for a specific pfd land
+     * on the SAME pipe regardless of which order the orchestrator's
+     * coroutines materialise their writers. Without this map, the FIFO
+     * queue races with the lease-induced serialisation in
+     * concurrentInferences_differentSessions — pipe assignment ends up
+     * driven by which job acquires the engine slot first, not by which
+     * pfd was passed into infer().
+     */
+    private val outputStreamByPfd =
+        java.util.concurrent.ConcurrentHashMap<ParcelFileDescriptor, OutputStream>()
 
     @Before
     fun setUp() {
@@ -157,11 +171,19 @@ class InferencePipelineTest {
 
         // Inject a writerFactory that bypasses ParcelFileDescriptor
         outputStreamQueue.clear()
+        outputStreamByPfd.clear()
         orchestrator = InferenceOrchestrator(
             service, sessionManager, sharedMemoryPool,
-            writerFactory = { _ ->
-                val out = outputStreamQueue.poll()
-                    ?: error("No output stream queued for TokenStreamWriter")
+            writerFactory = { pfd ->
+                // Prefer the per-pfd identity map (concurrent tests register
+                // there); fall back to the FIFO queue (single-pipe tests
+                // still use it). The map lookup is what makes
+                // concurrentInferences_differentSessions deterministic — it
+                // guarantees pipe-A's writer always wraps pipe-A's stream
+                // regardless of which job creates its writer first.
+                val mapped = outputStreamByPfd.remove(pfd)
+                val out = mapped ?: outputStreamQueue.poll()
+                    ?: error("No output stream registered for TokenStreamWriter")
                 TokenStreamWriter.forTesting(out)
             },
         )
@@ -518,7 +540,16 @@ class InferencePipelineTest {
 
     @Test
     fun concurrentInferences_differentSessions() = runTest {
-        // Each session gets its own mock conversation with unique text
+        // Hot-swap: under LiteRT-LM 0.12.0 only one Conversation can be
+        // active at a time. The WarmConversationSlot lease serialises
+        // inferences; the second session waits for the first to release
+        // the slot, then swaps in via close-prior + create-fresh. As a
+        // result there is no longer a stable 1:1 mapping between a
+        // mocked Conversation instance and a session id — whichever
+        // session leases first gets `conversation1`. The contract this
+        // test really cares about is: both inferences run to completion,
+        // both produce tokens on their respective pipes, and the
+        // foreground lifecycle fires for each.
         val conversation1 = mockk<Conversation>(relaxed = true) {
             every { sendMessageAsync(any<Contents>()) } returns flow {
                 emit(textMessage("A1"))
@@ -544,9 +575,17 @@ class InferencePipelineTest {
         val sessionA = createSession("sess-A")
         val sessionB = createSession("sess-B")
 
-        // Create both pipes
+        // Create both pipes — register each pfd in the identity map so the
+        // writerFactory routes by pfd, not by call order. This sidesteps
+        // the lease-induced races where Job B's writer could grab Job A's
+        // stream when the slot serialisation changed who calls
+        // writerFactory first.
         val (pipedInA, pfdA) = createPipe()
         val (pipedInB, pfdB) = createPipe()
+        // createPipe added to the FIFO queue too; move those entries into
+        // the identity map for this test's deterministic routing.
+        outputStreamByPfd[pfdA] = outputStreamQueue.poll() ?: error("queue underflow")
+        outputStreamByPfd[pfdB] = outputStreamQueue.poll() ?: error("queue underflow")
 
         val latchA = CountDownLatch(1)
         val latchB = CountDownLatch(1)
@@ -575,22 +614,36 @@ class InferencePipelineTest {
         val eventsA = parseFrames(framesA)
         val eventsB = parseFrames(framesB)
 
-        // Identify which pipe got which session's data by checking the header
+        // Each pipe must carry exactly its own request id on the header.
         val headerA = eventsA.first { it.kind == "header" }
         val headerB = eventsB.first { it.kind == "header" }
+        assertEquals("req-A", headerA.requestId)
+        assertEquals("req-B", headerB.requestId)
 
-        // Determine the expected token deltas for each pipe based on requestId
-        val (expectedDeltasA, expectedDeltasB) = if (headerA.requestId == "req-A") {
-            listOf("A1", "A2") to listOf("B1", "B2")
-        } else {
-            listOf("B1", "B2") to listOf("A1", "A2")
-        }
-
+        // Both inferences produced token deltas. Under the lease the
+        // order in which sessions acquire the engine slot is
+        // non-deterministic, so we don't assert which Conversation
+        // instance fed which pipe — only that both pipes received tokens
+        // and both completed normally.
         val deltasA = eventsA.filter { it.kind == "token_delta" }.map { it.text }
         val deltasB = eventsB.filter { it.kind == "token_delta" }.map { it.text }
+        assertEquals(
+            "pipe A should receive 2 token deltas",
+            2, deltasA.size,
+        )
+        assertEquals(
+            "pipe B should receive 2 token deltas",
+            2, deltasB.size,
+        )
 
-        assertEquals(expectedDeltasA, deltasA)
-        assertEquals(expectedDeltasB, deltasB)
+        // The pair of delta-sets the two pipes saw — collectively — must
+        // be exactly [A1,A2] and [B1,B2], in some order.
+        val collected = setOf(deltasA, deltasB)
+        val expected = setOf(listOf("A1", "A2"), listOf("B1", "B2"))
+        assertEquals(
+            "collectively both Conversations must have streamed to the pipes",
+            expected, collected,
+        )
 
         // Both pipes should complete with "done"
         assertTrue(eventsA.any { it.kind == "done" && it.finishReason == "stop" })
