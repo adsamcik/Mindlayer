@@ -587,3 +587,130 @@ data class LogUiItem(
     val event: String,
     val detail: String,
 )
+
+// ── Models page (Status / Models / Tests UI split) ──────────────────────────
+
+/**
+ * Per-role view-model summary backing the Models page card list. Pure data,
+ * with no Compose or Context dependencies — derived by
+ * [DashboardUiState.modelSummaries] from existing state fields plus the
+ * per-engine test result so the Models tab can render LOADED / IDLE /
+ * UNKNOWN / FAILED without re-querying the service.
+ */
+data class RoleModelSummary(
+    val role: ModelRole,
+    val modelDisplayName: String,
+    val packDescription: String,
+    val state: ModelLoadState,
+    val backend: String?,
+    val initTimeSeconds: Float?,
+    val failureDetail: String?,
+)
+
+enum class ModelRole { CHAT_AND_VISION, EMBEDDINGS, OCR }
+
+enum class ModelLoadState { UNKNOWN, IDLE, LOADED, FAILED }
+
+private const val MODEL_PACK_CHAT = "Install-time AI Pack: gemma_model"
+private const val MODEL_PACK_EMBEDDINGS = "Install-time AI Pack: gemma_embed_model"
+private const val MODEL_PACK_OCR = "Install-time AI Pack: paddleocr_model"
+private const val MODEL_DISPLAY_CHAT_DEFAULT = "Gemma 4 E2B"
+private const val MODEL_DISPLAY_EMBEDDINGS = "EmbeddingGemma"
+private const val MODEL_DISPLAY_OCR = "PaddleOCR PP-OCRv5 mobile"
+
+/**
+ * Pure derivation of the three role cards rendered by `ModelsScreen`.
+ * Does NOT touch Compose or Context — safe to unit-test.
+ *
+ *  - Chat & vision: derived from [isEngineLoaded] + [backend] + [modelId]
+ *    + [lastInitFailure] + [initTimeSeconds]. State LOADED when the engine
+ *    is loaded; FAILED when an init failure is recorded; IDLE otherwise.
+ *  - Embeddings: state is UNKNOWN until the embedding test has been
+ *    exercised at least once (no failure pathway is observable through
+ *    [DashboardUiState] today; SUCCESS-toned completed test → LOADED;
+ *    ERROR-toned → FAILED; otherwise IDLE).
+ *  - OCR: same shape as embeddings, plus an explicit FAILED if the test
+ *    tone is ERROR.
+ */
+fun DashboardUiState.modelSummaries(): List<RoleModelSummary> {
+    val chatState = when {
+        lastInitFailure != null -> ModelLoadState.FAILED
+        isEngineLoaded -> ModelLoadState.LOADED
+        else -> ModelLoadState.IDLE
+    }
+    val chatBackend = backend.takeIf { it.isNotBlank() && !it.equals("NONE", ignoreCase = true) }
+    val chatFailureDetail = lastInitFailure?.let { failure ->
+        // Reuse the same human-readable mapping used by the Status page,
+        // but only emit the text — the tone is implied by ModelLoadState.
+        // Mirrors describeInitFailure(...) without taking a Compose dep
+        // here; we accept slight string duplication to keep this file
+        // free of UI dependencies for tests.
+        when (failure) {
+            com.adsamcik.mindlayer.service.engine.InitFailure.LowMemory ->
+                "Engine init refused: insufficient memory. Free up memory and retry."
+            com.adsamcik.mindlayer.service.engine.InitFailure.ModelMissing ->
+                "Model file missing — install the AI Pack."
+            com.adsamcik.mindlayer.service.engine.InitFailure.IntegrityMismatch ->
+                "Model file corrupted — reinstall."
+            is com.adsamcik.mindlayer.service.engine.InitFailure.BackendUnavailable -> {
+                val recovered = backend.isNotBlank() &&
+                    !backend.equals("NONE", ignoreCase = true) &&
+                    !backend.equals(failure.backend, ignoreCase = true)
+                if (recovered) {
+                    "${failure.backend} backend failed (${failure.safeLabel}) — running on $backend."
+                } else {
+                    "${failure.backend} backend failed (${failure.safeLabel})."
+                }
+            }
+            is com.adsamcik.mindlayer.service.engine.InitFailure.NativeError ->
+                "Native runtime error (${failure.safeLabel})."
+        }
+    }
+    val chatDisplay = modelId.takeIf { it.isNotBlank() }
+        ?.substringAfterLast('/')
+        ?.substringAfterLast('\\')
+        ?: MODEL_DISPLAY_CHAT_DEFAULT
+    val chat = RoleModelSummary(
+        role = ModelRole.CHAT_AND_VISION,
+        modelDisplayName = chatDisplay,
+        packDescription = MODEL_PACK_CHAT,
+        state = chatState,
+        backend = chatBackend,
+        initTimeSeconds = initTimeSeconds.takeIf { it > 0f },
+        failureDetail = chatFailureDetail,
+    )
+
+    val embeddings = RoleModelSummary(
+        role = ModelRole.EMBEDDINGS,
+        modelDisplayName = MODEL_DISPLAY_EMBEDDINGS,
+        packDescription = MODEL_PACK_EMBEDDINGS,
+        state = derivedTestState(embeddingTest),
+        backend = null,
+        initTimeSeconds = null,
+        failureDetail = embeddingTest.status.takeIf {
+            it.isNotBlank() && embeddingTest.tone == DashboardMessageTone.ERROR
+        },
+    )
+
+    val ocr = RoleModelSummary(
+        role = ModelRole.OCR,
+        modelDisplayName = MODEL_DISPLAY_OCR,
+        packDescription = MODEL_PACK_OCR,
+        state = derivedTestState(ocrTest),
+        backend = null,
+        initTimeSeconds = null,
+        failureDetail = ocrTest.status.takeIf {
+            it.isNotBlank() && ocrTest.tone == DashboardMessageTone.ERROR
+        },
+    )
+
+    return listOf(chat, embeddings, ocr)
+}
+
+private fun derivedTestState(test: EngineTestState): ModelLoadState = when {
+    test.isRunning -> ModelLoadState.UNKNOWN
+    test.lastCompletedAtMs == null -> ModelLoadState.UNKNOWN
+    test.tone == DashboardMessageTone.SUCCESS -> ModelLoadState.LOADED
+    test.tone == DashboardMessageTone.ERROR -> ModelLoadState.FAILED
+    else -> ModelLoadState.IDLE
+}

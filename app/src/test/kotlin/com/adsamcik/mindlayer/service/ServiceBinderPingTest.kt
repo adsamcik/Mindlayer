@@ -143,6 +143,20 @@ class ServiceBinderPingTest {
         )
     }
 
+    @Test fun `FEATURE_AUDIO_INPUT is advertised in capabilities`() {
+        // Audio plumbing is unconditional today (the bundled Gemma 4 model
+        // always handles audio); this test pins that the capability string
+        // is actually exposed via getCapabilities() so SDK callers can
+        // gate on it. Co-located with the FEATURE_HEALTH_CHECK assertion
+        // above because both ride on the same getCapabilities() probe.
+        val caps = binder.getCapabilities()
+        assertTrue(
+            "FEATURE_AUDIO_INPUT must be advertised — Gemma 4 audio support " +
+                "is documented in docs/AUDIO.md and gated on this capability flag",
+            caps.supports(ServiceCapabilities.FEATURE_AUDIO_INPUT),
+        )
+    }
+
     @Test fun `engine-state fields default to IDLE when service fields uninitialized`() {
         val health = binder.ping()
         assertEquals(HealthCheck.ENGINE_STATE_IDLE, health.embeddingEngineState)

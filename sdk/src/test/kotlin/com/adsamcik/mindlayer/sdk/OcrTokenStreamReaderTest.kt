@@ -9,6 +9,8 @@ import com.adsamcik.mindlayer.shared.StreamHeader
 import com.adsamcik.mindlayer.shared.StreamProtocol
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -37,6 +39,7 @@ import org.robolectric.annotation.Config
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
+@OptIn(ExperimentalCoroutinesApi::class)
 class OcrTokenStreamReaderTest {
 
     private val json = Json { encodeDefaults = true }
@@ -248,7 +251,7 @@ class OcrTokenStreamReaderTest {
             ),
         )
 
-        OcrTokenStreamReader.readStream(readEnd).test {
+        OcrTokenStreamReader.readStream(readEnd, UnconfinedTestDispatcher()).test {
             val event = awaitItem()
             assertTrue(event is OcrEvent.Error)
             val thrown = awaitError()
@@ -269,7 +272,7 @@ class OcrTokenStreamReaderTest {
             ),
         )
 
-        OcrTokenStreamReader.readStream(readEnd).test {
+        OcrTokenStreamReader.readStream(readEnd, UnconfinedTestDispatcher()).test {
             awaitComplete()
         }
     }
@@ -291,7 +294,7 @@ class OcrTokenStreamReaderTest {
             ),
         )
 
-        OcrTokenStreamReader.readStream(readEnd).test {
+        OcrTokenStreamReader.readStream(readEnd, UnconfinedTestDispatcher()).test {
             assertTrue(awaitItem() is OcrEvent.ResultFinalized)
             awaitComplete()
         }

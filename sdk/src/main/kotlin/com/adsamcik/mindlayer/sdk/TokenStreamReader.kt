@@ -4,6 +4,7 @@ import android.os.ParcelFileDescriptor
 import com.adsamcik.mindlayer.shared.StreamEvent
 import com.adsamcik.mindlayer.shared.StreamEventType
 import com.adsamcik.mindlayer.shared.StreamHeader
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -44,10 +45,20 @@ object TokenStreamReader {
      * then calls [ParcelFileDescriptor.checkError] to distinguish a clean
      * close from a service crash.
      *
-     * Runs entirely on [Dispatchers.IO]. Backpressure is natural — when the
-     * collector is slow the pipe buffer fills and the service blocks.
+     * Runs the upstream pipe reads on [dispatcher] (default [Dispatchers.IO]).
+     * Backpressure is natural — when the collector is slow the pipe buffer
+     * fills and the service blocks.
+     *
+     * The [dispatcher] override exists so tests can inject an
+     * `UnconfinedTestDispatcher` and avoid the cross-thread race between
+     * the IO-thread `emit + throw` sequence and the collector's
+     * `awaitItem()` poll. See `OcrTokenStreamReaderTest.kt` for the
+     * concrete failure mode this addresses.
      */
-    fun readStream(readEnd: ParcelFileDescriptor): Flow<InferenceEvent> = flow {
+    fun readStream(
+        readEnd: ParcelFileDescriptor,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    ): Flow<InferenceEvent> = flow {
         val input = DataInputStream(
             BufferedInputStream(
                 ParcelFileDescriptor.AutoCloseInputStream(readEnd),
@@ -142,16 +153,21 @@ object TokenStreamReader {
         } finally {
             input.close()
         }
-    }.flowOn(Dispatchers.IO)
+    }.flowOn(dispatcher)
 
     // -- Parsing --------------------------------------------------------------
 
     /**
-     * Stable wire identifier for the v1 pipe protocol. Reader accepts v1
-     * **or** v2 (see [com.adsamcik.mindlayer.shared.StreamProtocol.SUPPORTED])
-     * — v2 streams may carry [com.adsamcik.mindlayer.shared.StreamEventType.TOKEN_DELTA_BATCH]
+     * Stable wire identifier for the v1 pipe protocol. Reader accepts v1,
+     * v2, **or** v3 (see
+     * [com.adsamcik.mindlayer.shared.StreamProtocol.SUPPORTED]) — v2
+     * streams may carry [com.adsamcik.mindlayer.shared.StreamEventType.TOKEN_DELTA_BATCH]
      * which the reader expands into per-token [InferenceEvent.TextDelta]
-     * emissions so the SDK consumer surface is unchanged.
+     * emissions; v3 streams additionally carry
+     * [com.adsamcik.mindlayer.shared.StreamEventType.THOUGHT_DELTA] /
+     * [com.adsamcik.mindlayer.shared.StreamEventType.THOUGHT_DELTA_BATCH]
+     * which become [InferenceEvent.ThoughtDelta] emissions. The SDK
+     * consumer surface is unchanged across all three versions.
      */
     internal const val EXPECTED_PIPE_PROTOCOL = "mindlayer.stream.v1"
 
@@ -180,12 +196,15 @@ object TokenStreamReader {
         }
         return when (streamEvent.type) {
             StreamEventType.TOKEN_DELTA_BATCH -> expandBatch(streamEvent)
+            StreamEventType.THOUGHT_DELTA_BATCH -> expandThoughtBatch(streamEvent)
             else -> {
                 val mapped = mapEvent(streamEvent)
-                if (mapped is InferenceEvent.Unknown && mapped.type == StreamEventType.TOKEN_DELTA_BATCH) {
-                    // Defense-in-depth: should be unreachable since the when
-                    // above handles it, but keeps the contract explicit.
-                    expandBatch(streamEvent)
+                if (mapped is InferenceEvent.Unknown) {
+                    when (mapped.type) {
+                        StreamEventType.TOKEN_DELTA_BATCH -> expandBatch(streamEvent)
+                        StreamEventType.THOUGHT_DELTA_BATCH -> expandThoughtBatch(streamEvent)
+                        else -> listOf(mapped)
+                    }
                 } else {
                     listOf(mapped)
                 }
@@ -236,6 +255,27 @@ object TokenStreamReader {
     }
 
     /**
+     * v1.1: expand a [StreamEventType.THOUGHT_DELTA_BATCH] frame into
+     * per-fragment [InferenceEvent.ThoughtDelta] emissions. Same
+     * sequence-number synthesis as [expandBatch]; empty `texts` list
+     * yields no events.
+     */
+    private fun expandThoughtBatch(envelope: StreamEvent): List<InferenceEvent> {
+        val texts = envelope.payload["texts"]
+            ?.let { it as? kotlinx.serialization.json.JsonArray }
+            ?: return emptyList()
+        if (texts.isEmpty()) return emptyList()
+        val lastSeq = envelope.seq
+        return texts.mapIndexed { index, element ->
+            val text = (element as? kotlinx.serialization.json.JsonPrimitive)
+                ?.contentOrNull
+                ?: ""
+            val perThoughtSeq = lastSeq - (texts.size - 1 - index)
+            InferenceEvent.ThoughtDelta(text = text, seq = perThoughtSeq)
+        }
+    }
+
+    /**
      * Tries [StreamEvent] first (common case), then falls back to
      * [StreamHeader] (first frame only). Returns `null` for unparseable frames.
      *
@@ -256,6 +296,11 @@ object TokenStreamReader {
      */
     private fun mapEvent(event: StreamEvent): InferenceEvent = when (event.type) {
         StreamEventType.TOKEN_DELTA -> InferenceEvent.TextDelta(
+            text = event.payload["text"]?.jsonPrimitive?.contentOrNull ?: "",
+            seq = event.seq,
+        )
+
+        StreamEventType.THOUGHT_DELTA -> InferenceEvent.ThoughtDelta(
             text = event.payload["text"]?.jsonPrimitive?.contentOrNull ?: "",
             seq = event.seq,
         )

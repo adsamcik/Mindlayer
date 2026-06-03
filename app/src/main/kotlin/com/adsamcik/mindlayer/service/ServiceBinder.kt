@@ -280,6 +280,13 @@ class ServiceBinder(
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TOKEN_BATCH,
+            // v1.1: Gemma 4 thinking mode — extraContextJson.thinking
+            // opt-in routes the model's <|channel>thought ... <channel|>
+            // block through StreamProtocol.V3 thought_delta frames so
+            // SDK callers can render reasoning separately from the
+            // user-visible answer. See SessionManager.parseThinkingOptIn
+            // and ServiceCapabilities.FEATURE_THINKING_MODE.
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_THINKING_MODE,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_EVICTION_CALLBACK,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DEFERRED_INFERENCE,
             // Phase 2 #6: ZXing barcode anchor injected into the OCR
@@ -300,6 +307,15 @@ class ServiceBinder(
             // gate and charges zero rate-limit cost; co-signed peers in
             // pending-approval can use it for liveness probes.
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_HEALTH_CHECK,
+            // Single-clip audio input. The transport (FEATURE_SHARED_MEMORY_MEDIA)
+            // and the multi-attachment shape (FEATURE_MEDIA_LIST) are
+            // already advertised above; FEATURE_AUDIO_INPUT specifically
+            // tells SDK callers the engine consumes the audio modality
+            // and respects the Gemma audio contract (≤30 s per clip,
+            // 25 tok/s budget). Multi-audio remains rejected by
+            // IpcInputValidator until the engine path lands — see
+            // docs/AUDIO.md for the supported / not-yet-supported split.
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_AUDIO_INPUT,
         )
 
         /** Allowed characters for caller-supplied identifiers (sessionId/requestId). */

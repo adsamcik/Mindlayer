@@ -5,6 +5,8 @@ import com.adsamcik.mindlayer.shared.StreamEventType
 import com.adsamcik.mindlayer.shared.StreamHeader
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -48,7 +50,7 @@ class TokenStreamReaderProtocolTest {
             wireFrame(json.encodeToString(StreamEvent.serializer(), doneEvent("r1"))),
         )
         val pfd = pfdFor(frames)
-        val events = TokenStreamReader.readStream(pfd).toList()
+        val events = TokenStreamReader.readStream(pfd, UnconfinedTestDispatcher()).toList()
 
         assertTrue(
             "expected Started + Done, got $events",
@@ -60,20 +62,22 @@ class TokenStreamReaderProtocolTest {
 
     @Test
     fun `unexpected pipe protocol yields PROTOCOL_MISMATCH error frame`() = runTest {
-        // v3 is not in StreamProtocol.SUPPORTED, so the reader rejects it.
-        val futureHeader = StreamHeader(protocol = "mindlayer.stream.v3", requestId = "r1")
+        // v4 is not in StreamProtocol.SUPPORTED, so the reader rejects it.
+        // (v3 became a supported protocol when Gemma 4 thinking-mode
+        // support landed — see docs/THINKING.md.)
+        val futureHeader = StreamHeader(protocol = "mindlayer.stream.v4", requestId = "r1")
         val frames = listOf(
             wireFrame(json.encodeToString(StreamHeader.serializer(), futureHeader)),
         )
         val pfd = pfdFor(frames)
 
-        val first = TokenStreamReader.readStream(pfd).first()
+        val first = TokenStreamReader.readStream(pfd, UnconfinedTestDispatcher()).first()
         assertTrue("expected Error, got $first", first is InferenceEvent.Error)
         val err = first as InferenceEvent.Error
         assertEquals("PROTOCOL_MISMATCH", err.code)
         assertTrue(
             "message should mention the unsupported protocol, got '${err.message}'",
-            err.message.contains("mindlayer.stream.v3"),
+            err.message.contains("mindlayer.stream.v4"),
         )
     }
 
@@ -86,7 +90,7 @@ class TokenStreamReaderProtocolTest {
             wireFrame(json.encodeToString(StreamEvent.serializer(), doneEvent("r2"))),
         )
         val pfd = pfdFor(frames)
-        val events = TokenStreamReader.readStream(pfd).toList()
+        val events = TokenStreamReader.readStream(pfd, UnconfinedTestDispatcher()).toList()
 
         assertTrue(
             "expected Started + Done on v2, got $events",

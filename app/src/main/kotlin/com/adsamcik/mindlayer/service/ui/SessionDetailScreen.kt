@@ -76,7 +76,7 @@ data class SessionEventItem(
 )
 
 @Composable
-private fun categoryColor(category: String): Color = when (category.uppercase()) {
+private fun eventCategoryColor(category: String): Color = when (category.uppercase()) {
     "INFERENCE" -> MaterialTheme.colorScheme.primary
     "THERMAL"   -> MaterialTheme.colorScheme.tertiary
     "SESSION"   -> MaterialTheme.colorScheme.secondary
@@ -272,7 +272,7 @@ private fun SummaryCard(state: SessionDetailUiState) {
 
 @Composable
 private fun EventRow(event: SessionEventItem) {
-    val catColor = categoryColor(event.category)
+    val catColor = eventCategoryColor(event.category)
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(

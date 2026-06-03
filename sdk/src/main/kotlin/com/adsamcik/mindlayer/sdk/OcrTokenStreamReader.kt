@@ -5,6 +5,7 @@ import com.adsamcik.mindlayer.shared.StreamEvent
 import com.adsamcik.mindlayer.shared.StreamEventType
 import com.adsamcik.mindlayer.shared.StreamHeader
 import com.adsamcik.mindlayer.shared.StreamProtocol
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -62,8 +63,21 @@ object OcrTokenStreamReader {
      * Header / unknown / malformed frames produce no emission. ``DONE``
      * cleanly terminates the stream. ``ERROR`` emits [OcrEvent.Error] and
      * then fails the flow with [MindlayerException].
+     *
+     * @param readEnd the read end of the framed pipe to drain.
+     * @param dispatcher upstream dispatcher for the blocking pipe reads.
+     *   Defaults to [Dispatchers.IO] for production; tests inject an
+     *   `UnconfinedTestDispatcher` so the emit + terminal-throw sequence
+     *   runs synchronously on the collector's thread — without this,
+     *   real-thread scheduling under CI load lets the closed-with-error
+     *   channel state race past Turbine's `awaitItem()` poll, surfacing
+     *   the MindlayerException before the OcrEvent.Error item the
+     *   producer emitted just before it.
      */
-    fun readStream(readEnd: ParcelFileDescriptor): Flow<OcrEvent> = flow {
+    fun readStream(
+        readEnd: ParcelFileDescriptor,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    ): Flow<OcrEvent> = flow {
         val input = DataInputStream(
             BufferedInputStream(
                 ParcelFileDescriptor.AutoCloseInputStream(readEnd),
@@ -105,7 +119,7 @@ object OcrTokenStreamReader {
                 // best-effort
             }
         }
-    }.flowOn(Dispatchers.IO)
+    }.flowOn(dispatcher)
 
     /**
      * Parse a single frame payload. Returns:

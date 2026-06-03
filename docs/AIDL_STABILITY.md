@@ -142,6 +142,7 @@ Stable feature-flag strings allocated:
 | `"typed_diagnostics"` | `getDiagnosticsTyped()` returns a typed snapshot. |
 | `"eviction_callback"` | `subscribeEvictionNotices(...)` is implemented. |
 | `"token_batch"` | Pipe emits `mindlayer.stream.v2` with `TOKEN_DELTA_BATCH`. |
+| `"thinking_mode"` | Gemma 4 thinking-mode opt-in is honoured: pipe negotiates `mindlayer.stream.v3` and emits `THOUGHT_DELTA` / `THOUGHT_DELTA_BATCH` for sessions created with `extraContextJson.thinking = { "enable": true }`. See [`docs/THINKING.md`](THINKING.md). |
 | `"deferred_inference"` | Durable deferred inference with fetch, cancel, acknowledge, and completion callback. |
 | `"embeddings"` | Text embeddings are available across inline, batch, SharedMemory, and deferred batch endpoints. |
 | `"ocr_session"` | Multi-frame OCR session API (`create/push/stream/finalize/close/state/limits`) is callable. |
@@ -220,3 +221,29 @@ parcelable with schemaVersion, server timestamp, uptime, apiVersion, and
 per-engine state. Old SDKs must gate on the capability or catch
 `NoSuchMethodError` / `AbstractMethodError` and fall back to `getStatus()` or
 Binder liveness checks.
+
+## Audio surface (v1.0)
+
+Capability flag: `ServiceCapabilities.FEATURE_AUDIO_INPUT` (`"audio_input"`).
+Advertises that the engine consumes single-clip audio attachments via
+`infer(...)` / `inferMulti(...)` with one `MediaPart` of kind `KIND_AUDIO`
+(or the legacy `AudioTransfer`). The contract is documented in
+[`docs/AUDIO.md`](AUDIO.md) and the per-clip cap lives on
+`com.adsamcik.mindlayer.GemmaAudioSpec.MAX_DURATION_MS` (30 s today).
+
+No new AIDL methods or parcelables — the surface piggybacks on existing
+`infer` / `inferMulti` / `AudioTransfer` / `MediaPart.KIND_AUDIO`. The
+flag is a pure capability signal so SDKs can fail fast against services
+that haven't loaded an audio-capable engine.
+
+`IpcInputValidator.validateAudioTransfer` and `validateAudioPart`
+tightened the `durationMs` cap from 60 minutes to
+`GemmaAudioSpec.MAX_DURATION_MS` (30 s). Callers who relied on the
+larger window must chunk their audio — Gemma 4 silently truncates above
+30 s, so the previous behaviour was undefined anyway.
+
+Multi-audio prompts (the upstream Google docs page demonstrates them
+for the journal1…5 example) remain rejected by the validator
+(`audioCount > 1`). The capability flag is **single-clip only**; do
+not infer multi-clip support from its presence.
+

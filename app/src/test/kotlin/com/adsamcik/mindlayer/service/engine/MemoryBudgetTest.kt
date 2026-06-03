@@ -56,69 +56,69 @@ class MemoryBudgetTest {
     // ---- DeviceTier construction -------------------------------------------
 
     @Test
-    fun `DeviceTier for 4GB device - 1 session, 2048 tokens`() {
+    fun `DeviceTier for 4GB device - 1 session, 32k max`() {
         val tier = DeviceTier(
             maxSessions = 1,
-            defaultMaxTokens = 2048,
-            maxMaxTokens = 2048,
+            defaultMaxTokens = 8_192,
+            maxMaxTokens = 32_768,
             deviceRamMb = 4 * 1024L,
         )
         assertEquals(1, tier.maxSessions)
-        assertEquals(2048, tier.defaultMaxTokens)
-        assertEquals(2048, tier.maxMaxTokens)
+        assertEquals(8_192, tier.defaultMaxTokens)
+        assertEquals(32_768, tier.maxMaxTokens)
     }
 
     @Test
-    fun `DeviceTier for 6GB device - 1 session, 2048 tokens`() {
+    fun `DeviceTier for 6GB device - 1 session, 64k max`() {
         val tier = DeviceTier(
             maxSessions = 1,
-            defaultMaxTokens = 2048,
-            maxMaxTokens = 2048,
+            defaultMaxTokens = 16_384,
+            maxMaxTokens = 65_536,
             deviceRamMb = 6 * 1024L,
         )
         assertEquals(1, tier.maxSessions)
-        assertEquals(2048, tier.defaultMaxTokens)
-        assertEquals(2048, tier.maxMaxTokens)
+        assertEquals(16_384, tier.defaultMaxTokens)
+        assertEquals(65_536, tier.maxMaxTokens)
         assertEquals(6 * 1024L, tier.deviceRamMb)
     }
 
     @Test
-    fun `DeviceTier for 8GB device - 2 sessions, 4096 default, 8192 max`() {
+    fun `DeviceTier for 8GB device - 1 session, 128k max`() {
         val tier = DeviceTier(
-            maxSessions = 2,
-            defaultMaxTokens = 4096,
-            maxMaxTokens = 8192,
+            maxSessions = 1,
+            defaultMaxTokens = 32_768,
+            maxMaxTokens = 131_072,
             deviceRamMb = 8 * 1024L,
         )
-        assertEquals(2, tier.maxSessions)
-        assertEquals(4096, tier.defaultMaxTokens)
-        assertEquals(8192, tier.maxMaxTokens)
+        assertEquals(1, tier.maxSessions)
+        assertEquals(32_768, tier.defaultMaxTokens)
+        assertEquals(131_072, tier.maxMaxTokens)
     }
 
     @Test
-    fun `DeviceTier for 12GB device - 4 sessions, 8192 default, 16384 max`() {
+    fun `DeviceTier for 12GB device - 1 session, 64k default, 128k max`() {
         val tier = DeviceTier(
-            maxSessions = 4,
-            defaultMaxTokens = 8192,
-            maxMaxTokens = 16384,
+            maxSessions = 1,
+            defaultMaxTokens = 65_536,
+            maxMaxTokens = 131_072,
             deviceRamMb = 12 * 1024L,
         )
-        assertEquals(4, tier.maxSessions)
-        assertEquals(8192, tier.defaultMaxTokens)
-        assertEquals(16384, tier.maxMaxTokens)
+        assertEquals(1, tier.maxSessions)
+        assertEquals(65_536, tier.defaultMaxTokens)
+        assertEquals(131_072, tier.maxMaxTokens)
     }
 
     @Test
-    fun `DeviceTier for 16GB+ device - 6 sessions, 16384 default, 32768 max`() {
+    fun `DeviceTier for 16GB+ device - 1 session, 128k default and max`() {
         val tier = DeviceTier(
-            maxSessions = 6,
-            defaultMaxTokens = 16384,
-            maxMaxTokens = 32768,
+            maxSessions = 1,
+            defaultMaxTokens = 131_072,
+            maxMaxTokens = 131_072,
             deviceRamMb = 16 * 1024L,
         )
-        assertEquals(6, tier.maxSessions)
-        assertEquals(16384, tier.defaultMaxTokens)
-        assertEquals(32768, tier.maxMaxTokens)
+        assertEquals(1, tier.maxSessions)
+        assertEquals(131_072, tier.defaultMaxTokens)
+        assertEquals(131_072, tier.maxMaxTokens)
     }
 
     @Test
@@ -247,30 +247,60 @@ class MemoryBudgetTest {
     fun `tier boundaries cover all expected RAM sizes`() {
         // Verify we have tiers for the full range
         val tiers = listOf(
-            DeviceTier(1, 2048, 2048, 4 * 1024L),   // ≤6GB
-            DeviceTier(2, 4096, 8192, 8 * 1024L),   // ≤8GB
-            DeviceTier(4, 8192, 16384, 12 * 1024L),  // ≤12GB
-            DeviceTier(6, 16384, 32768, 16 * 1024L), // >12GB
+            DeviceTier(1, 8_192, 32_768, 4 * 1024L),    // ≤4GB
+            DeviceTier(1, 16_384, 65_536, 6 * 1024L),   // ≤6GB
+            DeviceTier(1, 32_768, 131_072, 8 * 1024L),  // ≤8GB
+            DeviceTier(1, 65_536, 131_072, 12 * 1024L), // ≤12GB
+            DeviceTier(1, 131_072, 131_072, 16 * 1024L), // >12GB
         )
-        assertEquals(4, tiers.size)
-        // Sessions increase with RAM
+        assertEquals(5, tiers.size)
+        // maxSessions pinned at 1 across all tiers — see DeviceTier KDoc.
+        for (t in tiers) {
+            assertEquals(
+                "maxSessions must be 1 (LiteRT-LM one-Conversation-per-Engine)",
+                1,
+                t.maxSessions,
+            )
+        }
+        // defaultMaxTokens monotonically non-decreasing with RAM
         for (i in 0 until tiers.size - 1) {
-            assertTrue(tiers[i].maxSessions <= tiers[i + 1].maxSessions)
+            assertTrue(
+                "defaultMaxTokens non-decreasing across tiers",
+                tiers[i].defaultMaxTokens <= tiers[i + 1].defaultMaxTokens,
+            )
         }
     }
 
     @Test
     fun `maxMaxTokens is always at least defaultMaxTokens`() {
         val tiers = listOf(
-            DeviceTier(1, 2048, 2048, 6 * 1024L),
-            DeviceTier(2, 4096, 8192, 8 * 1024L),
-            DeviceTier(4, 8192, 16384, 12 * 1024L),
-            DeviceTier(6, 16384, 32768, 16 * 1024L),
+            DeviceTier(1, 8_192, 32_768, 4 * 1024L),
+            DeviceTier(1, 16_384, 65_536, 6 * 1024L),
+            DeviceTier(1, 32_768, 131_072, 8 * 1024L),
+            DeviceTier(1, 65_536, 131_072, 12 * 1024L),
+            DeviceTier(1, 131_072, 131_072, 16 * 1024L),
         )
         for (tier in tiers) {
             assertTrue(
                 "maxMaxTokens (${tier.maxMaxTokens}) >= defaultMaxTokens (${tier.defaultMaxTokens})",
                 tier.maxMaxTokens >= tier.defaultMaxTokens,
+            )
+        }
+    }
+
+    @Test
+    fun `maxMaxTokens never exceeds Gemma 4 E2B model max of 131072`() {
+        val tiers = listOf(
+            DeviceTier(1, 8_192, 32_768, 4 * 1024L),
+            DeviceTier(1, 16_384, 65_536, 6 * 1024L),
+            DeviceTier(1, 32_768, 131_072, 8 * 1024L),
+            DeviceTier(1, 65_536, 131_072, 12 * 1024L),
+            DeviceTier(1, 131_072, 131_072, 16 * 1024L),
+        )
+        for (tier in tiers) {
+            assertTrue(
+                "maxMaxTokens (${tier.maxMaxTokens}) must not exceed model max 131_072",
+                tier.maxMaxTokens <= 131_072,
             )
         }
     }

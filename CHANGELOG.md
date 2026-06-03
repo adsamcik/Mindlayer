@@ -28,11 +28,80 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 ## [Unreleased]
 
 ### Added
+- **`scripts/dev-install.{ps1,sh}`** — one-shot wrapper that builds
+  a code-only debug APK (AI Asset Packs excluded), `adb install -r`s
+  it (preserving `externalFilesDir`), and pushes only the missing
+  model files via the existing `tools/dev-models/push-models.{ps1,sh}`.
+  Replaces the manual three-step loop that several agents and devs
+  kept getting wrong — see the "On-device install + AI Pack delivery"
+  section in `.github/copilot-instructions.md` for the forbidden
+  moves it prevents (`adb install -r app-debug.apk` without a model
+  push, `adb uninstall` wiping ~3 GB of pushed models, etc.).
+
+  - `push-models.{ps1,sh}` now skip already-pushed files when the
+    remote size matches the local cache; pass `--force` / `-Force`
+    to override. The default behaviour saves the ~30-second Gemma
+    re-push on every iteration.
+
+- **Gemma 4 audio contract surfaced.** New `GemmaAudioSpec` in `:shared`
+  documents the audio frontend constants (16 kHz mono float32, 32 ms
+  frames, 30 s per-clip cap, 25 tok/s budget) sourced directly from
+  Google's [Gemma audio capabilities page](https://ai.google.dev/gemma/docs/capabilities/audio).
+  Cross-references in `app/.../engine/ContextBudget.kt` now forward to
+  the shared constants so token math has one source of truth.
+- **Canonical ASR helper.** `Mindlayer.transcribe(audio, language)`
+  (no caller-supplied prompt) uses Google's recommended ASR prompt
+  via the new `com.adsamcik.mindlayer.sdk.GemmaAudioPrompts` builder.
+  Existing `transcribe(prompt, audio)` is unchanged for callers who
+  want general-purpose audio understanding.
+- **`FEATURE_AUDIO_INPUT` capability flag** (`"audio_input"`)
+  advertised by `MindlayerMlService`. SDKs can probe it via
+  `ServiceCapabilities.supports(FEATURE_AUDIO_INPUT)` before issuing
+  audio inferences. Documented in `docs/AIDL_STABILITY.md` and
+  `docs/AUDIO.md`.
+- **`docs/AUDIO.md`** — single-page reference for the audio surface:
+  supported MIME types, limits, quick-start code, and the explicit
+  "not yet supported" list (multi-audio prompts, ≥30 s clips,
+  specialized translation helper).
+- **Gemma 4 thinking mode** — opt-in surface that exposes the model's
+  internal reasoning trace alongside the user-visible answer. See
+  [docs/THINKING.md](docs/THINKING.md) for the full architecture and
+  usage guide.
+
+  - **SDK:** new `enableThinking()` builder hook on both
+    `ConversationBuilder` (high-level DSL) and `SessionConfigBuilder`
+    (low-level), new `InferenceEvent.ThoughtDelta` sealed subtype, new
+    Flow operators `thoughtDeltas()` and `answerOnly()`.
+  - **Service:** when `extraContextJson.thinking = { "enable": true }`,
+    the LiteRT-LM `ConversationConfig` is built with a `thought`
+    channel and the Gemma `<|think|>` system marker is prepended. The
+    pipe negotiates `mindlayer.stream.v3` so the reader can decode the
+    new `THOUGHT_DELTA` / `THOUGHT_DELTA_BATCH` events.
+  - **Capability:** advertised via the new
+    `ServiceCapabilities.FEATURE_THINKING_MODE` flag. Old SDKs / old
+    services silently degrade — the opt-in JSON is ignored and the
+    stream stays on v1/v2 without any thought events emitted.
+  - **Multi-turn:** thoughts are routed away from the user-visible
+    answer at the LiteRT-LM channel level and never enter the SDK's
+    history database. They DO currently remain in the model's KV
+    cache across user turns (LiteRT-LM 0.12.0 default) — see the
+    "KV-cache caveat" in [docs/THINKING.md](docs/THINKING.md) for the
+    follow-up plan; callers with long thinking-enabled conversations
+    should recycle sessions to keep the working context fresh.
 - **`docs/ROADMAP.md`** — single source of truth for outstanding work
   across Phases 6-8 (device-gated `IS_PRODUCTION_READY` flip criteria,
   real model artifact pipeline, ICDAR2015 numeric validation harness,
   Phase 7 product polish backlog, Phase 8 speculative items).
   Cross-linked from `README.md`.
+
+### Changed
+- **`IpcInputValidator` audio duration cap tightened** from 60 minutes
+  to `GemmaAudioSpec.MAX_DURATION_MS` (30 s) — matches Gemma 4's
+  documented per-clip maximum. Applies to both
+  `validateAudioTransfer(AudioTransfer)` and the multi-part
+  `validateAudioPart(MediaPart)` path. Callers with longer recordings
+  must chunk client-side; the engine would have silently truncated
+  above 30 s anyway.
 
 ### Fixed
 - **`MediaTransfer` SharedMemory path on targetSdk 30+** — `fromBitmap` /

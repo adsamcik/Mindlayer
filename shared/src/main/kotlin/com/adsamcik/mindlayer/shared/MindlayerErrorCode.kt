@@ -58,6 +58,20 @@ object MindlayerErrorCode {
     /** Engine init failed inside the native runtime. */
     const val NATIVE_ERROR = 1006
 
+    /**
+     * The engine's single native session slot is held by another session
+     * that is currently processing an inference. Caller should retry after
+     * the `retryAfterMs` hint (typically ~500 ms — see
+     * [com.adsamcik.mindlayer.service.engine.WarmConversationSlot.ENGINE_BUSY_RETRY_MS]).
+     *
+     * LiteRT-LM 0.12.0 enforces "one Conversation per Engine at a time" at
+     * the JNI layer. When the client tries to `createSession(B)` while
+     * session A is mid-stream, the service cannot safely close A's
+     * Conversation underneath the active stream — the alternative would
+     * corrupt the native KV cache.
+     */
+    const val ENGINE_BUSY = 1007
+
     // ---- 2xxx session lifecycle --------------------------------------------
     /**
      * Session does not exist OR exists but is not owned by the caller.

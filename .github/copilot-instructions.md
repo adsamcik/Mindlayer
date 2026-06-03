@@ -35,6 +35,9 @@ Android service app (`com.adsamcik.mindlayer.service`) that loads a single LLM (
 | Keep `:app` + `:sdk` manifests free of `android.permission.INTERNET` | Add network permissions, Play Services deps, telemetry SDKs, or cloud fallback paths |
 | Use Apache-2.0 / MIT / BSD-3-licensed on-device runtimes (PaddleOCR models, LiteRT, LiteRT-LM, ZXing) | Adopt closed-source SDKs whose terms allow vendor telemetry (e.g. ML Kit) |
 | Use LiteRT (already in repo at `libs.litert`) as the single on-device inference runtime | Add a second inference runtime (e.g. ONNX Runtime Android, Paddle Lite) that competes with LiteRT for CPU / GPU / memory in the Mindlayer process |
+| Install on device with `scripts/dev-install.{ps1,sh}` (builds code-only APK, preserves on-device models) | `adb install -r app-debug.apk` blindly (debug APK does **not** bundle the AI packs; you'll get `MLERR:1003:Model file missing` at runtime) or `adb uninstall …mindlayer.service.debug` (wipes the ~3 GB of pushed models in externalFilesDir — re-pushing takes minutes) |
+| For instrumented tests against a shared dev emulator with sideloaded models, install the test APK alone with `adb install -r …app-debug-androidTest.apk` and invoke it via `adb shell am instrument -w -e class <fqn> <test-pkg>/androidx.test.runner.AndroidJUnitRunner` | Run `./gradlew :app:connectedDebugAndroidTest` (or any task that triggers AGP's install→test→uninstall cycle) against a shared dev emulator with sideloaded models. The post-test uninstall wipes the service's `files/` dir along with the ~2-3 GB `*.litertlm` model in `/sdcard/Android/data/com.adsamcik.mindlayer.service*/files/`, costing another `tools/dev-models/push-models.ps1` cycle to restore. **CI is the only safe place for `connectedAndroidTest`** because CI AVDs are throw-away. |
+| Hold an `android-emulator-mcp` claim (via `android_claim_device`) for the entire window you touch the shared dev emulator — including read-only probes (`adb shell pm list`, `adb shell ls`, screenshots, logcat reads) | Run **any** `adb`/`MCP-android` command against a shared dev emulator without first holding (or refreshing) a valid claim. Even reads race the other agent's in-flight UI manipulation / install / model push and can corrupt their results. If the device is claimed by another agent, wait for the claim to release via `android_await_device` or coordinate with the user — never bypass MCP to "just peek" |
 
 ## Privacy / offline / security — product invariants
 
@@ -87,6 +90,50 @@ The PR template asks for explicit confirmation that AIDL changes are mirrored. D
 ```
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ```
+
+## On-device install + AI Pack delivery — read this before touching adb
+
+The three AI models (`gemma-4-E2B-it.litertlm` ~2.4 GB, EmbeddingGemma ~250 MB, PaddleOCR PP-OCRv5 ~12 MB) are **deliberately not in `:app`**. They ship to end-users as Play [install-time AI Asset Packs](https://developer.android.com/google/play/on-device-ai/asset-delivery) (`:gemma_model`, `:gemma_embed_model`, `:paddleocr_model`), and to devs via a sideload script. **Don't try to bundle them into the debug APK** — the AAB-only delivery is the design.
+
+Concretely this means:
+
+- `./gradlew :app:assembleDebug` produces a ~75 MB code-only APK with **no model assets**. Installing that APK on a fresh device and running an inference returns `MLERR:1003:Model file missing`.
+- Models live on device under `/sdcard/Android/data/com.adsamcik.mindlayer.service{,.debug}/files/` (the service's `externalFilesDir`). The runtime registries scan it on debuggable builds via `Origin.EXTERNAL_FILES`.
+- `adb install -r app-debug.apk` **does** preserve `externalFilesDir`.
+- `adb uninstall com.adsamcik.mindlayer.service.debug` **wipes** `externalFilesDir` along with the APK. Re-pushing the 2.4 GB Gemma model is 30+ seconds on USB-3 and several minutes over an emulator's qemu pipe. **Don't do this casually.**
+- The dashboard's "Chat (LLM) → Run Test" button is the quickest on-device confirmation that the model is present and the engine loads — it fails fast with a clear status string when models are missing.
+
+### Canonical dev install loop
+
+Use the wrapper. It builds the code-only APK, `adb install -r`'s it, and pushes only the missing model files (size-checked):
+
+```powershell
+# Windows PowerShell
+$env:MINDLAYER_MODEL_CACHE = 'D:\mindlayer-models'   # one-time per machine
+.\scripts\dev-install.ps1                            # full loop
+.\scripts\dev-install.ps1 -SkipBuild -SkipInstall    # just (re-)push models
+.\scripts\dev-install.ps1 -DryRun                    # preview without touching adb
+```
+
+```bash
+# macOS / Linux
+export MINDLAYER_MODEL_CACHE=/data/mindlayer-models
+./scripts/dev-install.sh
+./scripts/dev-install.sh --skip-build --skip-install
+./scripts/dev-install.sh --dry-run
+```
+
+For direct model pushes (skipping the build+install phases), use the underlying `tools/dev-models/push-models.{ps1,sh}` script — see `docs/DEV_MODELS.md` for cache layout, where to source the raw model files, and the `/data/local/tmp/` fallback.
+
+### Forbidden moves (you will lose model bytes)
+
+- `adb install -r app-debug.apk` **without** previously running `dev-install` → model-less install, every inference fails.
+- `adb uninstall com.adsamcik.mindlayer.service.debug` → wipes 2.4 GB. Re-pushing is slow. If you need a clean slate, `adb shell pm clear` keeps externalFilesDir and is much cheaper.
+- Hand-rolling a 4 GB `assembleDebug` that bundles all three packs to "make it just work" → release CI then takes 30 minutes to bundle and the dev iteration loop is destroyed for everyone else.
+
+### When models are missing on a CI / fresh emulator
+
+The `:app:androidTest` job in `.github/workflows/ci.yml` provisions the PaddleOCR pack via `${{ secrets.PADDLEOCR_MODELS_ARCHIVE_B64 }}`. Tests that need Gemma or EmbeddingGemma on hardware skip with `assumeTrue` (or fail loudly with `MLERR:1003`) — wrap any new on-device test that depends on real models the same way so the suite stays green on a model-less runner.
 
 ## Worktree + PR workflow
 

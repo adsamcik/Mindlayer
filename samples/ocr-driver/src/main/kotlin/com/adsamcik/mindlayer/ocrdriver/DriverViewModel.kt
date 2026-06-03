@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.time.Duration
 
 /**
  * Single owner of every Mindlayer SDK call the driver makes. Each tab
@@ -44,7 +45,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             _ui.update { it.copy(connection = it.connection.copy(error = null), globalError = null) }
             val client = try {
                 val c = Mindlayer.connect(getApplication())
-                c.awaitConnected()
+                c.awaitConnected(Duration.INFINITE)
                 c
             } catch (t: Throwable) {
                 _ui.update {
@@ -156,6 +157,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     // ── Inference (Gemma) ───────────────────────────────────────────────
 
+    @Suppress("DEPRECATION")
     fun runInference(prompt: String, maxTokens: Int, temperature: Float) {
         val client = mindlayer ?: return
         if (prompt.isBlank()) return
@@ -245,8 +247,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             }
             val started = System.nanoTime()
             try {
-                @Suppress("DEPRECATION")
-                val vec = client.embedOne(text)
+                val vec = client.vector(text)
                 val l2 = kotlin.math.sqrt(vec.fold(0.0) { acc, v -> acc + v.toDouble() * v }).toFloat()
                 val firstFew = vec.take(8).joinToString { "%.4f".format(it) }
                 val durationMs = (System.nanoTime() - started) / 1_000_000L
@@ -267,7 +268,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     it.copy(
                         embeddings = it.embeddings.copy(
                             inProgress = false,
-                            error = "embedOne: ${t.javaClass.simpleName}: ${t.message?.take(180)}",
+                            error = "vector: ${t.javaClass.simpleName}: ${t.message?.take(180)}",
                         ),
                     )
                 }
@@ -277,6 +278,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     // ── OCR (single image / async) ──────────────────────────────────────
 
+    @Suppress("DEPRECATION")
     fun runOcrAsync(fixtureName: String, runLlm: Boolean, emitBoundingBoxes: Boolean) {
         val client = mindlayer ?: return
         viewModelScope.launch {
@@ -427,7 +429,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 android.util.Log.i("OcrDriverAuto", "Auto-run: connecting…")
                 val client = Mindlayer.connect(getApplication())
                 mindlayer = client
-                client.awaitConnected()
+                client.awaitConnected(Duration.INFINITE)
                 val caps = client.getCapabilities().supportedFeatures
                 android.util.Log.i(
                     "OcrDriverAuto",

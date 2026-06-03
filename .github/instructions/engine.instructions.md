@@ -22,18 +22,28 @@ EngineConfig → Engine(config) → engine.initialize()
 ## Sessions
 
 - One `SessionHandle` per `IMindlayerService.createSession`. Each holds a `Mutex` — sends are single-writer per session, parallel across sessions.
-- Session count and `maxNumTokens` cap come from `MemoryBudget.deviceTier`:
+- **LiteRT-LM 0.12.0 enforces "at most one Conversation per Engine at a time"** at the JNI layer. The second `engine.createConversation(...)` against the same Engine without an intervening `Conversation.close()` throws `LiteRtLmJniException(Failed to create conversation: FAILED_PRECONDITION: A session already exists. Only one session is supported at a time.)`. This is empirically verified — see the spike in `KvCacheMemoryBenchmarkInstrumentedTest` (phase = `spike_close_create`) and the analysis writeup.
+- `WarmConversationSlot` tracks the engine's single native slot. Wire-level error `MindlayerErrorCode.ENGINE_BUSY` (1007) signals a client tried to take the slot while another session was mid-stream; the client should retry after the `retryAfterMs` hint (~500 ms).
+- Session count and `maxNumTokens` cap come from `MemoryBudget.deviceTier` (see `docs/MEMORY_TIERS_EMPIRICS.md` for the empirical derivation):
 
-  | RAM | Sessions | Default tokens | Max tokens |
+  | totalMem | maxSessions | Default tokens | Max tokens |
   |---|---|---|---|
-  | ≤6 GB | 1 | 2 048 | 2 048 |
-  | ≤8 GB | 2 | 4 096 | 4 096 |
-  | ≤12 GB | 4 | 8 192 | 16 384 |
-  | >12 GB | 6 | 16 384 | 32 768 |
+  | ≤ 4 GB  | 1 | 8 192   | 32 768  |
+  | ≤ 6 GB  | 1 | 16 384  | 65 536  |
+  | ≤ 8 GB  | 1 | 32 768  | 131 072 |
+  | ≤ 12 GB | 1 | 65 536  | 131 072 |
+  | > 12 GB | 1 | 131 072 | 131 072 |
 
-- `maxNumTokens` is the **KV cache budget** — input tokens + output tokens combined.
-- Eviction priority: `streaming +1000`, `pinned +400`, accessed `<30 s +300` / `<120 s +150`, client hint `0–100`. Lowest priority is dropped first under memory pressure.
+- **`maxSessions = 1` across every tier** today — reflects the LiteRT-LM native invariant above. A follow-up PR will wire `WarmConversationSlot` into `SessionManager.createSession` to enable transparent hot-swap and lift this cap.
+- `maxNumTokens` is the **KV cache budget** — input tokens + output tokens combined. Measured cost: 9 208 bytes per configured token (LiteRT-LM 0.12.0, Gemma 4 E2B).
+- Per-session conversation history is recorded in `SessionHandle.recordedTurns` (token-budget capped at `effectiveMaxTokens × 0.5`, floor 256). Used by the hot-swap path to seed a fresh `Conversation` with the prior context.
+- Eviction priority: `streaming +1000`, `pinned +400`, accessed `<30 s +300` / `<120 s +150`, client hint `0–100`. Lowest priority is dropped first under memory pressure. Policy lives in `EvictionPolicy`.
 - Always tag a session with its `ownerToken` (the caller's `CallerIdentity`) so binder-death tears it down via `closeAllOwnedBy(token)`.
+
+## Engine cache directory
+
+- `context.cacheDir/litert_cache` is **wiped on every `EngineManager.initialize`** call. A failed init can leave a partially-written compiled-model cache that poisons subsequent inits with the misleading `NOT_FOUND: TF_LITE_PREFILL_DECODE` error — discovered during the Phase-0 spike.
+- Cost: one extra model compilation per cold start. Hot starts within the same process are unaffected (the wipe only runs at `initialize` time, not per inference).
 
 ## Inference orchestration
 

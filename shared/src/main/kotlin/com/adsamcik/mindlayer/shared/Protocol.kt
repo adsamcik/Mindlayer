@@ -27,12 +27,55 @@ object StreamEventType {
      * Saves wire bytes; documented as the contract for batched streams.
      *
      * Only emitted on streams whose [StreamHeader.protocol] is
-     * `mindlayer.stream.v2`. v1 streams must NEVER carry this event type
-     * (old readers see it as `InferenceEvent.Unknown` and silently drop
-     * the contained text — that's the only place silent text loss is
-     * possible, and the v1/v2 split prevents it).
+     * `mindlayer.stream.v2` or `mindlayer.stream.v3`. v1 streams must
+     * NEVER carry this event type (old readers see it as
+     * `InferenceEvent.Unknown` and silently drop the contained text —
+     * that's the only place silent text loss is possible, and the
+     * v1/v2 split prevents it).
      */
     const val TOKEN_DELTA_BATCH = "token_delta_batch"
+
+    /**
+     * v1.1 Gemma 4 thinking-mode delta. Carries one fragment of the
+     * model's internal reasoning trace (the content the model produced
+     * inside its `<|channel>thought ... <channel|>` block, surfaced
+     * separately from the user-visible answer).
+     *
+     * Payload contains:
+     *  - `text`: the thought-text fragment.
+     *
+     * **Privacy + separation contract:**
+     *  - Thought events are NEVER written to the SDK history database
+     *    (the service's KV cache also never replays them — LiteRT-LM
+     *    keeps channel content out of stored conversation state).
+     *  - Thought text is NEVER logged at INFO/DEBUG (only token counts
+     *    + delimiter ratios in metrics frames).
+     *  - The service emits THOUGHT_DELTA only when the session was
+     *    created with `extraContextJson.thinking = { "enable": true }`
+     *    AND the negotiated stream protocol is
+     *    [StreamProtocol.V3] — capability-gated via
+     *    [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_THINKING_MODE].
+     *
+     * Old readers parsing a v3 stream that asked for thinking will see
+     * THOUGHT_DELTA as `InferenceEvent.Unknown` and skip the fragment —
+     * matching the documented "answer-only" view that callers get when
+     * they opted out of thoughts at the SDK surface.
+     */
+    const val THOUGHT_DELTA = "thought_delta"
+
+    /**
+     * v1.1 batched thinking-mode delta. Mirrors [TOKEN_DELTA_BATCH] but
+     * for thought fragments emitted inside the model's reasoning channel.
+     * Payload contains:
+     *  - `texts`: JSON array of thought-text fragments in emission order.
+     *
+     * Per-fragment sequence numbers are synthesised by the reader the
+     * same way [TOKEN_DELTA_BATCH] does (envelope `seq` is the last
+     * fragment's seq; earlier fragments count backwards).
+     *
+     * Only emitted on [StreamProtocol.V3] streams.
+     */
+    const val THOUGHT_DELTA_BATCH = "thought_delta_batch"
 
     const val TOOL_CALL = "tool_call"
     const val METRICS = "metrics"
@@ -182,22 +225,37 @@ object StreamProtocol {
     const val V2: String = "mindlayer.stream.v2"
 
     /**
-     * v0.8 OCR-session pipe protocol — sibling of [V1] / [V2], NOT an
-     * extension. Carries the `ocr_*` event types defined alongside
+     * v3 pipe protocol — strict superset of [V2] that ALSO carries
+     * [StreamEventType.THOUGHT_DELTA] and [StreamEventType.THOUGHT_DELTA_BATCH]
+     * for Gemma 4 thinking mode. Negotiated per-stream when the session is
+     * created with `extraContextJson.thinking = { "enable": true }`;
+     * `ServiceCapabilities.FEATURE_THINKING_MODE` advertises that the
+     * service is *capable* of emitting v3 when the caller opts in.
+     *
+     * Token batching from v2 is preserved on v3 — both can coexist on a
+     * single stream (some chunks carry thoughts, others carry answer
+     * tokens, both can be batched).
+     */
+    const val V3: String = "mindlayer.stream.v3"
+
+    /**
+     * v0.8 OCR-session pipe protocol — sibling of [V1] / [V2] / [V3], NOT
+     * an extension. Carries the `ocr_*` event types defined alongside
      * [StreamEventType.OCR_FRAME_RECEIVED] et al., plus the standard
      * terminal [StreamEventType.DONE] / [StreamEventType.ERROR] frames.
      *
-     * **Disjoint from V1/V2**: OCR streams must never carry [StreamEventType.TOKEN_DELTA]
-     * or [StreamEventType.TOKEN_DELTA_BATCH]; token-stream readers must never
-     * see `ocr_*` events. The split keeps `TokenStreamReader` free of OCR
-     * type discrimination and the OCR reader free of token-batching state.
+     * **Disjoint from V1/V2/V3**: OCR streams must never carry [StreamEventType.TOKEN_DELTA],
+     * [StreamEventType.TOKEN_DELTA_BATCH], or [StreamEventType.THOUGHT_DELTA];
+     * chat readers must never see `ocr_*` events. The split keeps
+     * `TokenStreamReader` free of OCR type discrimination and the OCR
+     * reader free of token-batching state.
      *
      * Capability-gated via [ServiceCapabilities.FEATURE_OCR_SESSION].
      */
     const val OCR_V1: String = "mindlayer.stream.ocr.v1"
 
     /** All chat-stream protocols this build of the SDK reader can interpret. */
-    val SUPPORTED: Set<String> = setOf(V1, V2)
+    val SUPPORTED: Set<String> = setOf(V1, V2, V3)
 
     /** All OCR-stream protocols this build of the SDK reader can interpret. */
     val OCR_SUPPORTED: Set<String> = setOf(OCR_V1)

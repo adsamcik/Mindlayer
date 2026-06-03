@@ -30,14 +30,40 @@ enum class MemoryPressure {
 }
 
 /**
- * Static device tier derived from **total** RAM.  Computed once and cached.
+ * Static device tier derived from **total** RAM. Computed once and cached.
  *
- * | RAM       | Sessions | Default tokens | Max tokens |
- * |-----------|----------|----------------|------------|
- * | ≤ 6 GB    | 1        | 2 048          | 2 048      |
- * | ≤ 8 GB    | 2        | 4 096          | 4 096      |
- * | ≤ 12 GB   | 4        | 8 192          | 16 384     |
- * | > 12 GB   | 6        | 16 384         | 32 768     |
+ * Tier table revised in this PR based on empirical KV-cache measurements
+ * of Gemma 4 E2B on LiteRT-LM 0.12.0 — see `docs/MEMORY_TIERS_EMPIRICS.md`
+ * for the methodology and raw data.
+ *
+ * Measured cost per configured token: **9 208 bytes** (R²=0.9990, 95% CI
+ * [8 886, 9 736]). Fixed engine+model footprint: ~474 MiB. Process
+ * baseline: ~127 MiB. Mindlayer steady-state PSS at N configured tokens
+ * is therefore approximated by `127 + 474 + 9.5 × N / 1024` MiB (the 9.5
+ * factor rounds up from measured 9.2 for safety).
+ *
+ * Tier formula:
+ *
+ *   budget_mib  = (totalMem - 700 [foreground app]) × 0.85 [fragmentation]
+ *                 - 256 [LMK runway]
+ *   N_max       = floor(((budget_mib - 256 [peak transient] - 601 [fixed])
+ *                 × 1024) / 9.5)
+ *   maxMaxTokens = N_max capped at 131 072 (Gemma 4 E2B model max)
+ *
+ * **`maxSessions` is 1 across every tier today** — LiteRT-LM 0.12.0
+ * enforces "at most one Conversation per Engine at a time" at the JNI
+ * layer (see `WarmConversationSlot` and the analysis writeup). The
+ * `maxSessions` field reflects the *concurrent native conversation* cap,
+ * not the *open-session* cap. A subsequent PR will wire up hot-swap and
+ * expose a separate `maxOpenSessions` field.
+ *
+ * | totalMem | maxSessions | defaultMaxTokens | maxMaxTokens |
+ * |----------|-------------|------------------|--------------|
+ * | ≤ 4 GB   | 1           | 8 192            | 32 768       |
+ * | ≤ 6 GB   | 1           | 16 384           | 65 536       |
+ * | ≤ 8 GB   | 1           | 32 768           | 131 072      |
+ * | ≤ 12 GB  | 1           | 65 536           | 131 072      |
+ * | > 12 GB  | 1           | 131 072          | 131 072      |
  */
 data class DeviceTier(
     val maxSessions: Int,
@@ -295,11 +321,16 @@ class MemoryBudget(
         am.getMemoryInfo(memInfo)
         val totalMb = memInfo.totalMem / (1024L * 1024L)
 
+        // See DeviceTier KDoc for the empirical derivation. maxSessions is
+        // pinned at 1 across every tier because LiteRT-LM 0.12.0 enforces
+        // one Conversation per Engine. A follow-up PR will lift this when
+        // WarmConversationSlot is wired into createSession.
         return when {
-            totalMb <= 6 * 1024  -> DeviceTier(1,  2048,  2048,  totalMb)
-            totalMb <= 8 * 1024  -> DeviceTier(2,  4096,  8192,  totalMb)
-            totalMb <= 12 * 1024 -> DeviceTier(4,  8192,  16384, totalMb)
-            else                 -> DeviceTier(6, 16384,  32768, totalMb)
+            totalMb <= 4L * 1024L  -> DeviceTier(1, 8192,   32_768,  totalMb)
+            totalMb <= 6L * 1024L  -> DeviceTier(1, 16_384, 65_536,  totalMb)
+            totalMb <= 8L * 1024L  -> DeviceTier(1, 32_768, 131_072, totalMb)
+            totalMb <= 12L * 1024L -> DeviceTier(1, 65_536, 131_072, totalMb)
+            else                   -> DeviceTier(1, 131_072, 131_072, totalMb)
         }
     }
 }

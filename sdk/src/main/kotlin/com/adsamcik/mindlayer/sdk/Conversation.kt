@@ -157,6 +157,9 @@ class Conversation internal constructor(
             topK(config.topK)
             topP(config.topP)
             expirationMs(config.expiration.inWholeMilliseconds)
+            if (config.enableThinking) {
+                enableThinking()
+            }
         }
         sessionId = sid
         sid

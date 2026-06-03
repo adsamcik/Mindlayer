@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.sdk
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
@@ -46,6 +47,31 @@ sealed class InferenceEvent {
      *   not produced from a streamed pipe frame.
      */
     data class TextDelta(val text: String, val seq: Long? = null) : InferenceEvent()
+
+    /**
+     * v1.1: Gemma 4 thinking-mode delta — an incremental chunk of the
+     * model's reasoning trace (text the model produced inside its
+     * `<|channel>thought ... <channel|>` block, surfaced separately
+     * from the user-visible answer).
+     *
+     * Only emitted on sessions created with the SDK's `enableThinking()`
+     * builder hook (or `extraContextJson.thinking = { "enable": true }`
+     * at the AIDL boundary) AND when the connected service advertises
+     * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_THINKING_MODE].
+     * Without that opt-in the model still streams normal [TextDelta]
+     * events; thoughts are simply not separated.
+     *
+     * **Default filtering:** the per-subtype `await*()` terminals
+     * (`awaitFullText`, `awaitFirstResult`, …) discard [ThoughtDelta]
+     * by default, so callers that don't care about reasoning see only
+     * the answer. Callers that DO want to render thoughts can collect
+     * [InferenceHandle.events] directly or pipe through
+     * [thoughtDeltas] / [answerOnly].
+     *
+     * @property seq Wire-stream sequence number; `null` when this event
+     *   was not produced from a streamed pipe frame.
+     */
+    data class ThoughtDelta(val text: String, val seq: Long? = null) : InferenceEvent()
 
     /** The model is requesting a tool invocation. Respond with [Mindlayer.submitToolResult] using [callId]. */
     data class ToolCall(
@@ -99,6 +125,26 @@ sealed interface InferenceResult {
 /** Project the event stream down to just the text deltas. */
 fun Flow<InferenceEvent>.textDeltas(): Flow<String> =
     filterIsInstance<InferenceEvent.TextDelta>().map { it.text }
+
+/**
+ * v1.1: project the event stream down to just the Gemma 4 thinking-mode
+ * fragments (the model's internal reasoning surface, separated from the
+ * user-visible answer). Empty on sessions that did not opt into thinking
+ * mode or on services that don't advertise
+ * [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_THINKING_MODE].
+ */
+fun Flow<InferenceEvent>.thoughtDeltas(): Flow<String> =
+    filterIsInstance<InferenceEvent.ThoughtDelta>().map { it.text }
+
+/**
+ * v1.1: re-emit every event EXCEPT [InferenceEvent.ThoughtDelta]. Use
+ * this when a downstream pipeline (display, persistence, tool dispatch)
+ * should treat the stream as if thinking mode were not enabled — the
+ * model's reasoning is dropped on the floor, only answer tokens,
+ * metrics, tool calls, and terminal events pass through.
+ */
+fun Flow<InferenceEvent>.answerOnly(): Flow<InferenceEvent> =
+    filter { it !is InferenceEvent.ThoughtDelta }
 
 /**
  * Re-emit every event but throw a [MindlayerException] when an
