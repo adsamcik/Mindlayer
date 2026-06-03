@@ -275,4 +275,46 @@
     <string name="allowlist_install_source_unknown">unknown / sideload</string>
     <string name="allowlist_install_source_not_found">unknown (package not found)</string>
     <string name="allowlist_install_source_permission_denied">unknown (permission denied)</string>
+
+    <!-- Bottom navigation tab labels -->
+    <string name="nav_status">Status</string>
+    <string name="nav_models">Models</string>
+    <string name="nav_tests">Tests</string>
+    <string name="nav_a11y_status_tab">Status tab</string>
+    <string name="nav_a11y_models_tab">Models tab</string>
+    <string name="nav_a11y_tests_tab">Tests tab</string>
+
+    <!-- Tests page -->
+    <string name="tests_title">Engine verification</string>
+    <string name="tests_subtitle">Exercise each on-device engine end to end. Tests run in the order shown when you tap Verify all.</string>
+
+    <!-- Models page -->
+    <string name="models_title">Models</string>
+    <string name="models_offline_banner">All models run fully on-device. Nothing leaves your phone.</string>
+    <string name="models_role_chat">Chat &amp; vision</string>
+    <string name="models_role_chat_description">Generates text replies and describes images. Used by the SDK\'s infer and ocrAsync (extraction) paths.</string>
+    <string name="models_role_embeddings">Embeddings</string>
+    <string name="models_role_embeddings_description">Turns text into vectors for semantic search. Used by the SDK\'s embed path.</string>
+    <string name="models_role_ocr">OCR</string>
+    <string name="models_role_ocr_description">Recognizes text in images. Used by the SDK\'s ocrAsync path before any LLM extraction.</string>
+    <string name="models_state_loaded">Loaded</string>
+    <string name="models_state_idle">Not loaded</string>
+    <string name="models_state_unknown">Not yet exercised</string>
+    <string name="models_state_failed">Init failed</string>
+    <string name="models_state_unknown_hint">Run this engine\'s test on the Tests tab to load it.</string>
+    <string name="models_pack_label">Source</string>
+    <string name="models_backend_label">Backend</string>
+    <string name="models_init_time_label">Init time</string>
+    <string name="models_pack_chat" translatable="false">Install-time AI Pack: gemma_model</string>
+    <string name="models_pack_embeddings" translatable="false">Install-time AI Pack: gemma_embed_model</string>
+    <string name="models_pack_ocr" translatable="false">Install-time AI Pack: paddleocr_model</string>
+    <string name="models_chat_display_name" translatable="false">Gemma 4 E2B (multimodal)</string>
+    <string name="models_embeddings_display_name" translatable="false">EmbeddingGemma</string>
+    <string name="models_ocr_display_name" translatable="false">PaddleOCR PP-OCRv5 mobile</string>
+
+    <!-- Calm-IDLE first-time hint shown on the Status page when no engine
+         test has ever been run. Replaces the use-site of
+         `dashboard_callout_runtime_idle` for the calm path; the old key is
+         retained for the failure/stale/throttled path. -->
+    <string name="status_idle_no_test_hint">Engine is idle. Tap any test on the Tests tab to warm it up.</string>
 </resources>
