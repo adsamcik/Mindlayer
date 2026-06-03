@@ -108,9 +108,12 @@ class EngineManagerLowMemoryTest {
     }
 
     @Test
-    fun `initialize throws LowMemoryException when availMem is below model + 256MB on small device`() = runTest {
-        // 50 MB available, 4 GB total — small-device path applies.
-        // 50 MB < 4 KB model + 256 MB headroom = ~256 MB required → refuse.
+    fun `initialize throws LowMemoryException when availMem is below the 1GB runway floor`() = runTest {
+        // 50 MB available, 4 GB total — `availMb < minAvailFloorMb` so the
+        // gate refuses. The pre-flight check no longer depends on model
+        // size: the new floors are static (engineResidencyMb +
+        // systemReserveMb + foregroundAppBudgetMb = 2424 MB total floor,
+        // minAvailFloorMb = 1024 MB available floor).
         stubMemInfo(availBytes = 50L * 1024 * 1024, totalBytes = 4L * 1024 * 1024 * 1024)
 
         val mgr = EngineManager(context)
@@ -118,23 +121,46 @@ class EngineManagerLowMemoryTest {
             mgr.initialize(preferredBackend = "CPU")
             fail("Expected LowMemoryException")
         } catch (e: LowMemoryException) {
-            // 50 * 1024 * 1024 / 1024 / 1024 == 50
             assertEquals("availMb should match availMem/1MiB", 50L, e.availMb)
-            // (4096 + 256 * 1024 * 1024) / 1024 / 1024 == 256
-            assertEquals("requiredMb should be model + 256 (new headroom)", 256L, e.requiredMb)
+            assertEquals("requiredMb should be the total-RAM floor (2424 MiB)", 2424L, e.requiredMb)
             assertTrue(
                 "exception message should embed both numbers",
-                e.message!!.contains("availMb=50") && e.message!!.contains("requiredMb=256"),
+                e.message!!.contains("availMb=50") && e.message!!.contains("requiredMb=2424"),
             )
         }
     }
 
     @Test
-    fun `initialize does not throw LowMemoryException when availMem comfortably exceeds required`() = runTest {
-        // 4 GB available, 4 GB total — small-device path, well above
-        // 4 KB model + 256 MB headroom.
+    fun `initialize throws LowMemoryException when totalMem is below the 2_4GB floor`() = runTest {
+        // 1.5 GB available, 2 GB total — `availMb` clears the 1 GB runway
+        // but `totalMb < totalFloorMb (2424)`, so the gate refuses. This is
+        // the path that protects ~2 GB-class devices from attempting an
+        // engine load that would crash mid-init.
         stubMemInfo(
-            availBytes = 4L * 1024 * 1024 * 1024,
+            availBytes = 1536L * 1024 * 1024,
+            totalBytes = 2L * 1024 * 1024 * 1024,
+        )
+
+        val mgr = EngineManager(context)
+        try {
+            mgr.initialize(preferredBackend = "CPU")
+            fail("Expected LowMemoryException for 2 GB total RAM device")
+        } catch (e: LowMemoryException) {
+            assertEquals(1536L, e.availMb)
+            assertEquals(2424L, e.requiredMb)
+        }
+    }
+
+    @Test
+    fun `initialize does not throw LowMemoryException when both floors are met`() = runTest {
+        // 2 GB available, 4 GB total — clears both the 1 GB available floor
+        // AND the 2424 MB total floor. The legacy gate would have refused
+        // this (it required availMem >= modelSize + 256 MB on sub-6 GB
+        // devices, ~2.7 GB for Gemma 4 E2B). The empirical measurements
+        // show the model is mmap'd and only ~175 MiB resident — so 4 GB
+        // devices with reasonable available memory are now admitted.
+        stubMemInfo(
+            availBytes = 2L * 1024 * 1024 * 1024,
             totalBytes = 4L * 1024 * 1024 * 1024,
         )
 
@@ -149,7 +175,7 @@ class EngineManagerLowMemoryTest {
         try {
             mgr.initialize(preferredBackend = "CPU")
         } catch (e: LowMemoryException) {
-            fail("Did not expect LowMemoryException for 4 GB avail; got $e")
+            fail("Did not expect LowMemoryException for 4 GB total / 2 GB avail; got $e")
         } catch (_: Throwable) {
             // Other failures are acceptable — this test pins the gate, not
             // the full backend-fallback path.
@@ -157,12 +183,11 @@ class EngineManagerLowMemoryTest {
     }
 
     /**
-     * F-079: large-device path. Reproduces the Samsung Galaxy S24 Ultra
-     * failure mode (12 GB total, ~2.3 GB `availMem` because Linux uses
-     * ~2 GB as reclaimable page cache). The legacy single-band check
-     * refused engine init here; the new heuristic admits it because
-     * `availMb` is above the 1 GB runway floor and `totalMb` has room
-     * for the model plus a 1 GB system reserve.
+     * Reproduces the Samsung Galaxy S24 Ultra failure mode (12 GB total,
+     * ~2.3 GB `availMem` because Linux uses ~2 GB as reclaimable page
+     * cache). The legacy single-band check refused engine init here; the
+     * unified-floor heuristic admits because `availMb` is above the 1 GB
+     * runway and `totalMb` clears the 2424 MB floor with room to spare.
      */
     @Test
     fun `initialize allows load on 12GB device with 2_3GB availMem (S24 scenario)`() = runTest {
@@ -180,7 +205,7 @@ class EngineManagerLowMemoryTest {
         } catch (e: LowMemoryException) {
             fail(
                 "Did not expect LowMemoryException for 12 GB device with 2.3 GB " +
-                    "availMem (large-device cache-reclaim path); got $e",
+                    "availMem (cache-reclaim path); got $e",
             )
         } catch (_: Throwable) {
             // Other failures from the relaxed engine mock are acceptable.
@@ -188,10 +213,9 @@ class EngineManagerLowMemoryTest {
     }
 
     /**
-     * F-079: large-device path with too little availMem. Even with 12 GB
-     * total, if `availMem` drops below the 1 GB runway floor the gate
-     * MUST refuse — there isn't enough breathing room to start the load
-     * without immediate OOM-kill pressure.
+     * Even with 12 GB total, if `availMem` drops below the 1 GB runway
+     * floor the gate MUST refuse — there isn't enough breathing room to
+     * start the load without immediate OOM-kill pressure.
      */
     @Test
     fun `initialize throws LowMemoryException on 12GB device when availMem below 1GB floor`() = runTest {

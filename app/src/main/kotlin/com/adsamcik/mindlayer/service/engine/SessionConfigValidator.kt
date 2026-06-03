@@ -7,6 +7,7 @@ import com.adsamcik.mindlayer.service.security.IpcInputValidator
 import com.google.ai.edge.litertlm.OpenApiTool
 import com.google.ai.edge.litertlm.ToolProvider
 import com.google.ai.edge.litertlm.tool
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -91,6 +92,17 @@ internal object SessionConfigValidator {
             }
             MindlayerLog.d(TAG, "Parsed ${providers.size} tool definition(s)")
             ParsedTools(providers = providers, names = names)
+        } catch (e: SerializationException) {
+            // Malformed JSON / unexpected token. Distinguish from the
+            // require()-thrown IllegalArgumentException below so the
+            // documented "returns null on parse error" contract actually
+            // holds — without this catch the JsonDecodingException
+            // (which extends IllegalArgumentException via
+            // SerializationException) would fall through to the next
+            // catch and be re-thrown, surfacing as an opaque
+            // INVALID_REQUEST instead of a logged warn + null.
+            MindlayerLog.e(TAG, "Malformed toolsJson: ${e.safeLabel()}")
+            null
         } catch (e: IllegalArgumentException) {
             // L9: reserved-name rejections must surface to the client so the
             // session is rejected, not silently created without tools.

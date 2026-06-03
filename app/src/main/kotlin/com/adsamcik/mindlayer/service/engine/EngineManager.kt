@@ -318,8 +318,8 @@ class EngineManager(
             throw e
         }
 
-        // Pre-flight memory check: model needs ~2.5GB + working buffers.
-        // F-071: this check now hard-fails with a typed [LowMemoryException]
+        // Pre-flight memory check: model needs sufficient RAM at peak.
+        // F-071: this check hard-fails with a typed [LowMemoryException]
         // so SessionManager can stop the SDK retry loop. Previously this
         // logged a warning and proceeded, which SIGABRT'd inside native
         // model load on 4–6 GB devices. The debug-only
@@ -329,62 +329,65 @@ class EngineManager(
         // pressure during local debugging — release builds always
         // hard-fail.
         //
-        // F-079: two-band check. The legacy single check used
-        // `MemoryInfo.availMem >= modelSize + 512MB`. On modern phones
-        // (≥ 6 GB total) this was way too conservative because
-        // `availMem` excludes Linux's reclaimable page cache (often 2+
-        // GB on a hot phone). Result: an 11 GB Galaxy S24 with 2.3 GB
-        // `availMem` and 2 GB reclaimable cache would refuse a 2.5 GB
-        // model load that the kernel could easily satisfy by reclaiming
-        // cache as the model maps in. New heuristic:
+        // F-079 (revised): the previous heuristic computed
+        // `requiredBytes = modelSize + 256 MB` and required
+        // `availMem >= requiredBytes` on devices < 6 GB total RAM. For
+        // Gemma 4 E2B (2.4 GB model file) that meant any sub-6 GB
+        // device had to have >= 2.6 GB available — effectively a
+        // permanent refusal on 4 GB-class phones, even though the
+        // file is mmap'd and only ~175 MiB of pages stay resident
+        // (empirically measured — see docs/MEMORY_TIERS_EMPIRICS.md).
         //
-        //  - Large devices (totalMem ≥ 6 GB): admit if `totalMem` has
-        //    room for the model + system reserve AND `availMem` ≥
-        //    1 GB runway to start the load without immediate OOM-kill.
-        //    Trust the kernel to reclaim cache during mmap.
-        //  - Small devices (totalMem < 6 GB): keep the strict legacy
-        //    gate. Small phones don't have much reclaimable cache and
-        //    real OOM is a real risk.
+        // The replacement gate uses an empirically-derived peak
+        // residency estimate (not the on-disk file size) plus the
+        // 1 GB availMem runway for the init burst. This admits 4 GB
+        // and even 3 GB-class devices where the kernel's reclaimable
+        // cache can satisfy the mmap'd weights during load.
         //
-        // Headroom also halved (512 MB → 256 MB) because the model file
-        // size is itself an over-count of peak working set —
-        // LiteRT-LM mmaps quantised weights, so resident pages are a
-        // subset of the file's full byte length.
+        // Headroom values reflect the analysis writeup:
+        //   * `engineResidencyMb = 700` — model resident pages (~175 MiB
+        //     measured) + activation peak (~256 MiB estimated) + LiteRT-LM
+        //     compile-cache + sampler/decode buffers, rounded up for safety.
+        //   * `systemReserveMb = 1024` — kernel + always-on apps + system_server.
+        //   * `foregroundAppBudgetMb = 700` — the user's interactive app.
+        //   * `minAvailFloorMb = 1024` — preserved from the original gate;
+        //     this is the init burst runway (LiteRT-LM allocates significant
+        //     scratch during JIT/compile before mmap settles).
         val modelSizeBytes = target.sizeBytes
         val activityManager = context.getSystemService(android.app.ActivityManager::class.java)
         val memInfo = android.app.ActivityManager.MemoryInfo()
         activityManager.getMemoryInfo(memInfo)
-        val headroomBytes = 256L * 1024 * 1024
-        val requiredBytes = modelSizeBytes + headroomBytes
         val availMb = memInfo.availMem / 1024 / 1024
         val totalMb = memInfo.totalMem / 1024 / 1024
-        val requiredMb = requiredBytes / 1024 / 1024
-        val largeDeviceThresholdMb = 6L * 1024 // 6 GB total RAM
-        val systemReserveMb = 1024L            // kernel + always-on apps
-        val minAvailFloorMb = 1024L            // 1 GB runway for the load itself
-        val gateOk = if (totalMb >= largeDeviceThresholdMb) {
-            availMb >= minAvailFloorMb && totalMb >= requiredMb + systemReserveMb
-        } else {
-            memInfo.availMem >= requiredBytes
-        }
+
+        val engineResidencyMb = 700L
+        val systemReserveMb = 1024L
+        val foregroundAppBudgetMb = 700L
+        val minAvailFloorMb = 1024L
+        val totalFloorMb = engineResidencyMb + systemReserveMb + foregroundAppBudgetMb
+
+        val gateOk = totalMb >= totalFloorMb && availMb >= minAvailFloorMb
         MindlayerLog.i(TAG, "Loading model '${target.id}' (${target.displayName})")
         MindlayerLog.i(
             TAG,
-            "Memory check: total=${totalMb}MB, available=${availMb}MB, " +
-                "model=${modelSizeBytes / 1024 / 1024}MB, required=${requiredMb}MB, " +
+            "Memory check: total=${totalMb}MB (floor=${totalFloorMb}MB), " +
+                "available=${availMb}MB (floor=${minAvailFloorMb}MB), " +
+                "model_on_disk=${modelSizeBytes / 1024 / 1024}MB, " +
                 "gate=${if (gateOk) "open" else "refuse"}",
         )
         if (!gateOk) {
             if (com.adsamcik.mindlayer.service.BuildConfig.ALLOW_LOW_MEM) {
                 MindlayerLog.w(TAG, "ALLOW_LOW_MEM override active; proceeding with " +
-                    "${availMb}MB available, ${requiredMb}MB required, ${totalMb}MB total (debug build only)")
+                    "${availMb}MB available, ${minAvailFloorMb}MB available-floor, " +
+                    "${totalMb}MB total, ${totalFloorMb}MB total-floor (debug build only)")
             } else {
                 MindlayerLog.w(TAG, "Refusing engine init: ${availMb}MB available, " +
-                    "${requiredMb}MB required, ${totalMb}MB total for model '${target.id}'")
+                    "${totalMb}MB total (need >=${minAvailFloorMb}MB available + " +
+                    ">=${totalFloorMb}MB total) for model '${target.id}'")
                 // F-077: categorise BEFORE throwing so observers (dashboard,
                 // logs) see the typed signal even on this terminal path.
                 recordInitFailure(InitFailure.LowMemory)
-                throw LowMemoryException(availMb = availMb, requiredMb = requiredMb)
+                throw LowMemoryException(availMb = availMb, requiredMb = totalFloorMb)
             }
         }
 
