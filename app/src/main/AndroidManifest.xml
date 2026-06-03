@@ -38,8 +38,15 @@
             even though the package IS installed and the binder DID see it
             when the client first bound. This was the bug that left a
             pending entry stuck because Approve always failed.
+
+        The `tools:ignore="QueryAllPackagesPermission"` below silences
+        Android Lint's blanket warning for this permission. The rationale
+        above documents the explicit, security-driven need; without the
+        ignore, `:app:lintDebug` fails CI because the check's default
+        severity is Error and we have `abortOnError = true`.
     -->
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
     <permission
