@@ -138,18 +138,18 @@ class SessionManagerThinkingModeTest {
 
     @Test
     fun `createSession with thinking opt-in configures thought channel and enable_thinking extraContext`() {
-        val captured = slot<ConversationConfig>()
-        every { mockEngine.createConversation(capture(captured)) } returns
-            mockk<Conversation>(relaxed = true)
-
-        sessionManager.createSession(
+        val sessionId = sessionManager.createSession(
             SessionConfig(
                 extraContextJson = """{"thinking":{"enable":true}}""",
                 systemPrompt = "You are a careful assistant.",
             ),
         )
 
-        val cfg = captured.captured
+        // Hot-swap: createSession no longer eagerly opens a native
+        // Conversation. The factory recipe is stored on the handle as
+        // `baseConversationConfig` and run on first lease — inspect it
+        // directly instead of capturing on engine.createConversation.
+        val cfg = sessionManager.getSession(sessionId)!!.baseConversationConfig
         val channels = cfg.channels!!
         assertEquals(1, channels.size)
         val channel = channels.first()
@@ -180,15 +180,11 @@ class SessionManagerThinkingModeTest {
 
     @Test
     fun `createSession without thinking opt-in leaves channels empty and extraContext clean`() {
-        val captured = slot<ConversationConfig>()
-        every { mockEngine.createConversation(capture(captured)) } returns
-            mockk<Conversation>(relaxed = true)
-
-        sessionManager.createSession(
+        val sessionId = sessionManager.createSession(
             SessionConfig(systemPrompt = "You are a careful assistant."),
         )
 
-        val cfg = captured.captured
+        val cfg = sessionManager.getSession(sessionId)!!.baseConversationConfig
         assertTrue("no channels should be configured by default", cfg.channels?.isEmpty() ?: true)
         assertTrue(
             "extraContext must be empty when thinking is off",
@@ -203,15 +199,11 @@ class SessionManagerThinkingModeTest {
 
     @Test
     fun `createSession with thinking opt-in and no client systemPrompt leaves system instruction null`() {
-        val captured = slot<ConversationConfig>()
-        every { mockEngine.createConversation(capture(captured)) } returns
-            mockk<Conversation>(relaxed = true)
-
-        sessionManager.createSession(
+        val sessionId = sessionManager.createSession(
             SessionConfig(extraContextJson = """{"thinking":{"enable":true}}"""),
         )
 
-        val cfg = captured.captured
+        val cfg = sessionManager.getSession(sessionId)!!.baseConversationConfig
         assertEquals(1, cfg.channels!!.size)
         assertEquals(true, cfg.extraContext!![SessionManager.THINKING_TEMPLATE_KEY])
         // When there is no client systemPrompt, the systemInstruction is

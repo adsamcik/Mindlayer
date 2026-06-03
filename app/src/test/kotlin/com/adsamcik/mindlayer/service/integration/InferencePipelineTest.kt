@@ -518,7 +518,16 @@ class InferencePipelineTest {
 
     @Test
     fun concurrentInferences_differentSessions() = runTest {
-        // Each session gets its own mock conversation with unique text
+        // Hot-swap: under LiteRT-LM 0.12.0 only one Conversation can be
+        // active at a time. The WarmConversationSlot lease serialises
+        // inferences; the second session waits for the first to release
+        // the slot, then swaps in via close-prior + create-fresh. As a
+        // result there is no longer a stable 1:1 mapping between a
+        // mocked Conversation instance and a session id — whichever
+        // session leases first gets `conversation1`. The contract this
+        // test really cares about is: both inferences run to completion,
+        // both produce tokens on their respective pipes, and the
+        // foreground lifecycle fires for each.
         val conversation1 = mockk<Conversation>(relaxed = true) {
             every { sendMessageAsync(any<Contents>()) } returns flow {
                 emit(textMessage("A1"))
@@ -575,22 +584,36 @@ class InferencePipelineTest {
         val eventsA = parseFrames(framesA)
         val eventsB = parseFrames(framesB)
 
-        // Identify which pipe got which session's data by checking the header
+        // Each pipe must carry exactly its own request id on the header.
         val headerA = eventsA.first { it.kind == "header" }
         val headerB = eventsB.first { it.kind == "header" }
+        assertEquals("req-A", headerA.requestId)
+        assertEquals("req-B", headerB.requestId)
 
-        // Determine the expected token deltas for each pipe based on requestId
-        val (expectedDeltasA, expectedDeltasB) = if (headerA.requestId == "req-A") {
-            listOf("A1", "A2") to listOf("B1", "B2")
-        } else {
-            listOf("B1", "B2") to listOf("A1", "A2")
-        }
-
+        // Both inferences produced token deltas. Under the lease the
+        // order in which sessions acquire the engine slot is
+        // non-deterministic, so we don't assert which Conversation
+        // instance fed which pipe — only that both pipes received tokens
+        // and both completed normally.
         val deltasA = eventsA.filter { it.kind == "token_delta" }.map { it.text }
         val deltasB = eventsB.filter { it.kind == "token_delta" }.map { it.text }
+        assertEquals(
+            "pipe A should receive 2 token deltas",
+            2, deltasA.size,
+        )
+        assertEquals(
+            "pipe B should receive 2 token deltas",
+            2, deltasB.size,
+        )
 
-        assertEquals(expectedDeltasA, deltasA)
-        assertEquals(expectedDeltasB, deltasB)
+        // The pair of delta-sets the two pipes saw — collectively — must
+        // be exactly [A1,A2] and [B1,B2], in some order.
+        val collected = setOf(deltasA, deltasB)
+        val expected = setOf(listOf("A1", "A2"), listOf("B1", "B2"))
+        assertEquals(
+            "collectively both Conversations must have streamed to the pipes",
+            expected, collected,
+        )
 
         // Both pipes should complete with "done"
         assertTrue(eventsA.any { it.kind == "done" && it.finishReason == "stop" })

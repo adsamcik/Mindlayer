@@ -19,6 +19,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -365,7 +366,11 @@ class SessionManagerTest {
         every { mockEngine.createConversation(any()) } returns convo
 
         val id = createDefaultSession(sessionId = "streaming-destroy")
-        sessionManager.getSession(id)!!.isStreaming = true
+        // Hot-swap: createSession is lazy — simulate the session having
+        // been warmed by a prior inference lease.
+        val handle = sessionManager.getSession(id)!!
+        handle.conversation = convo
+        handle.isStreaming = true
 
         sessionManager.destroySession(id)
 
@@ -380,6 +385,9 @@ class SessionManagerTest {
         every { mockEngine.createConversation(any()) } returns convo
 
         val id = createDefaultSession(sessionId = "idle-destroy")
+        // Hot-swap: createSession is lazy — simulate the session having
+        // been warmed by a prior inference lease.
+        sessionManager.getSession(id)!!.conversation = convo
         sessionManager.destroySession(id)
 
         io.mockk.verify(exactly = 0) { convo.cancelProcess() }
@@ -1142,9 +1150,28 @@ class SessionManagerTest {
         assertEquals("Idle session metadata should survive backend switch", 1, sessionManager.sessionCount)
         assertNotNull(sessionManager.getSessionInfo(sid))
 
-        sessionManager.getSession(sid)
-
+        // Hot-swap: getSession triggers rewarmBackendInvalidatedSession,
+        // which now just nulls handle.conversation and clears the warm
+        // marker (no eager engine.createConversation call). The next
+        // withWarmConversation will lazily materialise a fresh
+        // Conversation from baseConversationConfig seeded with the
+        // preserved recordedTurns — that lazy path is exercised by
+        // separate WarmConversationSlotTest scenarios.
+        val handle = sessionManager.getSession(sid)
+        assertNotNull("session should survive lazy rewarm", handle)
+        assertNull(
+            "rewarmed session is cold until first inference",
+            handle!!.conversation,
+        )
+        assertFalse(
+            "backendInvalidated flag should be cleared after rewarm",
+            handle.backendInvalidated,
+        )
         assertEquals(1, sessionManager.sessionCount)
-        verify(exactly = 2) { mockEngine.createConversation(any()) }
+        // Hot-swap: createSession is lazy and rewarm is lazy, so
+        // engine.createConversation was never called along this path.
+        // The on-demand materialisation is covered by
+        // WarmConversationSlotTest.
+        verify(exactly = 0) { mockEngine.createConversation(any()) }
     }
 }
