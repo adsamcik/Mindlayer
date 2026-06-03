@@ -335,15 +335,21 @@ class RateLimiter(
          *   2. `getCapabilities()`     — cost 0.25
          *   3. (optional) a second `getCapabilities()` for feature gating
          *
-         * Total ≈ 1.5. The grant is sized at 10.0 so the standard handshake
-         * plus several immediate inference calls (e.g. a developer rapidly
-         * iterating on a prompt change, or a batch test harness running 4-5
-         * scans in a tight loop) all fit in the bucket without tripping the
-         * rate limiter. A heavier opening call (e.g. cost 4.0) still rejects
-         * after a few uses, locking in F-027's burst-after-eviction
-         * protection: the grant is one-shot and never approaches the full
-         * capacity (default 300 = 5 RPS sustained).
+         * Total ≈ 1.5. The grant is sized at 50.0 so the standard handshake
+         * plus a SDK reconnect/retry storm during the ~30 s cold engine init
+         * (each retry costs ~1.0) plus an immediate batch of inference calls
+         * all fit in the bucket without tripping the rate limiter. A heavier
+         * opening call (e.g. cost 4.0) still rejects after ~12 uses, locking
+         * in F-027's burst-after-eviction protection: the grant is one-shot
+         * and never approaches the full capacity (default 300 = 5 RPS
+         * sustained).
+         *
+         * The earlier value of 10.0 was sized for the documented call
+         * pattern but did NOT account for SDK rebind storms when the `:ml`
+         * subprocess was being recreated (e.g. after a service force-stop
+         * during dev iteration, or after a process restart from the
+         * #2028 thermal-switch path). Bumped to 50.0 to cover that case.
          */
-        const val INITIAL_FIRST_CALL_TOKENS: Double = 10.0
+        const val INITIAL_FIRST_CALL_TOKENS: Double = 50.0
     }
 }

@@ -223,14 +223,16 @@ class RateLimiterFirstCallTest {
     }
 
     @Test
-    fun `default constructor exposes INITIAL_FIRST_CALL_TOKENS = 10_0`() {
+    fun `default constructor exposes INITIAL_FIRST_CALL_TOKENS = 50_0`() {
         // Lock the production default so an accidental change to the
         // companion const fails CI loudly. The grant must accommodate
         // the documented connect handshake (registerClient +
-        // getCapabilities = 1.25) PLUS a small burst of immediate
-        // inference calls (developer iteration, test harness batch
-        // runs) without re-opening the burst-after-eviction calculation
-        // by approaching the per-minute capacity (default 300).
-        assertEquals(10.0, RateLimiter.INITIAL_FIRST_CALL_TOKENS, 0.0)
+        // getCapabilities = 1.25) PLUS the SDK rebind storm that fires
+        // during a ~30 s cold engine init (each retry costs ~1.0) PLUS
+        // a small burst of immediate inference calls (developer
+        // iteration, test harness batch runs) without re-opening the
+        // burst-after-eviction calculation by approaching the per-minute
+        // capacity (default 300).
+        assertEquals(50.0, RateLimiter.INITIAL_FIRST_CALL_TOKENS, 0.0)
     }
 }
