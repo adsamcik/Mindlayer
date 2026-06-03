@@ -555,14 +555,22 @@ class InferenceOrchestrator(
             val inferenceStartNs = System.nanoTime()
             try {
                 // Hot-swap: acquire the engine's warm slot for the full
-                // inference (initial send + tool loop + retries + cleanup).
-                // The lease either uses the already-warm Conversation, or
-                // closes the prior session's Conversation and creates a
-                // fresh one for `handle` seeded with its recordedTurns.
-                // Throws EngineBusyException if another session is mid-
-                // stream — caught below and translated to an ENGINE_BUSY
-                // terminal frame.
+                // inference + its cleanup. The lease either uses the
+                // already-warm Conversation, or closes the prior
+                // session's Conversation and creates a fresh one for
+                // `handle` seeded with its recordedTurns. Throws
+                // EngineBusyException if another session is mid-stream
+                // — caught below and translated to an ENGINE_BUSY
+                // terminal frame. The inner try/finally (and all
+                // exception handlers that touch native Conversation
+                // state) live INSIDE the lease so the slot stays held
+                // until handle.mutex.withLock is ready to release. If
+                // cleanup ran AFTER the lease, B's lease could grab
+                // the slot, see A's handle.mutex still held by A's
+                // cleanup, and incorrectly throw EngineBusy at B even
+                // though A is no longer streaming.
                 sessionManager.withWarmConversation(handle) { conv ->
+                  try {
                 service.enterForeground()
                 foregroundEntered = true
                 logRepository?.logInferenceStart(
@@ -1033,36 +1041,6 @@ class InferenceOrchestrator(
                 MindlayerLog.i(TAG, trace.summary(), requestId = meta.requestId, sessionId = meta.sessionId)
 
                 } // end withTimeout(MAX_INFERENCE_MS)
-                } // end withWarmConversation lease
-
-            } catch (busy: EngineBusyException) {
-                // Hot-swap: a different session is mid-stream and we
-                // cannot swap it out without truncating its inference.
-                // The slot lock saw a tryLock() failure on the prior
-                // session's per-handle Mutex and threw. Surface a
-                // typed ENGINE_BUSY frame so the SDK can retry after
-                // the hinted backoff.
-                trace.markError("engine_busy")
-                MindlayerLog.w(
-                    TAG,
-                    "Inference refused: engine slot held by session ${busy.busySessionId} " +
-                        "(retryAfterMs=${busy.retryAfterMs})",
-                    requestId = meta.requestId,
-                    sessionId = meta.sessionId,
-                )
-                logRepository?.logInferenceError(
-                    meta.requestId, meta.sessionId, "engine_busy"
-                )
-                kotlinx.coroutines.withContext(NonCancellable) {
-                    try {
-                        writer.closeWithError(
-                            0, "engine_busy", MindlayerErrorCode.ENGINE_BUSY,
-                        )
-                    } catch (_: Throwable) {
-                        // Best-effort terminal frame; pipe may already be closed.
-                    }
-                }
-                return
             } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
                 // F-061: total wall-clock budget for a single inference is
                 // MAX_INFERENCE_MS. On expiry, cancel native generation,
@@ -1152,7 +1130,7 @@ class InferenceOrchestrator(
                     meta.requestId, meta.sessionId, safe
                 )
                 writer.closeWithError(0, safe, MindlayerErrorCode.INTERNAL)
-                return
+                return@withWarmConversation
             } finally {
                 typedCancellationReasons.remove(scopedKey)
                 writer.close()
@@ -1162,6 +1140,42 @@ class InferenceOrchestrator(
                 // Clean up staged media files regardless of outcome — keyed
                 // by scopedKey so a co-signed peer with the same public
                 // requestId cannot trigger early cleanup of our files.
+                sharedMemoryPool.cleanup(scopedKey)
+            }
+                } // end withWarmConversation lease
+            } catch (busy: EngineBusyException) {
+                // Hot-swap: a different session is mid-stream and we
+                // cannot swap it out without truncating its inference.
+                // The slot lock saw a tryLock() failure on the prior
+                // session's per-handle Mutex and threw. Surface a
+                // typed ENGINE_BUSY frame so the SDK can retry after
+                // the hinted backoff. The lease was never entered so
+                // we run a mini cleanup here that mirrors the inner
+                // finally — writer close + flag reset + per-request
+                // media cleanup. (foreground was not entered either.)
+                trace.markError("engine_busy")
+                MindlayerLog.w(
+                    TAG,
+                    "Inference refused: engine slot held by session ${busy.busySessionId} " +
+                        "(retryAfterMs=${busy.retryAfterMs})",
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                )
+                logRepository?.logInferenceError(
+                    meta.requestId, meta.sessionId, "engine_busy"
+                )
+                kotlinx.coroutines.withContext(NonCancellable) {
+                    try {
+                        writer.closeWithError(
+                            0, "engine_busy", MindlayerErrorCode.ENGINE_BUSY,
+                        )
+                    } catch (_: Throwable) {
+                        // Best-effort terminal frame; pipe may already be closed.
+                    }
+                }
+                try { writer.close() } catch (_: Throwable) {}
+                handle.activeRequestId = null
+                handle.isStreaming = false
                 sharedMemoryPool.cleanup(scopedKey)
             }
         }
