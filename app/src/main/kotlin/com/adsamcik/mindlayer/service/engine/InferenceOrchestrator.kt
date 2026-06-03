@@ -378,7 +378,7 @@ class InferenceOrchestrator(
                 sessionId = handle.sessionId,
             )
             try {
-                handle.conversation.cancelProcess()
+                handle.conversation?.cancelProcess()
             } catch (t: Throwable) {
                 MindlayerLog.w(TAG, "cancelProcess() failed: ${t.safeLabel()}")
             }
@@ -439,7 +439,7 @@ class InferenceOrchestrator(
             primeTypedCancellationReason(scopedKey, reason)
             if (handle != null) {
                 try {
-                    handle.conversation.cancelProcess()
+                    handle.conversation?.cancelProcess()
                 } catch (t: Throwable) {
                     MindlayerLog.w(
                         TAG,
@@ -554,6 +554,15 @@ class InferenceOrchestrator(
             var foregroundEntered = false
             val inferenceStartNs = System.nanoTime()
             try {
+                // Hot-swap: acquire the engine's warm slot for the full
+                // inference (initial send + tool loop + retries + cleanup).
+                // The lease either uses the already-warm Conversation, or
+                // closes the prior session's Conversation and creates a
+                // fresh one for `handle` seeded with its recordedTurns.
+                // Throws EngineBusyException if another session is mid-
+                // stream — caught below and translated to an ENGINE_BUSY
+                // terminal frame.
+                sessionManager.withWarmConversation(handle) { conv ->
                 service.enterForeground()
                 foregroundEntered = true
                 logRepository?.logInferenceStart(
@@ -682,7 +691,7 @@ class InferenceOrchestrator(
                 } else {
                     emptyMap()
                 }
-                handle.conversation.sendMessageAsync(contents, perSendExtraContext).collect { chunk ->
+                handle.conversation!!.sendMessageAsync(contents, perSendExtraContext).collect { chunk ->
                     // v1.1: drain Gemma 4 thinking-channel fragments
                     // BEFORE answer text so the SDK sees thoughts and
                     // answer in the same order the model produced them.
@@ -906,7 +915,7 @@ class InferenceOrchestrator(
                     val toolResponses = results.map { (name, result) ->
                         Content.ToolResponse(name, ToolOutputSanitizer.wrap(name, result))
                     }
-                    val response = handle.conversation.sendMessage(
+                    val response = handle.conversation!!.sendMessage(
                         Message.tool(Contents.of(toolResponses)),
                         perSendExtraContext,
                     )
@@ -942,7 +951,7 @@ class InferenceOrchestrator(
                         // we don't keep decoding past the point we know the
                         // request is invalid.
                         try {
-                            handle.conversation.cancelProcess()
+                            handle.conversation?.cancelProcess()
                         } catch (t: Throwable) {
                             MindlayerLog.w(
                                 TAG,
@@ -1024,7 +1033,36 @@ class InferenceOrchestrator(
                 MindlayerLog.i(TAG, trace.summary(), requestId = meta.requestId, sessionId = meta.sessionId)
 
                 } // end withTimeout(MAX_INFERENCE_MS)
+                } // end withWarmConversation lease
 
+            } catch (busy: EngineBusyException) {
+                // Hot-swap: a different session is mid-stream and we
+                // cannot swap it out without truncating its inference.
+                // The slot lock saw a tryLock() failure on the prior
+                // session's per-handle Mutex and threw. Surface a
+                // typed ENGINE_BUSY frame so the SDK can retry after
+                // the hinted backoff.
+                trace.markError("engine_busy")
+                MindlayerLog.w(
+                    TAG,
+                    "Inference refused: engine slot held by session ${busy.busySessionId} " +
+                        "(retryAfterMs=${busy.retryAfterMs})",
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                )
+                logRepository?.logInferenceError(
+                    meta.requestId, meta.sessionId, "engine_busy"
+                )
+                kotlinx.coroutines.withContext(NonCancellable) {
+                    try {
+                        writer.closeWithError(
+                            0, "engine_busy", MindlayerErrorCode.ENGINE_BUSY,
+                        )
+                    } catch (_: Throwable) {
+                        // Best-effort terminal frame; pipe may already be closed.
+                    }
+                }
+                return
             } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
                 // F-061: total wall-clock budget for a single inference is
                 // MAX_INFERENCE_MS. On expiry, cancel native generation,
@@ -1033,7 +1071,7 @@ class InferenceOrchestrator(
                 // instead of a generic cancellation.
                 toolCallBridge.cancel(scopedKey)
                 try {
-                    handle.conversation.cancelProcess()
+                    handle.conversation?.cancelProcess()
                 } catch (t: Throwable) {
                     MindlayerLog.w(TAG, "cancelProcess() after timeout raised ${t.safeLabel()}", requestId = meta.requestId, sessionId = meta.sessionId)
                 }
@@ -1065,7 +1103,7 @@ class InferenceOrchestrator(
                 // This matters on broken-pipe (client died mid-stream) because the
                 // writer raises CancellationException to unwind the coroutine.
                 try {
-                    handle.conversation.cancelProcess()
+                    handle.conversation?.cancelProcess()
                 } catch (t: Throwable) {
                     MindlayerLog.w(TAG, "cancelProcess() after CancellationException raised ${t.safeLabel()}", requestId = meta.requestId, sessionId = meta.sessionId)
                 }
@@ -1287,7 +1325,7 @@ class InferenceOrchestrator(
                         result.errors, config.schema,
                     )
                     val retryBuf = StringBuilder()
-                    handle.conversation
+                    handle.conversation!!
                         .sendMessageAsync(Contents.of(retryPrompt))
                         .collect { chunk ->
                             chunk.text()?.let { retryBuf.append(it) }

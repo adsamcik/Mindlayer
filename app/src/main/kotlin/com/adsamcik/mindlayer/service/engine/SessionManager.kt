@@ -62,16 +62,17 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
 ) {
 
     private val initCoordinator = EngineInitCoordinator(engineManager, initDispatcher)
-    // F-{hot-swap}: WarmConversationSlot is wired but NOT yet integrated into
-    // createSession's path. The supporting infrastructure (eviction policy,
-    // recordedTurns history, FakeEngine, ENGINE_BUSY error code) is all in
-    // place for a follow-up PR to enable hot-swap by calling
-    // warmSlot.evictWarmFor(sessionId, sessions) right before
-    // engine.createConversation, and warmSlot.claim(sessionId) immediately
-    // after. The follow-up also needs to rewrite ~30 multi-session unit
-    // tests whose assumptions no longer hold under the one-Conversation-
-    // per-Engine native invariant.
-    @Suppress("unused")
+
+    /**
+     * The engine's single native-Conversation slot. SessionManager owns
+     * exactly one of these and routes every active-Conversation access
+     * through [withWarmConversation], which delegates to
+     * [WarmConversationSlot.lease].
+     *
+     * Cold sessions (sessions in [sessions] with `conversation == null`)
+     * coexist freely; the slot only serialises *active* inference. See
+     * [withWarmConversation] for the locking contract.
+     */
     private val warmSlot = WarmConversationSlot()
 
     companion object {
@@ -527,15 +528,23 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             )
         }
 
-        val conversation = engine.createConversation(conversationConfig)
+        // Hot-swap: do NOT call engine.createConversation eagerly. The
+        // session starts cold (handle.conversation = null) and its
+        // native Conversation is materialised on demand by the warm-slot
+        // lease (withWarmConversation). This makes multi-session safe
+        // under the LiteRT-LM 0.12.0 one-Conversation-per-Engine
+        // invariant — only one session is warm at any moment, and the
+        // lease handles cross-session swap by closing the prior warm
+        // Conversation before creating a fresh one for the new owner.
 
         val now = System.currentTimeMillis()
         val handle = SessionHandle(
             sessionId = sessionId,
-            conversation = conversation,
+            conversation = null,
             config = config,
             createdAtMs = now,
             effectiveMaxTokens = effectiveMaxTokens,
+            baseConversationConfig = conversationConfig,
             reservedTokens = reservedTokens,
             structuredOutputConfig = structuredOutputConfig,
             ownerToken = ownerToken,
@@ -550,9 +559,9 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         // path so we don't leak the native KV cache.
         val prior = sessions.putIfAbsent(sessionId, handle)
         if (prior != null) {
-            try { conversation.close() } catch (t: Throwable) {
-                MindlayerLog.w(TAG, "Failed to close orphan conversation on duplicate sessionId: ${t.safeLabel()}")
-            }
+            // Hot-swap: the new handle is cold (conversation = null) so
+            // there is no native conversation to close on the rollback
+            // path. Just drop the handle and surface the duplicate error.
             MindlayerLog.w(TAG, "Rejected duplicate sessionId: $sessionId", sessionId = sessionId)
             throw IllegalArgumentException("Session already exists: $sessionId")
         }
@@ -590,6 +599,54 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         return handle
     }
 
+    /**
+     * Run [block] with a guaranteed-live [Conversation] for [handle].
+     *
+     * Acquires the engine's single native slot for the entire duration of
+     * [block]. If a different session is currently warm, this either
+     * silently swaps (closing its `Conversation` first, then materialising
+     * a fresh one for [handle] seeded with its `recordedTurns`) or throws
+     * [EngineBusyException] when the prior session is mid-stream.
+     *
+     * The slot mutex is held for the WHOLE block — including tool loops,
+     * structured-output retries, and the streaming collect. This is v1's
+     * "one active inference globally" semantics; multi-session coexists at
+     * the *cold* state (handles in the map with `conversation == null`),
+     * but only one inference can be in flight at a time.
+     *
+     * Caller MUST also hold [handle.mutex.withLock] if multiple infers
+     * could race on the SAME session — the lease serialises across
+     * sessions, the per-handle mutex still serialises within one session.
+     * The canonical pattern in [InferenceOrchestrator] is
+     * `handle.mutex.withLock { sessionManager.withWarmConversation(handle) { conv -> ... } }`.
+     *
+     * @throws EngineBusyException if the prior warm session is mid-stream.
+     * @throws IllegalStateException if the engine is not yet initialised.
+     */
+    suspend fun <R> withWarmConversation(
+        handle: SessionHandle,
+        block: suspend (Conversation) -> R,
+    ): R = warmSlot.lease(
+        handle = handle,
+        sessions = sessions,
+        createConversation = {
+            // Seed the fresh Conversation with current recorded turns —
+            // for a brand-new session this matches the original
+            // initialHistory; for a swapped-back session this carries the
+            // accumulated turn buffer so context is preserved.
+            val replay = handle.messagesForReplay()
+            val effectiveConfig = handle.baseConversationConfig.copy(initialMessages = replay)
+            val engine = engineManager.requireEngine()
+            MindlayerLog.i(
+                TAG,
+                "Warming session: replaying ${replay.size} turn(s)",
+                sessionId = handle.sessionId,
+            )
+            engine.createConversation(effectiveConfig)
+        },
+        block = block,
+    )
+
     @Synchronized
     private fun rewarmBackendInvalidatedSession(id: String, expected: SessionHandle): SessionHandle? {
         val current = sessions[id] ?: return null
@@ -597,32 +654,25 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             current.recordAccess()
             return current
         }
-        val config = current.config.copy(sessionId = id)
-        val ownerToken = current.ownerToken
-        val turnCount = current.turnCount
-        val estimatedTokens = current.estimatedTokens
-        val clientPriorityHint = current.clientPriorityHint
+        // Hot-swap unification: backend invalidation no longer needs its
+        // own close+recreate path. Just close the stale Conversation (if
+        // any) and mark the handle cold — the next withWarmConversation
+        // call will materialise a fresh Conversation from the same
+        // baseConversationConfig, seeded with the preserved recordedTurns.
+        // This both unifies the rewarm path AND fixes the pre-existing
+        // history-loss bug (the old path used `config.copy()` which
+        // discarded everything accumulated after createSession).
         try {
-            try {
-                current.conversation.close()
-            } catch (t: Throwable) {
-                MindlayerLog.w(TAG, "Failed to close invalidated conversation: ${t.safeLabel()}", sessionId = id)
-            }
-            sessions.remove(id)
-            createSession(config, ownerToken)
-            val rewarmed = sessions[id] ?: return null
-            rewarmed.turnCount = turnCount
-            rewarmed.estimatedTokens = estimatedTokens
-            rewarmed.clientPriorityHint = clientPriorityHint
-            rewarmed.backendInvalidated = false
-            rewarmed.recordAccess()
-            MindlayerLog.i(TAG, "Re-warmed backend-invalidated session", sessionId = id)
-            return rewarmed
+            current.conversation?.close()
         } catch (t: Throwable) {
-            sessions[id] = current
-            current.backendInvalidated = true
-            throw t
+            MindlayerLog.w(TAG, "Failed to close invalidated conversation: ${t.safeLabel()}", sessionId = id)
         }
+        current.conversation = null
+        warmSlot.releaseMarker(id)
+        current.backendInvalidated = false
+        current.recordAccess()
+        MindlayerLog.i(TAG, "Marked backend-invalidated session cold; will rewarm on next inference", sessionId = id)
+        return current
     }
 
     /**
@@ -664,7 +714,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         val capturedOwnerUid = handle.ownerUid
         if (handle.isStreaming) {
             try {
-                handle.conversation.cancelProcess()
+                handle.conversation?.cancelProcess()
             } catch (t: Throwable) {
                 MindlayerLog.w(
                     TAG,
@@ -678,20 +728,42 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
                 handle.mutex.withLock {
                     handle.activeRequestId = null
                     handle.isStreaming = false
+                    // Hot-swap: try to evict any warm Conversation under
+                    // the warm-slot mutex so we don't race a concurrent
+                    // lease. The non-blocking tryLock means we never
+                    // wedge destroy on a competing inference — if the
+                    // other lease has the slot, releaseMarker covers us
+                    // below.
                     try {
-                        handle.conversation.close()
+                        warmSlot.tryEvictIdle(id, sessions)
                     } catch (t: Throwable) {
                         MindlayerLog.w(
                             TAG,
-                            "Error closing conversation: ${t.safeLabel()}",
+                            "tryEvictIdle threw during destroy: ${t.safeLabel()}",
                             sessionId = id,
                         )
+                    }
+                    val conv = handle.conversation
+                    if (conv != null) {
+                        try {
+                            conv.close()
+                        } catch (t: Throwable) {
+                            MindlayerLog.w(
+                                TAG,
+                                "Error closing conversation: ${t.safeLabel()}",
+                                sessionId = id,
+                            )
+                        }
+                        handle.conversation = null
                     }
                 }
             }
         } finally {
             sessions.remove(id)
-            warmSlot.release(id)  // no-op when not wired; harmless future-proofing
+            // Clear any lingering warm-slot marker (covers the case where
+            // we couldn't take the tryLock above because the lease is
+            // mid-flight but the lease will release into a stale marker).
+            warmSlot.releaseMarker(id)
         }
         logRepository?.logSessionDestroyed(id)
         MindlayerLog.i(TAG, "Session destroyed (remaining=${sessions.size})", sessionId = id)
@@ -974,6 +1046,16 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         for (id in ids) {
             destroySession(id)
         }
+        // Hot-swap: synchronously drain the warm slot under its own
+        // mutex to make sure no native Conversation outlives the
+        // SessionManager. Each destroySession call above already tried
+        // to evict the slot, but if any failed (e.g. the lease was
+        // mid-flight), this is the belt-and-braces.
+        try {
+            warmSlot.shutdown(sessions)
+        } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "warmSlot.shutdown threw: ${t.safeLabel()}")
+        }
     }
 
     // ---- SessionHandle -----------------------------------------------------
@@ -981,15 +1063,57 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     /**
      * Mutable bookkeeping wrapper around a LiteRT-LM [Conversation].
      *
-     * The [mutex] serialises sends so that only one inference is in-flight per
-     * session, while distinct sessions can run concurrently.
+     * # Lifecycle states
+     *
+     * - **Cold**: [conversation] is `null`. The session exists in the
+     *   `sessions` map and carries metadata (config, recordedTurns,
+     *   ownerToken, etc.) but holds no native engine slot. Cold sessions
+     *   are cheap (just heap state) and can coexist freely.
+     * - **Warm**: [conversation] is non-null. The session owns the
+     *   engine's single native [Conversation] slot. At most ONE handle is
+     *   warm at any time (LiteRT-LM 0.12.0 enforces this at the JNI layer;
+     *   see `WarmConversationSlot`).
+     * - **Streaming**: [isStreaming] = `true`. The orchestrator holds
+     *   [mutex] and is actively reading from the model. A streaming
+     *   session is always warm. Cross-session swaps cannot evict a
+     *   streaming session — they receive [EngineBusyException] instead.
+     *
+     * The transition Cold → Warm happens on `withWarmConversation`'s
+     * first invocation for the session. Warm → Cold happens when another
+     * session needs the slot (lazy eviction) or when the session is
+     * destroyed.
+     *
+     * # Field-mutability rules
+     *
+     * - [conversation] is `@Volatile var` so the lease coordinator can
+     *   swap it. ALL native use MUST go through
+     *   `SessionManager.withWarmConversation(handle) { conv -> ... }`
+     *   which guarantees `conv` stays valid for the block's duration.
+     *   Direct reads of `handle.conversation` are reserved for
+     *   destroy/cancel paths and must null-check.
+     * - The other `@Volatile var` fields are single-writer per session
+     *   (under [mutex]); cross-session reads are safe.
      */
     class SessionHandle(
         val sessionId: String,
-        val conversation: Conversation,
+        @Volatile var conversation: Conversation?,
         val config: SessionConfig,
         val createdAtMs: Long,
         val effectiveMaxTokens: Int,
+        /**
+         * Recipe for materialising a fresh [Conversation] when this handle
+         * needs to be re-warmed (after cross-session eviction). The lease
+         * coordinator calls `engine.createConversation(baseConversationConfig
+         * .copy(initialMessages = messagesForReplay()))` so the new
+         * Conversation comes up seeded with the current [recordedTurns]
+         * snapshot — which includes anything from `config.initialHistory`
+         * plus every successful turn observed so far.
+         *
+         * Built once at [SessionManager.createSession] time so the relatively
+         * expensive system-prompt + tools + sampler assembly doesn't repeat
+         * on every swap.
+         */
+        internal val baseConversationConfig: ConversationConfig,
         /**
          * F-072: tokens already consumed by service-owned prompt overhead
          * (system prompt + tool safety preamble + tool definitions +
@@ -1097,6 +1221,21 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
          * underlying mutable buffer. MUST be called while holding [mutex].
          */
         fun snapshotRecordedTurns(): List<HistoryTurn> = recordedTurns.toList()
+
+        /**
+         * Recorded turns mapped to LiteRT-LM [Message]s for replay into a
+         * freshly-created [Conversation] (used by the warm-conversation
+         * lease when re-warming this handle after cross-session eviction).
+         * MUST be called while holding [mutex].
+         */
+        internal fun messagesForReplay(): List<Message> = recordedTurns.map { turn ->
+            val contents = Contents.of(turn.text)
+            when (turn.role) {
+                "model" -> Message.model(contents)
+                "tool" -> Message.tool(contents)
+                else -> Message.user(contents)
+            }
+        }
 
         /** Test-only accessor exposing the current buffered turn count. */
         internal val recordedTurnCount: Int get() = recordedTurns.size

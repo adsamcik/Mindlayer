@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import com.google.ai.edge.litertlm.Conversation
+import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.service.security.IpcInputValidator
@@ -122,6 +123,7 @@ class SessionManagerTest {
             config = SessionConfig(),
             createdAtMs = System.currentTimeMillis(),
             effectiveMaxTokens = 4096,
+            baseConversationConfig = ConversationConfig(),
         )
         handle.isStreaming = isStreaming
         handle.isPinned = isPinned

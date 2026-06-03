@@ -2,6 +2,7 @@ package com.adsamcik.mindlayer.service.engine
 
 import android.os.SystemClock
 import com.adsamcik.mindlayer.SessionConfig
+import com.google.ai.edge.litertlm.ConversationConfig
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -147,6 +148,7 @@ class EvictionPolicyTest {
             config = SessionConfig(),
             createdAtMs = 1_000L,
             effectiveMaxTokens = 4096,
+            baseConversationConfig = ConversationConfig(),
             ownerUid = ownerUid,
         )
         handle.isStreaming = isStreaming
