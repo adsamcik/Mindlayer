@@ -93,11 +93,25 @@ class InferencePipelineTest {
     // -- Pipe wiring via writerFactory ---------------------------------------
 
     /**
-     * Queue of [PipedOutputStream]s. Each [createPipe] enqueues one; the
-     * custom [writerFactory] dequeues it and creates a [TokenStreamWriter]
-     * backed by that stream instead of a real [ParcelFileDescriptor].
+     * Queue of [PipedOutputStream]s for tests that only create ONE pipe per
+     * inference — kept for backward compatibility with the single-pipe
+     * tests in this suite.
      */
     private val outputStreamQueue = ConcurrentLinkedQueue<OutputStream>()
+
+    /**
+     * Identity map from a per-test [ParcelFileDescriptor] mock to its
+     * backing output stream. Used by [createPipe]'s concurrent variant
+     * to guarantee that header/tokens written for a specific pfd land
+     * on the SAME pipe regardless of which order the orchestrator's
+     * coroutines materialise their writers. Without this map, the FIFO
+     * queue races with the lease-induced serialisation in
+     * concurrentInferences_differentSessions — pipe assignment ends up
+     * driven by which job acquires the engine slot first, not by which
+     * pfd was passed into infer().
+     */
+    private val outputStreamByPfd =
+        java.util.concurrent.ConcurrentHashMap<ParcelFileDescriptor, OutputStream>()
 
     @Before
     fun setUp() {
@@ -157,11 +171,19 @@ class InferencePipelineTest {
 
         // Inject a writerFactory that bypasses ParcelFileDescriptor
         outputStreamQueue.clear()
+        outputStreamByPfd.clear()
         orchestrator = InferenceOrchestrator(
             service, sessionManager, sharedMemoryPool,
-            writerFactory = { _ ->
-                val out = outputStreamQueue.poll()
-                    ?: error("No output stream queued for TokenStreamWriter")
+            writerFactory = { pfd ->
+                // Prefer the per-pfd identity map (concurrent tests register
+                // there); fall back to the FIFO queue (single-pipe tests
+                // still use it). The map lookup is what makes
+                // concurrentInferences_differentSessions deterministic — it
+                // guarantees pipe-A's writer always wraps pipe-A's stream
+                // regardless of which job creates its writer first.
+                val mapped = outputStreamByPfd.remove(pfd)
+                val out = mapped ?: outputStreamQueue.poll()
+                    ?: error("No output stream registered for TokenStreamWriter")
                 TokenStreamWriter.forTesting(out)
             },
         )
@@ -553,9 +575,17 @@ class InferencePipelineTest {
         val sessionA = createSession("sess-A")
         val sessionB = createSession("sess-B")
 
-        // Create both pipes
+        // Create both pipes — register each pfd in the identity map so the
+        // writerFactory routes by pfd, not by call order. This sidesteps
+        // the lease-induced races where Job B's writer could grab Job A's
+        // stream when the slot serialisation changed who calls
+        // writerFactory first.
         val (pipedInA, pfdA) = createPipe()
         val (pipedInB, pfdB) = createPipe()
+        // createPipe added to the FIFO queue too; move those entries into
+        // the identity map for this test's deterministic routing.
+        outputStreamByPfd[pfdA] = outputStreamQueue.poll() ?: error("queue underflow")
+        outputStreamByPfd[pfdB] = outputStreamQueue.poll() ?: error("queue underflow")
 
         val latchA = CountDownLatch(1)
         val latchB = CountDownLatch(1)
