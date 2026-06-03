@@ -16,7 +16,7 @@ class SessionDiagnosticsFormattingTest {
     fun `detail route encodes and decodes reserved characters`() {
         val sessionId = "session/with spaces?trace=1#frag"
 
-        val route = SessionHistoryNavigation.detailRoute(sessionId)
+        val route = MindlayerNavigation.detailRoute(sessionId)
 
         assertEquals(
             "detail/session%2Fwith%20spaces%3Ftrace%3D1%23frag",
@@ -24,15 +24,15 @@ class SessionDiagnosticsFormattingTest {
         )
         assertEquals(
             sessionId,
-            SessionHistoryNavigation.decodeSessionId(route.substringAfter("detail/")),
+            MindlayerNavigation.decodeSessionId(route.substringAfter("detail/")),
         )
     }
 
     @Test
     fun `decode session id rejects blank arguments`() {
-        assertNull(SessionHistoryNavigation.decodeSessionId(null))
-        assertNull(SessionHistoryNavigation.decodeSessionId(""))
-        assertNull(SessionHistoryNavigation.decodeSessionId("   "))
+        assertNull(MindlayerNavigation.decodeSessionId(null))
+        assertNull(MindlayerNavigation.decodeSessionId(""))
+        assertNull(MindlayerNavigation.decodeSessionId("   "))
     }
 
     @Test
