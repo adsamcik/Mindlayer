@@ -1,5 +1,8 @@
 package com.adsamcik.mindlayer.service.ui
 
+import androidx.biometric.BiometricManager
+import com.adsamcik.mindlayer.service.ui.BiometricSensitiveActionAuthenticator.Companion.decidePreflight
+import com.adsamcik.mindlayer.service.ui.BiometricSensitiveActionAuthenticator.PreflightDecision
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -94,5 +97,55 @@ class SensitiveActionAuthenticatorTest {
         }
         assertEquals(5, capturedCode)
         assertTrue(capturedMsg!!.isNotEmpty())
+    }
+
+    // ---- decidePreflight policy (production class, no Activity needed) -----
+
+    @Test
+    fun `preflight BIOMETRIC_SUCCESS launches the prompt`() {
+        val d = decidePreflight(BiometricManager.BIOMETRIC_SUCCESS)
+        assertEquals(PreflightDecision.LaunchPrompt, d)
+    }
+
+    @Test
+    fun `preflight NONE_ENROLLED falls open with explicit reason`() {
+        val d = decidePreflight(BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED)
+        assertTrue("expected FallOpen, got $d", d is PreflightDecision.FallOpen)
+        assertEquals("biometric_unavailable_fallback", (d as PreflightDecision.FallOpen).reason)
+    }
+
+    @Test
+    fun `preflight NO_HARDWARE falls open with explicit reason`() {
+        val d = decidePreflight(BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE)
+        assertTrue("expected FallOpen, got $d", d is PreflightDecision.FallOpen)
+        assertEquals("biometric_unavailable_fallback", (d as PreflightDecision.FallOpen).reason)
+    }
+
+    @Test
+    fun `preflight HW_UNAVAILABLE falls open with explicit reason`() {
+        val d = decidePreflight(BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE)
+        assertTrue("expected FallOpen, got $d", d is PreflightDecision.FallOpen)
+        assertEquals("biometric_unavailable_fallback", (d as PreflightDecision.FallOpen).reason)
+    }
+
+    @Test
+    fun `preflight SECURITY_UPDATE_REQUIRED fails closed`() {
+        val d = decidePreflight(BiometricManager.BIOMETRIC_ERROR_SECURITY_UPDATE_REQUIRED)
+        assertTrue("expected FailClosed, got $d", d is PreflightDecision.FailClosed)
+        assertEquals("biometric_unknown_state", (d as PreflightDecision.FailClosed).reason)
+    }
+
+    @Test
+    fun `preflight STATUS_UNKNOWN fails closed`() {
+        val d = decidePreflight(BiometricManager.BIOMETRIC_STATUS_UNKNOWN)
+        assertTrue("expected FailClosed, got $d", d is PreflightDecision.FailClosed)
+        assertEquals("biometric_unknown_state", (d as PreflightDecision.FailClosed).reason)
+    }
+
+    @Test
+    fun `preflight unknown sentinel fails closed`() {
+        // Defends against an undocumented future BiometricManager status code.
+        val d = decidePreflight(-999)
+        assertTrue("expected FailClosed for unknown code, got $d", d is PreflightDecision.FailClosed)
     }
 }

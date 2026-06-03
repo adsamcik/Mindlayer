@@ -3,6 +3,7 @@ package com.adsamcik.mindlayer.service.ui
 import android.os.Build
 import androidx.activity.ComponentActivity
 import androidx.annotation.StringRes
+import androidx.annotation.VisibleForTesting
 import androidx.biometric.AuthenticationRequest
 import androidx.biometric.AuthenticationRequest.Biometric.Fallback
 import androidx.biometric.AuthenticationRequest.Biometric.Strength
@@ -23,10 +24,37 @@ import com.adsamcik.mindlayer.service.logging.MindlayerLog
  * authenticator — production builds construct
  * [BiometricSensitiveActionAuthenticator] in the hosting [ComponentActivity].
  *
- * Default-deny: if the device has no enrolled biometric AND no screen lock,
- * the action is rejected. The plan's contract is "the user with physical
- * access intentionally approved this", which a device with no lock cannot
- * provide.
+ * Behaviour on devices without an enrolled credential:
+ *
+ * - The original F-029 plan called for default-deny here ("the user with
+ *   physical access intentionally approved this", which a device with no
+ *   lock cannot provide), but that locks out three real-world cases:
+ *     * sideloaded debug installs on emulators (no biometric, no PIN)
+ *     * cheap Android devices without a fingerprint sensor whose owners
+ *       haven't set a PIN
+ *     * users who happen to have removed their PIN
+ *   On those devices the dashboard's Approve / Revoke buttons silently no-op,
+ *   making the entire allowlist UI unusable.
+ *
+ * - When `BiometricManager.canAuthenticate(...)` returns
+ *   `BIOMETRIC_ERROR_NONE_ENROLLED`, `BIOMETRIC_ERROR_NO_HARDWARE`, or
+ *   `BIOMETRIC_ERROR_HW_UNAVAILABLE`, the authenticator now falls open with
+ *   a logged `biometric_unavailable_fallback` audit decision. The dashboard's
+ *   own two-tap confirmation dialog ([AppApprovalDialog] /
+ *   [AppRevocationDialog]) already provides the user-intent gate: it shows
+ *   the package name, the full SHA-256 signing fingerprint, an explicit
+ *   spoof warning, and a destructive-styled confirm button paired with
+ *   Cancel. That dialog is what proves the human with physical access
+ *   typed it.
+ *
+ * - For other unknown/transient states
+ *   (`BIOMETRIC_STATUS_UNKNOWN`, `BIOMETRIC_ERROR_SECURITY_UPDATE_REQUIRED`,
+ *   ...) the authenticator keeps failing closed — those signal a recoverable
+ *   device condition the user can resolve, not a permanent capability gap.
+ *
+ * On devices that DO have an enrolled biometric or device credential,
+ * behaviour is unchanged: BiometricPrompt with the configured strength
+ * gates Approve / Revoke as before.
  */
 interface SensitiveActionAuthenticator {
     /**
@@ -120,23 +148,20 @@ class BiometricSensitiveActionAuthenticator(
         onResult: (granted: Boolean, errorCode: Int?, errorMsg: String?) -> Unit,
     ) {
         val canAuth = BiometricManager.from(activity).canAuthenticate(ALLOWED_AUTHENTICATORS)
-        when (canAuth) {
-            BiometricManager.BIOMETRIC_SUCCESS -> Unit
-            BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED,
-            BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE,
-            BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE -> {
+        when (val decision = decidePreflight(canAuth)) {
+            PreflightDecision.LaunchPrompt -> Unit
+            is PreflightDecision.FallOpen -> {
                 MindlayerLog.w(
                     TAG,
-                    "Biometric not available (canAuthenticate=$canAuth) — denying $action",
+                    "Biometric unavailable (canAuthenticate=$canAuth) — " +
+                        "falling open for $action; dialog-only intent gate in effect",
                 )
-                onResult(false, canAuth, "biometric_unavailable")
+                onResult(true, canAuth, decision.reason)
                 return
             }
-            else -> {
-                // BIOMETRIC_STATUS_UNKNOWN, _SECURITY_UPDATE_REQUIRED, etc. —
-                // fail closed; the dashboard surfaces the error to the user.
+            is PreflightDecision.FailClosed -> {
                 MindlayerLog.w(TAG, "Biometric in unknown state ($canAuth) — denying $action")
-                onResult(false, canAuth, "biometric_unknown_state")
+                onResult(false, canAuth, decision.reason)
                 return
             }
         }
@@ -167,6 +192,19 @@ class BiometricSensitiveActionAuthenticator(
             .setIsConfirmationRequired(true)
             .build()
 
+    /**
+     * Decision a preflight `BiometricManager.canAuthenticate(...)` value maps
+     * to. Separated out as a pure helper so the policy can be unit-tested
+     * without an Activity / BiometricManager — the production class wires it
+     * into the real authentication flow above.
+     */
+    @VisibleForTesting
+    internal sealed class PreflightDecision {
+        object LaunchPrompt : PreflightDecision()
+        data class FallOpen(val reason: String) : PreflightDecision()
+        data class FailClosed(val reason: String) : PreflightDecision()
+    }
+
     companion object {
         private const val TAG = "BiometricAuth"
 
@@ -185,5 +223,29 @@ class BiometricSensitiveActionAuthenticator(
                 // — the AuthenticationRequest still accepts PIN at prompt time.
                 BiometricManager.Authenticators.BIOMETRIC_WEAK
             }
+
+        /**
+         * Map a `BiometricManager.canAuthenticate(...)` return value to the
+         * production policy:
+         *
+         *  - `BIOMETRIC_SUCCESS` → launch the prompt as before.
+         *  - `BIOMETRIC_ERROR_NONE_ENROLLED` / `NO_HARDWARE` /
+         *    `HW_UNAVAILABLE` → fall open with
+         *    `biometric_unavailable_fallback` so the dashboard's existing
+         *    two-tap confirmation dialog is the user-intent gate.
+         *  - Anything else (`BIOMETRIC_STATUS_UNKNOWN`,
+         *    `BIOMETRIC_ERROR_SECURITY_UPDATE_REQUIRED`, undocumented
+         *    transient codes) → fail closed with `biometric_unknown_state`.
+         */
+        @VisibleForTesting
+        @Suppress("MagicNumber") // numeric constants come from BiometricManager
+        internal fun decidePreflight(canAuth: Int): PreflightDecision = when (canAuth) {
+            BiometricManager.BIOMETRIC_SUCCESS -> PreflightDecision.LaunchPrompt
+            BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED,
+            BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE,
+            BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE ->
+                PreflightDecision.FallOpen("biometric_unavailable_fallback")
+            else -> PreflightDecision.FailClosed("biometric_unknown_state")
+        }
     }
 }
