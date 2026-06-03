@@ -176,9 +176,24 @@ class MindlayerMlService : Service() {
         // 5-minute decay reset. The uncaught handler chains to whatever
         // was installed before us so framework crash reporting still
         // fires.
+        //
+        // We pass the host APK's `lastUpdateTime` so the watchdog can
+        // skip the missed-death bump when the previous run was killed
+        // by `pm install -r` / `pm clear` rather than by the OOM-killer
+        // — the watchdog exists to break OOM-loops, not to penalise
+        // dev iteration.
         mlHealthRecorder = MlHealthRecorder(this)
+        val packageLastUpdateMs = try {
+            packageManager.getPackageInfo(packageName, 0).lastUpdateTime
+        } catch (t: Throwable) {
+            // Pre-Android-9 quirks, Robolectric, or a torn install all
+            // land here. 0L disables the exemption — i.e. fall back to
+            // legacy behaviour rather than masking a real crash loop.
+            MindlayerLog.w(TAG, "PackageInfo.lastUpdateTime unreadable: ${t.safeLabel()}")
+            0L
+        }
         try {
-            mlHealthRecorder.recordHealthyBoot()
+            mlHealthRecorder.recordHealthyBoot(packageLastUpdateMs)
         } catch (t: Throwable) {
             MindlayerLog.w(TAG, "MlHealthRecorder.recordHealthyBoot raised: ${t.safeLabel()}")
         }

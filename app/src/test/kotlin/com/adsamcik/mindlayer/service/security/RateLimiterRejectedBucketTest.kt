@@ -94,15 +94,17 @@ class RateLimiterRejectedBucketTest {
         var time = 0L
         val rl = RateLimiter(
             maxRejectedPerMinute = 6,
+            initialFirstCallTokens = 2.0,
             timeSource = { time },
         )
         // F-027 refinement: the rejected-callers bucket follows the same
         // first-call grant policy as the main bucket — a brand-new unknown
         // caller gets the bookkeeping budget so its first `recordPending`
-        // lands. Bug #3 follow-up bumped the default grant to 2.0 so the
-        // documented connect handshake fits; subsequent calls without
-        // refill must still reject so a flooder cannot burst the disk-I/O
-        // budget on cold start.
+        // lands. Pin grant=2.0 explicitly so the test's 3-call burst-blocked
+        // assertion is independent of the default-tokens bump for the
+        // legitimate-traffic bucket. The semantic being tested is "rejected
+        // bucket grant has the same cap structure as the main one"; the
+        // exact number is parameterised via the constructor.
         assertTrue("first-call grant", rl.tryAcquireRejected(1000))
         assertTrue("second call still within 2.0 grant", rl.tryAcquireRejected(1000))
         assertFalse("burst blocked - grant is bounded at 2.0", rl.tryAcquireRejected(1000))

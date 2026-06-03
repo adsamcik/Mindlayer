@@ -187,13 +187,24 @@ class MlHealthRecorder @VisibleForTesting internal constructor(
      *     `lastBootAt` but no later [recordCleanShutdown] *and* no later
      *     [recordAbnormalDeath] was logged, the previous run was killed
      *     externally (OOM, SIGKILL). Bump the counter so the throttle
-     *     can engage on the next bind.
+     *     can engage on the next bind. EXCEPT: if the package was
+     *     updated since the previous boot, treat the kill as legitimate
+     *     (package manager kills processes on `pm install -r` and `pm
+     *     clear`) and do NOT count it as a death.
      *  3. **Mark this boot** — persist the new [lastBootAt] so the
      *     *next* boot can run the missed-death check against it.
      *
      * The three steps are atomic under the file lock.
+     *
+     * @param packageLastUpdateMs wall-clock ms at which the hosting APK
+     *   was last installed/updated (`PackageInfo.lastUpdateTime`).
+     *   Defaults to `0L`, which disables the package-update exemption —
+     *   callers that want the exemption (i.e. the real service) must
+     *   pass the value. Tests pin it explicitly so virtual-clock
+     *   scenarios stay deterministic.
      */
-    fun recordHealthyBoot() {
+    @JvmOverloads
+    fun recordHealthyBoot(packageLastUpdateMs: Long = 0L) {
         withFileLock {
             val now = clock()
             val s = readStateLocked()
@@ -211,10 +222,19 @@ class MlHealthRecorder @VisibleForTesting internal constructor(
                 lastResetAt = now
             }
 
-            if (prevBoot > 0L &&
+            val missedDeath = prevBoot > 0L &&
                 prevBoot > s.lastCleanShutdownAt &&
                 prevBoot > s.lastDeathAt
-            ) {
+            // Package-update exemption: `pm install -r` and `pm clear`
+            // kill the running service abruptly without giving it a
+            // chance to call `recordCleanShutdown`. That is not a crash
+            // loop — it is the package manager doing its job. Detect by
+            // comparing the previous boot timestamp against the APK's
+            // last-update time. Caller passes 0L to opt out (the
+            // default keeps backward-compatible behaviour for tests
+            // that pin the watchdog logic directly).
+            val packageWasUpdated = packageLastUpdateMs > 0L && packageLastUpdateMs > prevBoot
+            if (missedDeath && !packageWasUpdated) {
                 deathCount += 1
                 lastDeathAt = now
             }
@@ -420,10 +440,18 @@ class MlHealthRecorder @VisibleForTesting internal constructor(
 
         /**
          * Number of abnormal deaths inside [THROTTLE_WINDOW_MS] that
-         * trips the throttle. Three is generous enough for two binder
-         * deaths from a flaky native init while still catching a real
-         * crash-loop on the third reload.
+         * trips the throttle. Raised from 3 to 10 — Mindlayer's primary
+         * defense against rogue / malicious callers is the per-UID
+         * signing-cert allowlist (only user-approved apps can bind),
+         * not the crash-loop watchdog. The watchdog exists to break a
+         * real OOM-killer death-loop where every reconnect reloads the
+         * 2.4 GB model. A real such loop trips ≥ 10 deaths in 60 s
+         * trivially (rebind cadence is ~1 s); the previous threshold of
+         * 3 false-positived on legitimate dev iterations
+         * (force-stop / reinstall / `pm clear`) and on small native
+         * init flakes that recover on their own. Catch the real loop,
+         * not the dev workflow.
          */
-        const val DEATH_COUNT_THRESHOLD: Int = 3
+        const val DEATH_COUNT_THRESHOLD: Int = 10
     }
 }

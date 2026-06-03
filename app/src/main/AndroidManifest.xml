@@ -8,6 +8,38 @@
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+        Android 11 (R, API 30) hides every installed package from
+        `PackageManager.getPackageInfo` by default. The Mindlayer service
+        cannot enforce its allowlist without seeing the caller's signing
+        certificates, so we declare QUERY_ALL_PACKAGES here.
+
+        Why this is the right answer (and not a narrow `<queries>` block):
+          - A bound service cannot see its callers without explicit query
+            visibility. `<queries><package name="…"/></queries>` would force
+            us to enumerate every potential client app at build time, which
+            defeats the purpose of a dynamic allowlist + dashboard approval
+            flow.
+          - `<queries><intent>…</intent></queries>` only matches apps that
+            declare a matching `<intent-filter>`. SDK consumers bind to our
+            service via AIDL — they have no reason to expose a public
+            intent-filter, and forcing them to would leak a discoverable
+            attack surface.
+          - Google Play policy explicitly permits QUERY_ALL_PACKAGES for
+            "apps that need to query and/or interact with any and all
+            installed apps for the core user functionality of the app"
+            including security / device management tooling. Per-caller
+            signing-cert verification is exactly that.
+          - Without this permission, the dashboard's Approve button calls
+            `CallerVerifier.identifyByPackage` → `pm.getPackageInfo` →
+            `NameNotFoundException` (silently filtered) → AllowlistStore
+            throws `SecurityException("Package … no longer installed")`,
+            even though the package IS installed and the binder DID see it
+            when the client first bound. This was the bug that left a
+            pending entry stuck because Approve always failed.
+    -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
     <permission
         android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE"
         android:label="@string/permission_bind_ml_service_label"

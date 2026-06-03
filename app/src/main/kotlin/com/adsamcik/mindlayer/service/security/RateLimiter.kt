@@ -293,17 +293,19 @@ class RateLimiter(
     }
 
     companion object {
-        const val DEFAULT_RPM = 60
-        const val DEFAULT_MAX_CONCURRENT = 4
+        const val DEFAULT_RPM = 300
+        const val DEFAULT_MAX_CONCURRENT = 8
         const val DEFAULT_REJECTIONS_PER_MINUTE = 6
         const val DEFAULT_IDLE_EVICT_MS = 10 * 60 * 1000L
         /**
          * F-033: 6 rejected calls per minute per UID — one every 10 s
          * sustained. Enough headroom for a real first-launch race; not enough
-         * for a flooder to drive disk I/O.
+         * for a flooder to drive disk I/O. Kept low on purpose — bumping this
+         * weakens the F-033 flooder-resistance guarantee. Don't raise it
+         * alongside the legitimate-traffic RPM bumps.
          */
         const val DEFAULT_REJECT_RPM = 6
-        const val DEFAULT_PING_RPM = 30
+        const val DEFAULT_PING_RPM = 150
         /**
          * F-040: hard cap on simultaneous inferences across all UIDs. Set
          * to 4 × per-UID cap so up to four typical first-party clients
@@ -311,7 +313,7 @@ class RateLimiter(
          * but a fleet of co-signed apps cannot collectively flood the
          * native engine.
          */
-        const val DEFAULT_MAX_GLOBAL_CONCURRENT = 16
+        const val DEFAULT_MAX_GLOBAL_CONCURRENT = 32
         private const val EVICT_SCAN_INTERVAL_MS = 30_000L
 
         /**
@@ -333,13 +335,15 @@ class RateLimiter(
          *   2. `getCapabilities()`     — cost 0.25
          *   3. (optional) a second `getCapabilities()` for feature gating
          *
-         * Total ≈ 1.5. The grant is sized at 2.0 so the standard handshake
-         * + one cheap status follow-up all fit in the bucket without
-         * tripping the rate limiter. A heavier opening call (e.g.
-         * cost 4.0) still rejects, locking in F-027's burst-after-
-         * eviction protection: the grant is one-shot and never even
-         * approaches the full capacity (default 60).
+         * Total ≈ 1.5. The grant is sized at 10.0 so the standard handshake
+         * plus several immediate inference calls (e.g. a developer rapidly
+         * iterating on a prompt change, or a batch test harness running 4-5
+         * scans in a tight loop) all fit in the bucket without tripping the
+         * rate limiter. A heavier opening call (e.g. cost 4.0) still rejects
+         * after a few uses, locking in F-027's burst-after-eviction
+         * protection: the grant is one-shot and never approaches the full
+         * capacity (default 300 = 5 RPS sustained).
          */
-        const val INITIAL_FIRST_CALL_TOKENS: Double = 2.0
+        const val INITIAL_FIRST_CALL_TOKENS: Double = 10.0
     }
 }

@@ -572,11 +572,68 @@ internal class MindlayerImpl(
                 "deferred" to request.deferred.toString(),
             ),
         ) {
-            throw MindlayerException(
-                message = "Mindlayer v1 — embed behaviour lands in C3",
-                code = MindlayerErrorCode.NOT_SUPPORTED,
+            runEmbedRequest(request)
+        }
+    }
+
+    /**
+     * Behavioural body for [embed]. Bridges the canonical builder onto the
+     * working legacy embedding paths:
+     *  - `text(...)` → [embed] ([EmbeddingConfig]) (single inline)
+     *  - `items(...)` → [embedMany] ([List]) (batch; picks the cheapest viable
+     *    transport — inline, SharedMemory, or deferred — automatically).
+     *
+     * C3 deviations (documented in `docs/SDK_V1_MIGRATION.md`):
+     *  - `deferred()` is accepted but currently materialises to an inline batch.
+     *    True deferred wiring will land alongside the canonical builder for
+     *    [EmbeddingHandle.Deferred].
+     *  - `deadline(...)` is recorded for telemetry but not enforced at this
+     *    layer; the AIDL call inherits the service-side default budget.
+     */
+    @Suppress("DEPRECATION")
+    private suspend fun runEmbedRequest(request: EmbeddingRequest.Builder): EmbeddingHandle {
+        val single = request.singleItem
+        val items = request.items
+        return when {
+            single != null -> {
+                val config = EmbeddingConfig(text = single.text, task = single.task, tag = single.tag)
+                val result = embed(config)
+                CompletedEmbeddingSingle(result.vector)
+            }
+            items != null -> {
+                val configs = items.map { item ->
+                    EmbeddingConfig(text = item.text, task = item.task, tag = item.tag)
+                }
+                val resultItems = embedMany(configs).results.map { result ->
+                    EmbeddingResultItem(tag = result.tag, vector = EmbeddingVector(result.vector))
+                }
+                CompletedEmbeddingBatch(resultItems)
+            }
+            else -> throw MindlayerException(
+                message = "Mindlayer v1 — embed{} requires text(...) or items(...).",
+                code = MindlayerErrorCode.INVALID_REQUEST,
             )
         }
+    }
+
+    /** Cold [EmbeddingHandle.Single] backed by an already-computed vector. */
+    private class CompletedEmbeddingSingle(private val vector: FloatArray) : EmbeddingHandle.Single {
+        override val events: Flow<EmbeddingEvent> = flow {
+            emit(
+                EmbeddingEvent.Completed(
+                    items = listOf(EmbeddingResultItem(tag = null, vector = EmbeddingVector(vector))),
+                ),
+            )
+        }
+
+        override suspend fun awaitVector(): FloatArray = vector
+    }
+
+    /** Cold [EmbeddingHandle.Batch] backed by an already-computed result list. */
+    private class CompletedEmbeddingBatch(private val items: List<EmbeddingResultItem>) : EmbeddingHandle.Batch {
+        override val events: Flow<EmbeddingEvent> = flow { emit(EmbeddingEvent.Completed(items)) }
+
+        override suspend fun awaitVectors(): List<EmbeddingResultItem> = items
     }
 
     /** Observable connection state. */

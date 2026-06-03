@@ -170,6 +170,74 @@ class MlHealthRecorderTest {
     }
 
     @Test
+    fun `package reinstall skips missed-death bump when lastUpdateTime is newer than prevBoot`() {
+        val recorder = newRecorder()
+        recorder.recordHealthyBoot()
+        val bootAt = recorder.peek().lastBootAt
+        assertEquals(0, recorder.peek().deathCount)
+
+        // Simulate the user running `pm install -r` (or `pm clear`,
+        // or Android Studio's "Run" reinstalling the APK): the package
+        // manager kills the running service abruptly, so no clean
+        // shutdown is recorded. But because the next boot happens AFTER
+        // a package update, the watchdog must treat the kill as
+        // legitimate and skip the death bump.
+        advance(5_000L)
+        val packageUpdatedAt = virtualClockMs - 1_000L // newer than bootAt
+        assertTrue(packageUpdatedAt > bootAt)
+
+        val nextBoot = newRecorder()
+        nextBoot.recordHealthyBoot(packageLastUpdateMs = packageUpdatedAt)
+
+        assertEquals(
+            "missed-death bump must be skipped when the APK was reinstalled",
+            0,
+            nextBoot.peek().deathCount,
+        )
+        assertFalse(nextBoot.shouldThrottleBinds())
+    }
+
+    @Test
+    fun `package reinstall exemption only applies when lastUpdateTime is newer than prevBoot`() {
+        val recorder = newRecorder()
+        recorder.recordHealthyBoot()
+        val bootAt = recorder.peek().lastBootAt
+
+        advance(5_000L)
+        // The APK was last updated BEFORE the previous boot — so this
+        // boot is NOT a reinstall, it's a genuine missed-death.
+        val packageUpdatedAt = bootAt - 10_000L
+
+        val nextBoot = newRecorder()
+        nextBoot.recordHealthyBoot(packageLastUpdateMs = packageUpdatedAt)
+
+        assertEquals(
+            "old packageLastUpdateMs must not mask a genuine missed death",
+            1,
+            nextBoot.peek().deathCount,
+        )
+    }
+
+    @Test
+    fun `zero packageLastUpdateMs preserves legacy missed-death behaviour`() {
+        val recorder = newRecorder()
+        recorder.recordHealthyBoot()
+        assertEquals(0, recorder.peek().deathCount)
+
+        advance(5_000L)
+        val nextBoot = newRecorder()
+        // Caller could not read PackageInfo.lastUpdateTime — fall back
+        // to the original behaviour (count the missed death).
+        nextBoot.recordHealthyBoot(packageLastUpdateMs = 0L)
+
+        assertEquals(
+            "0L packageLastUpdateMs must opt out of the exemption",
+            1,
+            nextBoot.peek().deathCount,
+        )
+    }
+
+    @Test
     fun `uncaught-exception bump is not double-counted by missed-death detection`() {
         val recorder = newRecorder()
         recorder.recordHealthyBoot()

@@ -14,11 +14,12 @@ class RateLimiterTest {
     @Test
     fun `allows requests up to burst capacity once bucket fills`() {
         val clock = FakeClock()
-        val rl = RateLimiter(maxRequestsPerMinute = 5, timeSource = clock)
+        // Pin grant=2.0 so the test's semantic assertions (3rd call rejects)
+        // are independent of any future DEFAULT bump.
+        val rl = RateLimiter(maxRequestsPerMinute = 5, initialFirstCallTokens = 2.0, timeSource = clock)
         // F-027 refinement: fresh buckets start with the 2-token first-
-        // call grant (default INITIAL_FIRST_CALL_TOKENS = 2.0) so the
-        // documented connect handshake (registerClient + getCapabilities)
-        // succeeds without waiting on refill.
+        // call grant so the documented connect handshake (registerClient
+        // + getCapabilities) succeeds without waiting on refill.
         assertTrue("first-call grant allows fresh uid through", rl.tryAcquire(1000))
         assertTrue("second handshake call still within grant", rl.tryAcquire(1000))
         // Drain that grant immediately — third call without refill fails.
@@ -32,7 +33,9 @@ class RateLimiterTest {
     @Test
     fun `fresh uid gets two-token grant then must wait for refill (F-027 refinement)`() {
         val clock = FakeClock(now = 123_456L)
-        val rl = RateLimiter(maxRequestsPerMinute = 60, timeSource = clock)
+        // Pin grant=2.0 — this test is specifically about the F-027 refinement
+        // semantic at grant=2.0, not about the current default.
+        val rl = RateLimiter(maxRequestsPerMinute = 60, initialFirstCallTokens = 2.0, timeSource = clock)
         // Brand-new UID gets 2.0 tokens — enough for the canonical
         // connect handshake (registerClient cost 1.0 + getCapabilities
         // cost 0.25 + a follow-up feature check). NOT enough to burst:
@@ -51,7 +54,9 @@ class RateLimiterTest {
     @Test
     fun `refills tokens over time`() {
         val clock = FakeClock()
-        val rl = RateLimiter(maxRequestsPerMinute = 60, timeSource = clock)
+        // Pin grant=2.0; the test asserts specific token counts that depend on
+        // the grant size.
+        val rl = RateLimiter(maxRequestsPerMinute = 60, initialFirstCallTokens = 2.0, timeSource = clock)
         // F-027 refinement: 2-token first-call grant. Drain it then advance
         // the clock to test refill.
         assertTrue("first-call grant", rl.tryAcquire(1000))
@@ -70,7 +75,9 @@ class RateLimiterTest {
     @Test
     fun `per-uid buckets are independent`() {
         val clock = FakeClock()
-        val rl = RateLimiter(maxRequestsPerMinute = 2, timeSource = clock)
+        // Pin grant=2.0 so the per-uid drain logic below is deterministic
+        // regardless of future DEFAULT bumps.
+        val rl = RateLimiter(maxRequestsPerMinute = 2, initialFirstCallTokens = 2.0, timeSource = clock)
         // F-027 refinement: each UID gets its own 2-token grant (clamped at
         // capacity=2); drain both so the remainder of the test exercises
         // the refilled state.
