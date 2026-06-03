@@ -83,16 +83,16 @@ class MemoryBudgetTest {
     }
 
     @Test
-    fun `DeviceTier for 8GB device - 2 sessions, 4096 tokens`() {
+    fun `DeviceTier for 8GB device - 2 sessions, 4096 default, 8192 max`() {
         val tier = DeviceTier(
             maxSessions = 2,
             defaultMaxTokens = 4096,
-            maxMaxTokens = 4096,
+            maxMaxTokens = 8192,
             deviceRamMb = 8 * 1024L,
         )
         assertEquals(2, tier.maxSessions)
         assertEquals(4096, tier.defaultMaxTokens)
-        assertEquals(4096, tier.maxMaxTokens)
+        assertEquals(8192, tier.maxMaxTokens)
     }
 
     @Test
@@ -248,7 +248,7 @@ class MemoryBudgetTest {
         // Verify we have tiers for the full range
         val tiers = listOf(
             DeviceTier(1, 2048, 2048, 4 * 1024L),   // ≤6GB
-            DeviceTier(2, 4096, 4096, 8 * 1024L),   // ≤8GB
+            DeviceTier(2, 4096, 8192, 8 * 1024L),   // ≤8GB
             DeviceTier(4, 8192, 16384, 12 * 1024L),  // ≤12GB
             DeviceTier(6, 16384, 32768, 16 * 1024L), // >12GB
         )
@@ -263,7 +263,7 @@ class MemoryBudgetTest {
     fun `maxMaxTokens is always at least defaultMaxTokens`() {
         val tiers = listOf(
             DeviceTier(1, 2048, 2048, 6 * 1024L),
-            DeviceTier(2, 4096, 4096, 8 * 1024L),
+            DeviceTier(2, 4096, 8192, 8 * 1024L),
             DeviceTier(4, 8192, 16384, 12 * 1024L),
             DeviceTier(6, 16384, 32768, 16 * 1024L),
         )

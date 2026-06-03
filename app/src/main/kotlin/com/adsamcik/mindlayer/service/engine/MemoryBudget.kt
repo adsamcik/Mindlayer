@@ -297,7 +297,7 @@ class MemoryBudget(
 
         return when {
             totalMb <= 6 * 1024  -> DeviceTier(1,  2048,  2048,  totalMb)
-            totalMb <= 8 * 1024  -> DeviceTier(2,  4096,  4096,  totalMb)
+            totalMb <= 8 * 1024  -> DeviceTier(2,  4096,  8192,  totalMb)
             totalMb <= 12 * 1024 -> DeviceTier(4,  8192,  16384, totalMb)
             else                 -> DeviceTier(6, 16384,  32768, totalMb)
         }
