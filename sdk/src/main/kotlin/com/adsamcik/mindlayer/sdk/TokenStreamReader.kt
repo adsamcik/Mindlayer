@@ -4,6 +4,7 @@ import android.os.ParcelFileDescriptor
 import com.adsamcik.mindlayer.shared.StreamEvent
 import com.adsamcik.mindlayer.shared.StreamEventType
 import com.adsamcik.mindlayer.shared.StreamHeader
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -44,10 +45,20 @@ object TokenStreamReader {
      * then calls [ParcelFileDescriptor.checkError] to distinguish a clean
      * close from a service crash.
      *
-     * Runs entirely on [Dispatchers.IO]. Backpressure is natural — when the
-     * collector is slow the pipe buffer fills and the service blocks.
+     * Runs the upstream pipe reads on [dispatcher] (default [Dispatchers.IO]).
+     * Backpressure is natural — when the collector is slow the pipe buffer
+     * fills and the service blocks.
+     *
+     * The [dispatcher] override exists so tests can inject an
+     * `UnconfinedTestDispatcher` and avoid the cross-thread race between
+     * the IO-thread `emit + throw` sequence and the collector's
+     * `awaitItem()` poll. See `OcrTokenStreamReaderTest.kt` for the
+     * concrete failure mode this addresses.
      */
-    fun readStream(readEnd: ParcelFileDescriptor): Flow<InferenceEvent> = flow {
+    fun readStream(
+        readEnd: ParcelFileDescriptor,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    ): Flow<InferenceEvent> = flow {
         val input = DataInputStream(
             BufferedInputStream(
                 ParcelFileDescriptor.AutoCloseInputStream(readEnd),
@@ -142,7 +153,7 @@ object TokenStreamReader {
         } finally {
             input.close()
         }
-    }.flowOn(Dispatchers.IO)
+    }.flowOn(dispatcher)
 
     // -- Parsing --------------------------------------------------------------
 

@@ -5,6 +5,8 @@ import com.adsamcik.mindlayer.shared.StreamEventType
 import com.adsamcik.mindlayer.shared.StreamHeader
 import com.adsamcik.mindlayer.shared.StreamProtocol
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -45,7 +47,7 @@ class TokenStreamReaderThinkingTest {
     fun `v3 header is accepted and surfaces as Started`() = runTest {
         val header = StreamHeader(protocol = StreamProtocol.V3, requestId = "rt")
         val pfd = writeFrames(json.encodeToString(StreamHeader.serializer(), header))
-        val events = TokenStreamReader.readStream(pfd).toList()
+        val events = TokenStreamReader.readStream(pfd, UnconfinedTestDispatcher()).toList()
         // EOF after the header (no DONE) — but the header itself must
         // appear as Started without a PROTOCOL_MISMATCH error.
         assertTrue("expected at least one event", events.isNotEmpty())
@@ -82,7 +84,7 @@ class TokenStreamReaderThinkingTest {
             json.encodeToString(StreamEvent.serializer(), done),
         )
 
-        val events = TokenStreamReader.readStream(pfd).toList()
+        val events = TokenStreamReader.readStream(pfd, UnconfinedTestDispatcher()).toList()
         val deltas = events.filterIsInstance<InferenceEvent.ThoughtDelta>()
         assertEquals(1, deltas.size)
         assertEquals("Let me think about this...", deltas[0].text)
@@ -121,7 +123,7 @@ class TokenStreamReaderThinkingTest {
             json.encodeToString(StreamEvent.serializer(), done),
         )
 
-        val events = TokenStreamReader.readStream(pfd).toList()
+        val events = TokenStreamReader.readStream(pfd, UnconfinedTestDispatcher()).toList()
         val thoughts = events.filterIsInstance<InferenceEvent.ThoughtDelta>()
         assertEquals(3, thoughts.size)
         assertEquals(listOf("first ", "second ", "third"), thoughts.map { it.text })
@@ -150,7 +152,7 @@ class TokenStreamReaderThinkingTest {
             json.encodeToString(StreamEvent.serializer(), done),
         )
 
-        val events = TokenStreamReader.readStream(pfd).toList()
+        val events = TokenStreamReader.readStream(pfd, UnconfinedTestDispatcher()).toList()
         assertTrue(events.none { it is InferenceEvent.ThoughtDelta })
         assertTrue(events.any { it is InferenceEvent.Done })
     }
@@ -183,7 +185,7 @@ class TokenStreamReaderThinkingTest {
             json.encodeToString(StreamEvent.serializer(), done),
         )
 
-        val thoughts = TokenStreamReader.readStream(pfd).thoughtDeltas().toList()
+        val thoughts = TokenStreamReader.readStream(pfd, UnconfinedTestDispatcher()).thoughtDeltas().toList()
         assertEquals(listOf("reasoning"), thoughts)
     }
 
@@ -215,7 +217,7 @@ class TokenStreamReaderThinkingTest {
             json.encodeToString(StreamEvent.serializer(), done),
         )
 
-        val events = TokenStreamReader.readStream(pfd).answerOnly().toList()
+        val events = TokenStreamReader.readStream(pfd, UnconfinedTestDispatcher()).answerOnly().toList()
         assertTrue(
             "answerOnly() must not surface ThoughtDelta",
             events.none { it is InferenceEvent.ThoughtDelta },
