@@ -216,47 +216,52 @@ thinking mode, and you get a normal-looking answer with zero
 `ThoughtDelta` events (verified the hard way by an early iteration
 of this PR — see commit history).
 
-## Model variant compatibility
+## Runtime contract verified on Gemma 4 E2B
 
-The wiring above is complete and correct: the rendered prompt
-contains the `<|think|>` sentinel, the `thought` channel is
-configured, and any token the model emits between
-`<|channel>thought` and `<channel|>` will surface as a
-`ThoughtDelta` on the SDK side. **What surfaces depends entirely
-on what the bundled Gemma 4 `.litertlm` variant was trained to
-emit.**
+The thinking-mode surface is a hard end-to-end contract for the
+bundled `gemma-4-E2B-it.litertlm` model:
 
-Observed on `gemma-4-E2B-it.litertlm` (the build packaged with
-LiteRT-LM 0.12.0, verified end-to-end on emulator API 36 on
-2026-06-02):
+1. `SessionConfigBuilder.enableThinking()` writes
+   `{"thinking":{"enable":true}}` into `extraContextJson`.
+2. `SessionManager` translates that to LiteRT-LM
+   `extraContext["enable_thinking"] = true` at conversation creation.
+3. `InferenceOrchestrator` also passes
+   `extraContext["enable_thinking"] = true` on every send, because the
+   chat template is re-rendered for each turn.
+4. LiteRT-LM renders the prompt with the Gemma sentinel:
 
-| Aspect | Observed | Expected per Gemma docs |
-|---|---|---|
-| Prompt contains `<|think|>` sentinel | ✅ Yes | ✅ Yes |
-| Response **quality** with thinking on | ✅ Longer, more structured, more markdown/LaTeX | ✅ Reasoning-heavy |
-| Response **emits** `<|channel>thought ... <channel|>` block | ❌ No — reasoning is inline | ✅ Yes |
-| `InferenceEvent.ThoughtDelta` events on the SDK side | 0 | ≥ 1 |
+   ```text
+   <|turn>system
+   <|think|>You are a careful assistant.<turn|>
+   <|turn>user
+   What is the water formula?<turn|>
+   <|turn>model
+   ```
 
-So the SDK surface ships **today** with a real wiring contract, but
-the bundled E2B variant won't actually produce `ThoughtDelta` events
-until either (a) Google ships a Gemma 4 E2B `.litertlm` that emits
-channel-separated thoughts, or (b) Mindlayer adopts a larger Gemma 4
-variant (26B / 31B) per `docs/THINKING.md`. The on-device
-instrumented probe (`ThinkingModeInstrumentedTest`) reflects this
-honestly:
+5. The model emits its private reasoning through the
+   `<|channel>thought ... <channel|>` channel; LiteRT-LM routes those
+   tokens into `Message.channels["thought"]`.
+6. Mindlayer streams that channel as `InferenceEvent.ThoughtDelta`,
+   while the public answer begins only after the channel closes and is
+   streamed as `InferenceEvent.TextDelta`.
 
-- `thinking_opt_in_inserts_think_marker_in_rendered_prompt` — hard
-  assertion. The wiring delivered by this PR is the
-  `enable_thinking` extraContext plumbing; that's what this test
-  verifies.
+Verified on-device on emulator API 36 with the bundled E2B model on
+2026-06-03. A direct LiteRT-LM probe observed hundreds of
+`channels["thought"]` chunks for the Gemma docs prompt ("What is the
+water formula?"), beginning with `Thinking Process:` and followed by a
+clean answer. The service-level `ThinkingModeInstrumentedTest` locks
+this down:
+
+- `thinking_opt_in_reaches_engine_without_error` — proves a
+  thinking-enabled request is accepted and reaches the engine without
+  surfacing an error event.
 - `thinking_enabled_session_emits_ThoughtDelta_when_model_supports_channels`
-  — soft assertion. Skips with `assumeTrue` when the model
-  produced zero markers (current state); will go from skip → pass
-  automatically the moment a channel-emitting model variant lands.
-
-If you've manually pushed a channel-emitting Gemma 4 build to your
-device (see `docs/DEV_MODELS.md`), the second test will start
-passing — no SDK / service code change required.
+  — hard assertion: at least one `ThoughtDelta`, at least one
+  `TextDelta`, no Error event, terminal `Done`, and no raw
+  `<|channel>thought`, `<channel|>`, or `<|think|>` markers in the
+  answer text.
+- `non_thinking_session_emits_no_ThoughtDelta_baseline` — regression
+  guard: default callers receive no thought stream unless they opt in.
 
 ## Known limitations
 
@@ -266,12 +271,9 @@ passing — no SDK / service code change required.
 - The opt-in is per-session. Mid-session toggling is not supported;
   destroy the session and create a new one with the opposite flag if
   you need to switch behaviour for a different turn.
-- The bundled `gemma-4-E2B-it.litertlm` variant emits enhanced
-  reasoning inline rather than in a `<|channel>thought` block — see
-  "Model variant compatibility" above. The SDK surface ships now so
-  consumers can write their `enableThinking()` + `thoughtDeltas()`
-  pipelines today; emissions appear automatically when a
-  channel-emitting Gemma 4 build replaces the current E2B.
+- The answer stream is clean by construction: reasoning is emitted as
+  `ThoughtDelta`, and high-level answer helpers (`chat`, `awaitText`,
+  `textDeltas`) consume only `TextDelta`.
 
 ## References
 
