@@ -141,6 +141,12 @@ class MemoryBudget(
     // ---- Public API --------------------------------------------------------
 
     fun start() {
+        // R-21: idempotent — a second start() without stop() would orphan
+        // the prior poll job (stop() could then never reach it).
+        if (pollJob != null) {
+            MindlayerLog.w(TAG, "MemoryBudget.start() ignored — already running")
+            return
+        }
         pollJob = scope.launch(Dispatchers.Default) {
             while (isActive) {
                 evaluate()

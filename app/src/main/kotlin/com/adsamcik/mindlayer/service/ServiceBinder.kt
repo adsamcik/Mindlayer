@@ -363,14 +363,23 @@ class ServiceBinder(
      * **Self-UID bypass**: when the caller is in the same UID as this process
      * (the built-in dashboard speaking to its own `:ml` service over AIDL),
      * we skip the allowlist + rate-limit checks. Without this the dashboard
-     * would self-deny (never user-approved) and self-rate-limit (polling
-     * 3 RPCs every 2s = 90 RPM > default 60 RPM).
+     * would self-deny (never user-approved) and self-rate-limit (it polls
+     * several cheap RPCs every 2s).
      *
-     * **Order matters** (H2): rate-limit BEFORE allowlist so an un-approved
-     * caller cannot drive unbounded `recordPending` disk I/O simply by
-     * spamming the binder. The rejection-bookkeeping path is further
-     * throttled by [RateLimiter.tryAcquireRejection] — only ~6 rejections
-     * per minute per UID actually call `recordPending`.
+     * **Order** (security-review V-E/V-G): identity → allowlist
+     * (`isDenied`/`isAllowed`) → main rate-limit. Rate-limiting runs *after*
+     * the allowlist so a rate-limit rejection's timing cannot be used to
+     * probe allowlist membership. The disk/HMAC cost of the allowlist reads
+     * is bounded independently per UID: the no-identity flood path uses
+     * [RateLimiter.tryAcquireRejected], the un-approved (`recordPending`)
+     * path uses [RateLimiter.tryAcquireRejection], and the revoked/`isDenied`
+     * path is throttled by [RateLimiter.tryAcquireRejected] as well — so a
+     * hostile peer cannot drive unbounded allowlist I/O without first
+     * exhausting a small per-UID rejection budget.
+     *
+     * Approved first-party callers are bounded by the main per-UID bucket
+     * (`DEFAULT_RPM` = 300 RPM, cost-weighted; concurrent-inference + global
+     * caps in [RateLimiter]).
      */
     private fun authorizeCall(): CallerIdentity = authorizeCall(cost = 1.0)
 
@@ -428,6 +437,15 @@ class ServiceBinder(
         // 1. Allowlist check. A previously-denied caller is rejected silently.
         val store = allowlistStore
         if (store.isDenied(identity.packageName, identity.signingCertSha256)) {
+            // Security-review V-G: throttle revoked-caller floods so a
+            // denied app cannot force unbounded `isDenied` disk reads +
+            // HMAC verifies by re-binding in a loop. Same per-UID flood
+            // budget used for the no-identity path; the typed error is
+            // unchanged for callers that still have budget.
+            if (!rateLimiter.tryAcquireRejected(uid)) {
+                logRepository?.logRateLimitReject(callerAidlMethodName(), uid, cost)
+                throw typedBinderException(MindlayerErrorCode.RATE_LIMITED, "Rate limit exceeded")
+            }
             throw typedBinderException(
                 MindlayerErrorCode.ALLOWLIST_REVOKED,
                 "App not authorized — approval revoked",

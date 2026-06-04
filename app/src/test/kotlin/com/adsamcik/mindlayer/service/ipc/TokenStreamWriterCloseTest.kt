@@ -70,4 +70,38 @@ class TokenStreamWriterCloseTest {
         // Second close must not throw — closed flag is honoured.
         w.close()
     }
+
+    /**
+     * OutputStream that throws IOException on every write to simulate a
+     * dead/disconnected pipe reader (broken pipe / EPIPE).
+     */
+    private class WriteThrowing : OutputStream() {
+        @Volatile var closed = false
+            private set
+
+        override fun write(b: Int) { throw IOException("broken pipe") }
+        override fun write(b: ByteArray, off: Int, len: Int) { throw IOException("broken pipe") }
+        override fun close() { closed = true }
+    }
+
+    @Test
+    fun `broken-pipe writeFrame releases the fd instead of leaking it (R-1)`() = kotlinx.coroutines.runBlocking {
+        val out = WriteThrowing()
+        val w = TokenStreamWriter.forTesting(out)
+        try {
+            w.writeHeader("req-r1")
+            org.junit.Assert.fail("broken pipe should surface as CancellationException")
+        } catch (_: kotlinx.coroutines.CancellationException) {
+            // expected — writeFrame re-raises EPIPE as cancellation
+        }
+        // The whole point of R-1: the failed write must release the
+        // underlying stream/FD inline, NOT leave it for a close() that
+        // short-circuits on the `closed` flag.
+        assertTrue("broken-pipe writeFrame must release the fd, not leak it", out.closed)
+
+        // A subsequent orchestrator finally { writer.close() } must remain
+        // safe and not re-throw or double-release.
+        w.close()
+        assertTrue(out.closed)
+    }
 }
