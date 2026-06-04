@@ -207,7 +207,7 @@ Heuristic scoring in `:ml`'s input pipeline, applied **only for THIRD_PARTY call
 - Base64-encoded payloads above a length threshold
 - Multi-character control sequences
 
-Above threshold → reject with `MindlayerErrorCode.INPUT_REJECTED = 3006`. Logged with `LogRepository.logSecurityDecision(action = "input_rejected_injection_score", ...)` — score recorded, content NOT recorded.
+Above threshold → reject with `MindlayerErrorCode.INPUT_REJECTED = 3009`. Logged with `LogRepository.logSecurityDecision(action = "input_rejected_injection_score", ...)` — score recorded, content NOT recorded.
 
 Heuristics deliberately err on the side of false-negatives. They are a defense-in-depth layer, not a complete prompt-injection defense.
 
@@ -450,7 +450,7 @@ Idempotent — re-running on already-migrated data is a no-op.
 | Permanently-blocked package re-requests consent | `ConsentActivity` returns RESULT_CANCELED without UI. Client receives `ConsentDenied(until=null)`. |
 | Approved app rate-limit exhausted | AIDL call rejects with `SecurityException("Rate limit exceeded")`. Translated by SDK to `MindlayerSessionResult.RateLimited(retryAfter)`. |
 | Approved third-party app sends 32 KB tools JSON | `IpcInputValidator` rejects with `INVALID_INPUT_BUDGET`. (FIRST_PARTY would accept up to 256 KB.) |
-| Prompt-injection score above threshold for THIRD_PARTY caller | `MindlayerErrorCode.INPUT_REJECTED = 3006` returned. |
+| Prompt-injection score above threshold for THIRD_PARTY caller | `MindlayerErrorCode.INPUT_REJECTED = 3009` returned. |
 
 ## Out of scope (explicit non-goals)
 

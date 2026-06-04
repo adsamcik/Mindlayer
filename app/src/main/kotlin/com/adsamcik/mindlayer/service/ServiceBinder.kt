@@ -2997,6 +2997,62 @@ class ServiceBinder(
         )
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    //  v0.10 consent-Intent flow stubs (Phase 1 of feat/consent-architecture).
+    //
+    //  The wire contract is locked in here; the state machine + activity
+    //  binding land in Phase 2 (ConsentChallengeStore, ConsentAttemptStore,
+    //  per-UID rate limiting on requestConsentChallenge, etc.) and Phase 4
+    //  (ConsentActivity). These stubs return MindlayerErrorCode.INTERNAL
+    //  so they fail closed if any caller reaches them before Phase 2 ships.
+    //
+    //  See docs/CONSENT_ARCHITECTURE.md.
+    // ─────────────────────────────────────────────────────────────────────
+
+    override fun requestConsentChallenge(): com.adsamcik.mindlayer.ConsentChallenge {
+        // Phase 2: identity capture via Binder.getCallingUid() + per-UID
+        // rate limit (10/hour default) + ConsentChallengeStore.put +
+        // PendingIntent mint targeting ConsentActivity.
+        throw typedBinderException(
+            MindlayerErrorCode.INTERNAL,
+            "requestConsentChallenge not yet wired (Phase 1 stub)",
+        )
+    }
+
+    override fun lookupChallenge(nonce: String?): com.adsamcik.mindlayer.ConsentIdentity? {
+        if (Binder.getCallingUid() != Process.myUid()) {
+            throw typedBinderException(
+                MindlayerErrorCode.PERMISSION_DENIED,
+                "lookupChallenge: self-UID only",
+            )
+        }
+        // Phase 2: read pinned identity from ConsentChallengeStore by nonce,
+        // returning null for expired / consumed / unknown nonces.
+        throw typedBinderException(
+            MindlayerErrorCode.INTERNAL,
+            "lookupChallenge not yet wired (Phase 1 stub)",
+        )
+    }
+
+    override fun completeConsent(
+        nonce: String?,
+        decision: com.adsamcik.mindlayer.ConsentDecision?,
+    ) {
+        if (Binder.getCallingUid() != Process.myUid()) {
+            throw typedBinderException(
+                MindlayerErrorCode.PERMISSION_DENIED,
+                "completeConsent: self-UID only",
+            )
+        }
+        // Phase 2: consume nonce, dispatch on ConsentDecision.kind →
+        // store.approve / store.deny / ConsentAttemptStore.recordDismiss.
+        // F-031 revalidation happens inside store.approve() under file lock.
+        throw typedBinderException(
+            MindlayerErrorCode.INTERNAL,
+            "completeConsent not yet wired (Phase 1 stub)",
+        )
+    }
+
     /**
      * Read an engine's sealed-class state, catching the
      * `UninitializedPropertyAccessException` that fires when the
