@@ -347,14 +347,17 @@ internal class MindlayerImpl(
         val audio = request.audioFile
         val sessionId = overrideSessionId ?: request.sessionId
 
-        @Suppress("DEPRECATION")
-        val text: String = if (sessionId != null) {
-            when {
-                bitmap != null -> chatWithImageOnce(sessionId, prompt, bitmap)
-                audio != null -> chatWithAudioOnce(sessionId, prompt, audio)
-                else -> chatOnce(sessionId, prompt)
+        if (sessionId != null) {
+            @Suppress("DEPRECATION")
+            return when {
+                bitmap != null -> chatWithImage(sessionId, prompt, bitmap)
+                audio != null -> chatWithAudio(sessionId, prompt, audio)
+                else -> chat(sessionId, prompt)
             }
-        } else {
+        }
+
+        @Suppress("DEPRECATION")
+        val text: String = run {
             val configure = sessionConfigureFrom(request)
             when {
                 bitmap != null -> generateWithImage(prompt, bitmap, configure)

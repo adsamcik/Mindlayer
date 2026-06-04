@@ -123,17 +123,12 @@ class ThinkingModeInstrumentedTest {
     }
 
     @Test
-    fun thinking_opt_in_inserts_think_marker_in_rendered_prompt() = runBlocking<Unit> {
-        // Hard assertion: with `enable_thinking = true` flowing into the
-        // chat-template engine via ConversationConfig.extraContext +
-        // per-send extraContext, the rendered prompt MUST contain the
-        // single Gemma `<|think|>` sentinel. This is the wiring contract
-        // this PR delivers — independent of whether the bundled model
-        // variant emits channel-separated thoughts at decode time.
-        //
-        // We render through LiteRT-LM's `Conversation.renderMessageIntoString`
-        // here (test-only, never on the production hot path — see the
-        // "no prompt logging" rule in .github/copilot-instructions.md).
+    fun thinking_opt_in_reaches_engine_without_error() = runBlocking<Unit> {
+        // Smoke test: a thinking-enabled session should be accepted by
+        // the service and should complete a small inference without
+        // surfacing an Error event. The stronger contract — non-empty
+        // ThoughtDelta plus clean TextDelta answer — is asserted by
+        // thinking_enabled_session_emits_ThoughtDelta_when_model_supports_channels.
         val caps = mindlayer.getCapabilities()
         assumeTrue(
             "Service does not advertise FEATURE_THINKING_MODE; skip",
@@ -184,26 +179,22 @@ class ThinkingModeInstrumentedTest {
 
     @Test
     fun thinking_enabled_session_emits_ThoughtDelta_when_model_supports_channels() = runBlocking<Unit> {
-        // Soft / observational test. The `enable_thinking` extraContext
-        // is plumbed correctly (verified by
-        // thinking_opt_in_inserts_think_marker_in_rendered_prompt) but
-        // **whether the model actually emits `<|channel>thought ... <channel|>`
-        // delimiters depends on the model variant's training.** The
-        // bundled `gemma-4-E2B-it.litertlm` shipped in current LiteRT-LM
-        // 0.12.0 release artifacts produces structured reasoning inline
-        // and does NOT emit channel markers — verified end-to-end via
-        // the dashboard's "Run Test" flow on 2026-06-02.
+        // Hard end-to-end assertion. The Gemma 4 thinking docs specify
+        // that E2B/E4B with thinking ON renders:
         //
-        // Larger Gemma 4 variants (26B / 31B) and future E2B/E4B
-        // re-releases trained with channel-separated thinking will
-        // produce ThoughtDelta events without any further code change
-        // on the Mindlayer side. Until then this test logs the actual
-        // counts and skips when the model produced no thoughts — that
-        // way the suite stays green on the current model, and lights up
-        // as a true regression the moment a thinking-capable model
-        // variant becomes the default.
+        //   <|turn>system
+        //   <|think|><turn|>
+        //   <|turn>user
+        //   [Prompt]<turn|>
+        //   <|turn>model
         //
-        // See docs/THINKING.md § "Model variant compatibility".
+        // and emits its reasoning in a `<|channel>thought ... <channel|>`
+        // block. LiteRT-LM routes that block into Message.channels["thought"];
+        // Mindlayer must surface it as InferenceEvent.ThoughtDelta, never
+        // as answer text. A direct LiteRT-LM render/decode probe on
+        // 2026-06-03 confirmed the bundled gemma-4-E2B-it.litertlm model
+        // does exactly that when `enable_thinking=true` is passed through
+        // ConversationConfig.extraContext + per-send extraContext.
         val caps = mindlayer.getCapabilities()
         assumeTrue(
             "Service does not advertise FEATURE_THINKING_MODE; skip",
@@ -258,11 +249,11 @@ class ThinkingModeInstrumentedTest {
                 answers.isNotEmpty(),
             )
 
-            // Hard requirement on output cleanliness: even when the
-            // model doesn't emit channel markers, raw delimiter strings
-            // MUST NOT leak into the user-visible answer. This catches
-            // a regression where a future model variant starts emitting
-            // markers but the Channel routing breaks somehow.
+            // Hard requirement on output cleanliness: raw channel
+            // delimiters must never leak into user-visible answer text.
+            // When routing works, the model's private reasoning arrives
+            // as ThoughtDelta and the answer starts only after the
+            // `<channel|>` close marker.
             val leakedDelimiters = listOf("<|channel>thought", "<channel|>", "<|think|>")
             for (delim in leakedDelimiters) {
                 assertTrue(
@@ -272,23 +263,18 @@ class ThinkingModeInstrumentedTest {
                 )
             }
 
-            // Soft observation: did the model actually emit channel
-            // markers? Skip when it didn't (the wiring works, the
-            // model just doesn't separate thoughts).
-            assumeTrue(
-                "Model produced 0 ThoughtDelta events. The bundled " +
-                    "gemma-4-E2B-it.litertlm variant currently emits " +
-                    "structured reasoning inline rather than in a " +
-                    "<|channel>thought block, even with enable_thinking=true. " +
-                    "The wiring is verified by " +
-                    "thinking_opt_in_inserts_think_marker_in_rendered_prompt; " +
-                    "this test will go from skip -> pass automatically once a " +
-                    "channel-trained model variant becomes the default. See " +
-                    "docs/THINKING.md § Model variant compatibility.",
+            assertTrue(
+                "thinking-enabled session must emit at least one ThoughtDelta. " +
+                    "If this fails, callers would receive only answer TextDelta " +
+                    "and the reasoning stream would be silently lost. " +
+                    "events=${events.size} answerHead=${answerJoined.take(200)}",
                 thoughts.isNotEmpty(),
             )
+            assertTrue(
+                "thinking-enabled session must produce non-empty thought text",
+                thoughtJoined.isNotBlank(),
+            )
 
-            // If the model DID emit thoughts, lock in stronger expectations.
             Log.i(TAG, "thought head: ${thoughtJoined.take(400)}")
             Log.i(TAG, "answer head: ${answerJoined.take(400)}")
         } finally {
