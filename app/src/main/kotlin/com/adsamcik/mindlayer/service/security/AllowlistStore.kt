@@ -28,6 +28,14 @@ data class AllowlistEntry(
     val signingCertSha256: String,
     val grantedAtMs: Long,
     val displayName: String? = null,
+    /**
+     * v0.10: trust tier set at user-consent time. Migrated entries from
+     * the pre-v0.10 schema default to [TrustTier.FIRST_PARTY] since they
+     * came from the legacy `FIRST_PARTY_ALLOWLIST_SEEDS` constant.
+     * Drives per-tier [RateLimiter] budgets and [IpcInputValidator]
+     * byte caps; does NOT gate access. See `docs/CONSENT_ARCHITECTURE.md`.
+     */
+    val trustTier: TrustTier = TrustTier.FIRST_PARTY,
 )
 
 /**
@@ -78,10 +86,23 @@ class CertificateMismatchException(
  */
 data class DeniedEntry(
     val packageName: String,
-    val signingCertSha256: String,
+    /**
+     * Lowercase hex SHA-256 of the signer that was denied. `null` when
+     * [scope] is [DenialScope.PACKAGE_WIDE] — a package-wide block does
+     * not pin a specific cert, so cert rotation cannot bypass it.
+     */
+    val signingCertSha256: String?,
     val deniedAtMs: Long,
     val expiresAtMs: Long,
     val permanent: Boolean = false,
+    /**
+     * v0.10: the scope of the denial. [DenialScope.CERT_PAIR] (default,
+     * legacy) for `(pkg, sig)`-keyed denials. [DenialScope.PACKAGE_WIDE]
+     * for the "Block permanently" consent flow which prevents cert
+     * rotation from bypassing the user's clear "no" — applies to any
+     * cert under the package name.
+     */
+    val scope: DenialScope = DenialScope.CERT_PAIR,
 )
 
 /**
@@ -264,7 +285,14 @@ class AllowlistStore(
      * F-031: production approval entry point — re-verifies the live signing
      * certificate against [expectedSigSha256] under the file lock and writes
      * the entry only if it matches. Closes the TOCTOU window between
-     * dashboard render and the user's tap.
+     * dashboard render and the user's tap (or, in the v0.10 consent flow,
+     * between [com.adsamcik.mindlayer.IMindlayerService.requestConsentChallenge]
+     * and the user's `completeConsent(GRANT)` in `ConsentActivity`).
+     *
+     * @param trustTier v0.10: the tier to record on the new [AllowlistEntry].
+     *   See `docs/CONSENT_ARCHITECTURE.md § Trust tiers` for the assignment
+     *   rules used by `ConsentActivity`. Defaults to [TrustTier.FIRST_PARTY]
+     *   for back-compat with legacy code paths (e.g. [seedVerified]).
      *
      * @throws CertificateMismatchException if the live signer disagrees with
      *   what the user saw on screen.
@@ -276,6 +304,7 @@ class AllowlistStore(
         pkg: String,
         expectedSigSha256: String,
         displayName: String? = null,
+        trustTier: TrustTier = TrustTier.FIRST_PARTY,
     ) {
         withFileLock {
             val live = CallerVerifier.identifyByPackage(context, pkg)
@@ -288,7 +317,7 @@ class AllowlistStore(
                 )
             }
             val sanitized = CallerVerifier.sanitizeLabel(live.displayName ?: displayName)
-            writeApprovalLocked(pkg, live.signingCertSha256, sanitized)
+            writeApprovalLocked(pkg, live.signingCertSha256, sanitized, trustTier)
             // Clear any denial when explicitly approved.
             writeDenied(readDenied().filterNot { it.packageName == pkg })
         }
@@ -301,17 +330,27 @@ class AllowlistStore(
      * recovery paths that already hold the verified identity.
      */
     @VisibleForTesting
-    internal fun approveDirect(pkg: String, sigSha256: String, displayName: String? = null) {
+    internal fun approveDirect(
+        pkg: String,
+        sigSha256: String,
+        displayName: String? = null,
+        trustTier: TrustTier = TrustTier.FIRST_PARTY,
+    ) {
         withFileLock {
-            writeApprovalLocked(pkg, sigSha256, CallerVerifier.sanitizeLabel(displayName))
+            writeApprovalLocked(pkg, sigSha256, CallerVerifier.sanitizeLabel(displayName), trustTier)
         }
     }
 
-    private fun writeApprovalLocked(pkg: String, sigSha256: String, displayName: String?) {
+    private fun writeApprovalLocked(
+        pkg: String,
+        sigSha256: String,
+        displayName: String?,
+        trustTier: TrustTier = TrustTier.FIRST_PARTY,
+    ) {
         val now = System.currentTimeMillis()
         val current = readEntries()
         val updated = current.filterNot { it.packageName == pkg } +
-            AllowlistEntry(pkg, sigSha256, now, displayName)
+            AllowlistEntry(pkg, sigSha256, now, displayName, trustTier)
         writeEntries(updated)
         _entries.value = updated
 
@@ -457,14 +496,96 @@ class AllowlistStore(
     }
 
     /**
-     * Returns true if [pkg]/[sigSha256] has been denied and the [DENIAL_TTL_MS] has not elapsed.
+     * Returns true if [pkg]/[sigSha256] has been denied and the denial is
+     * still in effect. Honours [DenialScope]:
+     *  - [DenialScope.CERT_PAIR] — matches when both pkg AND sig match.
+     *  - [DenialScope.PACKAGE_WIDE] — matches any cert under [pkg].
+     *    Cert rotation does NOT bypass.
      */
     fun isDenied(pkg: String, sigSha256: String): Boolean {
         val now = System.currentTimeMillis()
-        return readDenied().any {
-            it.packageName == pkg &&
-                it.signingCertSha256.equals(sigSha256, ignoreCase = true) &&
-                it.expiresAtMs > now
+        return readDenied().any { entry ->
+            entry.packageName == pkg && (entry.permanent || entry.expiresAtMs > now) &&
+                when (entry.scope) {
+                    DenialScope.PACKAGE_WIDE -> true
+                    DenialScope.CERT_PAIR ->
+                        entry.signingCertSha256?.equals(sigSha256, ignoreCase = true) == true
+                }
+        }
+    }
+
+    /**
+     * True iff [pkg] has a [DenialScope.PACKAGE_WIDE] block in effect.
+     * `ConsentActivity` uses this to short-circuit a permanently-blocked
+     * package with `RESULT_CANCELED` before rendering any UI — no cert
+     * comparison needed because the block applies to any cert under the
+     * package.
+     */
+    fun isPermanentlyDenied(pkg: String): Boolean {
+        val now = System.currentTimeMillis()
+        return readDenied().any { entry ->
+            entry.packageName == pkg &&
+                entry.scope == DenialScope.PACKAGE_WIDE &&
+                (entry.permanent || entry.expiresAtMs > now)
+        }
+    }
+
+    /**
+     * v0.10: returns the full [AllowlistEntry] for an approved `(pkg, sig)`
+     * pair, or `null` if not allowed. Used by `ServiceBinder.authorizeCall`
+     * to read [AllowlistEntry.trustTier] without a second disk read so the
+     * tier-aware [RateLimiter] and [IpcInputValidator] can apply the right
+     * budgets.
+     */
+    fun lookupAllowed(pkg: String, sigSha256: String): AllowlistEntry? {
+        val entry = readEntries().firstOrNull { it.packageName == pkg } ?: return null
+        return if (entry.signingCertSha256.equals(sigSha256, ignoreCase = true)) entry else null
+    }
+
+    /**
+     * v0.10: unified denial entry point dispatched from `ConsentActivity`
+     * per the user's [com.adsamcik.mindlayer.ConsentDecision] kind.
+     *
+     *  - [com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H]
+     *    writes a [DenialScope.CERT_PAIR] row with `expiresAt = now + 24h`.
+     *    Requires non-null [sigSha256].
+     *  - [com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_PERMANENT]
+     *    writes a [DenialScope.PACKAGE_WIDE] row with `permanent = true`
+     *    and `expiresAt = Long.MAX_VALUE`. [sigSha256] is ignored — the
+     *    block applies to any cert under [pkg] so cert rotation cannot
+     *    bypass it.
+     *
+     * Both variants upsert: any prior denial row for the same package is
+     * replaced (single-row-per-package invariant). Use [revoke] to remove
+     * a prior approval at the same time as denying.
+     */
+    fun deny(pkg: String, sigSha256: String?, kind: Int) {
+        val now = System.currentTimeMillis()
+        val entry = when (kind) {
+            com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H -> {
+                requireNotNull(sigSha256) { "DENY_24H requires non-null sigSha256" }
+                DeniedEntry(
+                    packageName = pkg,
+                    signingCertSha256 = sigSha256,
+                    deniedAtMs = now,
+                    expiresAtMs = now + DENY_24H_TTL_MS,
+                    permanent = false,
+                    scope = DenialScope.CERT_PAIR,
+                )
+            }
+            com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_PERMANENT -> DeniedEntry(
+                packageName = pkg,
+                signingCertSha256 = null,
+                deniedAtMs = now,
+                expiresAtMs = Long.MAX_VALUE,
+                permanent = true,
+                scope = DenialScope.PACKAGE_WIDE,
+            )
+            else -> throw IllegalArgumentException("Unsupported deny kind: $kind")
+        }
+        withFileLock {
+            val updated = readDeniedIncludingExpired().filterNot { it.packageName == pkg } + entry
+            writeDenied(updated)
         }
     }
 
@@ -518,6 +639,7 @@ class AllowlistStore(
                 put("sig", e.signingCertSha256)
                 put("grantedAtMs", e.grantedAtMs)
                 e.displayName?.let { put("displayName", it) }
+                put("trustTier", e.trustTier.name)
             })
         }
         atomicWrite(entriesFile, signedEnvelope(ENTRIES_KEY, array).toString())
@@ -539,18 +661,22 @@ class AllowlistStore(
 
     private fun writeDenied(list: List<DeniedEntry>) {
         val now = System.currentTimeMillis()
-        // Permanent rows (set by revoke()) are never pruned by expiry — they
-        // are sticky tombstones of an explicit user decision. Time-bounded
-        // rows from denyPending still expire at expiresAtMs.
+        // Permanent rows (set by revoke() / consent "Block permanently") are
+        // never pruned by expiry — they are sticky tombstones of an explicit
+        // user decision. Time-bounded rows from denyPending /
+        // consent "Deny for 24h" still expire at expiresAtMs.
         val pruned = list.filter { it.permanent || it.expiresAtMs > now }
         val array = JSONArray()
         for (e in pruned.sortedBy { it.packageName }) {
             array.put(JSONObject().apply {
                 put("pkg", e.packageName)
-                put("sig", e.signingCertSha256)
+                // v3: sig may be null for DenialScope.PACKAGE_WIDE — cert
+                // rotation must not be able to bypass a package-wide block.
+                e.signingCertSha256?.let { put("sig", it) }
                 put("deniedAtMs", e.deniedAtMs)
                 put("expiresAtMs", e.expiresAtMs)
                 if (e.permanent) put("permanent", true)
+                put("scope", e.scope.name)
             })
         }
         atomicWrite(deniedFile, signedEnvelope(DENIED_KEY, array).toString())
@@ -636,6 +762,7 @@ class AllowlistStore(
                             signingCertSha256 = o.getString("sig"),
                             grantedAtMs = o.optLong("grantedAtMs", 0L),
                             displayName = o.optString("displayName").ifEmpty { null },
+                            trustTier = parseTrustTier(o.optString("trustTier")),
                         )
                     )
                 }
@@ -687,10 +814,11 @@ class AllowlistStore(
                     add(
                         DeniedEntry(
                             packageName = o.getString("pkg"),
-                            signingCertSha256 = o.getString("sig"),
+                            signingCertSha256 = o.optString("sig").ifEmpty { null },
                             deniedAtMs = o.optLong("deniedAtMs", 0L),
                             expiresAtMs = o.optLong("expiresAtMs", 0L),
                             permanent = o.optBoolean("permanent", false),
+                            scope = parseDenialScope(o.optString("scope")),
                         )
                     )
                 }
@@ -712,10 +840,11 @@ class AllowlistStore(
                         add(
                             DeniedEntry(
                                 packageName = o.getString("pkg"),
-                                signingCertSha256 = o.getString("sig"),
+                                signingCertSha256 = o.optString("sig").ifEmpty { null },
                                 deniedAtMs = o.optLong("deniedAtMs", 0L),
                                 expiresAtMs = expires,
                                 permanent = permanent,
+                                scope = parseDenialScope(o.optString("scope")),
                             )
                         )
                     }
@@ -724,6 +853,37 @@ class AllowlistStore(
         } catch (_: Throwable) {
             emptyList()
         }
+    }
+
+    /**
+     * Parse a [TrustTier] from its serialized name. Empty / absent is treated
+     * as [TrustTier.FIRST_PARTY] — that is the v2→v3 migration default for
+     * legacy entries that pre-date the trust-tier field. Unknown future
+     * values fall back to [TrustTier.THIRD_PARTY] (the more restrictive
+     * tier) so a corrupted or forged trustTier cannot upgrade a row to
+     * first-party budgets.
+     */
+    private fun parseTrustTier(value: String): TrustTier = when (value) {
+        "" -> TrustTier.FIRST_PARTY
+        TrustTier.FIRST_PARTY.name -> TrustTier.FIRST_PARTY
+        TrustTier.THIRD_PARTY.name -> TrustTier.THIRD_PARTY
+        else -> TrustTier.THIRD_PARTY
+    }
+
+    /**
+     * Parse a [DenialScope] from its serialized name. Empty / absent is
+     * treated as [DenialScope.CERT_PAIR] — that is the v2→v3 migration
+     * default for legacy denied entries that pre-date the scope field
+     * (legacy denyPending / revoke always wrote a cert-pair denial).
+     * Unknown future values fall back to [DenialScope.CERT_PAIR] (the
+     * narrower scope) so a corrupted or forged scope cannot widen a
+     * denial into a package-wide block.
+     */
+    private fun parseDenialScope(value: String): DenialScope = when (value) {
+        "" -> DenialScope.CERT_PAIR
+        DenialScope.CERT_PAIR.name -> DenialScope.CERT_PAIR
+        DenialScope.PACKAGE_WIDE.name -> DenialScope.PACKAGE_WIDE
+        else -> DenialScope.CERT_PAIR
     }
 
     private fun readSignedArray(file: File, arrayKey: String): JSONArray? {
@@ -807,16 +967,16 @@ class AllowlistStore(
                 if (i > 0) append(',')
                 val item = array.getJSONObject(i)
                 when (arrayKey) {
-                    ENTRIES_KEY -> appendCanonicalEntry(item, timestampKey = "grantedAtMs")
-                    PENDING_KEY -> appendCanonicalEntry(item, timestampKey = "firstRequestedAtMs")
-                    DENIED_KEY -> appendCanonicalDenied(item)
+                    ENTRIES_KEY -> appendCanonicalEntry(item, timestampKey = "grantedAtMs", version)
+                    PENDING_KEY -> appendCanonicalEntry(item, timestampKey = "firstRequestedAtMs", version)
+                    DENIED_KEY -> appendCanonicalDenied(item, version)
                     else -> throw IllegalArgumentException("Unknown allowlist array key: $arrayKey")
                 }
             }
             append(']')
         }
 
-    private fun StringBuilder.appendCanonicalEntry(item: JSONObject, timestampKey: String) {
+    private fun StringBuilder.appendCanonicalEntry(item: JSONObject, timestampKey: String, version: Int) {
         append('{')
         append("\"pkg\":").append(JSONObject.quote(item.getString("pkg")))
         append(",\"sig\":").append(JSONObject.quote(item.getString("sig")))
@@ -825,15 +985,44 @@ class AllowlistStore(
         if (displayName != null) {
             append(",\"displayName\":").append(JSONObject.quote(displayName))
         }
+        // v3+ extension: trustTier is part of the HMAC pre-image so an
+        // offline attacker cannot upgrade THIRD_PARTY rows to first-party
+        // budgets by editing the JSON. Pre-v3 callers/readers never see
+        // this field. Empty / absent defaults to FIRST_PARTY because v2→v3
+        // migrated rows did not carry a tier.
+        if (version >= 3) {
+            val trustTier = item.optString("trustTier").ifEmpty { TrustTier.FIRST_PARTY.name }
+            append(",\"trustTier\":").append(JSONObject.quote(trustTier))
+        }
         append('}')
     }
 
-    private fun StringBuilder.appendCanonicalDenied(item: JSONObject) {
+    private fun StringBuilder.appendCanonicalDenied(item: JSONObject, version: Int) {
         append('{')
         append("\"pkg\":").append(JSONObject.quote(item.getString("pkg")))
-        append(",\"sig\":").append(JSONObject.quote(item.getString("sig")))
+        // v2: sig is always present (no PACKAGE_WIDE scope existed).
+        // v3+: sig may be absent for DenialScope.PACKAGE_WIDE.
+        val sig = item.optString("sig").ifEmpty { null }
+        if (version >= 3) {
+            if (sig != null) {
+                append(",\"sig\":").append(JSONObject.quote(sig))
+            }
+            // else: omit sig field entirely for PACKAGE_WIDE rows
+        } else {
+            // v2 legacy: sig was non-nullable; emit empty string if somehow missing
+            append(",\"sig\":").append(JSONObject.quote(sig ?: ""))
+        }
         append(",\"deniedAtMs\":").append(item.optLong("deniedAtMs", 0L))
         append(",\"expiresAtMs\":").append(item.optLong("expiresAtMs", 0L))
+        if (version >= 3) {
+            // v3 closes rubber-duck Issue #11: the permanent flag and the
+            // scope are now HMAC-authenticated so an offline attacker
+            // cannot demote a permanent denial to a TTL one or widen the
+            // scope of a denial to package-wide.
+            append(",\"permanent\":").append(item.optBoolean("permanent", false))
+            val scope = item.optString("scope").ifEmpty { DenialScope.CERT_PAIR.name }
+            append(",\"scope\":").append(JSONObject.quote(scope))
+        }
         append('}')
     }
 
@@ -936,9 +1125,19 @@ class AllowlistStore(
 
         private const val DEDUP_MAP_SOFT_CAP = 256
 
-        // Bumped to 2 when canonicalPayload was changed to include version+arrayKey
-        // domain separator (audit M6). Verifier accepts MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION.
-        private const val SIGNED_FILE_VERSION = 2
+        // Bumped to 3 when AllowlistEntry gained trustTier (v0.10
+        // consent-architecture) and DeniedEntry gained scope + the
+        // canonical payload was extended to include permanent (rubber-
+        // duck Issue #11 — pre-v3 the permanent flag wasn't HMAC-
+        // authenticated). Bumped to 2 previously when canonicalPayload
+        // was changed to include version+arrayKey domain separator
+        // (audit M6).
+        //
+        // Verifier accepts MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION
+        // so v2 files (from legacy installs) still read correctly;
+        // canonicalPayload() is version-aware and emits the right
+        // pre-image per file version.
+        private const val SIGNED_FILE_VERSION = 3
         private const val MIN_SUPPORTED_VERSION = 2
         private const val ENTRIES_KEY = "entries"
         private const val PENDING_KEY = "pending"
@@ -952,5 +1151,7 @@ class AllowlistStore(
         const val MAX_PACKAGE_NAME_LENGTH = 255
         // Length of denial cooldown after denyPending / revoke (audit M8).
         const val DENIAL_TTL_MS = 7L * 24 * 60 * 60 * 1000
+        /** v0.10: TTL for the "Deny for 24 hours" consent decision. */
+        const val DENY_24H_TTL_MS = 24L * 60 * 60 * 1000
     }
 }
