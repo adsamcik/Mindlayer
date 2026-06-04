@@ -19,7 +19,7 @@
 
 ## What this is
 
-Android service app (`com.adsamcik.mindlayer.service`) that loads a single LLM (Gemma 4 E2B via LiteRT-LM) and serves inference to **consenting client apps** over IPC. Trust boundary is per-app user consent (`ConsentActivity`) — there is no static cert allowlist and no `signature|knownSigner` permission. First-party and third-party callers go through the same approval flow; trust tiers (set at approval time) gate per-app budgets, not access.
+Android service app (`com.adsamcik.mindlayer.service`) that loads a single LLM (Gemma 4 E2B via LiteRT-LM) and serves inference to **consenting client apps** over IPC. Trust boundary is per-app user consent (`ConsentActivity`) — there is no static cert allowlist and no `signature|knownSigner` permission. **All consenting apps are treated the same** (no trust tiers, no per-app budget classes); the consent flow itself is the throttle, and a planned usage-monitoring notification surfaces heavy callers to the user for direct revoke / block.
 
 ## Tech stack
 
@@ -67,7 +67,7 @@ Every AIDL entry point runs a 4-stage gate: **identity → allowlist → rate li
 
 The only path to an approval is the **consent-Intent flow**: the SDK calls `Mindlayer.createConsentIntent(ctx)` which binds, calls `requestConsentChallenge()` (Binder-side, identity captured via real `Binder.getCallingUid()`), receives a nonce-bearing `PendingIntent`, and fires it via `startActivityForResult`. `ConsentActivity` shows the user an opaque biometric-gated screen with the app label, sanitised display name, signing cert SHA-256, install source, and cert-rotation banner (if any). The user picks Approve / Deny-once / Deny-24h / Block-permanently. On Approve, `:ml` calls `AllowlistStore.approve()` under the file lock with F-031 live cert re-verification.
 
-Approved entries carry a `trustTier` (`FIRST_PARTY` / `THIRD_PARTY`) that drives per-tier `RateLimiter` and `IpcInputValidator` budgets. Self-UID bypasses the allowlist gate so the dashboard can poll `:ml` over its own AIDL.
+All approved entries share the same uniform `RateLimiter` and `IpcInputValidator` budgets — there are no trust tiers (see `docs/CONSENT_ARCHITECTURE.md § Why no trust tiers`). Self-UID bypasses the allowlist gate so the dashboard can poll `:ml` over its own AIDL.
 
 See [`docs/CONSENT_ARCHITECTURE.md`](../docs/CONSENT_ARCHITECTURE.md) for the full data flow, failure modes, threat model, and the consent-attempt escalation policy. Path-specific rules live in `.github/instructions/security.instructions.md`.
 

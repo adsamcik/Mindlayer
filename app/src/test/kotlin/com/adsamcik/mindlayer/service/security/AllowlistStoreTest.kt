@@ -270,8 +270,15 @@ class AllowlistStoreTest {
         val entriesFile = File(dir(), "entries.json")
         val envelope = JSONObject(entriesFile.readText())
         val entry = envelope.getJSONArray("entries").getJSONObject(0)
+        // Rewrite with keys reordered but the same envelope version + MAC.
+        // The HMAC pre-image is built from a canonical (key-sorted) form
+        // by `canonicalPayload`, so a key-reordered JSON must still verify.
+        // Version is the current SIGNED_FILE_VERSION (3 since the v0.10
+        // consent-architecture bump for the denial permanent+scope HMAC
+        // fix — entries shape is unchanged but the global file-format
+        // version applies).
         entriesFile.writeText(
-            """{"version":2,"entries":[{"displayName":"${entry.getString("displayName")}","grantedAtMs":${entry.getLong("grantedAtMs")},"sig":"${entry.getString("sig")}","pkg":"${entry.getString("pkg")}"}],"mac":"${envelope.getString("mac")}"}""",
+            """{"version":3,"entries":[{"displayName":"${entry.getString("displayName")}","grantedAtMs":${entry.getLong("grantedAtMs")},"sig":"${entry.getString("sig")}","pkg":"${entry.getString("pkg")}"}],"mac":"${envelope.getString("mac")}"}""",
         )
 
         assertTrue(store.isAllowed("com.example", "sig"))

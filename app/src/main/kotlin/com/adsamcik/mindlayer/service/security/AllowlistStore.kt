@@ -28,14 +28,6 @@ data class AllowlistEntry(
     val signingCertSha256: String,
     val grantedAtMs: Long,
     val displayName: String? = null,
-    /**
-     * v0.10: trust tier set at user-consent time. Migrated entries from
-     * the pre-v0.10 schema default to [TrustTier.FIRST_PARTY] since they
-     * came from the legacy `FIRST_PARTY_ALLOWLIST_SEEDS` constant.
-     * Drives per-tier [RateLimiter] budgets and [IpcInputValidator]
-     * byte caps; does NOT gate access. See `docs/CONSENT_ARCHITECTURE.md`.
-     */
-    val trustTier: TrustTier = TrustTier.FIRST_PARTY,
 )
 
 /**
@@ -304,7 +296,6 @@ class AllowlistStore(
         pkg: String,
         expectedSigSha256: String,
         displayName: String? = null,
-        trustTier: TrustTier = TrustTier.FIRST_PARTY,
     ) {
         withFileLock {
             val live = CallerVerifier.identifyByPackage(context, pkg)
@@ -317,7 +308,7 @@ class AllowlistStore(
                 )
             }
             val sanitized = CallerVerifier.sanitizeLabel(live.displayName ?: displayName)
-            writeApprovalLocked(pkg, live.signingCertSha256, sanitized, trustTier)
+            writeApprovalLocked(pkg, live.signingCertSha256, sanitized)
             // Clear any denial when explicitly approved.
             writeDenied(readDenied().filterNot { it.packageName == pkg })
         }
@@ -330,27 +321,17 @@ class AllowlistStore(
      * recovery paths that already hold the verified identity.
      */
     @VisibleForTesting
-    internal fun approveDirect(
-        pkg: String,
-        sigSha256: String,
-        displayName: String? = null,
-        trustTier: TrustTier = TrustTier.FIRST_PARTY,
-    ) {
+    internal fun approveDirect(pkg: String, sigSha256: String, displayName: String? = null) {
         withFileLock {
-            writeApprovalLocked(pkg, sigSha256, CallerVerifier.sanitizeLabel(displayName), trustTier)
+            writeApprovalLocked(pkg, sigSha256, CallerVerifier.sanitizeLabel(displayName))
         }
     }
 
-    private fun writeApprovalLocked(
-        pkg: String,
-        sigSha256: String,
-        displayName: String?,
-        trustTier: TrustTier = TrustTier.FIRST_PARTY,
-    ) {
+    private fun writeApprovalLocked(pkg: String, sigSha256: String, displayName: String?) {
         val now = System.currentTimeMillis()
         val current = readEntries()
         val updated = current.filterNot { it.packageName == pkg } +
-            AllowlistEntry(pkg, sigSha256, now, displayName, trustTier)
+            AllowlistEntry(pkg, sigSha256, now, displayName)
         writeEntries(updated)
         _entries.value = updated
 
@@ -532,10 +513,9 @@ class AllowlistStore(
 
     /**
      * v0.10: returns the full [AllowlistEntry] for an approved `(pkg, sig)`
-     * pair, or `null` if not allowed. Used by `ServiceBinder.authorizeCall`
-     * to read [AllowlistEntry.trustTier] without a second disk read so the
-     * tier-aware [RateLimiter] and [IpcInputValidator] can apply the right
-     * budgets.
+     * pair, or `null` if not allowed. Useful for the dashboard when it
+     * needs richer info than the boolean [isAllowed] check returns
+     * (e.g., displayName + grantedAtMs for a per-app detail row).
      */
     fun lookupAllowed(pkg: String, sigSha256: String): AllowlistEntry? {
         val entry = readEntries().firstOrNull { it.packageName == pkg } ?: return null
@@ -639,7 +619,6 @@ class AllowlistStore(
                 put("sig", e.signingCertSha256)
                 put("grantedAtMs", e.grantedAtMs)
                 e.displayName?.let { put("displayName", it) }
-                put("trustTier", e.trustTier.name)
             })
         }
         atomicWrite(entriesFile, signedEnvelope(ENTRIES_KEY, array).toString())
@@ -762,7 +741,6 @@ class AllowlistStore(
                             signingCertSha256 = o.getString("sig"),
                             grantedAtMs = o.optLong("grantedAtMs", 0L),
                             displayName = o.optString("displayName").ifEmpty { null },
-                            trustTier = parseTrustTier(o.optString("trustTier")),
                         )
                     )
                 }
@@ -853,21 +831,6 @@ class AllowlistStore(
         } catch (_: Throwable) {
             emptyList()
         }
-    }
-
-    /**
-     * Parse a [TrustTier] from its serialized name. Empty / absent is treated
-     * as [TrustTier.FIRST_PARTY] — that is the v2→v3 migration default for
-     * legacy entries that pre-date the trust-tier field. Unknown future
-     * values fall back to [TrustTier.THIRD_PARTY] (the more restrictive
-     * tier) so a corrupted or forged trustTier cannot upgrade a row to
-     * first-party budgets.
-     */
-    private fun parseTrustTier(value: String): TrustTier = when (value) {
-        "" -> TrustTier.FIRST_PARTY
-        TrustTier.FIRST_PARTY.name -> TrustTier.FIRST_PARTY
-        TrustTier.THIRD_PARTY.name -> TrustTier.THIRD_PARTY
-        else -> TrustTier.THIRD_PARTY
     }
 
     /**
@@ -977,6 +940,11 @@ class AllowlistStore(
         }
 
     private fun StringBuilder.appendCanonicalEntry(item: JSONObject, timestampKey: String, version: Int) {
+        // version is currently unused for entry canonical (the v2→v3 bump
+        // was for the denied envelope only — entry shape is unchanged
+        // beyond the v3 HMAC pre-image including the version+key
+        // domain separator already present at line 808).
+        @Suppress("UNUSED_PARAMETER") val v = version
         append('{')
         append("\"pkg\":").append(JSONObject.quote(item.getString("pkg")))
         append(",\"sig\":").append(JSONObject.quote(item.getString("sig")))
@@ -984,15 +952,6 @@ class AllowlistStore(
         val displayName = item.optString("displayName").ifEmpty { null }
         if (displayName != null) {
             append(",\"displayName\":").append(JSONObject.quote(displayName))
-        }
-        // v3+ extension: trustTier is part of the HMAC pre-image so an
-        // offline attacker cannot upgrade THIRD_PARTY rows to first-party
-        // budgets by editing the JSON. Pre-v3 callers/readers never see
-        // this field. Empty / absent defaults to FIRST_PARTY because v2→v3
-        // migrated rows did not carry a tier.
-        if (version >= 3) {
-            val trustTier = item.optString("trustTier").ifEmpty { TrustTier.FIRST_PARTY.name }
-            append(",\"trustTier\":").append(JSONObject.quote(trustTier))
         }
         append('}')
     }
@@ -1125,18 +1084,22 @@ class AllowlistStore(
 
         private const val DEDUP_MAP_SOFT_CAP = 256
 
-        // Bumped to 3 when AllowlistEntry gained trustTier (v0.10
-        // consent-architecture) and DeniedEntry gained scope + the
-        // canonical payload was extended to include permanent (rubber-
-        // duck Issue #11 — pre-v3 the permanent flag wasn't HMAC-
-        // authenticated). Bumped to 2 previously when canonicalPayload
-        // was changed to include version+arrayKey domain separator
-        // (audit M6).
+        // Bumped to 3 when DeniedEntry gained scope (v0.10
+        // consent-architecture: cert-pair vs package-wide denial scopes)
+        // and the canonical denied-entry payload was extended to include
+        // both `permanent` and `scope` so an offline attacker can no
+        // longer flip a 24h denial to permanent or widen a cert-pair
+        // denial to package-wide by editing the JSON (rubber-duck Issue
+        // #11 — pre-v3 the permanent flag was NOT HMAC-authenticated).
+        // Bumped to 2 previously when canonicalPayload was changed to
+        // include version+arrayKey domain separator (audit M6).
         //
-        // Verifier accepts MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION
-        // so v2 files (from legacy installs) still read correctly;
-        // canonicalPayload() is version-aware and emits the right
-        // pre-image per file version.
+        // Entry shape (ENTRIES_KEY / PENDING_KEY) is unchanged in v3 —
+        // v2 entries read back as v3 without migration. Verifier accepts
+        // MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION so legacy v2 files
+        // still verify; canonicalPayload() is version-aware so the v3
+        // pre-image picks up the new denied fields only when the file
+        // declares v3.
         private const val SIGNED_FILE_VERSION = 3
         private const val MIN_SUPPORTED_VERSION = 2
         private const val ENTRIES_KEY = "entries"

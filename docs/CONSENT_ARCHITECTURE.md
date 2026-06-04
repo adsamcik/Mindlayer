@@ -13,9 +13,8 @@
 - **User consent is the sole trust boundary.** A per-app `(packageName, signingCertSha256)` allowlist gated by an in-app consent flow.
 - **`ConsentActivity` replaces the dashboard "Pending approvals" inbox.** When a client SDK needs consent, it fires an Intent that opens a Mindlayer-owned, opaque, biometric-gated approval screen.
 - **Caller identity is captured via Binder, not the Activity.** A nonce-based challenge issued by `:ml` (`requestConsentChallenge` AIDL method) pins the caller's UID/pkg/cert before the Activity is ever shown. The Activity displays what `:ml` tells it to display and proxies the user's decision back.
-- **Trust tiers gate budgets, not access.** Approved callers carry `trustTier ∈ {FIRST_PARTY, THIRD_PARTY}` driving per-tier `RateLimiter` and `IpcInputValidator` limits.
-- **Denial is a user choice.** "Not now" / "Deny for 24h" / "Block permanently". Permanent denial is package-wide (any cert) — cert rotation does not bypass a block.
-- **Hard migration.** No backward compatibility for SDK APIs, schema versions, or legacy seed lists. Existing approved `entries.json` rows are preserved, get `trustTier = FIRST_PARTY`, and survive the upgrade.
+- **All consenting apps are treated the same.** No trust tiers, no per-app budget classes. The consent flow is the throttle; once approved, every caller gets the same uniform `RateLimiter` and `IpcInputValidator` limits. The dashboard and the (planned, post-PR) usage-monitoring notifications give the user oversight; revoke or "Block permanently" gives them control.
+- **Hard migration.** No backward compatibility for SDK APIs, schema versions, or legacy seed lists. Existing approved `entries.json` rows are preserved unchanged and survive the upgrade.
 
 ## Why we are doing this
 
@@ -34,7 +33,7 @@ Trust boundary changes from "two layers (OS permission + dashboard approval)" to
 - **In scope:** any installed app on the device can call `bindService()` and obtain `IBinder`. Without an approved `(pkg, cert)` row in `entries.json`, all AIDL methods except `requestConsentChallenge()` and a coarse `ping()` return `SecurityException`.
 - **In scope:** rate-limit per-UID prevents spam binds. Per-`(pkg, sig)` consent-attempt escalation prevents user fatigue from a malicious app re-firing the consent intent.
 - **In scope:** F-031 TOCTOU re-verify between consent display and consent commit. Done inside `:ml` under file lock, using `store.approve()` (never `approveDirect()`).
-- **In scope:** tier-aware budgets so a single approved third-party app cannot DoS the engine or starve other callers.
+- **In scope:** the user is in control. After approval, the dashboard surfaces real per-app usage (call count, inference time, token volume). A planned follow-up emits a system notification when a single approved app dominates AI workload or shows signs of significant battery impact — the user can then revoke or permanently block from the notification. **No automatic tier downgrade or rate-limit tightening** — the user, not the service, decides what counts as "too much."
 - **Out of scope:** rooted device, OS-level compromise, Keystore bypass, Mindlayer's own APK tampering, social engineering of the user to approve a malicious app. The user is the trust authority; they bear the risk of approving an app they should not have.
 - **Out of scope:** network attacks — Mindlayer holds no `INTERNET` permission and never opens sockets.
 
@@ -106,10 +105,7 @@ data class AllowlistEntry(
     val signingCertSha256: String,
     val grantedAtMs: Long,
     val displayName: String?,
-    val trustTier: TrustTier,         // NEW — FIRST_PARTY | THIRD_PARTY
 )
-
-enum class TrustTier { FIRST_PARTY, THIRD_PARTY }
 ```
 
 `DeniedEntry` gains `scope`:
@@ -134,10 +130,10 @@ API changes:
 - `recordPending` → **deleted**.
 - `seedIfEmpty` → **deleted**.
 - `seedVerified` → **deleted**.
-- `approve(context, pkg, expectedSig, displayName, trustTier)` — adds `trustTier` parameter. Still does live cert revalidation under file lock. F-031 preserved.
+- `approve(context, pkg, expectedSig, displayName)` — unchanged signature; still does live cert revalidation under file lock. F-031 preserved.
 - `approveDirect` — stays as `@VisibleForTesting internal`. Production must use `approve()`.
 - `isAllowed(pkg, sig)` — unchanged (returns boolean).
-- `lookupAllowed(pkg, sig): AllowlistEntry?` — **new** (returns entry for tier inspection by `RateLimiter` / `IpcInputValidator`).
+- `lookupAllowed(pkg, sig): AllowlistEntry?` — **new** convenience accessor for the dashboard ("show me the full approved-row details for this pkg+sig").
 - `deny(pkg, sig, decision: ConsentDecision)` — new unified denial entry point replacing the prior `denyPending` / `revoke` overlap.
 - `revoke(pkg)` — existing, still works.
 
@@ -168,48 +164,31 @@ Escalation rules enforced by `requestConsentChallenge`:
 
 A successful `GRANT` clears the entry. A `DENY_24H` or `DENY_PERMANENT` clears the entry (the explicit denial supersedes the dismiss tracking). The file is pruned on read (entries older than 7 days with no recent activity are removed).
 
-### `RateLimiter` (modified — tier-aware)
+### `RateLimiter` (unchanged)
 
-Per-UID token bucket and concurrent semaphore become per-tier. Defaults:
+Per-UID token bucket and concurrent semaphore remain at their existing defaults — 60 RPM / 4 concurrent, with a 6 RPM rejected/pending-write bucket and a separate ping bucket. Every approved caller is treated identically; there are no per-app tier-based budgets. The dashboard's self-UID bypass is preserved.
 
-| Tier | RPM | Concurrent inferences | Pending-write bucket |
-|---|---|---|---|
-| FIRST_PARTY | 60 | 4 | 6/min (unchanged) |
-| THIRD_PARTY | 15 | 1 | 6/min (unchanged) |
-| Pre-consent (no entry) | n/a (only `requestConsentChallenge` + coarse `ping` callable) | n/a | n/a |
+`requestConsentChallenge()` has its own bucket: **10/hour per UID** (this is the only rate-limit the consent flow itself adds).
 
-`requestConsentChallenge()` itself has its own bucket: **10/hour per UID**. The existing `ping()` bucket (`DEFAULT_PING_RPM = 30`) is split into pre-consent (5/min, coarse response) and post-consent (30/min, full response).
+A single rate-limit class for everyone is intentional. The premise is: if you've earned user consent, you've earned the same call budget any other consenting app gets. Throttling individual approved apps based on hard-coded tiers would (a) require the service to pick those tiers in advance, (b) hide misbehaviour from the user behind a quiet limit, and (c) eventually need a user-facing tier-management UI. The (planned) usage-monitoring notifications surface heavy callers transparently and let the user act, which we think is the better fit for a privacy-first product.
 
-The dashboard's self-UID bypass is preserved.
+### `IpcInputValidator` (unchanged)
 
-Implementation: `RateLimiter` constructor takes a `(uid) -> TrustTier?` callback (defaulted to `null` = pre-consent). The bucket selection happens at `tryAcquire` time using a freshly-resolved tier from `AllowlistStore.lookupAllowed`.
+Validator byte/count caps are untouched: every approved caller sees the historical `MAX_TOOLS_JSON_LEN` (256 KiB), `MAX_TEXT_CONTENT_LEN` (256 KiB), `MAX_HISTORY_TURNS` (64), `MAX_SESSION_EXPIRATION_MS` (90 days), `MAX_TOTAL_MEDIA_BYTES_PER_REQUEST` (200 MB). The same uniform-treatment rationale as `RateLimiter` applies.
 
-### `IpcInputValidator` (modified — tier-aware)
+### Usage monitoring (planned, post-PR)
 
-`CallerProfile` parameter added to every validator entry point. Defaults:
+Not implemented in this PR; documented here so the architecture has a place for it.
 
-| Validator field | FIRST_PARTY | THIRD_PARTY |
-|---|---|---|
-| `MAX_TOOLS_JSON_LEN` | 256 KB (unchanged) | 16 KB |
-| `MAX_TEXT_CONTENT_LEN` | 256 KB (unchanged) | 32 KB |
-| `MAX_HISTORY_TURNS` | 64 (unchanged) | 16 |
-| `MAX_SESSION_EXPIRATION_MS` | 90 days (unchanged) | 7 days |
-| `MAX_MEDIA_PARTS` | (current) | half of current |
+The service already tracks per-UID metrics via `LogRepository` and the inference path (call counts, inference time, token volume). A follow-up will:
 
-`MAX_MEDIA_PAYLOAD_BYTES` stays at 100 MB for both tiers (already gated by per-attachment memory-headroom checks in `:ml`).
+- Compute a rolling per-UID "load" score (combining call rate, inference time, and rough wall-clock CPU/GPU minutes).
+- When an approved caller's score crosses a threshold within a window (e.g., > 30 inference-minutes in the last 24 hours), emit a system notification: *"App X has been using a lot of on-device AI today. This may be affecting battery life. Manage in Mindlayer."*
+- The notification action deep-links to a per-app detail screen with **Revoke** and **Block permanently** affordances.
+- Threshold and window are user-tunable in dashboard settings (default conservative — better to over-notify than under-notify on a privacy-first product).
+- The notification does **not** itself rate-limit or revoke. The user remains in control; the service just makes the cost visible.
 
-### Prompt-injection scoring (new)
-
-Heuristic scoring in `:ml`'s input pipeline, applied **only for THIRD_PARTY callers** in this PR (FIRST_PARTY trusted not to attempt injection):
-
-- Instruction tokens at message start (`Ignore previous`, `System:`, `Disregard`)
-- Role impersonation strings
-- Base64-encoded payloads above a length threshold
-- Multi-character control sequences
-
-Above threshold → reject with `MindlayerErrorCode.INPUT_REJECTED = 3009`. Logged with `LogRepository.logSecurityDecision(action = "input_rejected_injection_score", ...)` — score recorded, content NOT recorded.
-
-Heuristics deliberately err on the side of false-negatives. They are a defense-in-depth layer, not a complete prompt-injection defense.
+This replaces the abandoned "trust tiers" approach (static per-app budgets selected at consent time). Tiers required the service to predict appropriate budgets in advance; usage monitoring measures actual behaviour and surfaces it. Either approach addresses the underlying concern — a heavy approved caller — but observability puts the decision in the user's hands rather than baking it into the service's policy.
 
 ### SDK API surface (modified — Result types for control plane)
 
@@ -382,14 +361,18 @@ The dashboard exposes:
 - "Blocked apps" list (unblock action — clears `DeniedEntry` for the package)
 - No "pending approvals" — that flow is gone.
 
-## Trust tiers
+## Why no trust tiers
 
-`AllowlistEntry.trustTier` is set at approval time. Two tiers in this PR:
+An earlier draft of this design carried a `TrustTier ∈ {FIRST_PARTY, THIRD_PARTY}` field on `AllowlistEntry`, with per-tier `RateLimiter` and `IpcInputValidator` budgets and an "input rejected" path for failed prompt-injection scoring on third-party callers. The design was reverted before any of it shipped.
 
-- **FIRST_PARTY** — assigned when (a) the approving caller is co-signed with Mindlayer (same `signingCertSha256` as the Mindlayer APK itself), OR (b) the entry was migrated from a pre-existing `entries.json` row (those were seeded from the legacy `FIRST_PARTY_ALLOWLIST_SEEDS`, all first-party by definition).
-- **THIRD_PARTY** — every other approved entry.
+The argument against tiers:
 
-The dashboard surfaces the tier with a badge ("First-party" / "Third-party") and exposes a "Promote to first-party" action for users who want to grant a third-party app first-party budgets. **No demote action** — first-party-to-third-party is a security-meaningful weakening and should not be a casual click; it requires a full revoke + re-consent.
+1. **The service has to predict appropriate budgets in advance.** A "third-party" SDK consumer might be a quick toy app or a power-user automation tool — there's no good static answer to what its rate limit should be.
+2. **Tiers hide misbehaviour from the user.** A quiet third-party rate limit silently caps a misbehaving caller without the user ever knowing the caller is heavy.
+3. **Tiers add a UX surface (promote / demote) that has no clear meaning to users.** "What does promoting an app to first-party mean? Why would I do it?"
+4. **The premise — that we know in advance which callers deserve more — is the same predict-in-advance bet that the legacy `signature|knownSigner` knownCerts array was making.** This PR explicitly moves away from that bet. Doubling back to "but still predict budgets in advance" is inconsistent.
+
+The (planned) usage-monitoring notifications replace tiers with after-the-fact observability and direct user control. That is the model we believe fits a privacy-first product: the service measures, the user decides.
 
 ## Migration from current model
 
@@ -399,7 +382,7 @@ Hard cutover. No backwards-compat shims.
 
 `MindlayerMlService.onCreate` performs a one-shot migration:
 
-1. If `entries.json` exists in the old (pre-tier) schema, read it, assign `trustTier = FIRST_PARTY` to every row, rewrite under the new envelope version.
+1. If `entries.json` exists in the old (pre-v3) schema, read it, rewrite under the new envelope version (no field changes — `AllowlistEntry` is structurally identical between v2 and v3; the bump is for the denial-side `permanent` + `scope` HMAC fix).
 2. If `denied.json` exists in the old (no-scope) schema, read it, assign `scope = CERT_PAIR` to every row, rewrite under the new envelope version.
 3. If `pending.json` exists, **delete it** (the pending mechanism is gone).
 4. Log the migration event via `LogRepository.logSecurityDecision(action = "schema_v3_migration", details)`.
@@ -449,14 +432,14 @@ Idempotent — re-running on already-migrated data is a no-op.
 | Caller package uninstalled between `requestConsentChallenge` and `completeConsent` | `identifyByPackage` returns `null` inside `store.approve()`. F-031 SecurityException. Consent commit fails closed. |
 | Permanently-blocked package re-requests consent | `ConsentActivity` returns RESULT_CANCELED without UI. Client receives `ConsentDenied(until=null)`. |
 | Approved app rate-limit exhausted | AIDL call rejects with `SecurityException("Rate limit exceeded")`. Translated by SDK to `MindlayerSessionResult.RateLimited(retryAfter)`. |
-| Approved third-party app sends 32 KB tools JSON | `IpcInputValidator` rejects with `INVALID_INPUT_BUDGET`. (FIRST_PARTY would accept up to 256 KB.) |
-| Prompt-injection score above threshold for THIRD_PARTY caller | `MindlayerErrorCode.INPUT_REJECTED = 3009` returned. |
+| Approved app sends 32 KB tools JSON | `IpcInputValidator` accepts it (cap is 256 KB for every approved caller — no per-app tier). |
+| Approved app sustains heavy inference workload | Per-UID rate limit (60 RPM / 4 concurrent) bounds saturation. The planned usage-monitoring notification surfaces the load to the user; the user can revoke or block. The service does not auto-throttle. |
 
 ## Out of scope (explicit non-goals)
 
 - **Centralised trust list / Mindlayer-curated "verified developer" badge.** The user is the trust authority. We do not maintain a remote allowlist or fetch updates.
 - **Background notification helper.** Per Q4 decision, the SDK fails loud when no Activity context is available. Hosts must ensure consent during a user-visible flow.
-- **Per-AIDL-method capability gating.** Trust tier affects budgets, not which methods you can call. A future PR may introduce `getCapabilities()` per-tier scoping.
+- **Per-AIDL-method capability gating.** Every approved caller can call every AIDL method. A future PR may introduce `getCapabilities()` scoping if a feature genuinely shouldn't be exposed to all consenting callers.
 - **Active mid-call revocation.** Revoke takes effect on the next AIDL call. In-flight inferences complete unless the client process is killed.
 - **Migrating per-call AIDL methods (`infer`, `embed`, `ocr*`) to Result types.** The control-plane vs data-plane split is intentional. Streaming uses `Flow<StreamEvent>`; per-call data-plane methods stay exception-based for now.
 - **Backwards-compatible SDK shims.** Hard cutover. StarlitCoffee and Ledgit update in lockstep with this PR.
@@ -468,7 +451,7 @@ The PR ships in 8 sequential commits, each independently reviewable. See the PR 
 0. **ADR + invariant docs** — this document + updates to `AUTHORIZATION.md`, `THIRD_PARTY_FUTURE.md`, `security.instructions.md`, `copilot-instructions.md`.
 1. **AIDL surface + error codes** — new parcelables in `:sdk`, new methods in both `IMindlayerService.aidl` copies, new error codes.
 2. **Service-side consent challenge state** — `ConsentChallengeStore`, `ConsentAttemptStore`, AIDL stub implementations, coarse `ping()`.
-3. **Trust tiers + hardening** — `AllowlistEntry.trustTier`, schema migration, tier-aware `RateLimiter` + `IpcInputValidator`, prompt-injection scoring.
+3. **`DenialScope` + schema bump** — `DeniedEntry` gains `scope: DenialScope`, schema bumps v2→v3, canonical HMAC pre-image extended to include `permanent` + `scope` (closes rubber-duck Issue #11). Migration is implicit (v2 read, v3 write on next change). `AllowlistStore.deny()` unified for the consent flow's three deny variants.
 4. **`ConsentActivity` UI** — Compose screens, biometric gate, three-option deny menu, opaque branded theme, overlay protection.
 5. **Drop legacy permission infrastructure** — manifest cleanup, deletion of seed lists, dashboard pending section, `DebugAllowlistSeeder`.
 6. **SDK Result API** — sealed result types, new `Mindlayer.createConsentIntent` / `connect` / `bindOrRequestConsent`, `ConnectionManager.kt` rewrite.

@@ -33,15 +33,15 @@ authorizeCall(sessionId? = null):
     if (uid == Process.myUid()) return SELF_IDENTITY            // dashboard bypass
     identity = CallerVerifier.identifyCaller(ctx, uid)
         ?: throw SecurityException("Unknown caller")
-    entry = allowlistStore.lookupAllowed(identity.pkg, identity.sig)
-        ?: throw SecurityException(
+    if (!allowlistStore.isAllowed(identity.pkg, identity.sig))
+        throw SecurityException(
             "App ${identity.pkg} requires user consent",
             errorCode = MindlayerErrorCode.CONSENT_REQUIRED
         )
-    if (!rateLimiter.tryAcquire(uid, tier = entry.trustTier))
+    if (!rateLimiter.tryAcquire(uid))
         throw SecurityException("Rate limit exceeded")
     sessionId?.let { requireOwnership(it, uid) }
-    return identity.copy(trustTier = entry.trustTier)
+    return identity
 ```
 
 ### Don't
@@ -50,10 +50,10 @@ authorizeCall(sessionId? = null):
   bind rejection" mechanism.** Pending state is ephemeral and lives only inside
   `ConsentChallengeStore` for the duration of an in-flight consent flow. Spam
   is bounded because nothing happens unless the user goes through `ConsentActivity`.
-- **Do NOT cache `lookupAllowed` results in memory.** The dashboard runs in
+- **Do NOT cache `isAllowed` results in memory.** The dashboard runs in
   the main process; the gate runs in `:ml`. The hot path **must** re-read
-  `entries.json` on every call. Disk cost is bounded by the tier-aware rate
-  limiter (60 RPM first-party / 15 RPM third-party default).
+  `entries.json` on every call. Disk cost is bounded by the per-UID rate
+  limiter (60 RPM default).
 - **Do NOT use `SharedPreferences`** for `entries.json`, `denied.json`,
   `challenges.json`, or `consent_attempts.json`. `MODE_MULTI_PROCESS` is
   deprecated and racy. All cross-process state goes through
@@ -62,7 +62,7 @@ authorizeCall(sessionId? = null):
 - **Do NOT call `AllowlistStore.approveDirect()` from production code.** It
   bypasses the F-031 live cert re-verification. It is `@VisibleForTesting internal`
   and stays that way. Production approvals (from `completeConsent(nonce, GRANT)`)
-  must call `approve(context, pkg, expectedSig, trustTier, ...)` which runs the
+  must call `approve(context, pkg, expectedSig, ...)` which runs the
   cert revalidation under the file lock.
 - **Do NOT add a manual "Add app by hand" UI.** Consent must originate from a
   client-initiated `requestConsentChallenge()` call so the cert was verified
@@ -89,9 +89,6 @@ authorizeCall(sessionId? = null):
   token everywhere downstream. Pass it to
   `InferenceOrchestrator.createSession(config, ownerToken = identity)` so
   binder-death tear-down works.
-- Pass `trustTier` (read from the `AllowlistEntry`) to `IpcInputValidator`
-  via `CallerProfile` so byte budgets are tier-aware. First-party callers
-  keep current generous limits; third-party get tightened defaults.
 - Persist the *current* signing cert per `signingCertificateHistory.last()`.
   Rotated certs invalidate prior approvals on purpose.
 - Serialise allowlist writes with `withFileLock { … }` and atomic-rename
@@ -162,21 +159,21 @@ external app. Treat it as a security boundary, not just a screen.
 - Treat back / swipe / home as `DENY_ONCE` (dismiss). Increment the attempt
   counter; do not write to `denied.json`.
 
-## Trust tiers
+## Uniform treatment of approved callers
 
-- `AllowlistEntry.trustTier` is set once at approval time and never
-  auto-downgraded. The dashboard exposes a "Promote to first-party" action
-  (third-party → first-party) but no demote action — demotion requires full
-  revoke + re-consent so the user actively re-evaluates.
-- Tier assignment at approval time:
-  - `FIRST_PARTY` if `identity.signingCertSha256` matches the Mindlayer APK's
-    own signing cert (computed at startup from `Process.myUid()`'s
-    `PackageInfo`).
-  - `FIRST_PARTY` for migrated entries (pre-existing rows in `entries.json`
-    seeded from the legacy `FIRST_PARTY_ALLOWLIST_SEEDS`).
-  - `THIRD_PARTY` otherwise.
-- Tier-aware defaults are encoded in `RateLimiter` and `IpcInputValidator`.
-  See `docs/CONSENT_ARCHITECTURE.md § Trust tiers` for the actual numbers.
+All consenting callers are treated identically. There are **no trust tiers**, no per-app rate-limit classes, no per-app validator budget classes. An earlier draft carried a `TrustTier ∈ {FIRST_PARTY, THIRD_PARTY}` field; it was deliberately removed before any of it shipped. The rationale is documented in `docs/CONSENT_ARCHITECTURE.md § Why no trust tiers`.
+
+### Don't
+
+- Do NOT add a `trustTier` field to `AllowlistEntry`.
+- Do NOT add tier-specific overloads on `RateLimiter` (`tryAcquire(uid, cost, tier)`) or `IpcInputValidator` (`validateSessionConfig(config, profile)`).
+- Do NOT add per-tier budget constants (`MAX_TOOLS_JSON_LEN_THIRD_PARTY` etc).
+- Do NOT add a dashboard "Promote to first-party" UX or any per-app budget-class affordance.
+
+### Do
+
+- Apply the existing uniform budgets (60 RPM / 4 concurrent / 256 KiB tools JSON / 90 day session expiration / etc) to every approved caller.
+- When considering a tighter per-app limit because "this caller looks heavy", prefer the planned **usage-monitoring notification** path (`docs/CONSENT_ARCHITECTURE.md § Usage monitoring`). Surface the behaviour to the user; let them revoke or block. Do not silently throttle.
 
 ## Denial semantics
 
@@ -194,14 +191,13 @@ without UI for any cert. User unblocks via the dashboard's "Blocked apps" list.
 
 ## Rate limiting
 
-- Tier-aware token bucket + concurrent semaphore per UID
-  (`RateLimiter.kt`). Defaults: first-party 60 RPM / 4 concurrent, third-party
-  15 RPM / 1 concurrent. Pre-consent callers cannot reach `tryAcquire`
-  because `authorizeCall` rejects them first.
+- Per-UID token bucket + concurrent semaphore (`RateLimiter.kt`).
+  Uniform defaults for every approved caller: 60 RPM / 4 concurrent.
+  Pre-consent callers cannot reach `tryAcquire` because `authorizeCall`
+  rejects them first.
 - `requestConsentChallenge()` has its own per-UID bucket: 10/hour default.
 - Pre-consent `ping()` has a 5/min coarse bucket; post-consent `ping()` falls
-  into the tier-aware bucket above (or its own 30/min ping-specific bucket,
-  whichever ships).
+  into its own 30/min ping-specific bucket.
 - Brand-new buckets start with `INITIAL_FIRST_CALL_TOKENS = 1.0` so the
   canonical `bindService → onServiceConnected → registerClient` flow
   succeeds without waiting for refill. Don't raise the default; tests pin it.
