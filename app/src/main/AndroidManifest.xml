@@ -78,6 +78,26 @@
             </intent-filter>
         </activity>
 
+        <!--
+            v0.10 consent-Intent flow (docs/CONSENT_ARCHITECTURE.md).
+            Launched only by an explicit, Mindlayer-minted PendingIntent
+            (no intent-filter). exported=true is required because the
+            PendingIntent is fired by arbitrary client UIDs; the nonce in
+            the Intent data is the capability, and lookupChallenge enforces
+            self-UID so only Mindlayer can resolve it. excludeFromRecents +
+            noHistory keep the consent screen out of the recents list and
+            prevent it lingering after the decision. Phase 4 builds out the
+            Compose UI + opaque/secure window; this Phase-3 registration
+            makes the PendingIntent target resolvable.
+        -->
+        <activity
+            android:name=".ui.consent.ConsentActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.Mindlayer" />
+
         <service
             android:name=".MindlayerMlService"
             android:process=":ml"

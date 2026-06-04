@@ -65,13 +65,18 @@ class ConsentAttemptStore(
     private val timeSource: () -> Long = { System.currentTimeMillis() },
 ) {
     private val appContext: Context = context.applicationContext
-    private val baseDir: File = File(appContext.filesDir, dirName).also { it.mkdirs() }
-    private val attemptsFile: File = File(baseDir, "consent_attempts.json")
-    private val lockFile: File = File(baseDir, "consent_attempts.lock")
-    private val hmacKeyFile: File = File(baseDir, "consent_attempts.hmac")
+    // Filesystem handles are lazy so constructing the store is cheap and
+    // touches no disk — important because ServiceBinder default-constructs
+    // one, and test fixtures inject a mock Context. Real I/O happens only
+    // on the first consent operation.
+    private val baseDir: File by lazy { File(appContext.filesDir, dirName).also { it.mkdirs() } }
+    private val attemptsFile: File by lazy { File(baseDir, "consent_attempts.json") }
+    private val lockFile: File by lazy { File(baseDir, "consent_attempts.lock") }
+    private val hmacKeyFile: File by lazy { File(baseDir, "consent_attempts.hmac") }
 
-    private val processLock: ReentrantLock =
+    private val processLock: ReentrantLock by lazy {
         PROCESS_LOCKS.computeIfAbsent(lockFile.absolutePath) { ReentrantLock() }
+    }
     private val fileLockDepth = ThreadLocal.withInitial { 0 }
 
     data class AttemptRecord(

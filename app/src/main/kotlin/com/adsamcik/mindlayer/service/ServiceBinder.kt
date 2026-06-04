@@ -96,6 +96,10 @@ class ServiceBinder(
     private val callerVerifier: CallerVerifierGate = DefaultCallerVerifierGate,
     private val allowlistStore: AllowlistStore = AllowlistStore(service),
     private val rateLimiter: RateLimiter = RateLimiter(),
+    private val consentChallengeStore: com.adsamcik.mindlayer.service.security.ConsentChallengeStore =
+        com.adsamcik.mindlayer.service.security.ConsentChallengeStore(),
+    private val consentAttemptStore: com.adsamcik.mindlayer.service.security.ConsentAttemptStore =
+        com.adsamcik.mindlayer.service.security.ConsentAttemptStore(service),
     private val logRepository: LogRepository? = null,
     private val mlHealthRecorder: MlHealthRecorder? = null,
     private val deferredStore: DeferredStore? = null,
@@ -202,6 +206,17 @@ class ServiceBinder(
         private const val TAG = "ServiceBinder"
         /** F-051: lifetime per-UID registerClient cap. */
         const val MAX_REGISTRATIONS_PER_UID = 64
+
+        /** v0.10: Intent extra carrying the consent nonce to `ConsentActivity`. */
+        const val EXTRA_CONSENT_NONCE = "com.adsamcik.mindlayer.extra.CONSENT_NONCE"
+
+        /** v0.10: valid `ConsentDecision.kind` values accepted by `completeConsent`. */
+        private val CONSENT_DECISION_KINDS = setOf(
+            com.adsamcik.mindlayer.ConsentDecision.KIND_GRANT,
+            com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_ONCE,
+            com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H,
+            com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_PERMANENT,
+        )
 
         /**
          * F-073: sentinel value written to [ServiceStatus.thermalBand] when
@@ -2982,6 +2997,28 @@ class ServiceBinder(
 
     override fun ping(): com.adsamcik.mindlayer.HealthCheck {
         val uid = Binder.getCallingUid()
+        // v0.10: coarse pre-consent ping. A caller that is neither self-UID
+        // nor allowlisted receives only {alive, apiVersion} — no uptime, no
+        // per-engine state — so an un-approved peer cannot use ping() for
+        // fine-grained fingerprinting once the manifest permission gate is
+        // removed (Phase 5). It is also charged against a tighter pre-consent
+        // bucket (5/min) than the full post-consent ping (150/min).
+        val trusted = uid == Process.myUid() || isAllowlisted(uid)
+        if (!trusted) {
+            if (!rateLimiter.tryAcquirePreConsentPing(uid)) {
+                logRepository?.logRateLimitReject("ping_pre_consent", uid, 0.0)
+                throw typedBinderException(MindlayerErrorCode.RATE_LIMITED, "Ping rate limit exceeded")
+            }
+            return com.adsamcik.mindlayer.HealthCheck(
+                serverTimestampMs = System.currentTimeMillis(),
+                serviceUptimeMs = 0L,
+                apiVersion = CURRENT_API_VERSION,
+                llmEngineState = com.adsamcik.mindlayer.HealthCheck.ENGINE_STATE_IDLE,
+                embeddingEngineState = com.adsamcik.mindlayer.HealthCheck.ENGINE_STATE_IDLE,
+                ocrEngineState = com.adsamcik.mindlayer.HealthCheck.ENGINE_STATE_IDLE,
+                extensionsJson = null,
+            )
+        }
         if (uid != Process.myUid() && !rateLimiter.tryAcquirePing(uid)) {
             logRepository?.logRateLimitReject("ping", uid, 0.0)
             throw typedBinderException(MindlayerErrorCode.RATE_LIMITED, "Ping rate limit exceeded")
@@ -2997,25 +3034,132 @@ class ServiceBinder(
         )
     }
 
+    /** True iff [uid] resolves to a single package whose current signer is allowlisted. */
+    private fun isAllowlisted(uid: Int): Boolean {
+        val identity = callerVerifier.identify(context, uid) ?: return false
+        return allowlistStore.isAllowed(identity.packageName, identity.signingCertSha256)
+    }
+
     // ─────────────────────────────────────────────────────────────────────
-    //  v0.10 consent-Intent flow stubs (Phase 1 of feat/consent-architecture).
-    //
-    //  The wire contract is locked in here; the state machine + activity
-    //  binding land in Phase 2 (ConsentChallengeStore, ConsentAttemptStore,
-    //  per-UID rate limiting on requestConsentChallenge, etc.) and Phase 4
-    //  (ConsentActivity). These stubs return MindlayerErrorCode.INTERNAL
-    //  so they fail closed if any caller reaches them before Phase 2 ships.
-    //
+    //  v0.10 consent-Intent flow (Phase 3B of feat/consent-architecture).
     //  See docs/CONSENT_ARCHITECTURE.md.
     // ─────────────────────────────────────────────────────────────────────
 
     override fun requestConsentChallenge(): com.adsamcik.mindlayer.ConsentChallenge {
-        // Phase 2: identity capture via Binder.getCallingUid() + per-UID
-        // rate limit (10/hour default) + ConsentChallengeStore.put +
-        // PendingIntent mint targeting ConsentActivity.
-        throw typedBinderException(
-            MindlayerErrorCode.INTERNAL,
-            "requestConsentChallenge not yet wired (Phase 1 stub)",
+        val uid = Binder.getCallingUid()
+        // Self-UID (the dashboard) never needs consent — it bypasses the
+        // whole gate. A self-UID call here is a programmer error.
+        if (uid == Process.myUid()) {
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_REQUEST,
+                "requestConsentChallenge is not for the self-UID dashboard",
+            )
+        }
+        // Primary spam defence: per-UID hourly budget.
+        if (!rateLimiter.tryAcquireConsentChallenge(uid)) {
+            logRepository?.logRateLimitReject("request_consent_challenge", uid, 1.0)
+            throw typedBinderException(
+                MindlayerErrorCode.RATE_LIMITED,
+                "Consent challenge rate limit exceeded",
+            )
+        }
+        // Identity is captured HERE, in the live Binder transaction, where
+        // Binder.getCallingUid() is authoritative. ConsentActivity never
+        // re-derives identity from Activity-layer APIs.
+        val identity = callerVerifier.identify(context, uid)
+            ?: throw typedBinderException(
+                MindlayerErrorCode.IDENTITY_UNKNOWN,
+                "Caller identity could not be verified",
+            )
+
+        // Already approved with the current cert → no challenge needed.
+        if (allowlistStore.isAllowed(identity.packageName, identity.signingCertSha256)) {
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_REQUEST,
+                "Caller is already approved",
+            )
+        }
+
+        // Dismiss-escalation + device-wide throttle gate.
+        when (val gate = consentAttemptStore.checkGate(identity.packageName, identity.signingCertSha256)) {
+            is com.adsamcik.mindlayer.service.security.ConsentGate.Allow -> Unit
+            is com.adsamcik.mindlayer.service.security.ConsentGate.Blocked -> {
+                logRepository?.logSecurityDecision(
+                    action = "consent_cooldown_blocked",
+                    packageName = identity.packageName,
+                    sigShaPrefix = identity.signingCertSha256.take(8),
+                )
+                throw typedBinderException(
+                    MindlayerErrorCode.CONSENT_DENIED,
+                    "until=${gate.untilMs} reason=${gate.reason}",
+                )
+            }
+        }
+
+        // F-032: if the package was previously approved under a different
+        // signer, carry the prior cert so ConsentActivity shows the
+        // rotation banner. (An exact-cert match would have short-circuited
+        // at the isAllowed check above, so any existing entry here is by
+        // definition a different signer.) list() re-reads from disk so this
+        // is correct even though the StateFlow may be stale in :ml.
+        val previousSig = allowlistStore.list()
+            .firstOrNull { it.packageName == identity.packageName }
+            ?.signingCertSha256
+            ?.takeIf { !it.equals(identity.signingCertSha256, ignoreCase = true) }
+
+        val installSource = com.adsamcik.mindlayer.service.security.CallerVerifier
+            .installSource(context, identity.packageName)
+
+        val record = consentChallengeStore.issue(
+            callerUid = uid,
+            packageName = identity.packageName,
+            signingCertSha256 = identity.signingCertSha256,
+            displayName = identity.displayName,
+            installSource = installSource,
+            previousSigSha256 = previousSig,
+        )
+
+        logRepository?.logSecurityDecision(
+            action = "consent_requested",
+            packageName = identity.packageName,
+            sigShaPrefix = identity.signingCertSha256.take(8),
+        )
+
+        return com.adsamcik.mindlayer.ConsentChallenge(
+            nonce = record.nonce,
+            consentIntent = mintConsentPendingIntent(record.nonce),
+            expiresAtMs = record.expiresAtMs,
+        )
+    }
+
+    /**
+     * Mint the [android.app.PendingIntent] that launches `ConsentActivity`
+     * for [nonce]. Security-critical (adversarial review HIGH-1):
+     *  - unique `data` URI (`mindlayer-consent://<nonce>`) so two in-flight
+     *    challenges are never treated as the same PendingIntent;
+     *  - `FLAG_IMMUTABLE` so the receiving client cannot rewrite the target
+     *    or extras;
+     *  - `FLAG_ONE_SHOT` so a fired challenge cannot be replayed;
+     *  - NEVER `FLAG_UPDATE_CURRENT` (would let a later challenge overwrite
+     *    an earlier one's extras).
+     */
+    private fun mintConsentPendingIntent(nonce: String): android.app.PendingIntent {
+        val intent = android.content.Intent().apply {
+            component = android.content.ComponentName(
+                context.packageName,
+                "com.adsamcik.mindlayer.service.ui.consent.ConsentActivity",
+            )
+            data = android.net.Uri.parse("mindlayer-consent://$nonce")
+            putExtra(EXTRA_CONSENT_NONCE, nonce)
+            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val flags = android.app.PendingIntent.FLAG_IMMUTABLE or
+            android.app.PendingIntent.FLAG_ONE_SHOT
+        return android.app.PendingIntent.getActivity(
+            context,
+            nonce.hashCode(),
+            intent,
+            flags,
         )
     }
 
@@ -3026,11 +3170,14 @@ class ServiceBinder(
                 "lookupChallenge: self-UID only",
             )
         }
-        // Phase 2: read pinned identity from ConsentChallengeStore by nonce,
-        // returning null for expired / consumed / unknown nonces.
-        throw typedBinderException(
-            MindlayerErrorCode.INTERNAL,
-            "lookupChallenge not yet wired (Phase 1 stub)",
+        val record = consentChallengeStore.lookup(nonce) ?: return null
+        return com.adsamcik.mindlayer.ConsentIdentity(
+            packageName = record.packageName,
+            displayName = record.displayName,
+            signingCertSha256 = record.signingCertSha256,
+            installSource = record.installSource,
+            previousSigSha256 = record.previousSigSha256,
+            expiresAtMs = record.expiresAtMs,
         )
     }
 
@@ -3044,13 +3191,74 @@ class ServiceBinder(
                 "completeConsent: self-UID only",
             )
         }
-        // Phase 2: consume nonce, dispatch on ConsentDecision.kind →
-        // store.approve / store.deny / ConsentAttemptStore.recordDismiss.
-        // F-031 revalidation happens inside store.approve() under file lock.
-        throw typedBinderException(
-            MindlayerErrorCode.INTERNAL,
-            "completeConsent not yet wired (Phase 1 stub)",
-        )
+        // Validate the decision shape before doing anything (crypto review).
+        val kind = decision?.kind
+        if (kind == null || kind !in CONSENT_DECISION_KINDS) {
+            throw typedBinderException(
+                MindlayerErrorCode.INVALID_REQUEST,
+                "Invalid consent decision",
+            )
+        }
+        // Atomic single-winner consume — at most one decision per nonce.
+        val record = consentChallengeStore.consume(nonce)
+            ?: throw typedBinderException(
+                MindlayerErrorCode.INVALID_REQUEST,
+                "Consent challenge expired, already used, or unknown",
+            )
+
+        val pkg = record.packageName
+        val sig = record.signingCertSha256
+        // Feed the device-wide throttle: a prompt was shown and acted on.
+        consentAttemptStore.recordPromptCompleted(pkg, sig)
+
+        when (kind) {
+            com.adsamcik.mindlayer.ConsentDecision.KIND_GRANT -> {
+                // F-031: re-verify the LIVE signer under the file lock. If the
+                // package was updated / cert-rotated between requestConsent-
+                // Challenge and now, approve() throws and we fail closed.
+                allowlistStore.approve(
+                    context = context,
+                    pkg = pkg,
+                    expectedSigSha256 = sig,
+                    displayName = record.displayName,
+                )
+                consentAttemptStore.clear(pkg, sig)
+                logRepository?.logSecurityDecision(
+                    action = if (record.previousSigSha256 == null) "consent_granted"
+                    else "consent_granted_after_cert_rotation",
+                    packageName = pkg,
+                    sigShaPrefix = sig.take(8),
+                )
+            }
+            com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_ONCE -> {
+                consentAttemptStore.recordDismiss(pkg, sig)
+                logRepository?.logSecurityDecision(
+                    action = "consent_denied_once",
+                    packageName = pkg,
+                    sigShaPrefix = sig.take(8),
+                )
+            }
+            com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H -> {
+                allowlistStore.deny(pkg, sig, com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H)
+                consentAttemptStore.clear(pkg, sig)
+                logRepository?.logSecurityDecision(
+                    action = "consent_denied_temporary",
+                    packageName = pkg,
+                    sigShaPrefix = sig.take(8),
+                )
+            }
+            com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_PERMANENT -> {
+                // Package-wide block — also clear any existing approval.
+                allowlistStore.revoke(pkg)
+                allowlistStore.deny(pkg, null, com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_PERMANENT)
+                consentAttemptStore.clear(pkg, sig)
+                logRepository?.logSecurityDecision(
+                    action = "consent_denied_permanent",
+                    packageName = pkg,
+                    sigShaPrefix = sig.take(8),
+                )
+            }
+        }
     }
 
     /**

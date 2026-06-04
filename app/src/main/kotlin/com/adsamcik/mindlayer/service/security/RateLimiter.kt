@@ -67,6 +67,17 @@ class RateLimiter(
      */
     private val rejectedBuckets = ConcurrentHashMap<Int, Bucket>()
     private val pingBuckets = ConcurrentHashMap<Int, Bucket>()
+    private val preConsentPingBuckets = ConcurrentHashMap<Int, Bucket>()
+
+    /**
+     * v0.10: per-UID bucket for `requestConsentChallenge`. Capacity
+     * [DEFAULT_CONSENT_CHALLENGE_PER_HOUR] tokens, refilled over one hour.
+     * This is the primary spam defence for the consent-Intent entry point —
+     * an un-approved caller can request at most ~10 consent challenges/hour,
+     * bounding how often it can pop the consent UI even before the per-
+     * `(pkg,sig)` dismiss escalation and device-wide throttle kick in.
+     */
+    private val consentChallengeBuckets = ConcurrentHashMap<Int, Bucket>()
 
     fun tryAcquire(uid: Int): Boolean = tryAcquire(uid, cost = 1.0)
 
@@ -236,6 +247,62 @@ class RateLimiter(
         }
     }
 
+    /**
+     * v0.10: try to consume one token from the per-UID consent-challenge
+     * bucket (capacity [DEFAULT_CONSENT_CHALLENGE_PER_HOUR], refilled over
+     * one hour). Returns `false` when the caller has exhausted its hourly
+     * consent-challenge budget. The bucket starts FULL so the first consent
+     * request from a fresh UID always succeeds.
+     */
+    fun tryAcquireConsentChallenge(uid: Int): Boolean {
+        val cap = DEFAULT_CONSENT_CHALLENGE_PER_HOUR.toDouble()
+        val bucket = consentChallengeBuckets.getOrPut(uid) { Bucket(capacity = cap) }
+        synchronized(bucket) {
+            val now = timeSource()
+            val elapsed = now - bucket.lastRefillMs
+            if (elapsed > 0) {
+                val refill = elapsed * DEFAULT_CONSENT_CHALLENGE_PER_HOUR / 3_600_000.0
+                bucket.tokens = (bucket.tokens + refill).coerceAtMost(cap)
+                bucket.lastRefillMs = now
+            }
+            bucket.lastAccessMs = now
+            return if (bucket.tokens >= 1.0) {
+                bucket.tokens -= 1.0
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    /**
+     * v0.10: coarse pre-consent ping budget for un-approved callers
+     * ([DEFAULT_PRE_CONSENT_PING_RPM] per minute). Separate from the
+     * post-consent ping bucket so an un-approved caller cannot use the
+     * generous 150 RPM budget, and so it only ever receives the coarse
+     * `{alive, apiVersion}` response shape.
+     */
+    fun tryAcquirePreConsentPing(uid: Int): Boolean {
+        val cap = DEFAULT_PRE_CONSENT_PING_RPM.toDouble()
+        val bucket = preConsentPingBuckets.getOrPut(uid) { Bucket(capacity = cap) }
+        synchronized(bucket) {
+            val now = timeSource()
+            val elapsed = now - bucket.lastRefillMs
+            if (elapsed > 0) {
+                val refill = elapsed * DEFAULT_PRE_CONSENT_PING_RPM / 60_000.0
+                bucket.tokens = (bucket.tokens + refill).coerceAtMost(cap)
+                bucket.lastRefillMs = now
+            }
+            bucket.lastAccessMs = now
+            return if (bucket.tokens >= 1.0) {
+                bucket.tokens -= 1.0
+                true
+            } else {
+                false
+            }
+        }
+    }
+
     private fun evictIdleOpportunistically() {
         val now = timeSource()
         // F-052: race-free eviction. If two threads both observe a stale
@@ -306,6 +373,23 @@ class RateLimiter(
          */
         const val DEFAULT_REJECT_RPM = 6
         const val DEFAULT_PING_RPM = 150
+
+        /**
+         * v0.10: per-UID hourly budget for `requestConsentChallenge`. The
+         * consent-Intent entry point is reachable by any un-approved caller
+         * once the manifest permission is removed (Phase 5), so this is the
+         * first line of spam defence. 10/hour is generous for a legitimate
+         * app that retries a connect, but far too slow for a nag attack.
+         */
+        const val DEFAULT_CONSENT_CHALLENGE_PER_HOUR = 10
+
+        /**
+         * v0.10: coarse pre-consent ping budget. An un-approved caller may
+         * ping at most this many times per minute and receives only a
+         * `{alive, apiVersion}` response (no uptime, no engine state) so it
+         * cannot be used for fine-grained fingerprinting.
+         */
+        const val DEFAULT_PRE_CONSENT_PING_RPM = 5
         /**
          * F-040: hard cap on simultaneous inferences across all UIDs. Set
          * to 4 × per-UID cap so up to four typical first-party clients
