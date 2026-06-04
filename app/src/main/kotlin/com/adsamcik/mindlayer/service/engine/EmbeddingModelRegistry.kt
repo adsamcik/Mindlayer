@@ -232,7 +232,13 @@ object EmbeddingModelRegistry {
         manifestEntry: IntegrityMetadata?,
         requireIntegrity: Boolean,
     ): VerificationResult {
-        val expected = manifestEntry ?: readSidecarIntegrity(file)
+        // S-5: on integrity-enforcing (release) builds, the expected digest
+        // must come ONLY from the packaged, build-pinned manifest. A
+        // sidecar integrity file sitting next to the model is
+        // attacker-controllable (a writable model dir / post-discovery
+        // swap) and must never be trusted as the source of truth. Debug
+        // builds keep the sidecar fallback for local model iteration.
+        val expected = if (requireIntegrity) manifestEntry else (manifestEntry ?: readSidecarIntegrity(file))
         if (expected == null) return VerificationResult(accepted = !requireIntegrity, sha256 = null)
         if (expected.sizeBytes != null && expected.sizeBytes != file.length()) {
             return VerificationResult(accepted = false, sha256 = null)

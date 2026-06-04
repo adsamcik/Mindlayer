@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.annotation.RequiresApi
 import androidx.core.app.ServiceCompat
 import com.adsamcik.mindlayer.service.engine.DeferredDatabase
 import com.adsamcik.mindlayer.service.engine.DeferredStore
@@ -371,6 +372,44 @@ class MindlayerMlService : Service() {
         }
         // START_NOT_STICKY: don't auto-restart; recovery is client-driven
         return START_NOT_STICKY
+    }
+
+    /**
+     * R-22: defensive foreground-service timeout handler.
+     *
+     * Today the `specialUse` FGS type is exempt from the Android 15
+     * (API 35) `dataSync`/`mediaProcessing` 6-hour cumulative timeout, so
+     * the platform does not currently call this. But if a future platform
+     * or Play policy revision extends time limits to `specialUse`, the OS
+     * invokes `onTimeout(...)` and then crashes the service with
+     * "did not stop within its timeout" if it is left unhandled. We demote
+     * the FGS and cancel in-flight inference so the service degrades
+     * cleanly instead of being force-killed.
+     */
+    @RequiresApi(34)
+    override fun onTimeout(startId: Int) {
+        handleFgsTimeout(startId, fgsType = null)
+    }
+
+    @RequiresApi(35)
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        handleFgsTimeout(startId, fgsType)
+    }
+
+    private fun handleFgsTimeout(startId: Int, fgsType: Int?) {
+        MindlayerLog.w(
+            TAG,
+            "FGS onTimeout(startId=$startId, fgsType=$fgsType) — cancelling inferences and demoting",
+        )
+        try {
+            orchestrator.cancelAll()
+        } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "orchestrator.cancelAll() on FGS timeout raised: ${t.safeLabel()}")
+        }
+        try {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        } catch (_: Throwable) { /* best-effort */ }
+        synchronized(stateLock) { activeInferenceCount = 0 }
     }
 
     override fun onDestroy() {
