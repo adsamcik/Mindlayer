@@ -100,6 +100,33 @@ object CallerVerifier {
         null
     }
 
+    /**
+     * Resolve the package name of the installer that put [pkg] on the
+     * device, for the consent UI's supply-chain badge ("Installed from
+     * Google Play" / "Side-loaded" / etc.). Returns `null` when the
+     * source is unknown or unresolvable.
+     *
+     * On API 30+ uses `getInstallSourceInfo().installingPackageName`
+     * (the most trustworthy attribution Android exposes to a non-system
+     * app). Below that falls back to the deprecated
+     * `getInstallerPackageName`. This is a **signal for the user**, not
+     * a trust gate — installer attribution can be self-reported by a
+     * sideloading installer, so the UI must present it as context only.
+     */
+    @Suppress("DEPRECATION")
+    fun installSource(context: Context, pkg: String): String? {
+        val pm = context.packageManager
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                pm.getInstallSourceInfo(pkg).installingPackageName
+            } else {
+                pm.getInstallerPackageName(pkg)
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     @Suppress("DEPRECATION")
     private fun certificateSha256(pm: PackageManager, pkg: String): String? {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {

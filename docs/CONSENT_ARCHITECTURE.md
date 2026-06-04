@@ -41,15 +41,16 @@ Trust boundary changes from "two layers (OS permission + dashboard approval)" to
 
 ### `ConsentChallengeStore` (new, `:ml` process)
 
-In-memory map plus HMAC-signed disk file at `filesDir/mindlayer_allowlist/challenges.json`. Each entry:
+In-memory `ConcurrentHashMap<String, ChallengeRecord>` keyed by nonce. Each record:
 
 ```kotlin
-data class ConsentChallenge(
+data class ChallengeRecord(
     val nonce: String,                // 256-bit URL-safe random
     val callerUid: Int,               // captured at requestConsentChallenge time
     val packageName: String,
     val signingCertSha256: String,
     val displayName: String?,         // F-030 sanitised
+    val installSource: String?,       // supply-chain badge
     val previousSigSha256: String?,   // F-032 cert rotation banner trigger
     val createdAtMs: Long,
     val expiresAtMs: Long,            // createdAt + 5 min default
@@ -57,10 +58,12 @@ data class ConsentChallenge(
 )
 ```
 
+(The wire-facing `ConsentChallenge` parcelable carries only `nonce` + `consentIntent` + `expiresAtMs`; the full record above never leaves `:ml`.)
+
 Invariants:
 
-- Nonces are **single-use**. Once `completeConsent(nonce)` is called, the entry is marked `consumed` and ignored by subsequent calls.
-- Disk persistence (HMAC-signed envelope, FileLock-protected) lets challenges survive `:ml` process death within the TTL window. Reboot wipes the file (treat it as ephemeral — disk persistence is just for soft restarts).
+- Nonces are **single-use**. `completeConsent(nonce)` atomically marks the entry `consumed` (single-winner `ConcurrentHashMap.compute`); subsequent calls for the same nonce return `null`.
+- The store is **in-memory only**. If `:ml` is killed between `requestConsentChallenge` and the user's decision, the challenge is lost and the client must call `requestConsentChallenge` again — a fail-closed retry, not a security hole. The 5-min TTL is the real contract; disk persistence would only avoid an occasional retry on soft restart and was dropped to keep the security surface small (no extra HMAC file, no cross-file lock coordination).
 - Per-UID rate limit on `requestConsentChallenge()` (default 10/hour) prevents nonce-flooding attacks.
 
 ### `ConsentActivity` (new, main process, `:app`)
