@@ -271,7 +271,7 @@ class AllowlistStoreTest {
         val envelope = JSONObject(entriesFile.readText())
         val entry = envelope.getJSONArray("entries").getJSONObject(0)
         entriesFile.writeText(
-            """{"version":2,"entries":[{"displayName":"${entry.getString("displayName")}","grantedAtMs":${entry.getLong("grantedAtMs")},"sig":"${entry.getString("sig")}","pkg":"${entry.getString("pkg")}"}],"mac":"${envelope.getString("mac")}"}""",
+            """{"version":3,"entries":[{"displayName":"${entry.getString("displayName")}","grantedAtMs":${entry.getLong("grantedAtMs")},"sig":"${entry.getString("sig")}","pkg":"${entry.getString("pkg")}"}],"mac":"${envelope.getString("mac")}"}""",
         )
 
         assertTrue(store.isAllowed("com.example", "sig"))

@@ -807,16 +807,16 @@ class AllowlistStore(
                 if (i > 0) append(',')
                 val item = array.getJSONObject(i)
                 when (arrayKey) {
-                    ENTRIES_KEY -> appendCanonicalEntry(item, timestampKey = "grantedAtMs")
-                    PENDING_KEY -> appendCanonicalEntry(item, timestampKey = "firstRequestedAtMs")
-                    DENIED_KEY -> appendCanonicalDenied(item)
+                    ENTRIES_KEY -> appendCanonicalEntry(item, timestampKey = "grantedAtMs", version = version)
+                    PENDING_KEY -> appendCanonicalEntry(item, timestampKey = "firstRequestedAtMs", version = version)
+                    DENIED_KEY -> appendCanonicalDenied(item, version = version)
                     else -> throw IllegalArgumentException("Unknown allowlist array key: $arrayKey")
                 }
             }
             append(']')
         }
 
-    private fun StringBuilder.appendCanonicalEntry(item: JSONObject, timestampKey: String) {
+    private fun StringBuilder.appendCanonicalEntry(item: JSONObject, timestampKey: String, version: Int) {
         append('{')
         append("\"pkg\":").append(JSONObject.quote(item.getString("pkg")))
         append(",\"sig\":").append(JSONObject.quote(item.getString("sig")))
@@ -825,15 +825,31 @@ class AllowlistStore(
         if (displayName != null) {
             append(",\"displayName\":").append(JSONObject.quote(displayName))
         }
+        // S-9 (v3+): bind the persisted, trusted `prevSig` (cert-rotation
+        // metadata) into the HMAC pre-image so a filesDir-tamper attacker
+        // cannot rewrite it without breaking the signature. Version-gated so
+        // existing v2 files still verify under their original canonical form.
+        if (version >= SIGNED_FILE_VERSION_METADATA) {
+            val prevSig = item.optString("prevSig").ifEmpty { null }
+            if (prevSig != null) {
+                append(",\"prevSig\":").append(JSONObject.quote(prevSig))
+            }
+        }
         append('}')
     }
 
-    private fun StringBuilder.appendCanonicalDenied(item: JSONObject) {
+    private fun StringBuilder.appendCanonicalDenied(item: JSONObject, version: Int) {
         append('{')
         append("\"pkg\":").append(JSONObject.quote(item.getString("pkg")))
         append(",\"sig\":").append(JSONObject.quote(item.getString("sig")))
         append(",\"deniedAtMs\":").append(item.optLong("deniedAtMs", 0L))
         append(",\"expiresAtMs\":").append(item.optLong("expiresAtMs", 0L))
+        // S-9 (v3+): bind the `permanent` tombstone flag into the HMAC so a
+        // filesDir-tamper attacker cannot flip a sticky (permanent) revoke
+        // into an expirable one and re-allow a revoked app after the TTL.
+        if (version >= SIGNED_FILE_VERSION_METADATA && item.optBoolean("permanent", false)) {
+            append(",\"permanent\":true")
+        }
         append('}')
     }
 
@@ -937,9 +953,16 @@ class AllowlistStore(
         private const val DEDUP_MAP_SOFT_CAP = 256
 
         // Bumped to 2 when canonicalPayload was changed to include version+arrayKey
-        // domain separator (audit M6). Verifier accepts MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION.
-        private const val SIGNED_FILE_VERSION = 2
+        // domain separator (audit M6). Bumped to 3 (security-review S-9) to bind
+        // the trusted `prevSig`/`permanent` fields into the HMAC pre-image.
+        // Verifier accepts MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION, so files
+        // written by an older build (v2) still verify under their original
+        // canonical form; new writes are signed as v3.
+        private const val SIGNED_FILE_VERSION = 3
         private const val MIN_SUPPORTED_VERSION = 2
+
+        /** First version whose canonical pre-image binds `prevSig`/`permanent`. */
+        private const val SIGNED_FILE_VERSION_METADATA = 3
         private const val ENTRIES_KEY = "entries"
         private const val PENDING_KEY = "pending"
         private const val DENIED_KEY = "denied"
