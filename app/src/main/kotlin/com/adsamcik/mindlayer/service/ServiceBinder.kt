@@ -3171,6 +3171,11 @@ class ServiceBinder(
             )
         }
         val record = consentChallengeStore.lookup(nonce) ?: return null
+        // A non-null lookup means ConsentActivity is about to render the
+        // prompt (requestConsentChallenge already rejected approved/blocked
+        // callers). Count it toward the device-wide throttle now so a
+        // swiped-away prompt still feeds the sock-puppet-fleet brake.
+        consentAttemptStore.recordPromptShown(record.packageName, record.signingCertSha256)
         return com.adsamcik.mindlayer.ConsentIdentity(
             packageName = record.packageName,
             displayName = record.displayName,
@@ -3208,8 +3213,6 @@ class ServiceBinder(
 
         val pkg = record.packageName
         val sig = record.signingCertSha256
-        // Feed the device-wide throttle: a prompt was shown and acted on.
-        consentAttemptStore.recordPromptCompleted(pkg, sig)
 
         when (kind) {
             com.adsamcik.mindlayer.ConsentDecision.KIND_GRANT -> {

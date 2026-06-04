@@ -91,10 +91,16 @@ Lifecycle:
 
 Defenses:
 
-- `window.setHideOverlayWindows(true)` called in `onCreate` (already permitted by manifest `HIDE_OVERLAY_WINDOWS`).
-- `getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE)` on the approve UI to suppress screenshots/recording.
+- `window.setHideOverlayWindows(true)` called in `onCreate` on API 31+ (`Build.VERSION_CODES.S`, not `S_V2`), permitted by manifest `HIDE_OVERLAY_WINDOWS`.
+- `getWindow().setFlags(FLAG_SECURE)` to suppress screenshots/recording, plus `decorView.filterTouchesWhenObscured = true` to drop obscured taps.
 - Opaque theme (no translucency).
+- Mixed-script label warning: if the sanitised display label mixes characters from multiple Unicode scripts (a homoglyph technique), the UI shows a caution banner. F-030 sanitisation strips control/format codepoints but cannot catch script-mixing, so the UI surfaces it rather than "fixing" the label.
 - Default launch mode (not `singleTask`) — each consent request is its own activity instance with its own nonce. Multiple in-flight consents from different clients do not collide.
+
+> **Localization:** the app is English-only today (no `values-*` translation
+> dirs), so the consent strings ship in `values/strings.xml` only. Adding a
+> partial locale would trip the `MissingTranslation` lint gate. Translations
+> can be added later as whole-locale sets.
 
 ### `AllowlistStore` (modified)
 

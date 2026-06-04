@@ -103,9 +103,9 @@ class ConsentAttemptStoreTest {
     fun `device-wide throttle blocks after three completed prompts`() {
         val s = store()
         // Three distinct callers each complete a prompt within the window.
-        s.recordPromptCompleted("com.a", "s")
-        s.recordPromptCompleted("com.b", "s")
-        s.recordPromptCompleted("com.c", "s")
+        s.recordPromptShown("com.a", "s")
+        s.recordPromptShown("com.b", "s")
+        s.recordPromptShown("com.c", "s")
         val gate = s.checkGate("com.d", "s")
         assertTrue("4th caller throttled device-wide", gate is ConsentGate.Blocked)
         assertEquals("device_wide_throttle", (gate as ConsentGate.Blocked).reason)
@@ -114,9 +114,9 @@ class ConsentAttemptStoreTest {
     @Test
     fun `device-wide throttle lifts after the window`() {
         val s = store()
-        s.recordPromptCompleted("com.a", "s")
-        s.recordPromptCompleted("com.b", "s")
-        s.recordPromptCompleted("com.c", "s")
+        s.recordPromptShown("com.a", "s")
+        s.recordPromptShown("com.b", "s")
+        s.recordPromptShown("com.c", "s")
         clock += ConsentAttemptStore.DEVICE_WIDE_WINDOW_MS + 1
         assertTrue("allowed after window", s.checkGate("com.d", "s") is ConsentGate.Allow)
     }

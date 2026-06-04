@@ -24,6 +24,34 @@
     <string name="biometric_revoke_title">Revoke app access</string>
     <string name="biometric_revoke_subtitle">Confirm with biometrics or device PIN to revoke this app.</string>
     <string name="biometric_unavailable">Set up a screen lock or biometric to approve apps.</string>
+
+    <!-- v0.10 consent-Intent flow (ConsentActivity). -->
+    <string name="consent_title">Allow AI access?</string>
+    <string name="consent_subtitle">This app wants to use Mindlayer\'s on-device AI.</string>
+    <string name="consent_app_label_fallback">Unknown app</string>
+    <string name="consent_package_label">Package</string>
+    <string name="consent_cert_label">Signing certificate (SHA-256)</string>
+    <string name="consent_cert_show_full">Show full fingerprint</string>
+    <string name="consent_cert_a11y">SHA-256 signing fingerprint</string>
+    <string name="consent_source_label">Installed from</string>
+    <string name="consent_source_play">Google Play</string>
+    <string name="consent_source_sideload">Sideloaded (not from an app store)</string>
+    <string name="consent_source_other">%1$s</string>
+    <string name="consent_source_unknown">Unknown source</string>
+    <string name="consent_mixed_script_warning">This app\'s name mixes characters from different alphabets, which can be used to imitate another app. Check the package name carefully.</string>
+    <string name="consent_rotation_banner_title">Signing key changed</string>
+    <string name="consent_rotation_banner_body">This app was previously seen with a different signing certificate. A re-signed app could be a normal key rotation or a malicious replacement. Verify before allowing.</string>
+    <string name="consent_approve">Allow</string>
+    <string name="consent_deny">Deny</string>
+    <string name="consent_deny_once">Not now</string>
+    <string name="consent_deny_24h">Deny for 24 hours</string>
+    <string name="consent_deny_permanent">Block this app</string>
+    <string name="consent_deny_permanent_confirm_title">Block this app?</string>
+    <string name="consent_deny_permanent_confirm_body">Mindlayer will refuse this app for any version, including future updates, until you unblock it from the dashboard.</string>
+    <string name="consent_deny_permanent_confirm_action">Block</string>
+    <string name="consent_cancel">Cancel</string>
+    <string name="consent_error_generic">Could not load this consent request. Please try again.</string>
+    <string name="consent_error_expired">This consent request has expired. Ask the app to try again.</string>
     <string name="allowed_apps_title">Allowed apps</string>
     <string name="pending_approvals_count">Pending approvals (%1$d)</string>
     <string name="allowed_apps_empty">No apps have been approved yet.</string>

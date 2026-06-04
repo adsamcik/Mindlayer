@@ -124,11 +124,14 @@ class ConsentAttemptStore(
     }
 
     /**
-     * Record that a consent prompt for [pkg]/[sig] was completed (the user
-     * saw it and committed any decision). Feeds the device-wide throttle.
-     * Call once per `completeConsent`, regardless of the decision kind.
+     * Record that a consent prompt for [pkg]/[sig] was shown to the user.
+     * Feeds the device-wide throttle and updates `lastShownAt`. Called from
+     * `lookupChallenge` (right before `ConsentActivity` renders the prompt),
+     * so a prompt that the user swipes away still counts toward the
+     * device-wide throttle — closing the sock-puppet-fleet gap a
+     * completeConsent-only counter would leave open.
      */
-    fun recordPromptCompleted(pkg: String, sig: String) {
+    fun recordPromptShown(pkg: String, sig: String) {
         val now = timeSource()
         withFileLock {
             // Append to the device-wide ring, pruned to the window.

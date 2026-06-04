@@ -173,7 +173,6 @@ class ServiceBinderConsentFlowTest {
         )
         binder.completeConsent("n1", ConsentDecision(kind = ConsentDecision.KIND_GRANT))
         verify { allowlist.approve(any(), "com.client", "sigC", "Client") }
-        verify { attemptStore.recordPromptCompleted("com.client", "sigC") }
         verify { attemptStore.clear("com.client", "sigC") }
     }
 
