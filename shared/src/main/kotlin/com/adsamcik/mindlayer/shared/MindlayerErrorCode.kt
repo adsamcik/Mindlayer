@@ -280,16 +280,13 @@ object MindlayerErrorCode {
     const val ALLOWLIST_PENDING = 6001
 
     /**
-     * Legacy: app approval was revoked; user must re-approve. The v0.10
-     * consent-Intent architecture surfaces revocation as
-     * [CONSENT_REQUIRED] on the next bind. Kept here for wire-decode
-     * compatibility with older SDK builds.
+     * App approval was revoked; user must re-consent. Still emitted as the
+     * **eviction / cancellation reason code** when `revokeApp` or a
+     * permanent block tears down a caller's in-flight sessions
+     * (`InferenceOrchestrator` / `SessionManager`). Distinct from
+     * [CONSENT_REQUIRED] (returned by the auth gate to an un-consented
+     * caller) and [CONSENT_DENIED] (returned to a user-denied caller).
      */
-    @Deprecated(
-        "Legacy code; pre-v0.10 dashboard revoke surface. " +
-            "Use CONSENT_REQUIRED for the v0.10 consent-Intent flow.",
-        ReplaceWith("CONSENT_REQUIRED"),
-    )
     const val ALLOWLIST_REVOKED = 6002
 
     /** Caller identity could not be resolved (shared-UID, unknown package). */
@@ -377,7 +374,7 @@ object MindlayerErrorCode {
         FEATURE_NOT_SUPPORTED, SERVICE_UNAVAILABLE, CONNECT_TIMEOUT,
         PROTOCOL_VIOLATION -> Category.RESOURCE
         @Suppress("DEPRECATION") ALLOWLIST_PENDING,
-        @Suppress("DEPRECATION") ALLOWLIST_REVOKED,
+        ALLOWLIST_REVOKED,
         IDENTITY_UNKNOWN, PERMISSION_DENIED,
         CONSENT_REQUIRED, CONSENT_DENIED -> Category.AUTH
         INTERNAL -> Category.UNKNOWN
@@ -435,7 +432,7 @@ object MindlayerErrorCode {
         UNSUPPORTED_ANDROID_VERSION -> "UNSUPPORTED_ANDROID_VERSION"
         INPUT_REJECTED -> "INPUT_REJECTED"
         @Suppress("DEPRECATION") ALLOWLIST_PENDING -> "ALLOWLIST_PENDING"
-        @Suppress("DEPRECATION") ALLOWLIST_REVOKED -> "ALLOWLIST_REVOKED"
+        ALLOWLIST_REVOKED -> "ALLOWLIST_REVOKED"
         IDENTITY_UNKNOWN -> "IDENTITY_UNKNOWN"
         PERMISSION_DENIED -> "PERMISSION_DENIED"
         CONSENT_REQUIRED -> "CONSENT_REQUIRED"

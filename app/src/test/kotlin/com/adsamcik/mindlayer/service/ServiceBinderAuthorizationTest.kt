@@ -66,12 +66,14 @@ class ServiceBinderAuthorizationTest {
 
     @After fun tearDown() = unmockkAll()
 
-    @Test fun `first time UID records pending before main rate limit is consumed`() {
+    @Test fun `unconsented UID is rejected with CONSENT_REQUIRED before main rate limit is consumed`() {
         assertThrows(SecurityException::class.java) { binder.getStatus() }
 
         verify { allowlist.isAllowed("first.time", "sig") }
         verify { rateLimiter.tryAcquireRejection(24_681) }
-        verify { allowlist.recordPending("first.time", "sig", "First Time") }
+        // v0.10: no pending-approval inbox. The caller obtains access via the
+        // consent-Intent flow, not a recorded pending row.
+        verify(exactly = 0) { allowlist.recordPending(any(), any(), any()) }
         verify(exactly = 0) { rateLimiter.tryAcquire(24_681, any()) }
     }
 

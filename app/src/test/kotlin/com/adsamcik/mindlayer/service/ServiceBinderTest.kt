@@ -1077,9 +1077,11 @@ class ServiceBinderTest {
             io.mockk.unmockkStatic(android.os.Binder::class)
         }
 
-        // Only the first ~6 rejections in the minute should call recordPending.
-        // Looser upper bound (8) to absorb minor refill timing variance.
-        verify(atLeast = 1, atMost = 8) {
+        // v0.10: there is no pending-approval inbox — authorizeCall never
+        // calls recordPending. The per-UID rejection bucket still bounds the
+        // rejection bookkeeping (log writes); the caller obtains access via
+        // the consent-Intent flow instead.
+        verify(exactly = 0) {
             store.recordPending(any(), any(), any())
         }
     }
@@ -1123,7 +1125,7 @@ class ServiceBinderTest {
     // ---- M7: allowlist rejection does not consume main rate-limit ----------
 
     @Test
-    fun `authorizeCall records pending without consuming main rate-limit for allowlist-rejected callers`() {
+    fun `authorizeCall rejects unconsented caller without consuming main rate-limit`() {
         mockkStatic(Binder::class)
         every { Binder.getCallingUid() } returns 1001
 
@@ -1159,11 +1161,12 @@ class ServiceBinderTest {
                 testBinder.getStatus()
                 fail("Expected SecurityException from allowlist")
             } catch (e: SecurityException) {
-                // expected
+                // expected — CONSENT_REQUIRED
             }
             verify(exactly = 0) { mockRateLimiter.tryAcquire(1001, any()) }
             verify { mockRateLimiter.tryAcquireRejection(1001) }
-            verify { mockAllowlist.recordPending("test.caller", "testsig", "Test Caller") }
+            // v0.10: no pending-approval inbox.
+            verify(exactly = 0) { mockAllowlist.recordPending(any(), any(), any()) }
         } finally {
             io.mockk.unmockkStatic(Binder::class)
         }

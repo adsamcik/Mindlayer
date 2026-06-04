@@ -368,35 +368,6 @@ class AllowlistStoreTest {
     }
 
     @Test
-    fun `seedIfEmpty refuses a permanently revoked package even after entries wiped`() {
-        // H-T1: the canonical attack: app-data partial clear (or corruption
-        // re-init) wipes entries.json but the permanent denial in denied.json
-        // remains. seedIfEmpty must still skip the revoked package.
-        store.approveDirect("com.example", "sigOriginal")
-        store.revoke("com.example")
-
-        // Simulate the entries file being wiped while denied.json survives —
-        // e.g. partial backup restore, DB corruption recovery path.
-        File(dir(), "entries.json").delete()
-
-        // Reopen the store to drop in-memory state and force a fresh read.
-        val reopened = AllowlistStore(context, dirName)
-        reopened.seedIfEmpty(
-            listOf(
-                AllowlistEntry(
-                    packageName = "com.example",
-                    signingCertSha256 = "sigOriginal",
-                    grantedAtMs = 0L,
-                    displayName = "Example",
-                ),
-            ),
-        )
-
-        assertFalse(reopened.isAllowed("com.example", "sigOriginal"))
-        assertTrue(reopened.list().isEmpty())
-    }
-
-    @Test
     fun `denyPending denial still uses the 7-day TTL, not permanent`() {
         // Behavior-change boundary: only revoke is sticky. denyPending keeps
         // the original 7-day TTL semantics so a user who taps "deny" by

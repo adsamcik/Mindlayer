@@ -204,13 +204,10 @@ class RevokeAppAidlTest {
             binder.revokeApp("com.target.app")
         }
 
-        verify {
-            logRepository.logAllowlistPendingRecorded(
-                uid = externalUid,
-                packageName = "test.caller",
-                sigShaPrefix = any(),
-            )
-        }
+        // v0.10: the auth gate no longer records a pending row / pending log
+        // (the consent-Intent flow replaces the pending inbox). The external
+        // caller is simply rejected and the target's allowlist entry is
+        // untouched.
         assertTrue(allowlistStore.isAllowed("com.target.app", "deadbeef"))
     }
 

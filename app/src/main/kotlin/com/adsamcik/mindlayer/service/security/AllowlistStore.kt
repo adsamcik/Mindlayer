@@ -203,67 +203,23 @@ class AllowlistStore(
 
     fun list(): List<AllowlistEntry> = readEntries().also { _entries.value = it }
 
+    @Deprecated("v0.10: the pending-approval inbox is replaced by the consent-Intent flow.")
     fun listPending(): List<PendingApproval> = readPending().also { _pending.value = it }
 
     /**
-     * Seeds co-signed first-party callers only when the allowlist is empty.
-     *
-     * Each seed is verified against the currently installed APK signer before
-     * insertion. If a package was previously denied/revoked, it is skipped so a
-     * service restart cannot silently undo that decision.
+     * v0.10 consent migration: discard the legacy `pending.json` inbox. The
+     * consent-Intent flow (`ConsentChallengeStore` + `ConsentActivity`)
+     * replaces the dashboard pending-approval list, so any rows left over
+     * from a pre-v0.10 install are deleted on first launch. Approved
+     * (`entries.json`) and denied (`denied.json`) state are preserved.
+     * Idempotent.
      */
-    fun seedIfEmpty(entries: List<AllowlistEntry>) {
-        seedVerified(entries, requireEmpty = true, action = "seed_first_party")
-    }
-
-    /**
-     * Seed verified installed packages while preserving explicit deny/revoke decisions.
-     */
-    internal fun seedVerified(entries: List<AllowlistEntry>, requireEmpty: Boolean, action: String) {
-        if (entries.isEmpty()) return
+    fun discardLegacyPending() {
         withFileLock {
-            val current = readEntries()
-            if (requireEmpty && current.isNotEmpty()) return@withFileLock
-            val denied = readDeniedIncludingExpired()
-            val now = System.currentTimeMillis()
-            val seeded = current.toMutableList()
-            var changed = false
-            for (entry in entries) {
-                if (denied.any { it.packageName == entry.packageName }) {
-                    MindlayerLog.i(TAG, "Skipped allowlist seed for previously denied package ${entry.packageName}")
-                    continue
-                }
-                val live = CallerVerifier.identifyByPackage(appContext, entry.packageName)
-                if (live == null || !live.signingCertSha256.equals(entry.signingCertSha256, ignoreCase = true)) {
-                    MindlayerLog.w(TAG, "Rejected allowlist seed for ${entry.packageName}: signer mismatch or package missing")
-                    continue
-                }
-                val seededEntry = AllowlistEntry(
-                    packageName = entry.packageName,
-                    signingCertSha256 = live.signingCertSha256,
-                    grantedAtMs = now,
-                    displayName = CallerVerifier.sanitizeLabel(live.displayName ?: entry.displayName),
-                )
-                val existingIndex = seeded.indexOfFirst { it.packageName == seededEntry.packageName }
-                if (existingIndex >= 0 && seeded[existingIndex].signingCertSha256.equals(seededEntry.signingCertSha256, ignoreCase = true)) {
-                    continue
-                }
-                if (existingIndex >= 0) {
-                    seeded[existingIndex] = seededEntry
-                } else {
-                    seeded += seededEntry
-                }
-                changed = true
-                logRepository?.logSecurityDecision(
-                    action = action,
-                    packageName = seededEntry.packageName,
-                    sigShaPrefix = seededEntry.signingCertSha256.take(8),
-                )
+            if (pendingFile.exists()) {
+                try { pendingFile.delete() } catch (_: Throwable) { }
             }
-            if (changed) {
-                writeEntries(seeded)
-                _entries.value = seeded
-            }
+            _pending.value = emptyList()
         }
     }
 

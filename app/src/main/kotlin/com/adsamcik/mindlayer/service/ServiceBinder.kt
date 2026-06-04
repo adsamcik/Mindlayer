@@ -440,34 +440,30 @@ class ServiceBinder(
                 )
             }
 
-        // 1. Allowlist check. A previously-denied caller is rejected silently.
+        // 1. Allowlist check. A user-denied caller is rejected with the
+        //    typed CONSENT_DENIED code (24h or permanent block).
         val store = allowlistStore
         if (store.isDenied(identity.packageName, identity.signingCertSha256)) {
             throw typedBinderException(
-                MindlayerErrorCode.ALLOWLIST_REVOKED,
-                "App not authorized — approval revoked",
+                MindlayerErrorCode.CONSENT_DENIED,
+                "App access denied by user",
             )
         }
         if (!store.isAllowed(identity.packageName, identity.signingCertSha256)) {
-                // Only do the (relatively expensive) recordPending if the
-                // per-UID rejection bucket still has tokens. Otherwise drop
-                // silently — prevents log spam + atomic-write storm.
+                // v0.10: there is no pending-approval inbox. An un-consented
+                // caller obtains access via the consent-Intent flow
+                // (Mindlayer.connect → ConsentRequired → ConsentActivity).
+                // We still rate-limit the rejection bookkeeping so a flooder
+                // cannot drive unbounded log writes.
                 if (rateLimiter.tryAcquireRejection(uid)) {
-                    store.recordPending(
-                        pkg = identity.packageName,
-                        sigSha256 = identity.signingCertSha256,
-                        displayName = identity.displayName,
+                    MindlayerLog.w(
+                        TAG,
+                        "Unconsented caller ${identity.packageName} (uid=$uid) — consent required",
                     )
-                    logRepository?.logAllowlistPendingRecorded(
-                        uid = uid,
-                        packageName = identity.packageName,
-                        sigShaPrefix = identity.signingCertSha256.take(12),
-                    )
-                    MindlayerLog.w(TAG, "Blocked un-approved caller ${identity.packageName} (uid=$uid)")
                 }
                 throw typedBinderException(
-                    MindlayerErrorCode.ALLOWLIST_PENDING,
-                    "App not authorized — user approval required",
+                    MindlayerErrorCode.CONSENT_REQUIRED,
+                    "App access requires user consent",
                 )
         }
 
