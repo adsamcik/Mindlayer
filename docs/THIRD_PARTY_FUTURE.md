@@ -1,6 +1,19 @@
 # Third-Party Caller Future Work
 
-> **Status: planning note.** No code changes here — this captures the design
+> **⚠️ Branch notice — being implemented in `feat/consent-architecture`.**
+>
+> This document describes a 5-step migration plan that was previously deferred.
+> The `feat/consent-architecture` branch implements **all 5 steps in a single PR**
+> because we are in the experimental phase and the alternative (incremental shipping)
+> would leave a long window of mixed first-party / third-party semantics in production.
+>
+> The target design is documented in [`CONSENT_ARCHITECTURE.md`](CONSENT_ARCHITECTURE.md).
+> This document will be archived in Phase 7 of the migration; its content is preserved
+> here as the historical motivation. **Use `CONSENT_ARCHITECTURE.md` as the reference
+> for the current direction** — the text below describes the original incremental plan,
+> not the as-shipped design.
+
+> **Status (legacy): planning note.** No code changes here — this captures the design
 > deltas the codebase needs before the `BIND_ML_SERVICE` permission is
 > relaxed below `signature` protection level. Read this whenever you're
 > tempted to invoke "third-party" as a justification for a current

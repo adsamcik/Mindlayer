@@ -3,13 +3,23 @@
 
 # Mindlayer — Copilot Instructions
 
+> **⚠️ Branch notice — `feat/consent-architecture` migration in flight.**
+> The trust-model and AIDL-permission sections below describe the **target consent
+> architecture** that this branch ships. See
+> [`docs/CONSENT_ARCHITECTURE.md`](../docs/CONSENT_ARCHITECTURE.md) for the
+> full design and
+> [`.github/instructions/security.instructions.md`](instructions/security.instructions.md)
+> for the in-flight invariants. Legacy invariants that still apply to un-deleted
+> code paths are tracked at the bottom of `security.instructions.md`.
+
 > Action-oriented summary. For detail see `.github/context/ARCHITECTURE.md`,
 > `.github/context/PATTERNS.md`, `.github/context/DEVELOPMENT.md`,
-> `docs/AUTHORIZATION.md`, and `SDK_INTEGRATION.md`.
+> `docs/CONSENT_ARCHITECTURE.md`, `docs/AUTHORIZATION.md` (legacy reference),
+> and `SDK_INTEGRATION.md`.
 
 ## What this is
 
-Android service app (`com.adsamcik.mindlayer.service`) that loads a single LLM (Gemma 4 E2B via LiteRT-LM) and serves inference to **trusted first-party client apps** over IPC. It is **not** a public SDK; co-signed clients are the audience. Architecture must remain extensible to allow third-party callers later, gated by user approval.
+Android service app (`com.adsamcik.mindlayer.service`) that loads a single LLM (Gemma 4 E2B via LiteRT-LM) and serves inference to **consenting client apps** over IPC. Trust boundary is per-app user consent (`ConsentActivity`) — there is no static cert allowlist and no `signature|knownSigner` permission. First-party and third-party callers go through the same approval flow; trust tiers (set at approval time) gate per-app budgets, not access.
 
 ## Tech stack
 
@@ -41,7 +51,7 @@ Android service app (`com.adsamcik.mindlayer.service`) that loads a single LLM (
 
 ## Privacy / offline / security — product invariants
 
-Mindlayer is **fully on-device, network-free, and first-party-trust-gated**. These are product-level guarantees; weakening any of them is a release blocker. New features must:
+Mindlayer is **fully on-device, network-free, and user-consent-gated**. These are product-level guarantees; weakening any of them is a release blocker. New features must:
 
 - Add no `INTERNET` / network permission to `:app` or `:sdk` manifests.
 - Add no third-party telemetry, analytics, or cloud-fallback paths.
@@ -53,11 +63,13 @@ See `.github/instructions/privacy-offline.instructions.md` for the full ruleset 
 
 ## Trust model (read this before touching auth)
 
-Today, every AIDL entry point runs a 4-stage gate: **identity → allowlist → rate limit → ownership**. Default-deny: even co-signed first-party apps are rejected on first connect and need a one-time dashboard approval. The signature-level `BIND_ML_SERVICE` permission is the *first* line; the user-approved allowlist runs underneath as defense-in-depth. Self-UID bypasses the allowlist+rate gate so the dashboard can poll `:ml` over its own AIDL.
+Every AIDL entry point runs a 4-stage gate: **identity → allowlist → rate limit → ownership**. Default-deny: any app can call `bindService()` (no permission gate), but every non-self-UID AIDL method except `requestConsentChallenge()` and a coarse `ping()` requires an approved `(packageName, signingCertSha256)` entry in `entries.json`.
 
-The product **intent** is for first-party (co-signed) apps to skip user approval (via a future `AllowlistStore.seedIfEmpty(...)` from `MindlayerMlService.onCreate`) while keeping the approval flow intact for any future third-party support. Implement that hook when needed; do **not** remove `recordPending`, `CallerVerifier`, `RateLimiter`, ownership checks, or binder-death linkage.
+The only path to an approval is the **consent-Intent flow**: the SDK calls `Mindlayer.createConsentIntent(ctx)` which binds, calls `requestConsentChallenge()` (Binder-side, identity captured via real `Binder.getCallingUid()`), receives a nonce-bearing `PendingIntent`, and fires it via `startActivityForResult`. `ConsentActivity` shows the user an opaque biometric-gated screen with the app label, sanitised display name, signing cert SHA-256, install source, and cert-rotation banner (if any). The user picks Approve / Deny-once / Deny-24h / Block-permanently. On Approve, `:ml` calls `AllowlistStore.approve()` under the file lock with F-031 live cert re-verification.
 
-See `docs/AUTHORIZATION.md` for the full data flow, failure modes, and threat model. Path-specific rules live in `.github/instructions/security.instructions.md`.
+Approved entries carry a `trustTier` (`FIRST_PARTY` / `THIRD_PARTY`) that drives per-tier `RateLimiter` and `IpcInputValidator` budgets. Self-UID bypasses the allowlist gate so the dashboard can poll `:ml` over its own AIDL.
+
+See [`docs/CONSENT_ARCHITECTURE.md`](../docs/CONSENT_ARCHITECTURE.md) for the full data flow, failure modes, threat model, and the consent-attempt escalation policy. Path-specific rules live in `.github/instructions/security.instructions.md`.
 
 ## Cross-module contract synchronization
 
@@ -66,7 +78,8 @@ Whenever you change any of these, update **all** producers, consumers, and tests
 - AIDL **interface** files (`app/src/main/aidl/com/adsamcik/mindlayer/{IMindlayerService,IClientCallback}.aidl` ↔ `sdk/src/main/aidl/com/adsamcik/mindlayer/{IMindlayerService,IClientCallback}.aidl`). **Parcelable AIDL files live only in `:sdk`** — `:app` pulls them in transitively via `implementation(project(":sdk"))`.
 - `StreamEvent` / `StreamEventType` / `StreamHeader` (`shared/.../Protocol.kt`) and the writer/reader pair (`TokenStreamWriter` / `TokenStreamReader`)
 - Frame format / `MAX_FRAME_BYTES` (duplicated in writer + reader on purpose)
-- `BIND_ML_SERVICE` permission name, service `<intent-filter>`, or process name `:ml`
+- `ConsentChallenge` / `ConsentIdentity` / `ConsentDecision` parcelables in `:sdk` and the matching AIDL method signatures
+- Service `<intent-filter>` or process name `:ml`
 
 The PR template asks for explicit confirmation that AIDL changes are mirrored. Don't merge half-changes.
 
@@ -219,7 +232,8 @@ Read-only operations (`git status`, `git log`, `git blame`) and zero-file invest
 | Add a stream event type | `shared/.../Protocol.kt::StreamEventType` constant; emit in `TokenStreamWriter`; handle in `TokenStreamReader`; update tests in both `:app` and `:sdk`. |
 | Add a Room column on the SDK history DB | Bump `MindlayerDatabase.version`, add a `Migration`, update `Entities.kt`. SQLCipher cross-install backup is unreadable by design. |
 | Add a logged event | Add `LogEvent`/`LogCategory` enum value; add a builder on `LogRepository`; never include prompt or output text. |
-| Add a security/auth gate | Read `docs/AUTHORIZATION.md` first. Don't bypass `authorizeCall()`. |
+| Add a security/auth gate | Read `docs/CONSENT_ARCHITECTURE.md` first. Don't bypass `authorizeCall()`. New AIDL methods default to consent-required; only `requestConsentChallenge` and `ping` are reachable pre-consent. |
+| Add to the consent flow | Edit `ConsentActivity` + `ConsentChallengeStore` + `ConsentAttemptStore`. See `docs/CONSENT_ARCHITECTURE.md`. Never call `AllowlistStore.approveDirect()` from production. |
 
 ## Path-specific guidance
 

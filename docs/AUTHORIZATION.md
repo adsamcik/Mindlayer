@@ -1,5 +1,22 @@
 # Caller Authorization
 
+> **⚠️ Branch notice — `feat/consent-architecture` migration in flight.**
+>
+> The content below describes the **legacy two-layer model** (`signature|knownSigner`
+> manifest permission + AIDL-level dashboard-approved allowlist + `pending.json` inbox)
+> that is currently in production on `main`. This branch is rolling out a
+> **consent-Intent architecture** that collapses the two layers into a single
+> user-consent boundary and removes `QUERY_ALL_PACKAGES`, the `BIND_ML_SERVICE`
+> permission, and the entire pending-approval mechanism.
+>
+> **The target design lives in [`CONSENT_ARCHITECTURE.md`](CONSENT_ARCHITECTURE.md).**
+> Read that document for the model the code is migrating toward. This document will be
+> rewritten in Phase 7 to absorb the new design.
+>
+> While the migration is in progress, the legacy invariants below still apply to
+> code paths that have not yet been touched. Phase markers in the PR's individual
+> commits indicate when each section becomes obsolete.
+
 Mindlayer runs as a standalone Android service and exposes on-device LLM
 inference over AIDL. Any app on the device can *attempt* to bind to it, so
 every AIDL entry point enforces a four-stage gate before any work is done:
