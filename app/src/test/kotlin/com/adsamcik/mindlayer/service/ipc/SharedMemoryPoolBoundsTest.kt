@@ -297,6 +297,75 @@ class SharedMemoryPoolBoundsTest {
     }
 
     // =========================================================================
+    // Double-release / idempotency regression (P0). releaseReservation must
+    // never drive the global counters negative or leak capacity, even when it
+    // is called twice, after cleanup(), or with a larger count/bytes than the
+    // per-request ledger actually holds. Before the fix the global counters
+    // were decremented unconditionally BEFORE the ledger lookup, so a
+    // double-release (e.g. a staging-failure release racing a cleanup) drove
+    // activeCount/activeBytes negative and corrupted pool accounting.
+    // =========================================================================
+
+    @Test
+    fun `double releaseReservation does not drive counters negative`() {
+        pool.tryReserve("123:req-dbl", addBytes = 4096L)
+        pool.releaseReservation("123:req-dbl", count = 1, bytes = 4096L)
+        // Second (duplicate) release for the same key must be a safe no-op.
+        pool.releaseReservation("123:req-dbl", count = 1, bytes = 4096L)
+
+        val (count, bytes) = pool.reservationSnapshot()
+        assertEquals("count must clamp at 0, not go negative", 0, count)
+        assertEquals("bytes must clamp at 0, not go negative", 0L, bytes)
+    }
+
+    @Test
+    fun `releaseReservation after cleanup is a no-op`() {
+        pool.tryReserve("123:req-after-clean", addBytes = 8192L)
+        pool.cleanup("123:req-after-clean")
+        // A staging-failure path that releases AFTER cleanup already ran must
+        // not double-decrement the globals.
+        pool.releaseReservation("123:req-after-clean", count = 1, bytes = 8192L)
+
+        val (count, bytes) = pool.reservationSnapshot()
+        assertEquals(0, count)
+        assertEquals(0L, bytes)
+    }
+
+    @Test
+    fun `releaseReservation clamps when asked to release more than is held`() {
+        pool.tryReserve("123:req-clamp", addBytes = 1024L)
+        // Ask to release far more than the single 1-PFD / 1024-byte reservation.
+        pool.releaseReservation("123:req-clamp", count = 5, bytes = 1_000_000L)
+
+        val (count, bytes) = pool.reservationSnapshot()
+        assertEquals("over-release must clamp to the ledger, not go negative", 0, count)
+        assertEquals(0L, bytes)
+    }
+
+    @Test
+    fun `counters recover to full capacity after a double-release`() {
+        pool.tryReserve("123:req-x", addBytes = 1024L)
+        pool.releaseReservation("123:req-x", count = 1, bytes = 1024L)
+        // Duplicate release — would have driven activeCount negative before the
+        // fix, letting the fill below overshoot the cap.
+        pool.releaseReservation("123:req-x", count = 1, bytes = 1024L)
+
+        repeat(SharedMemoryPool.MAX_GLOBAL_ACTIVE_PFDS) { i ->
+            pool.tryReserve("123:req-fill-$i", addBytes = 1024L)
+        }
+        val (count, _) = pool.reservationSnapshot()
+        assertEquals(SharedMemoryPool.MAX_GLOBAL_ACTIVE_PFDS, count)
+        // And the (cap+1)th still trips the global cap exactly — proving no
+        // negative drift and no leaked capacity.
+        try {
+            pool.tryReserve("123:req-over", addBytes = 1024L)
+            fail("should trip global cap after a clean fill")
+        } catch (e: SharedMemoryPoolExhaustedException) {
+            assertEquals("global_active_pfds", e.reason)
+        }
+    }
+
+    // =========================================================================
     // precheckBounds (the synchronous binder-thread gate)
     // =========================================================================
 

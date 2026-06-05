@@ -410,7 +410,12 @@ class InferenceOrchestrator(
     }
 
     fun shutdown() {
-        activeJobs.values.forEach { it.cancel() }
+        // R-NATIVE-CANCEL: stop native generation FIRST. Job.cancel() only
+        // cancels the coroutine; LiteRT-LM keeps decoding until
+        // Conversation.cancelProcess() is called. cancelAll() routes every
+        // active request through cancelInference(), which calls cancelProcess()
+        // (and cancels the job) before we await + tear down.
+        cancelAll()
         runBlocking { awaitAllJobs(timeoutMs = 5_000) }
         activeJobs.clear()
         sharedMemoryPool.cleanupAll()
@@ -550,6 +555,26 @@ class InferenceOrchestrator(
         val deadlineNs = System.nanoTime() + INFERENCE_DEADLINE_MS * 1_000_000L
         // Single-writer: serialize sends for this session
         handle.mutex.withLock {
+            // R-TOCTOU: a destroySession() may have closed this handle while we
+            // were staging media outside the lock. If so, abort instead of
+            // re-warming a fresh Conversation on a destroyed/removed session
+            // (which would stream tokens for a dead session and leak the warm
+            // slot). The destroy path sets `destroyed` under this same mutex.
+            if (handle.destroyed) {
+                MindlayerLog.w(
+                    TAG,
+                    "Session destroyed during media staging; aborting inference",
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                )
+                sharedMemoryPool.cleanup(scopedKey)
+                writerFactory(pipeWriteEnd).closeWithError(
+                    0,
+                    "Session destroyed",
+                    MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                )
+                return
+            }
             handle.activeRequestId = scopedKey
             handle.isStreaming = true
             val writer = writerFactory(pipeWriteEnd)
