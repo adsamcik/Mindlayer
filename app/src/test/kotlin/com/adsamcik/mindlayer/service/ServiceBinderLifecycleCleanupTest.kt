@@ -119,11 +119,16 @@ class ServiceBinderLifecycleCleanupTest {
         verify(exactly = 1) { token.linkToDeath(any(), 0) }
     }
 
-    @Test fun `re-registering a different token unlinks the prior recipient (R-19a)`() {
-        val firstDeath = CapturingSlot<IBinder.DeathRecipient>()
+    @Test fun `re-registering a different token keeps the prior registration independent (R-19a)`() {
+        // Same-UID registrations are INDEPENDENT (see ServiceBinderTest's
+        // "same uid registrations retain independent death cleanup"): a new
+        // token becomes the current registration that owns NEW sessions, but
+        // it must NOT unlink the prior recipient or tear down the prior
+        // registration's sessions — each registration is cleaned up only by
+        // its own binder death. Only the same-token reconnect is idempotent.
         val first = mockk<IBinder>(relaxed = true) {
             every { interfaceDescriptor } returns "android.os.IBinder"
-            every { linkToDeath(capture(firstDeath), 0) } just Runs
+            every { linkToDeath(any(), 0) } just Runs
         }
         val second = mockk<IBinder>(relaxed = true) {
             every { interfaceDescriptor } returns "android.os.IBinder"
@@ -133,10 +138,9 @@ class ServiceBinderLifecycleCleanupTest {
         binder.registerClient(first)
         binder.registerClient(second)
 
-        // A genuinely new token replaces the UID's registration: the prior
-        // recipient is unlinked so it can't accumulate, and the prior
-        // registration's sessions are torn down once.
-        verify(exactly = 1) { first.unlinkToDeath(firstDeath.captured, 0) }
+        // The prior recipient stays linked so the first client's own death
+        // still cleans up its own sessions.
+        verify(exactly = 0) { first.unlinkToDeath(any(), 0) }
     }
 
     private companion object {

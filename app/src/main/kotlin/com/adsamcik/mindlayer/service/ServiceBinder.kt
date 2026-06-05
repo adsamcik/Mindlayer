@@ -724,18 +724,15 @@ class ServiceBinder(
             // the new token is dead at registration time (F-042).
             token.linkToDeath(recipient, 0)
             clientDeathRecipients[registration] = token to recipient
-            // R-19a: a DIFFERENT token replacing this UID's prior registration
-            // means a genuinely new client instance (the same-token reconnect
-            // returned early above). Unlink + drop the prior recipient so it
-            // can't accumulate, and tear down the prior registration's
-            // sessions cleanly (the old token's context is being abandoned).
-            val prior = currentRegistrationByUid.put(uid, registration)
-            if (prior != null && prior != registration) {
-                clientDeathRecipients.remove(prior)?.let { (priorToken, priorRecipient) ->
-                    try { priorToken.unlinkToDeath(priorRecipient, 0) } catch (_: Throwable) { }
-                }
-                onClientRegistrationDisconnected(prior)
-            }
+            // R-19a: a DIFFERENT token from the same UID is a genuinely new,
+            // INDEPENDENT client instance (the same-token reconnect returned
+            // early above). It becomes the "current" registration that owns
+            // new sessions, but the prior registration keeps its own
+            // DeathRecipient and its own sessions — same-UID registrations
+            // retain independent death cleanup (see ServiceBinderTest). The
+            // per-UID cap above bounds accumulation; promoteRegistrationForUid
+            // re-elects a survivor when the current registration dies.
+            currentRegistrationByUid[uid] = registration
         } catch (e: RemoteException) {
             // Token already dead — run cleanup immediately. Don't disturb
             // any existing live recipient for this UID.
