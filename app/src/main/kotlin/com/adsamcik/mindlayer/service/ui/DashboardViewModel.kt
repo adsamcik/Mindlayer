@@ -2007,6 +2007,7 @@ class DashboardViewModel : ViewModel() {
     }
 
     private fun Throwable.toDashboardMessage(): String {
+        (this as? com.adsamcik.mindlayer.sdk.MindlayerException)?.let { return typedSdkErrorLabel(it) }
         val raw = message?.lineSequence()?.firstOrNull()?.trim().orEmpty()
         val typed = decodeTypedWireMessage(raw)
         return typed ?: raw.ifBlank { javaClass.simpleName }
@@ -2029,6 +2030,7 @@ class DashboardViewModel : ViewModel() {
      * without LiteRT stack frames`.
      */
     private fun Throwable.toInferenceErrorMessage(): String {
+        (this as? com.adsamcik.mindlayer.sdk.MindlayerException)?.let { return typedSdkErrorLabel(it) }
         val raw = message?.lineSequence()?.firstOrNull()?.trim().orEmpty()
         return decodeTypedWireMessage(raw) ?: safeLabel()
     }
@@ -2046,6 +2048,36 @@ class DashboardViewModel : ViewModel() {
         val name = MindlayerErrorCode.nameOf(code) ?: "ERROR_$code"
         val msg = MindlayerErrorCode.messageFromWireMessage(raw).orEmpty()
         return if (msg.isBlank()) name else "$name: $msg"
+    }
+
+    /**
+     * Render a typed SDK [com.adsamcik.mindlayer.sdk.MindlayerException] as
+     * `"<NAME>: <message>"` from its parsed `.code`/`.codeName` + operator-safe,
+     * prefix-stripped message — instead of the opaque
+     * `"MindlayerException -> SecurityException"` class chain.
+     *
+     * Typed service errors travel as `SecurityException("MLERR:<code>:<msg>")`
+     * on the wire because AIDL can't expose `ServiceSpecificException`
+     * (system-API only). The SDK's typed-error chokepoint strips the prefix
+     * into `.code` + `.message`, so [decodeTypedWireMessage] applied to the
+     * *stripped message* no longer matches — the renderer used to fall through
+     * to [safeLabel], hiding the real code (an OCR / inference engine failure
+     * surfaced to the user as a bare "SecurityException"). The wire message is
+     * operator-safe by the security rules (codes + diagnostic numbers only,
+     * never prompt / model output) and the SDK never wraps an engine `Throwable`
+     * as the cause, so surfacing it here cannot leak model content.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun typedSdkErrorLabel(e: com.adsamcik.mindlayer.sdk.MindlayerException): String {
+        val name = e.codeName?.takeIf { it.isNotBlank() }
+            ?: MindlayerErrorCode.nameOf(e.code)
+        val msg = e.message?.lineSequence()?.firstOrNull()?.trim().orEmpty()
+        return when {
+            name != null && msg.isNotEmpty() -> "$name: $msg"
+            name != null -> name
+            msg.isNotEmpty() -> msg
+            else -> e.safeLabel()
+        }
     }
 
     private data class DashboardStatusSample(

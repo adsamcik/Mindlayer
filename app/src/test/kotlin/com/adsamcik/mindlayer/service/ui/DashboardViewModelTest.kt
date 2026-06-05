@@ -4,6 +4,7 @@ import android.os.Binder
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import com.adsamcik.mindlayer.IMindlayerService
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
@@ -32,6 +33,37 @@ class DashboardViewModelTest {
         val state = viewModel.uiState.value
         assertFalse(state.isTestRunning)
         assertNull(state.lastTestCompletedAtMs)
+    }
+
+    @Test
+    fun `typed SDK MindlayerException renders code name and message not the class chain`() {
+        // Regression: SDK-facade calls (ocrAsync / generateWithImage / inferAsync)
+        // wrap a typed SecurityException("MLERR:<code>:<msg>") into a
+        // MindlayerException with the prefix STRIPPED into .code + .message, so
+        // decodeTypedWireMessage(message) no longer matches and the renderer
+        // used to fall through to safeLabel() — surfacing the opaque
+        // "MindlayerException -> SecurityException" instead of the real code.
+        val viewModel = DashboardViewModel()
+        val e = com.adsamcik.mindlayer.sdk.MindlayerException(
+            message = "single-image OCR engine not ready",
+            code = MindlayerErrorCode.SERVICE_UNAVAILABLE,
+            cause = SecurityException(
+                "MLERR:${MindlayerErrorCode.SERVICE_UNAVAILABLE}:single-image OCR engine not ready",
+            ),
+        )
+
+        val rendered = viewModel.typedSdkErrorLabel(e)
+
+        assertTrue("expected code name, got: $rendered", rendered.contains(e.codeName!!))
+        assertTrue(
+            "expected the operator-safe message, got: $rendered",
+            rendered.contains("single-image OCR engine not ready"),
+        )
+        assertFalse(
+            "must not surface the opaque class chain, got: $rendered",
+            rendered.contains("SecurityException"),
+        )
+        assertFalse("must not leak the wire prefix, got: $rendered", rendered.contains("MLERR:"))
     }
 
     @Test
