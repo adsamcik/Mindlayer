@@ -120,6 +120,16 @@ class AllowlistStore(
     private val hmacKeyFile: File = File(baseDir, "allowlist.hmac")
 
     /**
+     * S-8: AndroidKeyStore wrapper for the HMAC key. The key file is no
+     * longer plaintext base64 on devices with a working Keystore — the
+     * random HMAC key is wrapped (AES-256-GCM) so a filesDir-write attacker
+     * cannot read it and forge a valid allowlist/denial signature. Aliased
+     * per store dir so independent stores (test fixtures) don't collide.
+     */
+    private val hmacKeyWrapper: KeystoreSecretWrapper =
+        KeystoreSecretWrapper(alias = "mindlayer.allowlist.hmac.${baseDir.name}")
+
+    /**
      * JVM-wide mutex that serialises threads in this process before they
      * race for the kernel-level [java.nio.channels.FileLock] on
      * [lockFile]. Java NIO `FileChannel.lock()` is a **process-wide**
@@ -892,8 +902,34 @@ class AllowlistStore(
                 quarantineCorruptHmacKey("read failed: ${t.javaClass.simpleName}")
                 return generateAndPersistHmacKey()
             }
+            // S-8: wrapped-key path (mlks1:...). Unwrap via the Keystore.
+            if (hmacKeyWrapper.isWrapped(encoded)) {
+                val unwrapped = hmacKeyWrapper.unwrap(encoded)
+                if (unwrapped != null && unwrapped.size >= HMAC_KEY_BYTES) return unwrapped
+                // Wrapped blob present but Keystore key gone/invalid (user
+                // cleared credentials, key migrated off device). Regenerate;
+                // affected callers must be re-approved — the same recovery
+                // semantics as a corrupt key.
+                quarantineCorruptHmacKey("keystore unwrap failed")
+                return generateAndPersistHmacKey()
+            }
+            // Legacy plaintext base64 path.
             val decoded = runCatching { Base64.getDecoder().decode(encoded) }.getOrNull()
-            if (decoded != null && decoded.size >= HMAC_KEY_BYTES) return decoded
+            if (decoded != null && decoded.size >= HMAC_KEY_BYTES) {
+                // S-8 migration: if the Keystore is now available, re-persist
+                // the existing key in wrapped form so it stops sitting in
+                // plaintext. Keep the SAME key bytes so existing signatures
+                // still verify. Best-effort — a write failure leaves the
+                // plaintext file in place and we retry next launch.
+                if (hmacKeyWrapper.isAvailable) {
+                    val wrapped = hmacKeyWrapper.wrap(decoded)
+                    if (wrapped != null) {
+                        runCatching { atomicWrite(hmacKeyFile, wrapped) }
+                            .onSuccess { MindlayerLog.i(TAG, "Migrated plaintext allowlist HMAC key to Keystore-wrapped form") }
+                    }
+                }
+                return decoded
+            }
             quarantineCorruptHmacKey("decode failed or wrong length (${decoded?.size ?: -1})")
         }
         return generateAndPersistHmacKey()
@@ -912,7 +948,15 @@ class AllowlistStore(
     private fun generateAndPersistHmacKey(): ByteArray {
         val key = ByteArray(HMAC_KEY_BYTES)
         SecureRandom().nextBytes(key)
-        atomicWrite(hmacKeyFile, Base64.getEncoder().encodeToString(key))
+        // S-8: persist Keystore-wrapped when possible; fall back to legacy
+        // plaintext base64 only when the Keystore is unavailable (a broken/
+        // rooted host where the filesDir-write threat is already moot).
+        val wrapped = hmacKeyWrapper.wrap(key)
+        if (wrapped != null) {
+            atomicWrite(hmacKeyFile, wrapped)
+        } else {
+            atomicWrite(hmacKeyFile, Base64.getEncoder().encodeToString(key))
+        }
         return key
     }
 
