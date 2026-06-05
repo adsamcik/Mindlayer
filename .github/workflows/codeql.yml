@@ -1,0 +1,91 @@
+name: CodeQL
+
+# ── Advanced (in-repo) CodeQL setup ───────────────────────────────────────────
+#
+# This replaces GitHub "default setup" (Settings → Code security) so the code
+# scanning configuration lives in the repo: SHA-pinned, reviewed, and explicit
+# about which languages are analysed and why.
+#
+# ⚠️  Kotlin is intentionally NOT analysed right now. ⚠️
+#   - The project tracks the latest Kotlin (`gradle/libs.versions.toml` →
+#     `kotlin = "2.4.0"`). CodeQL's Kotlin extractor (CLI bundle v2.25.6 and
+#     earlier) only supports Kotlin below 2.3.30, so any *build*-based mode
+#     (autobuild / manual) crashes during `compileDebugKotlin` with
+#     `KotlinInterceptor$KotlinVersionTooRecentError`. That is exactly the
+#     failure that broke default setup's `Analyze (java-kotlin)` job.
+#   - `build-mode: none` is the only Kotlin-version-independent option, but it
+#     analyses *pure Java only* — it never extracts Kotlin (standalone or
+#     mixed). This module set has **zero hand-written Java** (the only Java is
+#     AIDL-generated boilerplate under `build/`), so a `java-kotlin` entry would
+#     scan nothing while adding minutes and noise.
+#   Net: CodeQL genuinely cannot scan this Kotlin codebase until upstream adds
+#   Kotlin 2.4.0 support. Tracking issue: https://github.com/github/codeql/issues/21938
+#
+#   TO RESTORE Kotlin coverage once that issue ships (and the codeql-action
+#   bundle below is bumped to a release that advertises Kotlin 2.4.x support):
+#     1. Add to the matrix below:
+#          - language: java-kotlin
+#            build-mode: autobuild   # or `manual` with an explicit Gradle build
+#     2. For build-mode autobuild/manual, add the JDK 21 + Gradle setup steps
+#        (mirror `ci.yml`'s `build-and-test` job) BEFORE the analyze step, and
+#        give the job `timeout-minutes: 30`.
+#     3. Re-enable in tandem with a default-setup teardown (already done here).
+#
+# `actions` + `python` ARE analysed: they are interpreted, so extraction is
+# build-free and never depends on the Kotlin/JDK toolchain — reliable and fast.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Weekly, mirrors the cadence default setup used. Offset minute/hour to
+    # avoid the top-of-hour scheduler stampede.
+    - cron: '24 5 * * 1'
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    # 20 (vs the ~3 min these scans take) absorbs transient CodeQL
+    # bundle-download / init flakiness without masking a real hang.
+    timeout-minutes: 20
+    permissions:
+      # Required for CodeQL to upload results.
+      security-events: write
+      # Only needed by the (currently unused) build-based languages; harmless.
+      packages: read
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: python
+            build-mode: none
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@411bbbe57033eedfc1a82d68c01345aa96c737d7 # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@411bbbe57033eedfc1a82d68c01345aa96c737d7 # v4
+        with:
+          category: "/language:${{ matrix.language }}"
