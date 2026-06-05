@@ -676,7 +676,13 @@ tasks.withType<Test> {
         "-XX:-UseG1GC",
     )
     if (name == "testReleaseUnitTest") {
-        filter.includeTestsMatching("com.adsamcik.mindlayer.service.security.DebugAllowlistSeederReleaseAbsenceTest")
+        // The release-variant CI step exists to catch release-only source-set
+        // compile errors (it implicitly runs :app:compileRelease*Kotlin). The
+        // rest of the :app unit suite is Robolectric-heavy and not release-
+        // clean, so we scope the release run to one fast, pure-JVM smoke test.
+        // Replaces DebugAllowlistSeederReleaseAbsenceTest (subject deleted in
+        // the v0.10 consent migration). See ConsentReleaseSmokeTest.
+        filter.includeTestsMatching("com.adsamcik.mindlayer.service.security.ConsentReleaseSmokeTest")
     }
 }
 
