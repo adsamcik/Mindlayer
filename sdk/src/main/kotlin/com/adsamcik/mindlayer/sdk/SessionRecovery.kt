@@ -72,6 +72,11 @@ class SessionRecovery internal constructor(
         // Best-effort: any service-thrown error here is informational only.
         try {
             mindlayer.connection.awaitConnected().destroySession(sessionId)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // R-19: never swallow cooperative cancellation — re-throw so a
+            // cancelled recovery flow stops here instead of proceeding to
+            // create a fresh server session after the caller abandoned it.
+            throw e
         } catch (_: Exception) {
             // Already gone, evicted, or service shutting down — fine.
         }

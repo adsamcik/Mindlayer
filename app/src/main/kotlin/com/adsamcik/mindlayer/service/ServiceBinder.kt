@@ -702,6 +702,19 @@ class ServiceBinder(
             )
             throw SecurityException("clientToken descriptor mismatch")
         }
+        // R-19a: idempotent re-register with the SAME stable liveness token —
+        // the canonical SDK reconnect path (ConnectionManager holds one
+        // Binder() for its lifetime). Keep the existing registration +
+        // DeathRecipient so we neither leak a recipient toward the per-UID
+        // cap nor orphan the sessions owned by the existing registration, and
+        // don't burn a registrationAttempts slot.
+        run {
+            val existing = currentRegistrationByUid[uid]
+            if (existing != null && clientDeathRecipients[existing]?.first === token) {
+                return
+            }
+        }
+
         // Cap repeat registrations from a single UID. The map is keyed by
         // UID so a hostile caller can't grow it past one entry, but a
         // buggy client repeatedly invoking registerClient with new tokens
@@ -742,6 +755,14 @@ class ServiceBinder(
             // the new token is dead at registration time (F-042).
             token.linkToDeath(recipient, 0)
             clientDeathRecipients[registration] = token to recipient
+            // R-19a: a DIFFERENT token from the same UID is a genuinely new,
+            // INDEPENDENT client instance (the same-token reconnect returned
+            // early above). It becomes the "current" registration that owns
+            // new sessions, but the prior registration keeps its own
+            // DeathRecipient and its own sessions — same-UID registrations
+            // retain independent death cleanup (see ServiceBinderTest). The
+            // per-UID cap above bounds accumulation; promoteRegistrationForUid
+            // re-elects a survivor when the current registration dies.
             currentRegistrationByUid[uid] = registration
         } catch (e: RemoteException) {
             // Token already dead — run cleanup immediately. Don't disturb

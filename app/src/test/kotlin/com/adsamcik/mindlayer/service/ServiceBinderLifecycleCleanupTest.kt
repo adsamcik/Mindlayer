@@ -101,6 +101,48 @@ class ServiceBinderLifecycleCleanupTest {
         verify(exactly = 1) { embedding.cancelAllForUid(UID) }
     }
 
+    @Test fun `re-registering the same stable token is idempotent (R-19a)`() {
+        // The canonical SDK reconnect path uses one stable liveness Binder for
+        // the ConnectionManager's lifetime. Re-registering it must NOT link a
+        // second DeathRecipient (which would accumulate toward the per-UID cap
+        // and, on death, fire teardown twice).
+        val token = mockk<IBinder>(relaxed = true) {
+            every { interfaceDescriptor } returns "android.os.IBinder"
+            every { linkToDeath(any(), 0) } just Runs
+        }
+
+        binder.registerClient(token)
+        binder.registerClient(token)
+        binder.registerClient(token)
+
+        // Only the first registration links a recipient; the rest short-circuit.
+        verify(exactly = 1) { token.linkToDeath(any(), 0) }
+    }
+
+    @Test fun `re-registering a different token keeps the prior registration independent (R-19a)`() {
+        // Same-UID registrations are INDEPENDENT (see ServiceBinderTest's
+        // "same uid registrations retain independent death cleanup"): a new
+        // token becomes the current registration that owns NEW sessions, but
+        // it must NOT unlink the prior recipient or tear down the prior
+        // registration's sessions — each registration is cleaned up only by
+        // its own binder death. Only the same-token reconnect is idempotent.
+        val first = mockk<IBinder>(relaxed = true) {
+            every { interfaceDescriptor } returns "android.os.IBinder"
+            every { linkToDeath(any(), 0) } just Runs
+        }
+        val second = mockk<IBinder>(relaxed = true) {
+            every { interfaceDescriptor } returns "android.os.IBinder"
+            every { linkToDeath(any(), 0) } just Runs
+        }
+
+        binder.registerClient(first)
+        binder.registerClient(second)
+
+        // The prior recipient stays linked so the first client's own death
+        // still cleans up its own sessions.
+        verify(exactly = 0) { first.unlinkToDeath(any(), 0) }
+    }
+
     private companion object {
         const val UID = 24_680
     }
