@@ -342,6 +342,25 @@ class InferencePipelineTest {
     // ========================================================================
 
     @Test
+    fun quiescingForRestart_emitsRetryableErrorFrame() {
+        // R-6: when the service rejects enterForeground (quiescing for a
+        // backend-switch restart), the orchestrator must emit a RETRYABLE
+        // ENGINE_INITIALIZING error frame, not a terminal INTERNAL failure,
+        // so the SDK backs off and retries after the restart.
+        io.mockk.every { service.enterForeground() } throws
+            com.adsamcik.mindlayer.service.engine.EngineNotReadyException(retryAfterMs = 2_000L)
+
+        val sessionId = createSession()
+        val events = inferAndCollect(sessionId, "hello")
+
+        val error = events.firstOrNull { it.kind == "error" }
+        assertNotNull("expected a terminal error frame", error)
+        // Wire code carried in the error message body — ENGINE_INITIALIZING is
+        // the retryable code (see MindlayerErrorCode).
+        assertEquals("engine_restarting", error!!.errorMessage)
+    }
+
+    @Test
     fun textInference_fullPipeline() {
         every { mockConversation.sendMessageAsync(any<Contents>()) } returns
             messageFlow("Hello", " world", "!")
