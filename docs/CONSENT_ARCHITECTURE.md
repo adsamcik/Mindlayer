@@ -41,7 +41,10 @@ Trust boundary changes from "two layers (OS permission + dashboard approval)" to
 
 ### `ConsentChallengeStore` (new, `:ml` process)
 
-In-memory `ConcurrentHashMap<String, ChallengeRecord>` keyed by nonce. Each record:
+A **disk-backed**, HMAC-signed registry of in-flight challenges keyed by nonce
+(an `entries.json`-style file in the service's private `filesDir`, written under
+a cross-process `FileLock` with atomic rename — the same pattern as
+`AllowlistStore` / `ConsentAttemptStore`). Each record:
 
 ```kotlin
 data class ChallengeRecord(
@@ -54,7 +57,6 @@ data class ChallengeRecord(
     val previousSigSha256: String?,   // F-032 cert rotation banner trigger
     val createdAtMs: Long,
     val expiresAtMs: Long,            // createdAt + 5 min default
-    val consumed: Boolean = false,
 )
 ```
 
@@ -62,9 +64,10 @@ data class ChallengeRecord(
 
 Invariants:
 
-- Nonces are **single-use**. `completeConsent(nonce)` atomically marks the entry `consumed` (single-winner `ConcurrentHashMap.compute`); subsequent calls for the same nonce return `null`.
-- The store is **in-memory only**. If `:ml` is killed between `requestConsentChallenge` and the user's decision, the challenge is lost and the client must call `requestConsentChallenge` again — a fail-closed retry, not a security hole. The 5-min TTL is the real contract; disk persistence would only avoid an occasional retry on soft restart and was dropped to keep the security surface small (no extra HMAC file, no cross-file lock coordination).
-- Per-UID rate limit on `requestConsentChallenge()` (default 10/hour) prevents nonce-flooding attacks.
+- Nonces are **single-use**. `completeConsent(nonce)` consumes the entry inside the `withFileLock` critical section (atomic read-remove-write across threads *and* processes); subsequent calls for the same nonce return `null`.
+- The store is **disk-backed**. The challenge MUST outlive the `:ml` *Service component*: `MindlayerConsent.requestConsent` transient-binds `:ml`, calls `requestConsentChallenge`, and immediately unbinds, so Android tears the bound Service (often the whole process) down before `ConsentActivity` — which lives in the service app's *main* process — binds `:ml` and calls `lookupChallenge`. An in-memory store is wiped at that teardown, so the nonce is **always** gone by the time the consent screen resolves it (every flow shows "expired"). This was found by on-device validation; the earlier in-memory design's "occasional fail-closed retry" assumption was wrong — the loss is deterministic, not occasional. Persisting the record decouples the two binds. The record is HMAC-authenticated (domain-separated by the `challenges` key) so a nonce→identity binding cannot be forged by an offline editor. The 5-min TTL remains the security contract; durability is what makes the flow reachable at all.
+- Per-UID rate limit on `requestConsentChallenge()` (default 10/hour) prevents nonce-flooding attacks; a `maxOutstanding` FIFO cap bounds the file.
+
 
 ### `ConsentActivity` (new, main process, `:app`)
 

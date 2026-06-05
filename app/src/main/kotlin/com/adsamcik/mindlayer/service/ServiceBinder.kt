@@ -97,7 +97,7 @@ class ServiceBinder(
     private val allowlistStore: AllowlistStore = AllowlistStore(service),
     private val rateLimiter: RateLimiter = RateLimiter(),
     private val consentChallengeStore: com.adsamcik.mindlayer.service.security.ConsentChallengeStore =
-        com.adsamcik.mindlayer.service.security.ConsentChallengeStore(),
+        com.adsamcik.mindlayer.service.security.ConsentChallengeStore(service),
     private val consentAttemptStore: com.adsamcik.mindlayer.service.security.ConsentAttemptStore =
         com.adsamcik.mindlayer.service.security.ConsentAttemptStore(service),
     private val logRepository: LogRepository? = null,

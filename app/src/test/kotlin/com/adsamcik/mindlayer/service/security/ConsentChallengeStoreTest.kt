@@ -1,36 +1,61 @@
 package com.adsamcik.mindlayer.service.security
 
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.File
 import java.security.SecureRandom
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Unit tests for [ConsentChallengeStore]. The store is a pure in-memory
- * registry (no Context), but it logs via `MindlayerLog` on eviction, so the
- * suite runs under Robolectric to stub `android.util.Log`.
+ * Unit tests for [ConsentChallengeStore]. The store is disk-backed (an
+ * HMAC-signed JSON file under `filesDir`, so the consent nonce survives the
+ * `:ml` Service being torn down between `requestConsentChallenge` and
+ * `lookupChallenge`), so the suite runs under Robolectric for a real
+ * `filesDir` and to stub `android.util.Log`.
  *
  * Pins the security-critical invariants from the crypto/concurrency review:
- *  - single-use nonces (atomic single-winner consume)
+ *  - single-use nonces (atomic single-winner consume, now cross-process)
  *  - TTL expiry
  *  - lookup is non-consuming
  *  - bounded outstanding set
+ *  - durability across new store instances (process-restart proxy)
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
 class ConsentChallengeStoreTest {
 
+    private lateinit var context: Context
+    private val dirCounter = AtomicInteger(0)
     private var clock = 1_000L
-    private fun store(maxOutstanding: Int = 256, ttlMs: Long = 5 * 60 * 1000L) =
+
+    @Before fun setUp() {
+        context = ApplicationProvider.getApplicationContext()
+    }
+
+    @After fun tearDown() {
+        File(context.filesDir, "test_challenges").deleteRecursively()
+    }
+
+    private fun store(
+        maxOutstanding: Int = 256,
+        ttlMs: Long = 5 * 60 * 1000L,
+        dirName: String = "test_challenges/s${dirCounter.incrementAndGet()}",
+    ) =
         ConsentChallengeStore(
+            context = context,
+            dirName = dirName,
             maxOutstanding = maxOutstanding,
             ttlMs = ttlMs,
             timeSource = { clock },
@@ -134,12 +159,51 @@ class ConsentChallengeStoreTest {
 
     @Test
     fun `nonces are unique across many issues`() {
+        // Reduced from the in-memory era's 2000: the disk-backed store does a
+        // full read-modify-write per issue, so the growing-file cost is
+        // quadratic. 300 still exercises uniqueness without a slow suite.
         val s = store(maxOutstanding = 10_000)
         val seen = HashSet<String>()
-        repeat(2_000) {
+        repeat(300) {
             clock += 1
             val rec = issue(s, pkg = "com.app$it")
             assertTrue("nonce collision at $it", seen.add(rec.nonce))
         }
+    }
+
+    @Test
+    fun `challenge survives a new store instance (process-restart proxy)`() {
+        // This is the on-device bug: requestConsentChallenge issues into one
+        // :ml Service instance, which is torn down before ConsentActivity
+        // binds a fresh instance and calls lookupChallenge. A disk-backed
+        // store must hand the SAME challenge to a brand-new instance pointed
+        // at the same dir.
+        val dir = "test_challenges/shared_restart"
+        val issuer = store(dirName = dir)
+        val rec = issue(issuer)
+
+        val resolver = store(dirName = dir) // simulates the recreated :ml
+        val looked = resolver.lookup(rec.nonce)
+        assertNotNull("a new store instance must resolve a prior nonce", looked)
+        assertEquals(rec.nonce, looked!!.nonce)
+        assertEquals("com.example", looked.packageName)
+        assertEquals("abc123", looked.signingCertSha256)
+
+        // And consume from the new instance is still single-use.
+        assertNotNull(resolver.consume(rec.nonce))
+        assertNull(store(dirName = dir).consume(rec.nonce))
+    }
+
+    @Test
+    fun `tampered challenge file is rejected`() {
+        val dir = "test_challenges/tamper"
+        val s = store(dirName = dir)
+        val rec = issue(s)
+        val file = File(context.filesDir, "$dir/consent_challenges.json")
+        assertTrue(file.exists())
+        // Flip the package name without re-signing → HMAC mismatch → ignored.
+        val poisoned = file.readText().replace("com.example", "com.attacker")
+        file.writeText(poisoned)
+        assertNull("tampered nonce binding must not resolve", store(dirName = dir).lookup(rec.nonce))
     }
 }

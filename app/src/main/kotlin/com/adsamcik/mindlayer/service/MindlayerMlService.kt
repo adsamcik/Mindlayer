@@ -276,7 +276,7 @@ class MindlayerMlService : Service() {
         val diagnosticExporter = DiagnosticExporter(
             engineManager, thermalMonitor, memoryBudget, sessionManager, logDb.logDao()
         )
-        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, allowlistStore = allowlistStore, consentChallengeStore = com.adsamcik.mindlayer.service.security.ConsentChallengeStore(), consentAttemptStore = com.adsamcik.mindlayer.service.security.ConsentAttemptStore(this), logRepository = logRepository, mlHealthRecorder = mlHealthRecorder, deferredStore = deferredStore, embeddingCoordinator = embeddingCoordinator, callbackRegistry = callbackRegistry, ocrSessionManager = ocrSessionManager, sharedMemoryPool = sharedMemoryPool, paddleOcrEngine = paddleOcrEngine, ocrLlmExtractor = ocrLlmExtractor)
+        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, allowlistStore = allowlistStore, consentChallengeStore = com.adsamcik.mindlayer.service.security.ConsentChallengeStore(this), consentAttemptStore = com.adsamcik.mindlayer.service.security.ConsentAttemptStore(this), logRepository = logRepository, mlHealthRecorder = mlHealthRecorder, deferredStore = deferredStore, embeddingCoordinator = embeddingCoordinator, callbackRegistry = callbackRegistry, ocrSessionManager = ocrSessionManager, sharedMemoryPool = sharedMemoryPool, paddleOcrEngine = paddleOcrEngine, ocrLlmExtractor = ocrLlmExtractor)
 
         logRepository.log(LogEntry(
             timestampMs = System.currentTimeMillis(),
