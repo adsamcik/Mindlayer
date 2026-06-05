@@ -1,7 +1,13 @@
 package com.adsamcik.mindlayer.service.ipc
 
+import android.util.Log
+import io.mockk.every
+import io.mockk.mockkStatic
+import io.mockk.unmockkAll
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -21,8 +27,47 @@ import java.nio.ByteOrder
  */
 class OcrTokenStreamWriterTest {
 
+    @Before
+    fun setUp() {
+        // The broken-pipe path logs via MindlayerLog -> android.util.Log,
+        // which is unmocked in pure-JVM tests. Stub it so the IOException
+        // branch can exercise the FD-release logic without an NPE.
+        mockkStatic(Log::class)
+        every { Log.d(any(), any()) } returns 0
+        every { Log.i(any(), any()) } returns 0
+        every { Log.w(any(), any<String>()) } returns 0
+        every { Log.w(any(), any<String>(), any()) } returns 0
+        every { Log.e(any(), any()) } returns 0
+    }
+
+    @After
+    fun tearDown() {
+        unmockkAll()
+    }
+
     @Test fun `MAX_FRAME_BYTES is 1 MiB`() {
         assertEquals(1_048_576, OcrTokenStreamWriter.MAX_FRAME_BYTES)
+    }
+
+    /** OutputStream that throws IOException on write to simulate a dead reader. */
+    private class WriteThrowing : java.io.OutputStream() {
+        @Volatile var closed = false
+            private set
+        override fun write(b: Int) { throw java.io.IOException("broken pipe") }
+        override fun write(b: ByteArray, off: Int, len: Int) { throw java.io.IOException("broken pipe") }
+        override fun close() { closed = true }
+    }
+
+    @Test fun `broken-pipe write releases the fd instead of leaking it (R-12)`() {
+        val out = WriteThrowing()
+        val writer = OcrTokenStreamWriter.forTesting(out)
+        // writeHeader -> writeFrame hits the IOException path. OCR writes are
+        // advisory so this must NOT throw, but it MUST release the fd.
+        writer.writeHeader()
+        assertTrue("broken-pipe OCR write must release the fd, not leak it", out.closed)
+        // A later close() from the session manager must stay safe/idempotent.
+        writer.close()
+        assertTrue(out.closed)
     }
 
     @Test fun `writeHeader emits header frame with OCR_V1 protocol`() {

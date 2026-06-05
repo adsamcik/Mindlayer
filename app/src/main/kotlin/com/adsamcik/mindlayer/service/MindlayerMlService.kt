@@ -351,11 +351,7 @@ class MindlayerMlService : Service() {
         // path.
         if (intent?.action == ACTION_STOP) {
             MindlayerLog.i(TAG, "ACTION_STOP received; cancelling all inferences and stopping")
-            try {
-                orchestrator.cancelAll()
-            } catch (t: Throwable) {
-                MindlayerLog.w(TAG, "orchestrator.cancelAll() raised: ${t.safeLabel()}")
-            }
+            cancelForegroundCountedSubsystems()
             try {
                 ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             } catch (_: Throwable) { /* best-effort */ }
@@ -401,15 +397,40 @@ class MindlayerMlService : Service() {
             TAG,
             "FGS onTimeout(startId=$startId, fgsType=$fgsType) — cancelling inferences and demoting",
         )
-        try {
-            orchestrator.cancelAll()
-        } catch (t: Throwable) {
-            MindlayerLog.w(TAG, "orchestrator.cancelAll() on FGS timeout raised: ${t.safeLabel()}")
-        }
+        cancelForegroundCountedSubsystems()
         try {
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         } catch (_: Throwable) { /* best-effort */ }
         synchronized(stateLock) { activeInferenceCount = 0 }
+    }
+
+    /**
+     * R-9 / R-22: cancel EVERY foreground-counted subsystem (LLM
+     * orchestrator, embedding coordinator, OCR sessions) so none keeps
+     * running native work after the FGS notification is dropped on
+     * ACTION_STOP or an FGS onTimeout. Each cancelled job releases its own
+     * foreground refcount as it unwinds.
+     */
+    private fun cancelForegroundCountedSubsystems() {
+        try {
+            orchestrator.cancelAll()
+        } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "orchestrator.cancelAll() raised: ${t.safeLabel()}")
+        }
+        if (::embeddingCoordinator.isInitialized) {
+            try {
+                embeddingCoordinator.cancelAll()
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "embeddingCoordinator.cancelAll() raised: ${t.safeLabel()}")
+            }
+        }
+        if (::ocrSessionManager.isInitialized) {
+            try {
+                ocrSessionManager.cancelAllForMemoryPressure()
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "ocrSessionManager cancel raised: ${t.safeLabel()}")
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -757,17 +778,26 @@ class MindlayerMlService : Service() {
                     logRepository.logFgsPromoted(activeInferenceCount)
                     MindlayerLog.i(TAG, "Entered foreground")
                 } catch (e: Exception) {
+                    // R-16: promotion failed — do NOT let the (possibly
+                    // multi-minute) inference run as an unprotected background
+                    // service where the OS can freeze/kill it mid-stream and
+                    // silently drop the stream. Roll back the refcount and
+                    // propagate so the orchestrator aborts with a typed error
+                    // the client can retry (promotion self-heals on the next
+                    // attempt once the app is foregroundable again).
+                    activeInferenceCount = (activeInferenceCount - 1).coerceAtLeast(0)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                         e is ForegroundServiceStartNotAllowedException
                     ) {
                         MindlayerLog.e(
                             TAG,
-                            "Foreground service start not allowed: ${e.safeLabel()}",
+                            "Foreground service start not allowed; aborting inference: ${e.safeLabel()}",
                             throwable = null,
                         )
                     } else {
-                        MindlayerLog.e(TAG, "Failed to enter foreground: ${e.safeLabel()}")
+                        MindlayerLog.e(TAG, "Failed to enter foreground; aborting inference: ${e.safeLabel()}")
                     }
+                    throw e
                 }
             }
         }

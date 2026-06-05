@@ -1350,10 +1350,12 @@ class ServiceBinder(
         meta: RequestMeta,
         media: List<com.adsamcik.mindlayer.MediaPart>?,
     ): DeferredHandle {
+        val parts = media ?: emptyList()
+        var handedOff = false
+        try {
         val identity = authorizeCall()
         val uid = Binder.getCallingUid()
         val ownerToken = requireRegisteredClient()
-        val parts = media ?: emptyList()
         try {
             IpcInputValidator.validateRequestMeta(meta)
             IpcInputValidator.validateMediaParts(
@@ -1424,7 +1426,6 @@ class ServiceBinder(
         // submission-side OOM before `scope.launch` returns) we clean up
         // here. The matching SDK-side cleanup of caller-owned source PFDs
         // lives in `Mindlayer.chatDeferred()` (H-D2).
-        var handedOff = false
         // M-D2: map known synchronous preflight exceptions to their typed
         // wire codes. Mirrors the translation `inferMulti` applies at
         // ServiceBinder.kt:1157-1184 — without this, callers see a
@@ -1540,6 +1541,20 @@ class ServiceBinder(
         logRepository?.logDeferredSubmit(requestId, meta.sessionId, parts.size)
         mlHealthRecorder?.recordDeferredSubmit()
         return handle
+        } finally {
+            // R-11: close caller-owned media source FDs on ANY early
+            // rejection (auth, validation, ownership, rate-limit, quota,
+            // duplicate) that returns/throws before the orchestrator takes
+            // ownership. The inner finally only covers dispatch-phase
+            // failures; this outer one covers everything before it.
+            if (!handedOff) {
+                val callerSources = java.util.Collections.newSetFromMap(
+                    java.util.IdentityHashMap<ParcelFileDescriptor, Boolean>(),
+                )
+                parts.forEach { callerSources.add(it.source) }
+                callerSources.forEach { src -> try { src.close() } catch (_: Exception) {} }
+            }
+        }
     }
 
     override fun fetchDeferredResult(requestId: String): DeferredResult {

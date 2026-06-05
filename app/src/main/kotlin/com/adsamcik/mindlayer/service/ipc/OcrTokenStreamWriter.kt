@@ -21,6 +21,9 @@ import java.io.IOException
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -79,6 +82,15 @@ class OcrTokenStreamWriter private constructor(
 
     @Volatile private var headerWritten: Boolean = false
     @Volatile private var closed: Boolean = false
+
+    /**
+     * R-12: distinct from [closed] (which only disables further writes).
+     * All FD release funnels through the idempotent [closeResourcesQuietly]
+     * so a `writeFrame` IOException can no longer set `closed = true` and
+     * leave the pipe descriptor open for the later short-circuiting [close]
+     * to skip — the same leak fixed in [TokenStreamWriter].
+     */
+    @Volatile private var resourcesClosed: Boolean = false
 
     /**
      * Write the protocol header. Must be the first frame on a freshly
@@ -311,7 +323,12 @@ class OcrTokenStreamWriter private constructor(
     }
 
     fun close() {
-        if (closed) return
+        // R-12: always release the FD, even if `closed` was already set by a
+        // failed writeFrame (pre-fix this returned early and leaked the pipe).
+        if (closed) {
+            closeResourcesQuietly()
+            return
+        }
         closed = true
         try {
             output.flush()
@@ -319,6 +336,16 @@ class OcrTokenStreamWriter private constructor(
             MindlayerLog.w(TAG, "OCR pipe flush failed (client gone): ${e.safeLabel()}")
         } catch (t: Throwable) {
             MindlayerLog.w(TAG, "OCR pipe flush non-IOException: ${t.safeLabel()}")
+        }
+        closeResourcesQuietly()
+    }
+
+    /** Idempotently release the pipe descriptor. Safe from any path. */
+    private fun closeResourcesQuietly() {
+        if (resourcesClosed) return
+        resourcesClosed = true
+        try { pfd?.close() } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "OCR pfd.close() raised: ${t.safeLabel()}")
         }
         try {
             output.close()
@@ -373,25 +400,57 @@ class OcrTokenStreamWriter private constructor(
         }
         val header = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
             .putInt(payloadBytes.size).array()
+        // R-12: bound the blocking write. On API < R the pipe is NOT
+        // O_NONBLOCK, so a reader that stops draining can wedge this worker
+        // thread forever; even on API >= R a force-close is the unblock
+        // mechanism. The watchdog closes the pipe after WRITE_TIMEOUT_MS,
+        // which makes a blocked write() throw, and is cancelled on success.
+        val watchdog = WRITE_WATCHDOG.schedule({
+            MindlayerLog.w(
+                TAG,
+                "OCR pipe write exceeded ${WRITE_TIMEOUT_MS}ms; force-closing",
+                throwable = null,
+            )
+            closed = true
+            closeResourcesQuietly()
+        }, WRITE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         try {
             output.write(header)
             output.write(payloadBytes)
             output.flush()
         } catch (e: IOException) {
-            // Reader likely closed. Mark closed so subsequent writes
-            // no-op; do NOT throw — OCR events are advisory and
-            // shouldn't poison the session lifecycle.
+            // Reader likely closed (or the watchdog force-closed us). Mark
+            // closed so subsequent writes no-op AND release the FD here — do
+            // NOT throw — OCR events are advisory and shouldn't poison the
+            // session lifecycle.
             MindlayerLog.w(
                 TAG,
                 "OCR frame write failed (reader gone): ${e.safeLabel()}",
                 throwable = null,
             )
             closed = true
+            closeResourcesQuietly()
+        } finally {
+            watchdog.cancel(false)
         }
     }
 
     companion object {
         private const val TAG = "OcrTokenStreamWriter"
+
+        /**
+         * R-12: per-write wall-clock budget. A stalled/dead OCR reader must
+         * not pin the session-manager worker thread; on timeout the pipe is
+         * force-closed so the blocked write throws. Generous because OCR
+         * events are small and the reader is first-party.
+         */
+        internal const val WRITE_TIMEOUT_MS: Long = 5_000L
+
+        /** Daemon scheduler backing the OCR write watchdog. */
+        private val WRITE_WATCHDOG: ScheduledExecutorService =
+            Executors.newSingleThreadScheduledExecutor { r ->
+                Thread(r, "mindlayer-ocr-pipe-watchdog").apply { isDaemon = true }
+            }
 
         /**
          * Hard upper bound on a single framed JSON payload. Mirrors

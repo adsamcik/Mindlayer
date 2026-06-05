@@ -305,6 +305,21 @@ class EmbeddingCoordinator(
         }
     }
 
+    /**
+     * R-9: cancel every in-flight embedding job across all UIDs. Used by the
+     * service's ACTION_STOP and FGS onTimeout paths so embedding work does
+     * not keep running (foreground-counted) after the notification is
+     * dropped. Each cancelled job's `withTracked` finally releases its
+     * foreground refcount.
+     */
+    fun cancelAll() {
+        val keys = activeJobs.keys.toList()
+        keys.forEach { activeJobs.remove(it)?.cancel() }
+        if (keys.isNotEmpty()) {
+            MindlayerLog.i(TAG, "Cancelled ${keys.size} embedding job(s) (service stop/timeout)")
+        }
+    }
+
     private suspend fun <T> withTracked(uid: Int, requestId: String, block: suspend () -> T): T {
         validateRequestId(requestId)
         val scoped = key(uid, requestId)
