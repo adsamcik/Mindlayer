@@ -1,113 +1,112 @@
 # Third-Party Caller Future Work
 
-> **⚠️ Branch notice — being implemented in `feat/consent-architecture`.**
+> **Status — reconciled for the v0.10 consent architecture.**
 >
-> This document describes a 5-step migration plan that was previously deferred.
-> The `feat/consent-architecture` branch implements **all 5 steps in a single PR**
-> because we are in the experimental phase and the alternative (incremental shipping)
-> would leave a long window of mixed first-party / third-party semantics in production.
+> The original Phase-0 plan to "open up" Mindlayer has mostly arrived on
+> `feat/consent-architecture`: any installed app can bind, and access is gated
+> by a Mindlayer-owned per-app user-consent flow. The authoritative current
+> design is [`CONSENT_ARCHITECTURE.md`](CONSENT_ARCHITECTURE.md).
 >
-> The target design is documented in [`CONSENT_ARCHITECTURE.md`](CONSENT_ARCHITECTURE.md).
-> This document will be archived in Phase 7 of the migration; its content is preserved
-> here as the historical motivation. **Use `CONSENT_ARCHITECTURE.md` as the reference
-> for the current direction** — the text below describes the original incremental plan,
-> not the as-shipped design.
+> This document now tracks what remains future-facing and records which earlier
+> ideas were intentionally retired. Do not use the pre-consent-era plan to revive
+> `BIND_ML_SERVICE`, trusted signer lists, dashboard pending approvals, or trust
+> tiers.
 
-> **Status (legacy): planning note.** No code changes here — this captures the design
-> deltas the codebase needs before the `BIND_ML_SERVICE` permission is
-> relaxed below `signature` protection level. Read this whenever you're
-> tempted to invoke "third-party" as a justification for a current
-> architecture decision.
+## Current shipped posture
 
-## Today's posture
+Mindlayer is no longer first-party-only at the Binder layer:
 
-Mindlayer is **first-party-only**:
+- `MindlayerMlService` is exported with **no** `BIND_ML_SERVICE` permission.
+  The app and SDK manifests do not declare/request that permission.
+- Any installed app can bind, but only two methods are reachable before consent:
+  `requestConsentChallenge()` and coarse `ping()`.
+- All real AIDL methods run `ServiceBinder.authorizeCall()` and require an
+  approved `(packageName, signingCertSha256)` allowlist entry.
+- An unapproved caller receives `CONSENT_REQUIRED = 6005` and must use
+  `MindlayerConsent.requestConsent(context)` to launch the consent-Intent flow.
+- An explicitly denied caller receives `CONSENT_DENIED = 6006` until a temporary
+  denial lapses or the user unblocks the package.
+- Approved callers all share the same `RateLimiter` and `IpcInputValidator`
+  limits. There is no first-party / third-party trust tier.
 
-- `<permission android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE" android:protectionLevel="signature|knownSigner" />` (`AndroidManifest.xml`).
-- Same-key apps can bind via `signature`; Android 12+ first-party apps signed by known registered certs can bind via `knownSigner`.
-- The user-approved allowlist (`AllowlistStore`) gives a second gate even for co-signed apps.
-- Per-UID rate limit is generous (60 RPM, 4 concurrent).
-- `IpcInputValidator` byte budgets are tuned for trusted callers (256 KB tools JSON, 100 MB media payload, etc.).
-- Identity scoping in `getDiagnostics()`, `getStatus()` and `listSessions()` is already caller-scoped for external UIDs (good — that work doesn't need to be redone).
+## What arrived from the old plan
 
-## What changes when we open up
+The old incremental plan had one large one-way door: let apps outside the
+first-party signing set bind. The consent-architecture PR takes that door and
+ships the surrounding safety rails in one change:
 
-### 1. The `BIND_ML_SERVICE` permission
+1. **Open bind:** the manifest permission is removed rather than relaxed to
+   `normal`.
+2. **User consent as the trust boundary:** the old dashboard pending-approval
+   inbox is replaced by `requestConsentChallenge()` + Mindlayer-owned
+   `ConsentActivity`.
+3. **Server-side caller capture:** Binder UID/package/cert are captured before
+   the Activity is launched; the client cannot self-assert identity.
+4. **Denial controls:** users can dismiss, deny for 24 hours, or permanently
+   block a package from the dashboard's **Blocked apps** list.
+5. **No Play policy footgun:** removing the pending inbox also removes the need
+   for `QUERY_ALL_PACKAGES`.
 
-The current `signature|knownSigner` protection level is the wrong fence for third-party. Two paths:
+## Still future-facing
 
-- **Drop to `normal`** — any installed app can bind. Combine with the existing dashboard-approval flow as the actual gate.
-- **Custom permission group** — let the user grant "AI inference" as a runtime permission in Settings. Heavier UX, more granular.
+These items are not shipped by the consent-architecture PR. They remain valid
+follow-ups only if product needs justify them:
 
-Either way, **the user-approval flow becomes the primary trust boundary** instead of the secondary one it is today. `AllowlistStore.recordPending` and the dashboard's approve/revoke UX must scale to a much larger long tail of unknown apps.
+### Usage-monitoring notifications
 
-### 2. Per-package quota multipliers
+The service records metadata-only usage today. A planned follow-up may compute a
+rolling per-UID load score and notify the user when one approved app dominates
+on-device AI workload or appears to affect battery materially. The notification
+should deep-link to per-app management with **Revoke** and **Block permanently**
+actions. It should not silently throttle or revoke; the user remains the trust
+authority.
 
-A flat 60 RPM / 4 concurrent for every caller becomes a denial-of-service surface once anyone can bind. Plan:
+### Richer per-app management UX
 
-- Default new third-party callers to `1/4` of the first-party allowance (~15 RPM, 1 concurrent).
-- Allow the user to bump trusted apps up via the dashboard (per-package "allow burst" toggle).
-- Keep the global `DEFAULT_MAX_GLOBAL_CONCURRENT = 16` cap so N apps can't collectively saturate the engine.
+The dashboard now has approved and blocked app concepts. Future UX can add more
+context around install source, recent call counts, token volume, or inference
+time if that data is already collected metadata-only. Do not add telemetry,
+network calls, or prompt/output persistence to support this UI.
 
-This is a `RateLimiter` constructor change (per-UID limits become a function of the entry's allowlist trust tier) and an `AllowlistEntry` schema addition (`trustTier: Int`).
+### SDK ergonomics beyond consent
 
-### 3. Stricter `IpcInputValidator` budgets for unknown callers
+The shipped consent entry point is
+`MindlayerConsent.requestConsent(context): ConsentRequestResult`. A full
+migration of `connect`, `createSession`, `getStatus`, and the rest of the SDK
+control surface to Result types is deferred to a follow-up PR.
 
-Today's validator is the same regardless of caller. For third-party:
+### Capability scoping, only if a future feature needs it
 
-- `MAX_TOOLS_JSON_LEN`: drop from 256 KB to 16 KB unless explicitly raised.
-- `MAX_TEXT_CONTENT_LEN`: drop from 256 KB to 32 KB.
-- `MAX_HISTORY_TURNS`: drop from 64 to 16.
-- `MAX_SESSION_EXPIRATION_MS`: drop from 90 days to 7 days.
-- Image / audio payload caps: keep at current 100 MB but require Per-attachment validation against device memory headroom.
+Every approved caller currently gets the same service capabilities. If a future
+feature genuinely should not be available to all consenting callers, introduce a
+specific capability model for that feature and document it in
+`AUTHORIZATION.md`. Do not reintroduce broad first-party / third-party tiers.
 
-The validator needs a `CallerProfile` parameter so byte budgets are per-caller, not global.
+## Retired ideas from the old plan
 
-### 4. Prompt-injection defenses
+The following ideas were part of the historical plan but are now rejected or
+obsolete:
 
-First-party apps are trusted not to attempt prompt injection. Third-party can't be. Required:
+- **Relax `BIND_ML_SERVICE` to `normal`.** The permission is gone entirely; the
+  manifest layer is not the trust boundary.
+- **Trusted signer arrays / first-party seed lists.** The service no longer
+  predicts trusted callers by certificate. The user approves concrete apps.
+- **Dashboard pending approvals.** There is no `pending.json` inbox and no
+  dashboard **Approve** button for first connect.
+- **Trust tiers and quota multipliers.** Static `FIRST_PARTY` / `THIRD_PARTY`
+  budgets were explicitly rejected. Approved apps share one rate-limit class.
+- **Stricter validator budgets for "unknown third-party" callers.** Unknown
+  callers cannot reach real methods; approved callers share the same
+  `IpcInputValidator` bounds.
+- **Tier-specific prompt-injection scoring.** Input validation remains uniform;
+  do not add a special third-party-only model-policy layer without a new design.
 
-- Score incoming text content for prompt-injection markers before it reaches the model. Heuristics: instruction tokens at start, role-impersonation strings, base64 payloads. Below threshold: pass; above: reject with a typed `MindlayerErrorCode` (allocate `INPUT_REJECTED = 3006`).
-- Tool-call result sanitization (`ToolOutputSanitizer` already exists for engine output) needs a counterpart for tool-call **inputs** — a third-party app could exfiltrate via `submitToolResult.resultJson`.
-- Document this in `docs/AUTHORIZATION.md` § threat model.
+## Migration implications
 
-### 5. Cross-process state coherence
-
-`RateLimiter` is in-process today (lives in `:ml`). The dashboard runs in the main process and is self-UID-bypass'd. For third-party:
-
-- Rate counters must be visible across the dashboard's reporting UI (so users can see per-app usage). Either: dashboard reads via its self-UID AIDL access, or a shared file-backed counter with `FileLock` (matches the `AllowlistStore` pattern).
-- `concurrentFor(uid)` already exists; expose via a new dashboard-only AIDL method `listCallerUsage(): List<CallerUsage>`.
-
-### 6. Per-caller diagnostics scoping
-
-Already done for `getStatus` / `getDiagnostics` / `listSessions` (external callers see only their own data). **Audit** when adding any new typed-diagnostics method (`v04-typed-diagnostics`) — easy to forget on a new code path.
-
-### 7. AIDL-method-level capability gating
-
-Once `getCapabilities()` ships (`v02-capabilities`), the feature-flag set should be **per-caller**. A first-party app might see `"media_list", "token_batch", "eviction_callback"`, while an unknown third-party gets just `"media_list"`. The `ServiceCapabilities` parcelable already has a `supportedFeatures: Set<String>` — populating it per-caller is a server-side decision based on `AllowlistEntry.trustTier`.
-
-## What we already got right
-
-These don't need to change:
-
-- F-008 anti-enumeration: `SESSION_NOT_FOUND_OR_NOT_OWNED` shares one wire code; cross-UID lookups are already opaque.
-- Per-UID session ownership (`InferenceOrchestrator.getSessionOwner` + `requireOwnership`): correct and test-covered.
-- Self-UID bypass in `authorizeCall`: necessary for the dashboard, and it's gated by `Process.myUid()` which a third-party UID cannot impersonate.
-- `BIND_ML_SERVICE` as a separate permission name: keep the name even if the protection level relaxes, so existing first-party manifests don't need editing.
-
-## When we ship this, what breaks?
-
-- **First-party apps with the current generous quotas** will continue working — `trustTier` for already-approved entries defaults to "first-party" (current limits).
-- **The dashboard's UX** needs new flows: per-app trust tier toggles, per-app usage charts, prompt-injection scoring visibility, easier revoke.
-- **`AllowlistStore` schema** bumps via the existing JSON `version` field — migration path adds `trustTier: Int = TIER_FIRST_PARTY` for old entries.
-
-## Implementation order (when this lands)
-
-1. `AllowlistEntry.trustTier` schema bump + dashboard UI to set it.
-2. `IpcInputValidator` accepts a `CallerProfile`.
-3. `RateLimiter` per-UID limits become a function of trust tier.
-4. Prompt-injection scoring + `INPUT_REJECTED` error code.
-5. Drop `BIND_ML_SERVICE` protection level to `normal`.
-6. Document the new threat model in `AUTHORIZATION.md`.
-
-Step 5 is the one-way door. Steps 1-4 ship behind the existing signature gate and become live for everyone the moment 5 lands. Everything before 5 is reversible.
+- Existing approved allowlist entries survive upgrade.
+- Legacy pending entries are discarded; clients must use the consent-Intent
+  flow instead of asking users to open the dashboard.
+- Re-signed apps lose access until the user approves the new signing
+  certificate through the normal consent flow.
+- Permanently blocked packages stay blocked across signing-cert rotation and
+  must be unblocked explicitly by the user.

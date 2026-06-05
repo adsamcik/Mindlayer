@@ -49,40 +49,20 @@ dependencies {
 }
 ```
 
-### 3. Permission
+### 3. No permission required
 
-The Mindlayer SDK manifest already declares the signature-level service
-permission, so it is inherited automatically by your app through manifest
-merger:
+Mindlayer no longer declares a signature-level bind permission. **Any installed
+app can bind to the service** — there is nothing to add to your manifest and no
+signing-key requirement. Access is not gated at the OS bind layer; it is gated
+per-app by **explicit user consent** (see [First-run user consent](#first-run-user-consent)
+below).
 
-```xml
-<!-- Automatically inherited from the SDK manifest; you do not need to add this -->
-<uses-permission android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE" />
-```
-
-The permission is `signature|knownSigner` and only effective when your app is
-signed with one of the trusted first-party certs registered in Mindlayer; an
-unrelated app gaining the `<uses-permission>` line via the SDK gains no actual
-access to the service.
-
-> **Important:** Cross-app first-party integration requires Android 12 (API 31)
-> or later when the client is signed with a different Play app-signing key than
-> Mindlayer. On older devices, `Mindlayer.connect()` / `awaitConnected()` fails
-> with `MindlayerException` carrying
-> `MindlayerErrorCode.UNSUPPORTED_ANDROID_VERSION`.
-
-### Registering a new first-party app
-
-A new first-party Android app must be registered in Mindlayer in two places in
-the same PR:
-
-1. Add its Play app-signing certificate SHA-256 (lowercase hex, no separators)
-   to `app/src/main/res/values/arrays.xml` under
-   `mindlayer_trusted_client_certs` for the OS `signature|knownSigner` gate.
-2. Add the matching `(packageName, signingCertSha256)` entry to
-   `MindlayerMlService.FIRST_PARTY_ALLOWLIST_SEEDS` for the AIDL allowlist gate.
-
-The app parity test fails if these cert hash lists drift.
+> **Migrating from an older SDK?** Delete any
+> `<uses-permission android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE" />`
+> line you previously added — that permission has been removed. There is also no
+> longer any first-party cert registration step; the old
+> `mindlayer_trusted_client_certs` array and `FIRST_PARTY_ALLOWLIST_SEEDS` are
+> gone.
 
 ---
 
@@ -101,23 +81,76 @@ val mindlayer = Mindlayer.connect(context)
 mindlayer.awaitConnected()
 ```
 
-### First-run user approval
+### First-run user consent
 
-Mindlayer is default-deny: the first time your app binds, the service records
-a **pending approval** for your package + signing-cert SHA and rejects the
-call with `SecurityException`. The user must then open the Mindlayer dashboard
-and approve your app explicitly — Mindlayer pins the SHA-256 of your current
-signing certificate at approval time, so a re-signed APK is rejected.
+Mindlayer is default-deny: the first time your app calls the service, it is
+rejected because the user has not yet granted your app access. The SDK surfaces
+this as `ConnectionState.REJECTED_NOT_APPROVED` and `awaitConnected()` throws
+(the service returned `MindlayerErrorCode.CONSENT_REQUIRED`). This is a
+**terminal state** — the SDK will not silently retry (that would poll the
+service and burn the rate limit).
 
-- During the pending window, `ConnectionManager.state` transitions to
-  `REJECTED_NOT_APPROVED` and `awaitConnected()` throws `SecurityException`.
-  This is a **terminal state** — the SDK will not auto-reconnect (that would
-  poll the service and tip the rate limit). Your app should surface a "please
-  approve Mindlayer access" prompt and retry `connect()` when the user asks.
-- Once approved, the next `connect()` succeeds.
-- The user can revoke access at any time from the dashboard.
+To obtain consent, launch the Mindlayer consent screen with
+`MindlayerConsent.requestConsent(...)` and retry your call when the user
+approves:
 
-See [`docs/AUTHORIZATION.md`](docs/AUTHORIZATION.md) for the full authorization model, including signing-cert rotation semantics, rate limiting, session ownership, and rejection-path failure modes.
+```kotlin
+import androidx.activity.result.ActivityResultContracts.StartIntentSenderForResult
+import androidx.activity.result.IntentSenderRequest
+import com.adsamcik.mindlayer.sdk.ConsentRequestResult
+import com.adsamcik.mindlayer.sdk.MindlayerConsent
+
+// 1. Register a launcher (Activity / Fragment scope).
+private val consentLauncher = registerForActivityResult(
+    StartIntentSenderForResult(),
+) { result ->
+    if (result.resultCode == Activity.RESULT_OK) {
+        // Approved — retry connect()/your call. It will now succeed.
+        lifecycleScope.launch { mindlayer.awaitConnected() }
+    }
+    // RESULT_CANCELED => the user declined or dismissed; surface a message.
+}
+
+// 2. When a call fails with CONSENT_REQUIRED (REJECTED_NOT_APPROVED), ask:
+lifecycleScope.launch {
+    when (val r = MindlayerConsent.requestConsent(context)) {
+        is ConsentRequestResult.Available ->
+            consentLauncher.launch(IntentSenderRequest.Builder(r.intentSender).build())
+        ConsentRequestResult.AlreadyApproved ->
+            mindlayer.awaitConnected() // already granted; just (re)connect
+        is ConsentRequestResult.Denied -> {
+            // r.untilEpochMs == null  => permanently blocked (user unblocks in dashboard)
+            // r.untilEpochMs != null  => temporary block; retry after that time
+        }
+        ConsentRequestResult.ServiceUnavailable -> { /* service not installed */ }
+        is ConsentRequestResult.Failed -> { /* r.code / r.message */ }
+    }
+}
+```
+
+What the user sees: a branded, full-screen Mindlayer consent prompt showing your
+app's label, signing certificate, and install source, with **Approve** / **Deny**
+options. Approving runs a biometric confirmation, then pins the SHA-256 of your
+**current** signing certificate — a later re-signed APK is treated as a new app
+and must be approved again.
+
+- On **Approve**, the next `connect()` / `awaitConnected()` succeeds.
+- On **Deny**, the user can choose "Not now" (you may ask again later),
+  "Deny for 24 hours", or "Block permanently". A denied app cannot re-trigger
+  the prompt until the denial lapses; `requestConsent()` returns
+  `Denied(untilEpochMs)` in that window instead of showing the screen again.
+- The user can revoke access at any time from the Mindlayer dashboard
+  ("Approved apps"), and unblock a permanently-blocked app from "Blocked apps".
+
+> **Background services:** `requestConsent()` returns an `IntentSender` that must
+> be launched from an `Activity`/UI context. A pure background worker has no way
+> to show the consent screen — fail loud and defer the work until your app next
+> has UI. Consent is expected to be granted before headless inference runs.
+
+See [`docs/AUTHORIZATION.md`](docs/AUTHORIZATION.md) and
+[`docs/CONSENT_ARCHITECTURE.md`](docs/CONSENT_ARCHITECTURE.md) for the full
+authorization model, including signing-cert rotation semantics, the consent-Intent
+handshake, rate limiting, session ownership, and denial semantics.
 
 ### Encrypted on-device storage
 
@@ -385,8 +418,8 @@ Bump version in `build.gradle.kts` root `publishVersion` before releasing.
 ## Requirements
 
 - **Mindlayer service app** must be installed on the device
-- **Trusted first-party signing**: same signing key, or an Android 12+
-  `knownSigner` certificate registered by the Mindlayer service
+- **User consent**: the user must approve your app once via the Mindlayer
+  consent screen (any signing key works — no first-party registration)
 - **Android 8.0+** (minSdk 26)
 - **Model files** must be deployed (via Play AI Packs or manual staging)
 

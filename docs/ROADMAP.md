@@ -47,11 +47,10 @@ workflow (not in the repo, by design).
 ### Service architecture
 - Single AIDL surface (`IMindlayerService`), byte-identical mirror between
   `:app` and `:sdk`. See `docs/AIDL_STABILITY.md`.
-- Four-stage authorization gate on every entry point: identity →
-  allowlist → rate limit → ownership. See `docs/AUTHORIZATION.md`.
-- Signature-level `BIND_ML_SERVICE` permission, `signature|knownSigner` on
-  API 31+, plus runtime allowlist with one-time user approval for
-  first-party callers.
+- Four-stage authorization gate on every real entry point: identity →
+  consent/allowlist → rate limit → ownership. See `docs/AUTHORIZATION.md`.
+- Open exported service with no custom bind permission; per-app user consent
+  pins `(packageName, signingCertSha256)` before real AIDL methods run.
 - Foreground-service lifecycle (`specialUse`) promoted only during active
   inference; refcounted across chat / embeddings / OCR.
 - Cross-process state via `filesDir` + atomic rename + `FileLock` and a

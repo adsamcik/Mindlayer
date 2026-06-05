@@ -3,7 +3,7 @@
 
 # Mindlayer Architecture
 
-> Mindlayer is an Android service app that loads a single LLM (Gemma 4 E2B via LiteRT-LM) and serves inference to **trusted first-party client apps** over IPC. It is not a public-internet SDK; it is an on-device, on-host shared-runtime.
+> Mindlayer is an Android service app that loads a single LLM (Gemma 4 E2B via LiteRT-LM) and serves inference to **user-approved client apps** over IPC. It is not a public-internet SDK; it is an on-device, on-host shared-runtime.
 
 ## System Topology
 
@@ -11,7 +11,7 @@
 ┌────────────────────────────────────────────────────────────────────────────┐
 │  CLIENT APPS (separate processes / UIDs)                                   │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                      │
-│  │  Client A    │  │  Client B    │  │  Client C    │   (signed by us)    │
+│  │  Client A    │  │  Client B    │  │  Client C    │ (user-approved)      │
 │  │  uses :sdk   │  │  uses :sdk   │  │  uses :sdk   │                      │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘                      │
 │         │                 │                 │                              │
@@ -27,20 +27,20 @@
 ┌───────────────────────────┼────────────────────────────────────────────────┐
 │  MINDLAYER SERVICE  (`com.adsamcik.mindlayer.service`, process `:ml`)      │
 │                                                                            │
-│  ServiceBinder ──► [authorize: identity → allowlist → rate → ownership]   │
-│        │                                                                  │
-│        ├─► InferenceOrchestrator ─► SessionManager ─► EngineManager       │
-│        │           │                     │                │               │
+│  ServiceBinder ──► [authorize: identity → consent → rate → ownership]      │
+│        │                                                                   │
+│        ├─► InferenceOrchestrator ─► SessionManager ─► EngineManager        │
+│        │           │                     │                │                │
 │        │           ├─ TokenStreamWriter  ├─ ToolCallBridge├─ Backend       │
 │        │           ├─ SharedMemoryPool   ├─ ConcurrentMap │   GPU→CPU      │
 │        │           └─ LogRepository                       │   (NPU planned)│
-│        │                                                  │               │
-│        ├─► ThermalMonitor (4-band: COOL/WARM/HOT/CRITICAL, 1 Hz)          │
-│        ├─► MemoryBudget   (NORMAL/WARNING/CRITICAL/EMERGENCY)             │
-│        └─► DiagnosticExporter, LogRepository (Room, app-process)          │
+│        │                                                  │                │
+│        ├─► ThermalMonitor (4-band: COOL/WARM/HOT/CRITICAL, 1 Hz)           │
+│        ├─► MemoryBudget   (NORMAL/WARNING/CRITICAL/EMERGENCY)              │
+│        └─► DiagnosticExporter, LogRepository (Room, app-process)           │
 │                                                                            │
-│  Dashboard UI runs in the *main* process and talks to `:ml` over the      │
-│  same AIDL surface (self-UID bypasses the allowlist gate).                │
+│  Dashboard UI runs in the *main* process and talks to `:ml` over the       │
+│  same AIDL surface (self-UID bypasses the consent gate).                   │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -73,7 +73,7 @@ Cross-process state (allowlist) is a JSON file under the service's `filesDir/min
 | Component | Path | Responsibility |
 |---|---|---|
 | `MindlayerMlService` | `app/.../service/MindlayerMlService.kt` | Hosts the binder; promotes to FGS `specialUse` only during active inference; routes `onTrimMemory` to `MemoryBudget`. `START_NOT_STICKY`. |
-| `ServiceBinder` | `app/.../service/ServiceBinder.kt` | AIDL stub. Every entry point starts with `authorizeCall()` (4-stage gate). Binder-death linkage tears down a UID's sessions when its process dies. |
+| `ServiceBinder` | `app/.../service/ServiceBinder.kt` | AIDL stub. Every real entry point starts with `authorizeCall()` (4-stage gate). Binder-death linkage tears down a UID's sessions when its process dies. |
 | `EngineManager` | `app/.../engine/EngineManager.kt` | LiteRT-LM `Engine` lifecycle. Backend chain: NPU (when supported SoC) → GPU → CPU. Init can take ~10 s — never block the main thread. Mutex-serialized. |
 | `SessionManager` | `app/.../engine/SessionManager.kt` | Per-session `Conversation` instances. Memory-pressure eviction by priority (streaming +1000, pinned +400, recent +300/150, hint 0–100). Per-session `Mutex`. |
 | `InferenceOrchestrator` | `app/.../engine/InferenceOrchestrator.kt` | Streams tokens to a PFD pipe; cancellation via `cancelInference(requestId)`; bridges tool calls to the client and awaits results. `MAX_TOOL_ROUNDS = 25`. |
@@ -81,7 +81,7 @@ Cross-process state (allowlist) is a JSON file under the service's `filesDir/min
 | `MemoryBudget` | `app/.../engine/MemoryBudget.kt` | Static device tier from total RAM (`≤6 GB / ≤8 GB / ≤12 GB / >12 GB`) caps session count + token budget. Emits dynamic `MemoryPressure`. |
 | `TokenStreamWriter` | `app/.../ipc/TokenStreamWriter.kt` | Writes 4-byte LE length-prefixed JSON frames to the PFD pipe. Not thread-safe — orchestrator owns serialization. |
 | `SharedMemoryPool` | `app/.../ipc/SharedMemoryPool.kt` | Backing for `ImageTransfer` / `AudioTransfer` — Binder's 1 MB transaction limit forces media off the parcel. |
-| `AllowlistStore` | `app/.../security/AllowlistStore.kt` | File-backed approved/pending callers, sig-pinned. `isAllowed()` always re-reads disk so dashboard approvals are visible to `:ml`. |
+| `AllowlistStore` | `app/.../security/AllowlistStore.kt` | File-backed approved and denied callers, sig-pinned. `isAllowed()` always re-reads disk so consent grants, revokes, and unblocks are visible to `:ml`. |
 | `CallerVerifier` | `app/.../security/CallerVerifier.kt` | UID → `(packageName, signingCertSha256)`. Rejects shared-UID callers. Multi-signer: hash each cert, sort hex digests, hash concatenation. |
 | `RateLimiter` | `app/.../security/RateLimiter.kt` | Per-UID token bucket (60 RPM default) + concurrent-inference semaphore. |
 | `LogRepository` | `app/.../logging/LogRepository.kt` | Fire-and-forget Room writer on `Dispatchers.IO`. **Persists metadata only** — never prompt or model output text. |
@@ -113,27 +113,32 @@ Cancellation: LiteRT-LM `Conversation.cancelProcess()` is **explicit** — Flow 
 
 ## Trust Model
 
-1. **Manifest gate** — `BIND_ML_SERVICE` is `signature|knownSigner`. Same-key
-   callers (including the dashboard/self-UID path) keep the traditional
-   `signature` grant, while Android 12+ grants known first-party certs listed
-   in `R.array.mindlayer_trusted_client_certs`.
-2. **Identity** — `CallerVerifier.identifyCaller(uid)` resolves UID →
-   `(pkg, signingCertSha256)`. Shared-UID rejected.
-3. **Allowlist** — `AllowlistStore.isAllowed(pkg, sig)` checks a JSON file in
-   service `filesDir`. Fresh installs seed known first-party `(pkg, sig)`
-   pairs from `FIRST_PARTY_ALLOWLIST_SEEDS`; unknown callers still become
-   pending dashboard approvals.
-4. **Rate limit** — `RateLimiter` per-UID token bucket (60 RPM) +
-   concurrent-inference cap.
-5. **Ownership** — Session-scoped methods (`infer`, `destroy`, `cancel`,
+1. **Open bind, closed methods** — `MindlayerMlService` is exported with no
+   custom bind permission. Any installed app can bind, but binding carries no
+   trust and every real method starts with `ServiceBinder.authorizeCall()`.
+2. **Pre-consent surface** — only `requestConsentChallenge()` and coarse
+   `ping()` are reachable before approval. `ping()` returns `{alive,
+   apiVersion}` only.
+3. **Consent challenge** — `requestConsentChallenge()` captures Binder
+   UID/package/cert server-side, mints a 256-bit single-use nonce and immutable
+   one-shot `PendingIntent`, and launches Mindlayer-owned `ConsentActivity`.
+4. **Identity** — `CallerVerifier.identifyCaller(uid)` resolves UID →
+   `(pkg, signingCertSha256)`. Shared-UID callers are rejected.
+5. **Consent allowlist / denial** — `AllowlistStore.isAllowed(pkg, sig)` checks
+   the HMAC-sealed JSON allowlist in service `filesDir`. Explicit denials return
+   `CONSENT_DENIED`; missing approvals return `CONSENT_REQUIRED`.
+6. **Rate limit** — approved callers share the same per-UID token bucket
+   (60 RPM default) plus concurrent-inference cap. There are no trust tiers.
+7. **Ownership** — Session-scoped methods (`infer`, `destroy`, `cancel`,
    `submitToolResult`) require the calling UID to own the session.
-6. **Self-UID bypass** — When `Binder.getCallingUid() == Process.myUid()` the
-   dashboard's own AIDL traffic skips the allowlist + rate limit; otherwise it
+8. **Self-UID bypass** — When `Binder.getCallingUid() == Process.myUid()` the
+   dashboard's own AIDL traffic skips the consent + rate gate; otherwise it
    would self-deny.
 
-API 26–30 ignore `knownSigner`, so different-key first-party cross-app binds
-require API 31+. `TrustedClientCertParityTest` enforces manifest-array ↔ seed
-list cert hash parity.
+The old `signature|knownSigner` permission, trusted-cert array, first-party seed
+list, and API 26–30 `knownSigner` caveat are gone with the consent model. See
+[`../../docs/AUTHORIZATION.md`](../../docs/AUTHORIZATION.md) and
+[`../../docs/CONSENT_ARCHITECTURE.md`](../../docs/CONSENT_ARCHITECTURE.md).
 
 ## Wire Protocol (v1)
 

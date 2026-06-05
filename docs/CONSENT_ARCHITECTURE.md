@@ -201,6 +201,19 @@ This replaces the abandoned "trust tiers" approach (static per-app budgets selec
 
 ### SDK API surface (modified — Result types for control plane)
 
+> **Implementation status (this PR):** the slice that shipped is the additive
+> entry point `MindlayerConsent.requestConsent(context): ConsentRequestResult`
+> (sealed: `Available(intentSender)` / `AlreadyApproved` / `Denied(untilEpochMs?)`
+> / `ServiceUnavailable` / `Failed(code, message)`). It transiently binds `:ml`,
+> calls `requestConsentChallenge()`, and returns the server-issued
+> `IntentSender` for the host to launch. The existing exception-based control
+> surface (`connect()` / `awaitConnected()` → `ConnectionState.REJECTED_NOT_APPROVED`
+> on `CONSENT_REQUIRED`) is unchanged and already surfaces the consent-required
+> signal. The fuller `createConsentIntent` / `consentState` / `bindOrRequestConsent`
+> + `MindlayerConnectResult` / `MindlayerSessionResult` / `MindlayerStatusResult`
+> Result-type migration below is the **design target** and is **deferred to a
+> follow-up PR** to keep this change reviewable; it has NOT shipped.
+
 Pure refactor on top of `:sdk`. AIDL stays as-is (already exception-based, unchanged shape).
 
 ```kotlin
@@ -287,7 +300,7 @@ sequenceDiagram
     participant Activity as ConsentActivity<br/>(main process)
     participant Store as AllowlistStore
 
-    Client->>SDK: Mindlayer.createConsentIntent(ctx)
+    Client->>SDK: MindlayerConsent.requestConsent(ctx)
     SDK->>ML: bindService() [no permission gate now]
     SDK->>ML: requestConsentChallenge()
     Note over ML: Binder.getCallingUid() = client UID<br/>identifyCaller() resolves pkg + sig<br/>(visibility granted by this bind)
@@ -295,7 +308,7 @@ sequenceDiagram
     ML->>ML: SecureRandom 256-bit nonce
     ML->>ML: ChallengeStore.put(nonce, identity, ttl=5min)
     ML-->>SDK: ConsentChallenge(pendingIntent, nonce)
-    SDK-->>Client: Intent (opaque)
+    SDK-->>Client: ConsentRequestResult.Available(intentSender)
     SDK->>ML: unbindService()
 
     Client->>Activity: startActivityForResult(intent, REQ)

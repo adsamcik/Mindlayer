@@ -21,13 +21,12 @@ android {
     }
 
     signingConfigs {
-        // Sign with the same project-checked-in dev keystore the :app debug
-        // variant uses. The `BIND_ML_SERVICE` permission on :app is gated
-        // by signature|knownSigner with this cert's SHA-256 listed in
-        // app/src/main/res/values/arrays.xml (mindlayer_trusted_client_certs).
-        // Without this signingConfig the sample APK is signed by the
-        // per-machine default ~/.android/debug.keystore and the service
-        // refuses to bind.
+        // Sign with a stable, project-checked-in keystore so the signing-cert
+        // SHA-256 the user approves once (Mindlayer pins it per package) stays
+        // identical across dev machines. With the consent model any signing key
+        // works to bind — there is no longer a signature|knownSigner gate — but
+        // a per-machine ~/.android/debug.keystore would change the pinned cert
+        // and force re-consent on every machine.
         create("knownCertsOwner") {
             storeFile = rootProject.file("app/keystores/knowncerts-owner.jks")
             storePassword = "knowncertstest"

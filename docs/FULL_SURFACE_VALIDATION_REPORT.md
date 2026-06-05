@@ -5,6 +5,13 @@
 > uncovered by the end-to-end pass). Emulator: `sdk_gphone64_x86_64`,
 > API 36, x86_64.
 
+
+> **Historical authorization note (2026-06-05):** This point-in-time report was
+> written before the v0.10 consent architecture. Rows and findings that mention
+> cross-app bind, `BIND_ML_SERVICE`, `signature|knownSigner`, known certs, or
+> `knowncerts-owner.jks` describe the pre-consent model and are superseded by the
+> consent-Intent flow in [`CONSENT_ARCHITECTURE.md`](CONSENT_ARCHITECTURE.md).
+
 ## TL;DR
 
 | Surface | Validated | Notes |

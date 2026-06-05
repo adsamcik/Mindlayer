@@ -121,14 +121,14 @@ R8/proguard rules: `app/proguard-rules.pro`, `sdk/consumer-rules.pro`, `shared/c
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `SecurityException: App <pkg> not authorized — user approval required` | First-ever bind from this `(pkg, signingCertSha256)`. Pending entry has been recorded. | Open the Mindlayer dashboard and tap **Approve**. Future: `seedIfEmpty` will skip this for 1P apps. |
+| `CONSENT_REQUIRED` / `MindlayerErrorCode.CONSENT_REQUIRED` (`6005`) | First real AIDL call from an app without an approved `(pkg, signingCertSha256)` consent row. | Launch the consent-Intent flow: call `requestConsentChallenge()` directly or use `MindlayerConsent.requestConsent(context)`, then have the user approve the Mindlayer prompt. There is no dashboard **Approve** button and no `seedIfEmpty`. |
 | `BadParcelableException` at runtime when calling AIDL | AIDL **interface** files in `:app` and `:sdk` drifted. | Re-sync `app/src/main/aidl/com/adsamcik/mindlayer/{IMindlayerService,IClientCallback}.aidl` with the same files in `sdk/src/main/aidl/`. They must be byte-identical. (Parcelables live only in `:sdk` and cannot drift.) |
 | Robolectric tests SIGSEGV (`G1SATBMarkQueueSet::filter`) | Wrong JDK on the Gradle test runtime. | Use Java 21 for Gradle (see Java 21 gotcha above). Don't auto-provision Temurin 17 toolchain. |
 | `IllegalStateException: SQLCipher not loaded` | First boot after install, native lib missing. | Code already guards with `try { System.loadLibrary("sqlcipher") } catch (_: UnsatisfiedLinkError) { }`. Ensure `libs.sqlcipher.android` is on the classpath. |
 | Engine init never returns | Backend-fallback chain is exhausted (NPU → GPU → CPU). | Check `EngineManager.lastGpuFailureReason`. Inspect `adb logcat -s "Mindlayer.EngineManager:D"`. |
 | Model not found | `gemma-4-E2B-it.litertlm` missing in `filesDir/`, asset pack, or external/internal app dirs. | Run the `adb push` recipe above, or install the AI pack (Play Store). `ModelRegistry.discoverModels` lists every probed location. |
-| Service auto-starts but binder not exported | `permission` mismatch — client app not signed with same key. | Sign client with the same key, or relax `signature` perm in `AndroidManifest.xml` for multi-vendor (see `docs/AUTHORIZATION.md`). |
-| `Rate limit exceeded` from a co-signed dashboard | Client is calling `:ml` from a different UID and exceeding 60 RPM. | Throttle the caller, or increase `RateLimiter` defaults if the policy needs widening. |
+| `bindService` fails / returns null binding | Service package, action, or installation issue. The v0.10 service has no custom bind permission. | Verify Mindlayer is installed/enabled and the client uses the SDK's service intent. If binding succeeds but calls fail, handle `CONSENT_REQUIRED` via the consent-Intent flow. |
+| `Rate limit exceeded` from an approved caller | Client UID is exceeding the shared 60 RPM budget. | Throttle the caller, or increase `RateLimiter` defaults if the product policy needs widening. |
 
 ## Useful logcat filters
 

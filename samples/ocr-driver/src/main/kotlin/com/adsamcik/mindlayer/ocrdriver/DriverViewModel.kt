@@ -1,16 +1,22 @@
 package com.adsamcik.mindlayer.ocrdriver
 
 import android.app.Application
+import android.content.IntentSender
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.adsamcik.mindlayer.ServiceCapabilities
 import com.adsamcik.mindlayer.sdk.ConnectionState
+import com.adsamcik.mindlayer.sdk.ConsentRequestResult
 import com.adsamcik.mindlayer.sdk.Mindlayer
+import com.adsamcik.mindlayer.sdk.MindlayerConsent
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -38,6 +44,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private var capabilitiesPollJob: Job? = null
     private var inferenceJob: Job? = null
 
+    /**
+     * One-shot consent prompts to launch from the Activity. The ViewModel
+     * cannot start an Activity itself, so [requestConsent] pushes the
+     * server-issued [IntentSender] here and `MainActivity` launches it via
+     * `StartIntentSenderForResult`.
+     */
+    private val _consentPrompts = Channel<IntentSender>(Channel.BUFFERED)
+    val consentPrompts: Flow<IntentSender> = _consentPrompts.receiveAsFlow()
+
     // ── Connection lifecycle ────────────────────────────────────────────
 
     fun connect() {
@@ -52,7 +67,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     it.copy(
                         connection = it.connection.copy(
                             state = ConnectionState.DISCONNECTED,
-                            error = "Connect failed: ${t.javaClass.simpleName}: ${t.message?.take(200)}",
+                            error = "Connect failed: ${t.javaClass.simpleName}: ${t.message?.take(200)}. " +
+                                "If this app has not been approved yet, tap \u201CRequest consent\u201D.",
                         ),
                     )
                 }
@@ -63,6 +79,50 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 it.copy(connection = it.connection.copy(state = ConnectionState.CONNECTED, error = null))
             }
             startCapabilitiesPoll(client)
+        }
+    }
+
+    /**
+     * Launch the Mindlayer consent flow. Any app must be approved by the user
+     * once before the service will answer AIDL calls; this is the v0.10
+     * consent-Intent handshake. On approval the Activity calls [onConsentResult]
+     * which re-runs [connect].
+     */
+    fun requestConsent() {
+        viewModelScope.launch {
+            when (val r = MindlayerConsent.requestConsent(getApplication())) {
+                is ConsentRequestResult.Available -> _consentPrompts.send(r.intentSender)
+                ConsentRequestResult.AlreadyApproved -> connect()
+                is ConsentRequestResult.Denied -> _ui.update {
+                    val msg = if (r.untilEpochMs == null) {
+                        "Permanently blocked — unblock this app from the Mindlayer dashboard."
+                    } else {
+                        "Temporarily denied — try again later (until=${r.untilEpochMs})."
+                    }
+                    it.copy(connection = it.connection.copy(error = msg))
+                }
+                ConsentRequestResult.ServiceUnavailable -> _ui.update {
+                    it.copy(connection = it.connection.copy(error = "Mindlayer service is not installed."))
+                }
+                is ConsentRequestResult.Failed -> _ui.update {
+                    it.copy(
+                        connection = it.connection.copy(
+                            error = "Consent request failed: code=${r.code} ${r.message?.take(120) ?: ""}",
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    /** Called by the Activity with the consent screen's result. */
+    fun onConsentResult(approved: Boolean) {
+        if (approved) {
+            connect()
+        } else {
+            _ui.update {
+                it.copy(connection = it.connection.copy(error = "Consent was not granted."))
+            }
         }
     }
 

@@ -5,15 +5,14 @@ description: "Authorization invariants — applies to ServiceBinder, MlService, 
 
 <!-- context-init:managed -->
 
-> **⚠️ Branch notice — `feat/consent-architecture` migration in flight.**
+> **Model: consent architecture (v0.10).**
 >
-> The invariants below describe the **target consent-architecture model**. Code that
-> still implements the legacy `signature|knownSigner` permission + `recordPending`
-> inbox is being deleted phase-by-phase in this PR. See
-> [`docs/CONSENT_ARCHITECTURE.md`](../../docs/CONSENT_ARCHITECTURE.md) for the full design
-> and the [§ Legacy invariants during migration](#legacy-invariants-during-migration)
-> section at the bottom of this file for rules that still apply to un-deleted legacy
-> code paths.
+> The invariants below describe the live model: open bind, per-method
+> `authorizeCall()`, and per-app user consent via `ConsentActivity`. The legacy
+> `signature|knownSigner` permission, `QUERY_ALL_PACKAGES`, trusted-cert arrays,
+> first-party seeding, and the `recordPending` approval inbox have been removed.
+> See [`docs/CONSENT_ARCHITECTURE.md`](../../docs/CONSENT_ARCHITECTURE.md) for the
+> full design and migration notes.
 
 ## Authorization invariants (do not weaken)
 
@@ -216,23 +215,10 @@ without UI for any cert. User unblocks via the dashboard's "Blocked apps" list.
 
 - Log every authorization rejection with `MindlayerLog.w("ServiceBinder", reason, requestId, sessionId)` and a structured `LogRepository` entry — but **never** include the rejected caller's request body, prompt, or any session content.
 - Use `Throwable.safeLabel()` when surfacing exceptions thrown by native verification code.
-- New consent-flow audit actions emitted via `LogRepository.logSecurityDecision`:
-  `consent_requested`, `consent_shown`, `consent_granted`,
-  `consent_denied_once`, `consent_denied_temporary`, `consent_denied_permanent`,
-  `consent_dismissed`, `consent_biometric_failed`, `consent_cert_mismatch`,
-  `consent_nonce_expired`, `consent_cooldown_blocked`,
-  `input_rejected_injection_score`, `schema_v3_migration`.
-
-## Legacy invariants during migration
-
-These rules apply to code paths that have not yet been deleted in this PR.
-Once the corresponding phase commits, the rule becomes obsolete.
-
-| Legacy rule | Applies until phase | Notes |
-|---|---|---|
-| Keep `R.array.mindlayer_trusted_client_certs` and `FIRST_PARTY_ALLOWLIST_SEEDS` in sync | Phase 5 | Both deleted in Phase 5. |
-| `seedIfEmpty(...)` is intentionally first-launch only | Phase 5 | Deleted in Phase 5. |
-| Don't remove or relax the manifest permission | Phase 5 | The permission IS being removed in Phase 5 per `docs/CONSENT_ARCHITECTURE.md`. |
-| Debug-only same-cert auto-seeding belongs only in `app/src/debug` | Phase 5 | `DebugAllowlistSeeder` is deleted in Phase 5 (no longer useful when there is no cert array). |
-| `recordPending` for unknown callers | Phase 5 | Deleted in Phase 5. Replaced by `ConsentChallengeStore`. |
-| `TrustedClientCertParityTest` must pass | Phase 5 | Test deleted in Phase 5. |
+- New consent-flow audit actions emitted via `LogRepository.logSecurityDecision`
+  (see `ServiceBinder`): `consent_requested`, `consent_granted`,
+  `consent_granted_after_cert_rotation`, `consent_denied_once`,
+  `consent_denied_temporary`, `consent_denied_permanent`,
+  `consent_cooldown_blocked`, `consent_request_blocked_denied`,
+  `consent_grant_blocked_denied`. Keep this list in sync when adding a new
+  consent decision branch.

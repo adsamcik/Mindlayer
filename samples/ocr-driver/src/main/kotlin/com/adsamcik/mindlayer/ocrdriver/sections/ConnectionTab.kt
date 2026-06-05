@@ -60,6 +60,7 @@ fun ConnectionTab(
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onRefresh: () -> Unit,
+    onRequestConsent: () -> Unit,
 ) {
     Card {
         Column(
@@ -84,6 +85,14 @@ fun ConnectionTab(
                 }
                 TextButton(onClick = onRefresh, enabled = slice.state == ConnectionState.CONNECTED) {
                     Text("Refresh caps")
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onRequestConsent,
+                    enabled = slice.state != ConnectionState.CONNECTED,
+                ) {
+                    Text("Request consent")
                 }
             }
             slice.error?.let {
