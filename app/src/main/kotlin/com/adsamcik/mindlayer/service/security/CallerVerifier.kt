@@ -73,8 +73,8 @@ object CallerVerifier {
 
     /**
      * F-031: resolve a [CallerIdentity] from a package name only. Used at
-     * approve-tap time to re-verify the live signing certificate against the
-     * sig pinned in the displayed [PendingApproval] row.
+     * consent-grant time to re-verify the live signing certificate against
+     * the sig captured when the consent challenge was issued.
      *
      * Returns `null` if the package is not installed, has no signing
      * certificate, or fails sig resolution. Does NOT consult the calling

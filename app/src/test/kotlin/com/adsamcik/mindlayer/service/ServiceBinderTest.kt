@@ -1035,10 +1035,10 @@ class ServiceBinderTest {
         }
     }
 
-    // ---- H2: allowlist before main rate-limit; rejection bucket caps recordPending
+    // ---- H2: allowlist before main rate-limit; rejection bucket caps logging
 
     @Test
-    fun `un-allowlisted UID hammered N times triggers bounded recordPending count`() {
+    fun `un-allowlisted UID hammered N times returns consent required without main rate limit`() {
         val store = mockk<AllowlistStore>(relaxed = true)
         every { store.isDenied(any(), any()) } returns false
         every { store.isAllowed(any(), any()) } returns false
@@ -1070,20 +1070,20 @@ class ServiceBinderTest {
         mockkStatic(android.os.Binder::class)
         every { android.os.Binder.getCallingUid() } returns externalUid
         try {
+            var rejectionCount = 0
             repeat(50) {
-                try { localBinder.getStatus() } catch (_: SecurityException) { /* expected */ }
+                try {
+                    localBinder.getStatus()
+                } catch (_: SecurityException) {
+                    rejectionCount++
+                }
             }
+            assertEquals(50, rejectionCount)
         } finally {
             io.mockk.unmockkStatic(android.os.Binder::class)
         }
 
-        // v0.10: there is no pending-approval inbox — authorizeCall never
-        // calls recordPending. The per-UID rejection bucket still bounds the
-        // rejection bookkeeping (log writes); the caller obtains access via
-        // the consent-Intent flow instead.
-        verify(exactly = 0) {
-            store.recordPending(any(), any(), any())
-        }
+        verify(atLeast = 1) { store.isAllowed("evil.app", "evilsig") }
     }
 
     // ---- H4-binder: engineWarming in getStatus ----------------------------
@@ -1165,8 +1165,6 @@ class ServiceBinderTest {
             }
             verify(exactly = 0) { mockRateLimiter.tryAcquire(1001, any()) }
             verify { mockRateLimiter.tryAcquireRejection(1001) }
-            // v0.10: no pending-approval inbox.
-            verify(exactly = 0) { mockAllowlist.recordPending(any(), any(), any()) }
         } finally {
             io.mockk.unmockkStatic(Binder::class)
         }

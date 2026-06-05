@@ -71,9 +71,6 @@ class ServiceBinderAuthorizationTest {
 
         verify { allowlist.isAllowed("first.time", "sig") }
         verify { rateLimiter.tryAcquireRejection(24_681) }
-        // v0.10: no pending-approval inbox. The caller obtains access via the
-        // consent-Intent flow, not a recorded pending row.
-        verify(exactly = 0) { allowlist.recordPending(any(), any(), any()) }
         verify(exactly = 0) { rateLimiter.tryAcquire(24_681, any()) }
     }
 

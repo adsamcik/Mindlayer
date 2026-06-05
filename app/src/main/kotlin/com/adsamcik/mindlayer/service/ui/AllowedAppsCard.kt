@@ -1,8 +1,5 @@
 package com.adsamcik.mindlayer.service.ui
 
-import android.content.Context
-import android.content.pm.PackageManager
-import android.os.Build
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -13,10 +10,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -42,15 +36,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.adsamcik.mindlayer.service.R
 import com.adsamcik.mindlayer.service.logging.LogRepository
-import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.security.AllowlistEntry
 import com.adsamcik.mindlayer.service.security.AllowlistStore
-import com.adsamcik.mindlayer.service.security.CertificateMismatchException
-import com.adsamcik.mindlayer.service.security.PendingApproval
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-
-private const val TAG = "AllowedAppsCard"
 
 /**
  * Formats a 64-char hex SHA-256 cert fingerprint into spaced 8-char groups
@@ -64,31 +53,11 @@ internal fun formatCertHash(sha: String): String {
     return sha.chunked(8).joinToString(" ")
 }
 
-/** Resolves the install source for [packageName], or returns a fallback string. */
-private fun resolveInstallSource(context: Context, packageName: String): String {
-    val pm = context.packageManager
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-        return context.getString(R.string.allowlist_install_source_unknown_old_api)
-    }
-    return try {
-        pm.getInstallSourceInfo(packageName).initiatingPackageName
-            ?: context.getString(R.string.allowlist_install_source_unknown)
-    } catch (_: PackageManager.NameNotFoundException) {
-        context.getString(R.string.allowlist_install_source_not_found)
-    } catch (_: SecurityException) {
-        context.getString(R.string.allowlist_install_source_permission_denied)
-    }
-}
-
 /**
- * Minimal dashboard section showing approved caller apps and pending
- * approval requests. Writes directly through an [AllowlistStore] bound to
- * the application context.
+ * Minimal dashboard section showing approved caller apps. Writes directly
+ * through an [AllowlistStore] bound to the application context.
  *
- * Sensitive Approve / Revoke actions are gated by [SensitiveActionAuthenticator]
- * (F-029) and the Approve flow re-verifies the live signing certificate at
- * tap time (F-031). Cert-rotation pending rows render a banner + "I understand"
- * confirmation gate (F-032).
+ * Sensitive Revoke actions are gated by [SensitiveActionAuthenticator] (F-029).
  */
 @Composable
 fun AllowedAppsCard(
@@ -105,14 +74,11 @@ fun AllowedAppsCard(
     onRevokeAidl: ((packageName: String) -> Unit)? = null,
 ) {
     val entries by store.entries.collectAsState()
-    val pending by store.pending.collectAsState()
     val ctx = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
 
-    // The :ml service process writes pending approvals into the shared file
-    // when an un-approved caller tries to connect. Our StateFlow only reflects
-    // what this process has written, so poll the file to surface cross-process
-    // updates in the dashboard UI.
+    // The :ml service process can write allowlist changes through AIDL.
+    // Poll the file so this process's StateFlow reflects cross-process updates.
     androidx.compose.runtime.LaunchedEffect(store) {
         while (true) {
             store.refresh()
@@ -131,84 +97,6 @@ fun AllowedAppsCard(
                 text = stringResource(R.string.allowed_apps_title),
                 style = MaterialTheme.typography.titleMedium,
             )
-
-            if (pending.isNotEmpty()) {
-                Text(
-                    text = stringResource(R.string.pending_approvals_count, pending.size),
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.tertiary,
-                )
-                pending.forEach { p ->
-                    PendingRow(
-                        entry = p,
-                        onApprove = {
-                            authenticator.authenticate(SensitiveAction.APPROVE_CALLER) { granted, _, _ ->
-                                if (!granted) return@authenticate
-                                scope.launch(Dispatchers.IO) {
-                                    try {
-                                        store.approve(
-                                            ctx,
-                                            p.packageName,
-                                            p.signingCertSha256,
-                                            p.displayName,
-                                        )
-                                        // F-032: distinct audit event when the
-                                        // user approves a sig rotation.
-                                        val action = if (p.previousSigSha256 == null) {
-                                            "approve"
-                                        } else {
-                                            "approve_after_cert_rotation"
-                                        }
-                                        logRepository?.logSecurityDecision(
-                                            action = action,
-                                            packageName = p.packageName,
-                                            sigShaPrefix = p.signingCertSha256.take(8),
-                                            extra = p.previousSigSha256?.take(8)?.let { "prev=$it" },
-                                        )
-                                    } catch (e: CertificateMismatchException) {
-                                        MindlayerLog.w(
-                                            TAG,
-                                            "Approve blocked: live sig changed for ${e.pkg}",
-                                        )
-                                        logRepository?.logSecurityDecision(
-                                            action = "approve_blocked_cert_mismatch",
-                                            packageName = e.pkg,
-                                            sigShaPrefix = e.expectedSig.take(8),
-                                            extra = "live=${e.liveSig.take(8)}",
-                                        )
-                                        store.refresh()
-                                    } catch (e: SecurityException) {
-                                        MindlayerLog.w(
-                                            TAG,
-                                            "Approve failed: ${e.javaClass.simpleName}",
-                                        )
-                                        logRepository?.logSecurityDecision(
-                                            action = "approve_blocked",
-                                            packageName = p.packageName,
-                                            sigShaPrefix = p.signingCertSha256.take(8),
-                                            extra = e.javaClass.simpleName,
-                                        )
-                                    }
-                                }
-                            }
-                        },
-                        onDeny = {
-                            authenticator.authenticate(SensitiveAction.REVOKE_CALLER) { granted, _, _ ->
-                                if (!granted) return@authenticate
-                                scope.launch(Dispatchers.IO) {
-                                    store.denyPending(p.packageName)
-                                    logRepository?.logSecurityDecision(
-                                        action = "deny_pending",
-                                        packageName = p.packageName,
-                                        sigShaPrefix = p.signingCertSha256.take(8),
-                                    )
-                                }
-                            }
-                        },
-                    )
-                }
-                HorizontalDivider()
-            }
 
             if (entries.isEmpty()) {
                 Text(
@@ -245,216 +133,6 @@ fun AllowedAppsCard(
             }
         }
     }
-}
-
-@Composable
-private fun PendingRow(
-    entry: PendingApproval,
-    onApprove: () -> Unit,
-    onDeny: () -> Unit,
-) {
-    var showDialog by rememberSaveable { mutableStateOf(false) }
-    val context = LocalContext.current
-
-    val installSource = remember(entry.packageName) {
-        resolveInstallSource(context, entry.packageName)
-    }
-
-    if (showDialog) {
-        ApproveConfirmDialog(
-            packageName = entry.packageName,
-            certHash = entry.signingCertSha256,
-            installSource = installSource,
-            onConfirm = {
-                showDialog = false
-                onApprove()
-            },
-            onDismiss = { showDialog = false },
-        )
-    }
-
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        // F-032: cert-rotation banner.
-        if (entry.previousSigSha256 != null) {
-            CertRotationBanner(
-                previousSig = entry.previousSigSha256,
-                newSig = entry.signingCertSha256,
-            )
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                // Package name is the authoritative primary identity.
-                Text(
-                    text = entry.packageName,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Bold,
-                )
-                if (entry.displayName != null) {
-                    Text(
-                        text = stringResource(R.string.allowlist_claims_to_be, entry.displayName),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Text(
-                    text = stringResource(R.string.allowlist_installed_from, installSource),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                SelectionContainer {
-                    Text(
-                        text = formatCertHash(entry.signingCertSha256),
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 10.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            ApproveDenyButtons(
-                isCertRotation = entry.previousSigSha256 != null,
-                onApprove = {
-                    if (entry.previousSigSha256 != null) {
-                        // Cert rotation: user already passed the "I understand" gate.
-                        onApprove()
-                    } else {
-                        showDialog = true
-                    }
-                },
-                onDeny = onDeny,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ApproveDenyButtons(
-    isCertRotation: Boolean,
-    onApprove: () -> Unit,
-    onDeny: () -> Unit,
-) {
-    // F-032: gate Approve behind an "I understand" tap when this is a
-    // signing-key rotation. Reset to ungated when the entry changes (because
-    // `remember` is keyed to the row's own composition).
-    var confirmed by remember(isCertRotation) { mutableStateOf(!isCertRotation) }
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        TextButton(onClick = onDeny) { Text(stringResource(R.string.allowlist_deny)) }
-        if (isCertRotation && !confirmed) {
-            TextButton(onClick = { confirmed = true }) {
-                Text(stringResource(R.string.allowlist_understand_signing_change))
-            }
-        } else {
-            OutlinedButton(
-                onClick = onApprove,
-                enabled = confirmed,
-                colors = if (isCertRotation) {
-                    ButtonDefaults.outlinedButtonColors(
-                        contentColor = MaterialTheme.colorScheme.error,
-                    )
-                } else {
-                    ButtonDefaults.outlinedButtonColors()
-                },
-            ) {
-                Text(if (isCertRotation) stringResource(R.string.allowlist_approve_replacement) else stringResource(R.string.allowlist_approve))
-            }
-        }
-    }
-}
-
-@Composable
-private fun CertRotationBanner(previousSig: String, newSig: String) {
-    Surface(
-        color = MaterialTheme.colorScheme.errorContainer,
-        shape = MaterialTheme.shapes.small,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(
-            modifier = Modifier.padding(8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Text(
-                text = stringResource(R.string.allowlist_signing_key_changed),
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onErrorContainer,
-            )
-            Text(
-                text = stringResource(R.string.allowlist_signing_key_changed_body),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onErrorContainer,
-            )
-            Text(
-                text = stringResource(R.string.allowlist_previous_sig, previousSig.uppercase().take(16)),
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onErrorContainer,
-            )
-            Text(
-                text = stringResource(R.string.allowlist_new_sig, newSig.uppercase().take(16)),
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onErrorContainer,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ApproveConfirmDialog(
-    packageName: String,
-    certHash: String,
-    installSource: String,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.allowlist_approve_access_title)) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = stringResource(R.string.allowlist_spoof_warning),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Text(text = stringResource(R.string.allowlist_package_label), style = MaterialTheme.typography.labelMedium)
-                SelectionContainer {
-                    Text(
-                        text = packageName,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
-                    )
-                }
-                Text(text = stringResource(R.string.allowlist_signing_fingerprint_label), style = MaterialTheme.typography.labelMedium)
-                SelectionContainer {
-                    Text(
-                        text = formatCertHash(certHash),
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 10.sp,
-                    )
-                }
-                Text(text = stringResource(R.string.allowlist_install_source, installSource), style = MaterialTheme.typography.bodySmall)
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = onConfirm,
-                colors = ButtonDefaults.textButtonColors(
-                    contentColor = MaterialTheme.colorScheme.error,
-                ),
-            ) {
-                Text(stringResource(R.string.allowlist_approve_package, packageName))
-            }
-        },
-    )
 }
 
 @Composable

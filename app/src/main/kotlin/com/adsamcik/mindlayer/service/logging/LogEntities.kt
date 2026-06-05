@@ -110,7 +110,6 @@ enum class LogEvent(val key: String) {
     // Security
     SECURITY_DECISION("security_decision"),
     RATE_LIMIT_REJECT("rate_limit_reject"),
-    ALLOWLIST_PENDING_RECORDED("allowlist_pending_recorded"),
     BINDER_DEATH_CLIENT("binder_death_client"),
     BINDER_DEATH_SELF("binder_death_self"),
     CRASH_LOOP_THROTTLE("crash_loop_throttle");

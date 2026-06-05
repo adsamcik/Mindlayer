@@ -179,10 +179,6 @@ class MindlayerMlService : Service() {
         logRepository = LogRepository(logDb.logDao())
 
         val allowlistStore = AllowlistStore(this, logRepository = logRepository)
-        // v0.10 consent migration: drop the legacy pending-approval inbox
-        // (the consent-Intent flow replaces it). Existing approved entries
-        // are preserved. See docs/CONSENT_ARCHITECTURE.md § Migration.
-        allowlistStore.discardLegacyPending()
 
         engineManager = EngineManager(this, logRepository)
         memoryBudget = MemoryBudget(this, serviceScope, logRepository)

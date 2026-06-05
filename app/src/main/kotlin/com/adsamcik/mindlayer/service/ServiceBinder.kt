@@ -319,8 +319,8 @@ class ServiceBinder(
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_BOUNDING_BOXES,
             // Phase 3 #8 (p3-health-check): lightweight ping() endpoint
             // returning a HealthCheck parcelable. Bypasses the allowlist
-            // gate and charges zero rate-limit cost; co-signed peers in
-            // pending-approval can use it for liveness probes.
+            // gate and charges zero rate-limit cost; unconsented peers can
+            // use it for liveness probes.
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_HEALTH_CHECK,
             // Single-clip audio input. The transport (FEATURE_SHARED_MEMORY_MEDIA)
             // and the multi-attachment shape (FEATURE_MEDIA_LIST) are
@@ -381,11 +381,9 @@ class ServiceBinder(
      * would self-deny (never user-approved) and self-rate-limit (polling
      * 3 RPCs every 2s = 90 RPM > default 60 RPM).
      *
-     * **Order matters** (H2): rate-limit BEFORE allowlist so an un-approved
-     * caller cannot drive unbounded `recordPending` disk I/O simply by
-     * spamming the binder. The rejection-bookkeeping path is further
-     * throttled by [RateLimiter.tryAcquireRejection] — only ~6 rejections
-     * per minute per UID actually call `recordPending`.
+     * **Order matters**: identity and allowlist are checked before the main
+     * request bucket. Unconsented callers receive CONSENT_REQUIRED and only
+     * the rejection logging path is throttled by [RateLimiter.tryAcquireRejection].
      */
     private fun authorizeCall(): CallerIdentity = authorizeCall(cost = 1.0)
 
@@ -450,7 +448,7 @@ class ServiceBinder(
             )
         }
         if (!store.isAllowed(identity.packageName, identity.signingCertSha256)) {
-                // v0.10: there is no pending-approval inbox. An un-consented
+                // v0.10: there is no legacy approval inbox. An unconsented
                 // caller obtains access via the consent-Intent flow
                 // (Mindlayer.connect → ConsentRequired → ConsentActivity).
                 // We still rate-limit the rejection bookkeeping so a flooder
@@ -469,8 +467,7 @@ class ServiceBinder(
 
         // 2. Rate-limit only callers that have cleared identity + allowlist.
         //    Rejected callers are separately bounded by tryAcquireRejection()
-        //    around recordPending above, preserving first-run approval
-        //    discovery even though main buckets start empty.
+        //    so rejection logging cannot flood the local audit trail.
         if (!rateLimiter.tryAcquire(uid, cost)) {
             logRepository?.logRateLimitReject(callerAidlMethodName(), uid, cost)
             MindlayerLog.w(TAG, "Rate limit exceeded for ${identity.packageName} (uid=$uid)")
@@ -2315,9 +2312,8 @@ class ServiceBinder(
 
     override fun getCapabilities(): com.adsamcik.mindlayer.ServiceCapabilities {
         // Cheap probe — quarter-cost so first-launch handshake doesn't burn
-        // budget. Still gated by authorizeCall so un-approved peers go
-        // through the standard pending-approval path rather than getting a
-        // free fingerprinting endpoint.
+        // budget. Still gated by authorizeCall so unapproved peers receive
+        // CONSENT_REQUIRED rather than getting a free fingerprinting endpoint.
         authorizeCall(cost = 0.25)
         val coord = embeddingCoordinator
         // FEATURE_EMBEDDINGS is conditional on TWO independent signals:
@@ -2977,9 +2973,9 @@ class ServiceBinder(
     //
     //  Lightweight liveness probe. Deliberately BYPASSES authorizeCall
     //  (no allowlist gate) so:
-    //    - co-signed peers in pending-approval can confirm the service
-    //      is alive without bumping their pending-approval rate-limit
-    //      bucket; it is separately capped by a ping-only token bucket;
+    //    - unconsented peers can confirm the service is alive without
+    //      bumping the main request bucket; it is separately capped by a
+    //      pre-consent ping-only token bucket;
     //    - the dashboard can poll cheaply for an in-process indicator;
     //    - watchdog probes don't compete with real inference for the
     //      caller's rate budget.

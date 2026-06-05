@@ -67,31 +67,6 @@ class OptionalSecurityHardeningIntegrationTest {
         unmockkAll()
     }
 
-    @Test
-    fun `pending approval written by service store is approved by dashboard store and authorizes service store`() {
-        val serviceStore = AllowlistStore(appContext, allowlistDirName)
-        val dashboardStore = AllowlistStore(appContext, allowlistDirName)
-
-        serviceStore.recordPending(
-            pkg = "com.adsamcik.firstparty.client",
-            sigSha256 = "abc123",
-            displayName = "First-party Client",
-        )
-
-        val pending = dashboardStore.listPending()
-        assertEquals(1, pending.size)
-        assertEquals("com.adsamcik.firstparty.client", pending.single().packageName)
-        assertEquals("First-party Client", pending.single().displayName)
-
-        dashboardStore.approveDirect(
-            pkg = pending.single().packageName,
-            sigSha256 = pending.single().signingCertSha256,
-            displayName = pending.single().displayName,
-        )
-
-        assertTrue(serviceStore.isAllowed("com.adsamcik.firstparty.client", "abc123"))
-        assertTrue(serviceStore.listPending().isEmpty())
-    }
 
     @Test
     fun `tampered shared allowlist blocks service store until dashboard reapproves`() {

@@ -58,12 +58,10 @@ class RateLimiter(
     private val buckets = ConcurrentHashMap<Int, Bucket>()
 
     /**
-     * F-033: separate token bucket for callers that fail identity / allowlist.
-     * Consulted BEFORE [AllowlistStore.recordPending] so a hostile caller
-     * cannot saturate FileLock+disk by repeatedly tripping the gate. Capacity
-     * is small ([DEFAULT_REJECT_RPM] tokens/minute) and isolated from the
-     * normal-traffic bucket so legitimate callers never share quota with a
-     * flooding attacker on the same UID.
+     * Separate token bucket for callers that fail identity / allowlist.
+     * Capacity is small ([DEFAULT_REJECT_RPM] tokens/minute) and isolated
+     * from the normal-traffic bucket so legitimate callers never share quota
+     * with a flooding attacker on the same UID.
      */
     private val rejectedBuckets = ConcurrentHashMap<Int, Bucket>()
     private val pingBuckets = ConcurrentHashMap<Int, Bucket>()
@@ -199,8 +197,7 @@ class RateLimiter(
     /**
      * Secondary bucket used to throttle the cost of REJECTING un-allowlisted
      * callers. A separate, smaller-capacity bucket so that an attacker
-     * spamming allowlist misses cannot trigger unbounded `recordPending`
-     * disk I/O / log writes via [com.adsamcik.mindlayer.service.security.AllowlistStore].
+     * spamming allowlist misses cannot trigger unbounded rejection log writes.
      *
      * Returns true if a "we'll do the expensive rejection bookkeeping"
      * token was available; false means swallow the rejection silently.
@@ -340,9 +337,8 @@ class RateLimiter(
         val now = timeSource()
         // F-027 refinement: same one-token grant policy as the main bucket
         // applies to the rejected-callers bucket too — a brand-new unknown
-        // caller gets exactly one bookkeeping action (so its first
-        // `recordPending` lands), but cannot burst the disk-I/O budget on
-        // cold start.
+        // caller gets exactly one rejection-log opportunity, but cannot burst
+        // the local audit trail on cold start.
         val grant = initialFirstCallTokens.coerceIn(0.0, maxRejectedPerMinute.toDouble())
         return Bucket(capacity = maxRejectedPerMinute.toDouble(), initialTokens = grant).also {
             it.lastRefillMs = now

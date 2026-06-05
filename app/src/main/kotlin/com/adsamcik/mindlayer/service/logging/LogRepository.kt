@@ -479,7 +479,7 @@ class LogRepository(
     }
 
     /**
-     * Log a security decision (approve / deny / revoke / pending). Persists
+     * Log a security decision (approve / deny / revoke). Persists
      * package + signing-cert SHA prefix so an audit trail exists for the
      * dashboard, addressing SECURITY_REVIEW F-056.
      */
@@ -556,19 +556,6 @@ class LogRepository(
                 put("method", method)
                 put("uid", uid)
                 put("cost", cost)
-            },
-        ))
-    }
-
-    fun logAllowlistPendingRecorded(uid: Int, packageName: String, sigShaPrefix: String) {
-        log(LogEntry(
-            timestampMs = System.currentTimeMillis(),
-            category = LogCategory.SECURITY,
-            event = LogEvent.ALLOWLIST_PENDING_RECORDED.key,
-            extraJson = logExtraJson {
-                put("uid", uid)
-                put("pkg", packageName)
-                put("sigPrefix", sigShaPrefix)
             },
         ))
     }

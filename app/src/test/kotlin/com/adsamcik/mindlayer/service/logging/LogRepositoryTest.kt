@@ -416,7 +416,6 @@ class LogRepositoryTest {
     fun `new observability builders write expected structured events`() = runTest {
         repo.logRequestCancel("req-cancel", "sess-cancel")
         repo.logRateLimitReject("infer", uid = 42, cost = 1.5, requestId = "req-rate", sessionId = "sess-rate")
-        repo.logAllowlistPendingRecorded(uid = 43, packageName = "com.example.app", sigShaPrefix = "abcdef123456")
         repo.logFgsPromoted(activeInferenceCount = 1)
         repo.logFgsDemoted(activeInferenceCount = 0)
         repo.logBackendSwitch("GPU", "CPU", "complete")
@@ -434,7 +433,6 @@ class LogRepositoryTest {
 
         assertEquals(LogCategory.INFERENCE, byEvent.getValue(LogEvent.REQUEST_CANCEL.key).category)
         assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.RATE_LIMIT_REJECT.key).category)
-        assertEquals(LogCategory.SECURITY, byEvent.getValue(LogEvent.ALLOWLIST_PENDING_RECORDED.key).category)
         assertEquals(LogCategory.ENGINE, byEvent.getValue(LogEvent.FGS_PROMOTED.key).category)
         assertEquals(LogCategory.ENGINE, byEvent.getValue(LogEvent.FGS_DEMOTED.key).category)
         assertEquals(LogCategory.ENGINE, byEvent.getValue(LogEvent.BACKEND_SWITCH.key).category)

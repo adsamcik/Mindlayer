@@ -31,27 +31,9 @@ data class AllowlistEntry(
 )
 
 /**
- * Pending caller-approval row.
- *
- * - [previousSigSha256] (F-032): set when a package previously approved
- *   under a *different* signing certificate is now requesting approval again
- *   with a new sig. Triggers the cert-rotation banner in the UI. `null`
- *   means first-time approval (no prior trust). The field is additive in
- *   `pending.json` (`prevSig`) and round-trips via `optString` reads, so
- *   older on-disk files remain compatible.
- */
-data class PendingApproval(
-    val packageName: String,
-    val signingCertSha256: String,
-    val firstRequestedAtMs: Long,
-    val displayName: String? = null,
-    val previousSigSha256: String? = null,
-)
-
-/**
  * Thrown by [AllowlistStore.approve] when the live signing certificate for
- * the target package no longer matches the sig the user saw in the dashboard
- * row. F-031 — closes the TOCTOU window between display and tap.
+ * the target package no longer matches the sig captured for approval.
+ * F-031 — closes the TOCTOU window between display and grant.
  */
 class CertificateMismatchException(
     val pkg: String,
@@ -63,18 +45,15 @@ class CertificateMismatchException(
 )
 
 /**
- * A package that was explicitly denied (via [AllowlistStore.denyPending]) or
- * revoked (via [AllowlistStore.revoke]). Suppresses re-creation of pending
- * entries and re-seeding by [AllowlistStore.seedIfEmpty] until [expiresAtMs].
+ * A package that was explicitly denied via the consent flow or revoked via
+ * [AllowlistStore.revoke]. While [expiresAtMs] is in the future, the caller is
+ * blocked from receiving a fresh consent challenge or using existing service
+ * access.
  *
  * If [permanent] is `true`, the entry is treated as a sticky tombstone of an
- * explicit user revoke: it is never pruned by expiry and survives [seedIfEmpty]
- * forever. This closes a re-admission window where the 7-day cooldown on
- * `revoke()` would otherwise expire and let a future seed silently re-add the
- * revoked package after an app-data clear or DB-corruption-driven re-init.
- * For persistence/back-compat, permanent entries set [expiresAtMs] to
- * [Long.MAX_VALUE] so older readers that ignore the `permanent` field still
- * treat them as "never expires".
+ * explicit user decision: it is never pruned by expiry. For persistence and
+ * back-compat, permanent entries set [expiresAtMs] to [Long.MAX_VALUE] so older
+ * readers that ignore the `permanent` field still treat them as "never expires".
  */
 data class DeniedEntry(
     val packageName: String,
@@ -114,8 +93,8 @@ data class DeniedEntry(
  * `filesDir` and re-reads the file on every [isAllowed] check (the hot path
  * for external callers is at most 60 RPM by default, so disk cost is
  * negligible). Writes are serialised across processes with a [FileLock] on a
- * sidecar `.lock` file. The [entries] / [pending] StateFlows are maintained
- * per-process for UI observation and refreshed via [refresh].
+ * sidecar `.lock` file. The [entries] StateFlow is maintained per-process
+ * for UI observation and refreshed via [refresh].
  */
 class AllowlistStore(
     context: Context,
@@ -127,7 +106,6 @@ class AllowlistStore(
         it.mkdirs()
     }
     private val entriesFile: File = File(baseDir, "entries.json")
-    private val pendingFile: File = File(baseDir, "pending.json")
     private val deniedFile: File = File(baseDir, "denied.json")
     private val lockFile: File = File(baseDir, "allowlist.lock")
     private val hmacKeyFile: File = File(baseDir, "allowlist.hmac")
@@ -151,7 +129,7 @@ class AllowlistStore(
      * process — e.g. test fixtures that recreate the store with a fresh
      * temp dir — get independent mutexes and don't false-share. The
      * outer mutex is a [ReentrantLock] so a single thread can still
-     * legitimately re-enter (e.g. [revoke] -> [recordPending]).
+     * legitimately re-enter (e.g. [revoke] -> [writeDenied] -> [readSignedArray]).
      */
     private val processLock: ReentrantLock =
         PROCESS_LOCKS.computeIfAbsent(lockFile.absolutePath) { ReentrantLock() }
@@ -163,33 +141,21 @@ class AllowlistStore(
      * [loadOrCreateHmacKey] uses this depth to skip the inner lock acquisition when
      * it is invoked transitively from code that already holds the lock.
      *
-     * Must be declared before [_entries] / [_pending] so it is initialised before
-     * the property initialisers call [readEntries] / [readPending], which transitively
-     * call [loadOrCreateHmacKey].
+     * Must be declared before [_entries] so it is initialised before the
+     * property initialiser calls [readEntries], which transitively calls
+     * [loadOrCreateHmacKey].
      */
     private val fileLockDepth = ThreadLocal.withInitial { 0 }
 
     private val _entries = MutableStateFlow(readEntries())
     val entries: StateFlow<List<AllowlistEntry>> = _entries.asStateFlow()
 
-    private val _pending = MutableStateFlow(readPending())
-    val pending: StateFlow<List<PendingApproval>> = _pending.asStateFlow()
-
     init {
         withFileLock {
             migrateLegacyArray(entriesFile, ENTRIES_KEY)
-            migrateLegacyArray(pendingFile, PENDING_KEY)
         }
         refresh()
     }
-
-    /**
-     * F-033: per-process in-memory dedup keyed by `(pkg, sig)`. A hostile
-     * caller that already has a pending row should not be able to re-acquire
-     * the FileLock + re-fsync the JSON on every blocked request. Lives only
-     * in `:ml` (the dashboard process never calls [recordPending]).
-     */
-    private val recentPendingDedup = ConcurrentHashMap<DedupKey, Long>()
 
     /**
      * Fast path — always reads from disk so a dashboard approval in the main
@@ -203,30 +169,9 @@ class AllowlistStore(
 
     fun list(): List<AllowlistEntry> = readEntries().also { _entries.value = it }
 
-    @Deprecated("v0.10: the pending-approval inbox is replaced by the consent-Intent flow.")
-    fun listPending(): List<PendingApproval> = readPending().also { _pending.value = it }
-
-    /**
-     * v0.10 consent migration: discard the legacy `pending.json` inbox. The
-     * consent-Intent flow (`ConsentChallengeStore` + `ConsentActivity`)
-     * replaces the dashboard pending-approval list, so any rows left over
-     * from a pre-v0.10 install are deleted on first launch. Approved
-     * (`entries.json`) and denied (`denied.json`) state are preserved.
-     * Idempotent.
-     */
-    fun discardLegacyPending() {
-        withFileLock {
-            if (pendingFile.exists()) {
-                try { pendingFile.delete() } catch (_: Throwable) { }
-            }
-            _pending.value = emptyList()
-        }
-    }
-
-    /** Re-read both files and update the StateFlows. Call this in dashboard pollers. */
+    /** Re-read approved entries and update the StateFlow. Call this in dashboard pollers. */
     fun refresh() {
         _entries.value = readEntries()
-        _pending.value = readPending()
     }
 
     /**
@@ -331,18 +276,6 @@ class AllowlistStore(
             AllowlistEntry(pkg, sigSha256, now, displayName)
         writeEntries(updated)
         _entries.value = updated
-
-        // F-031: only remove the matching pending row. Sig-swap pending rows
-        // (a different sig on the same pkg) are kept so the user can still
-        // see them in the dashboard.
-        val pendingUpdated = readPending().filterNot {
-            it.packageName == pkg && it.signingCertSha256.equals(sigSha256, ignoreCase = true)
-        }
-        writePending(pendingUpdated)
-        _pending.value = pendingUpdated
-        // Drop any dedup entries for this pkg — a fresh approval cycle
-        // should be observable again.
-        recentPendingDedup.keys.removeIf { it.pkg == pkg }
     }
 
     fun revoke(pkg: String) {
@@ -354,13 +287,10 @@ class AllowlistStore(
             _entries.value = updated
 
             // Persist a *permanent* denial: explicit user revoke is a sticky
-            // decision, not a 7-day cooldown like denyPending. Without this,
-            // a future seedIfEmpty (after app-data clear or DB-corruption
-            // re-init) could silently re-admit the revoked package once the
-            // old DENIAL_TTL_MS had elapsed. permanent=true tells the writer
-            // to skip the expiry-pruning step; we also pin expiresAtMs to
-            // Long.MAX_VALUE so older readers that ignore the `permanent`
-            // field still treat the row as "never expires".
+            // decision. permanent=true tells the writer to skip the
+            // expiry-pruning step; we also pin expiresAtMs to Long.MAX_VALUE
+            // so older readers that ignore the `permanent` field still treat
+            // the row as "never expires".
             val now = System.currentTimeMillis()
             val deniedUpdated = readDeniedIncludingExpired().filterNot { it.packageName == pkg } +
                 DeniedEntry(
@@ -371,105 +301,6 @@ class AllowlistStore(
                     permanent = true,
                 )
             writeDenied(deniedUpdated)
-        }
-    }
-
-    /**
-     * Record a caller that attempted to connect but is not on the allowlist.
-     * Used by the dashboard UI so the user can approve/deny.
-     *
-     * F-031: append-only across cert mismatches — if a previously-pending
-     * package now requests approval with a *different* sig, both rows are
-     * kept so the user can see the sig change.
-     *
-     * F-032: the new row carries [PendingApproval.previousSigSha256] when an
-     * already-approved entry exists for the same package under a different
-     * sig — the UI uses that to render the cert-rotation banner.
-     *
-     * F-033: short-circuits via an in-memory dedup TTL keyed by `(pkg, sig)`
-     * so a hammering caller does not even reacquire the FileLock; capped at
-     * [MAX_PENDING_ROWS] (FIFO) to bound on-disk growth.
-     *
-     * Silently ignored if [pkg] is within its denial TTL or if [pkg] exceeds [MAX_PACKAGE_NAME_LENGTH].
-     */
-    fun recordPending(pkg: String, sigSha256: String, displayName: String? = null) {
-        if (pkg.length > MAX_PACKAGE_NAME_LENGTH) return
-        val key = DedupKey(pkg, sigSha256.lowercase())
-        val now = System.currentTimeMillis()
-        val prev = recentPendingDedup[key]
-        if (prev != null && now - prev < DEDUP_TTL_MS) return
-        recentPendingDedup[key] = now
-        if (recentPendingDedup.size > DEDUP_MAP_SOFT_CAP) {
-            recentPendingDedup.entries.removeIf { now - it.value > DEDUP_TTL_MS }
-        }
-
-        withFileLock {
-            // Suppress if the package is within its denial TTL.
-            val denied = readDenied()
-            if (denied.any {
-                    it.packageName == pkg &&
-                        it.signingCertSha256.equals(sigSha256, ignoreCase = true) &&
-                        it.expiresAtMs > now
-                }) {
-                return@withFileLock
-            }
-
-            // F-054 (related): re-check entries.json under the lock — if the
-            // pkg is already approved with this sig, skip writing a pending
-            // row at all.
-            val approved = readEntries().firstOrNull { it.packageName == pkg }
-            if (approved != null && approved.signingCertSha256.equals(sigSha256, ignoreCase = true)) {
-                return@withFileLock
-            }
-
-            val current = readPending()
-            // Exact dup — same (pkg, sig) already pending — no-op.
-            if (current.any {
-                    it.packageName == pkg &&
-                        it.signingCertSha256.equals(sigSha256, ignoreCase = true)
-                }
-            ) {
-                return@withFileLock
-            }
-
-            // F-032: was this pkg previously approved under a different sig?
-            val prevSig = approved
-                ?.signingCertSha256
-                ?.takeIf { !it.equals(sigSha256, ignoreCase = true) }
-
-            // F-031 + F-033: append (no overwrite of prior sig rows for this
-            // pkg) and FIFO-cap at MAX_PENDING_ROWS.
-            val sanitized = CallerVerifier.sanitizeLabel(displayName)
-            val appended = current + PendingApproval(
-                packageName = pkg,
-                signingCertSha256 = sigSha256,
-                firstRequestedAtMs = now,
-                displayName = sanitized,
-                previousSigSha256 = prevSig,
-            )
-            val capped = if (appended.size > MAX_PENDING_ROWS) {
-                appended.subList(appended.size - MAX_PENDING_ROWS, appended.size)
-            } else {
-                appended
-            }
-            writePending(capped)
-            _pending.value = capped
-        }
-    }
-
-    fun denyPending(pkg: String) {
-        withFileLock {
-            val current = readPending()
-            val entry = current.firstOrNull { it.packageName == pkg } ?: return@withFileLock
-            // Persist the denial with TTL so re-trigger is suppressed.
-            val now = System.currentTimeMillis()
-            val deniedUpdated = readDenied().filterNot { it.packageName == pkg } +
-                DeniedEntry(pkg, entry.signingCertSha256, now, now + DENIAL_TTL_MS)
-            writeDenied(deniedUpdated)
-            val updatedPending = current.filterNot { it.packageName == pkg }
-            writePending(updatedPending)
-            _pending.value = updatedPending
-            recentPendingDedup.keys.removeIf { it.pkg == pkg }
         }
     }
 
@@ -645,26 +476,12 @@ class AllowlistStore(
         atomicWrite(entriesFile, signedEnvelope(ENTRIES_KEY, array).toString())
     }
 
-    private fun writePending(list: List<PendingApproval>) {
-        val array = JSONArray()
-        for (e in list.sortedBy { it.packageName }) {
-            array.put(JSONObject().apply {
-                put("pkg", e.packageName)
-                put("sig", e.signingCertSha256)
-                put("firstRequestedAtMs", e.firstRequestedAtMs)
-                e.displayName?.let { put("displayName", it) }
-                e.previousSigSha256?.let { put("prevSig", it) }
-            })
-        }
-        atomicWrite(pendingFile, signedEnvelope(PENDING_KEY, array).toString())
-    }
-
     private fun writeDenied(list: List<DeniedEntry>) {
         val now = System.currentTimeMillis()
         // Permanent rows (set by revoke() / consent "Block permanently") are
         // never pruned by expiry — they are sticky tombstones of an explicit
-        // user decision. Time-bounded rows from denyPending /
-        // consent "Deny for 24h" still expire at expiresAtMs.
+        // user decision. Time-bounded rows from consent "Deny for 24h"
+        // still expire at expiresAtMs.
         val pruned = list.filter { it.permanent || it.expiresAtMs > now }
         val array = JSONArray()
         for (e in pruned.sortedBy { it.packageName }) {
@@ -771,30 +588,6 @@ class AllowlistStore(
         }
     }
 
-    private fun readPending(): List<PendingApproval> {
-        val array = readSignedArray(pendingFile, PENDING_KEY) ?: return emptyList()
-        return try {
-            buildList(array.length()) {
-                for (i in 0 until array.length()) {
-                    val o = array.getJSONObject(i)
-                    add(
-                        PendingApproval(
-                            packageName = o.getString("pkg"),
-                            signingCertSha256 = o.getString("sig"),
-                            firstRequestedAtMs = o.optLong("firstRequestedAtMs", 0L),
-                            displayName = o.optString("displayName").ifEmpty { null },
-                            previousSigSha256 = o.optString("prevSig").ifEmpty { null },
-                        )
-                    )
-                }
-            }
-        } catch (_: Throwable) {
-            emptyList()
-        }
-    }
-
-    private data class DedupKey(val pkg: String, val sig: String)
-
     private fun readDeniedIncludingExpired(): List<DeniedEntry> {
         if (!deniedFile.exists()) return emptyList()
         if (!isRegularFileForRead(deniedFile)) return emptyList()
@@ -858,7 +651,7 @@ class AllowlistStore(
      * Parse a [DenialScope] from its serialized name. Empty / absent is
      * treated as [DenialScope.CERT_PAIR] — that is the v2→v3 migration
      * default for legacy denied entries that pre-date the scope field
-     * (legacy denyPending / revoke always wrote a cert-pair denial).
+     * (legacy revokes always wrote a cert-pair denial).
      * Unknown future values fall back to [DenialScope.CERT_PAIR] (the
      * narrower scope) so a corrupted or forged scope cannot widen a
      * denial into a package-wide block.
@@ -906,8 +699,8 @@ class AllowlistStore(
      * trusted — that's a forgery primitive for an offline attacker who could
      * write to the data dir between releases (see security audit M7). New
      * behaviour: rename the file to `.legacy-rejected-<ts>` so the user must
-     * re-approve callers via the dashboard. The renamed file is preserved for
-     * forensic inspection but never read by the runtime.
+     * grant consent again. The renamed file is preserved for forensic
+     * inspection but never read by the runtime.
      */
     private fun migrateLegacyArray(file: File, arrayKey: String) {
         if (!file.exists()) return
@@ -919,7 +712,7 @@ class AllowlistStore(
         val renamed = File(file.parentFile, "${file.name}.legacy-rejected-$ts")
         try {
             if (file.renameTo(renamed)) {
-                MindlayerLog.w(TAG, "Renamed unsigned legacy allowlist ${file.name} to ${renamed.name}; user must re-approve callers")
+                MindlayerLog.w(TAG, "Renamed unsigned legacy allowlist ${file.name} to ${renamed.name}; user must re-consent callers")
             } else {
                 file.delete()
                 MindlayerLog.w(TAG, "Deleted unsigned legacy allowlist ${file.name} (rename failed)")
@@ -940,7 +733,7 @@ class AllowlistStore(
     /**
      * Build the canonical pre-image used for HMAC. Includes the file [version]
      * and [arrayKey] as a domain separator so a v1-signed entries blob can NOT
-     * be replayed as v2/pending/denied. See [readSignedArray] for the verifier
+     * be replayed as v2/denied. See [readSignedArray] for the verifier
      * that reconstructs this.
      */
     private fun canonicalPayload(version: Int, arrayKey: String, array: JSONArray): String =
@@ -952,7 +745,6 @@ class AllowlistStore(
                 val item = array.getJSONObject(i)
                 when (arrayKey) {
                     ENTRIES_KEY -> appendCanonicalEntry(item, timestampKey = "grantedAtMs", version)
-                    PENDING_KEY -> appendCanonicalEntry(item, timestampKey = "firstRequestedAtMs", version)
                     DENIED_KEY -> appendCanonicalDenied(item, version)
                     else -> throw IllegalArgumentException("Unknown allowlist array key: $arrayKey")
                 }
@@ -1030,7 +822,7 @@ class AllowlistStore(
      * Caching is intentionally omitted so that a corrupt key file is detected on
      * every call — once the file is quarantined and a new key generated, subsequent
      * HMAC verifications against entries signed with the old key will correctly fail,
-     * signalling that callers must be re-approved (audit H8 / M15).
+     * signalling that callers must grant consent again (audit H8 / M15).
      */
     private fun loadOrCreateHmacKey(): ByteArray =
         if ((fileLockDepth.get() ?: 0) > 0) readOrCreateHmacKeyLocked()
@@ -1089,22 +881,6 @@ class AllowlistStore(
          */
         private val PROCESS_LOCKS = ConcurrentHashMap<String, ReentrantLock>()
 
-        /**
-         * F-033: cap pending-approval rows to bound disk growth on a flooder.
-         * FIFO eviction: oldest rows fall off first, so a real user-initiated
-         * pending request stays at the top of the list.
-         */
-        const val MAX_PENDING_ROWS = 32
-
-        /** Alias retained for source-compat with security tests. */
-        const val MAX_PENDING = MAX_PENDING_ROWS
-
-        /** F-033: in-memory dedup TTL. Per-process; lives in `:ml`. */
-        @VisibleForTesting
-        internal const val DEDUP_TTL_MS: Long = 30_000L
-
-        private const val DEDUP_MAP_SOFT_CAP = 256
-
         // Bumped to 3 when DeniedEntry gained scope (v0.10
         // consent-architecture: cert-pair vs package-wide denial scopes)
         // and the canonical denied-entry payload was extended to include
@@ -1115,8 +891,8 @@ class AllowlistStore(
         // Bumped to 2 previously when canonicalPayload was changed to
         // include version+arrayKey domain separator (audit M6).
         //
-        // Entry shape (ENTRIES_KEY / PENDING_KEY) is unchanged in v3 —
-        // v2 entries read back as v3 without migration. Verifier accepts
+        // Entry shape (ENTRIES_KEY) is unchanged in v3 — v2 entries read
+        // back as v3 without migration. Verifier accepts
         // MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION so legacy v2 files
         // still verify; canonicalPayload() is version-aware so the v3
         // pre-image picks up the new denied fields only when the file
@@ -1124,17 +900,12 @@ class AllowlistStore(
         private const val SIGNED_FILE_VERSION = 3
         private const val MIN_SUPPORTED_VERSION = 2
         private const val ENTRIES_KEY = "entries"
-        private const val PENDING_KEY = "pending"
         private const val DENIED_KEY = "denied"
         private const val MAC_KEY = "mac"
         private const val HMAC_ALGORITHM = "HmacSHA256"
         private const val HMAC_KEY_BYTES = 32
         private val HEX_SHA256 = Regex("(?i)^[0-9a-f]{64}$")
 
-        // Anti-DoS caps for the pending list (audit H2/F-B-O-1).
-        const val MAX_PACKAGE_NAME_LENGTH = 255
-        // Length of denial cooldown after denyPending / revoke (audit M8).
-        const val DENIAL_TTL_MS = 7L * 24 * 60 * 60 * 1000
         /** v0.10: TTL for the "Deny for 24 hours" consent decision. */
         const val DENY_24H_TTL_MS = 24L * 60 * 60 * 1000
     }

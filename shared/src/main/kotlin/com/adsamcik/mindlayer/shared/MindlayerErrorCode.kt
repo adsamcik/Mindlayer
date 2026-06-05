@@ -267,19 +267,6 @@ object MindlayerErrorCode {
     // ---- 6xxx auth / allowlist ---------------------------------------------
 
     /**
-     * Legacy: app not on the allowlist; user approval pending in the
-     * dashboard. The v0.10 consent-Intent architecture replaces the
-     * pending-approval inbox; new code emits [CONSENT_REQUIRED] instead.
-     * Kept here for wire-decode compatibility with older SDK builds.
-     */
-    @Deprecated(
-        "Legacy code; pre-v0.10 dashboard pending-approval flow. " +
-            "Use CONSENT_REQUIRED for the v0.10 consent-Intent flow.",
-        ReplaceWith("CONSENT_REQUIRED"),
-    )
-    const val ALLOWLIST_PENDING = 6001
-
-    /**
      * App approval was revoked; user must re-consent. Still emitted as the
      * **eviction / cancellation reason code** when `revokeApp` or a
      * permanent block tears down a caller's in-flight sessions
@@ -373,7 +360,6 @@ object MindlayerErrorCode {
         FRAME_DROPPED_BUSY, FRAME_REJECTED_QUALITY,
         FEATURE_NOT_SUPPORTED, SERVICE_UNAVAILABLE, CONNECT_TIMEOUT,
         PROTOCOL_VIOLATION -> Category.RESOURCE
-        @Suppress("DEPRECATION") ALLOWLIST_PENDING,
         ALLOWLIST_REVOKED,
         IDENTITY_UNKNOWN, PERMISSION_DENIED,
         CONSENT_REQUIRED, CONSENT_DENIED -> Category.AUTH
@@ -431,7 +417,6 @@ object MindlayerErrorCode {
         PROTOCOL_VIOLATION -> "PROTOCOL_VIOLATION"
         UNSUPPORTED_ANDROID_VERSION -> "UNSUPPORTED_ANDROID_VERSION"
         INPUT_REJECTED -> "INPUT_REJECTED"
-        @Suppress("DEPRECATION") ALLOWLIST_PENDING -> "ALLOWLIST_PENDING"
         ALLOWLIST_REVOKED -> "ALLOWLIST_REVOKED"
         IDENTITY_UNKNOWN -> "IDENTITY_UNKNOWN"
         PERMISSION_DENIED -> "PERMISSION_DENIED"

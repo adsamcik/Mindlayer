@@ -85,40 +85,9 @@ class AllowlistStoreTest {
         assertFalse(store.isAllowed("com.example", "old"))
     }
 
-    @Test
-    fun `recordPending dedupes by package + signature`() {
-        store.recordPending("com.example", "sig1", "A")
-        store.recordPending("com.example", "sig1", "A")
-        assertEquals(1, store.listPending().size)
-    }
 
-    @Test
-    fun `recordPending appends a new row when signature changes`() {
-        // F-031: pending becomes append-only across cert mismatches so a
-        // sig-swap cannot silently overwrite the prior pending row before
-        // the user has a chance to see it.
-        store.recordPending("com.example", "sig1")
-        store.recordPending("com.example", "sig2")
-        assertEquals(2, store.listPending().size)
-        val sigs = store.listPending().map { it.signingCertSha256 }.toSet()
-        assertTrue(sigs.contains("sig1"))
-        assertTrue(sigs.contains("sig2"))
-    }
 
-    @Test
-    fun `approve clears any pending entry for the same package`() {
-        store.recordPending("com.example", "sig1")
-        store.approveDirect("com.example", "sig1")
-        assertTrue(store.listPending().isEmpty())
-        assertTrue(store.isAllowed("com.example", "sig1"))
-    }
 
-    @Test
-    fun `denyPending removes pending entry`() {
-        store.recordPending("com.example", "sig1")
-        store.denyPending("com.example")
-        assertTrue(store.listPending().isEmpty())
-    }
 
     @Test
     fun `entries persist across instances`() {
@@ -179,57 +148,9 @@ class AllowlistStoreTest {
         assertEquals("Recovered App", store.list().single().displayName)
     }
 
-    @Test
-    fun `corrupted entries file does not hide valid pending approvals`() {
-        store.approveDirect("com.example", "sig")
-        store.recordPending("com.pending", "pending-sig", "Pending App")
-        File(dir(), "entries.json").writeText("{not-json")
 
-        assertFalse(store.isAllowed("com.example", "sig"))
-        assertEquals(1, store.listPending().size)
-        assertEquals("com.pending", store.listPending().single().packageName)
-    }
 
-    @Test
-    fun `pending approvals reject tampered signed file`() {
-        store.recordPending("com.example", "sig", "Example")
-        val pendingFile = File(dir(), "pending.json")
-        val envelope = JSONObject(pendingFile.readText())
-        envelope.getJSONArray("pending")
-            .getJSONObject(0)
-            .put("sig", "evil")
-        pendingFile.writeText(envelope.toString())
 
-        assertTrue(store.listPending().isEmpty())
-    }
-
-    @Test
-    fun `recordPending recovers store after pending file corruption`() {
-        store.recordPending("com.example", "sig", "Example")
-        val pendingFile = File(dir(), "pending.json")
-        val envelope = JSONObject(pendingFile.readText())
-        envelope.getJSONArray("pending")
-            .getJSONObject(0)
-            .put("sig", "evil")
-        pendingFile.writeText(envelope.toString())
-        assertTrue(store.listPending().isEmpty())
-
-        store.recordPending("com.example", "recovered", "Recovered Pending")
-
-        assertEquals(1, store.listPending().size)
-        assertEquals("recovered", store.listPending().single().signingCertSha256)
-        assertEquals("Recovered Pending", store.listPending().single().displayName)
-    }
-
-    @Test
-    fun `corrupted pending file does not invalidate approved entries`() {
-        store.approveDirect("com.example", "sig")
-        store.recordPending("com.pending", "pending-sig")
-        File(dir(), "pending.json").writeText("{not-json")
-
-        assertTrue(store.isAllowed("com.example", "sig"))
-        assertTrue(store.listPending().isEmpty())
-    }
 
     @Test
     fun `malformed entries file is replaced by next approval`() {
@@ -301,21 +222,6 @@ class AllowlistStoreTest {
         legacyDir.deleteRecursively()
     }
 
-    @Test
-    fun `legacy pending arrays are quarantined on load`() {
-        val legacyDirName = "${dirName}_legacy_pending"
-        val legacyDir = File(context.filesDir, legacyDirName).also { it.mkdirs() }
-        File(legacyDir, "pending.json").writeText(
-            """[{"pkg":"com.example","sig":"sig","firstRequestedAtMs":1,"displayName":"Example"}]""",
-        )
-
-        val migrated = AllowlistStore(context, legacyDirName)
-
-        // Legacy unsigned pending entries are quarantined; caller must re-connect to appear in pending.
-        assertTrue(migrated.listPending().isEmpty())
-        assertFalse("pending.json must have been renamed", File(legacyDir, "pending.json").exists())
-        legacyDir.deleteRecursively()
-    }
 
     @Test
     fun `legacy array injection after migration is rejected`() {
@@ -330,10 +236,9 @@ class AllowlistStoreTest {
 
     @Test
     fun `revoke writes a permanent denial tombstone`() {
-        // H-T1: explicit user revoke must persist forever, not just for the
-        // 7-day denyPending cooldown. Otherwise a future seedIfEmpty (after
-        // an app-data clear or DB-corruption re-init) could silently re-admit
-        // the revoked package once the cooldown had expired.
+        // H-T1: explicit user revoke must persist forever. Otherwise a
+        // future consent flow could silently re-admit the revoked package
+        // after a prior denial expired.
         store.approveDirect("com.example", "sig123")
         store.revoke("com.example")
 
@@ -350,8 +255,7 @@ class AllowlistStoreTest {
     @Test
     fun `permanent revoke survives subsequent writeDenied prune`() {
         // H-T1: a later writeDenied (triggered by an unrelated revoke or
-        // denyPending) must not prune permanent tombstones. denyPending
-        // entries still get their 7-day TTL.
+        // time-bounded consent denial) must not prune permanent tombstones.
         store.approveDirect("com.foo", "sigFoo")
         store.revoke("com.foo")
 
@@ -367,21 +271,6 @@ class AllowlistStoreTest {
         assertTrue(pkgs.contains("com.bar"))
     }
 
-    @Test
-    fun `denyPending denial still uses the 7-day TTL, not permanent`() {
-        // Behavior-change boundary: only revoke is sticky. denyPending keeps
-        // the original 7-day TTL semantics so a user who taps "deny" by
-        // mistake on a *pending* row isn't permanently locked out.
-        store.recordPending("com.example", "sig1")
-        store.denyPending("com.example")
-
-        val envelope = JSONObject(File(dir(), "denied.json").readText())
-        val arr = envelope.getJSONArray("denied")
-        assertEquals(1, arr.length())
-        val row = arr.getJSONObject(0)
-        assertFalse("denyPending must not mark the row permanent", row.optBoolean("permanent", false))
-        assertTrue(row.getLong("expiresAtMs") < Long.MAX_VALUE)
-    }
 
     @Test
     fun `denialFor returns a DENY_24H row for the same pkg and sig only`() {
