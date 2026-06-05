@@ -247,6 +247,40 @@ Debug builds do not auto-seed apps signed with the Android debug keystore. This
 avoids accidentally trusting unrelated debug APKs installed on the same emulator
 or device.
 
+### Debug-only "auto-accept all callers" (CI / instrumented tests)
+
+Interactive consent (the ConsentActivity prompt) cannot be driven by a headless
+`connectedAndroidTest` run. **Debug builds only** therefore ship a developer
+escape hatch that makes `authorizeCall()` treat an *identified, not-user-denied,
+but unconsented* caller as approved — skipping the consent prompt. It is
+deliberately narrow:
+
+- **Debug-only and physically absent from release.** The toggle is backed by
+  `DebugAutoAcceptStore` (a sentinel file under
+  `filesDir/debug_auto_accept/enabled`) which exists **only** in
+  `app/src/debug`. The release source set compiles a no-op seam
+  (`debugAutoAcceptAllEnabled()` → always `false`), and
+  `DebugAutoAcceptReleaseAbsenceTest` (wired into the `testReleaseUnitTest`
+  filter) asserts the class is not on the release classpath.
+- **Narrow effect.** Identity verification, explicit user denials
+  (`isDenied`), and the per-UID rate limit all still apply, and the OS-level
+  `signature|knownSigner` `BIND_ML_SERVICE` permission is untouched — only apps
+  that can already bind are affected.
+- **Two ways to flip it**, both writing the same flag:
+  - Dashboard → *Allowed apps* card → the debug-only "auto-accept all callers"
+    switch (hidden in release).
+  - adb / CI, via the DUMP-guarded, debug-manifest-only
+    `DebugAutoAcceptReceiver` (only the shell and system hold `DUMP`, so an
+    ordinary app on the device cannot trigger it):
+
+    ```
+    adb shell am broadcast \
+      -n com.adsamcik.mindlayer.service.debug/com.adsamcik.mindlayer.service.security.DebugAutoAcceptReceiver \
+      -a com.adsamcik.mindlayer.debug.SET_AUTO_ACCEPT --ez enabled true
+    # → Broadcast completed: result=1, data="auto_accept=true"
+    # disable again with --ez enabled false
+    ```
+
 ## The consent flow
 
 ```

@@ -53,6 +53,8 @@
     <string name="consent_error_generic">Could not load this consent request. Please try again.</string>
     <string name="consent_error_expired">This consent request has expired. Ask the app to try again.</string>
     <string name="allowed_apps_title">Allowed apps</string>
+    <string name="debug_auto_accept_title" translatable="false">Debug: auto-accept all callers</string>
+    <string name="debug_auto_accept_body" translatable="false">Approves any bind-authorized app without the consent prompt. Debug builds only — never shipped in release. Explicitly denied apps stay blocked.</string>
     <string name="pending_approvals_count">Pending approvals (%1$d)</string>
     <string name="allowed_apps_empty">No apps have been approved yet.</string>
     <string name="allowlist_claims_to_be">claims to be: %1$s</string>

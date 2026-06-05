@@ -125,11 +125,31 @@ class ServiceBinder(
      */
     private val ocrLlmExtractor: com.adsamcik.mindlayer.service.engine.OcrLlmExtractor =
         com.adsamcik.mindlayer.service.engine.NoOpOcrLlmExtractor(),
+    /**
+     * DEBUG-only escape hatch. When this returns `true`, [authorizeCall] treats
+     * an identified, not-user-denied, but *unconsented* caller as approved —
+     * skipping the interactive ConsentActivity flow so headless CI /
+     * instrumented tests can exercise the service. Defaults to `{ false }`
+     * (the production [MindlayerMlService] wires the debug seam
+     * `{ debugAutoAcceptAllEnabled(this) }`; release builds compile a no-op
+     * seam that is always `false`). Identity verification, explicit user
+     * denials, and rate limiting are all still enforced; the OS-level
+     * `signature|knownSigner` bind permission is untouched.
+     */
+    private val autoAcceptGate: () -> Boolean = { false },
 ) : IMindlayerService.Stub() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val diagnosticsRefreshInFlight = AtomicBoolean(false)
     private val engineWarmupInFlight = AtomicBoolean(false)
+
+    /**
+     * DEBUG-only: `(packageName|sig)` of callers already logged as
+     * auto-accepted, so the warning fires once per unique caller per process
+     * lifetime instead of on every call. Only `add()`/`contains()` are used
+     * (no snapshot drain) so there is no concurrent-iteration hazard.
+     */
+    private val autoAcceptLogged = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /**
      * P4-DECOMP: multi-frame OCR session endpoint logic extracted off this
@@ -489,21 +509,41 @@ class ServiceBinder(
             )
         }
         if (!store.isAllowed(identity.packageName, identity.signingCertSha256)) {
-                // v0.10: there is no legacy approval inbox. An unconsented
-                // caller obtains access via the consent-Intent flow
-                // (Mindlayer.connect → ConsentRequired → ConsentActivity).
-                // We still rate-limit the rejection bookkeeping so a flooder
-                // cannot drive unbounded log writes.
-                if (rateLimiter.tryAcquireRejection(uid)) {
-                    MindlayerLog.w(
-                        TAG,
-                        "Unconsented caller ${identity.packageName} (uid=$uid) — consent required",
+                // DEBUG-only escape hatch: when the developer has enabled
+                // "auto-accept all callers" (dashboard switch or adb
+                // broadcast), treat this identified — and not user-denied
+                // (the isDenied gate above already rejected those) — but
+                // unconsented caller as approved, so headless CI /
+                // instrumented tests can run without the interactive
+                // ConsentActivity flow. Release builds wire a no-op gate
+                // ({ false }) and the backing store is absent from the
+                // release classpath, so production can never take this path.
+                if (autoAcceptGate()) {
+                    if (autoAcceptLogged.add("${identity.packageName}|${identity.signingCertSha256}")) {
+                        MindlayerLog.w(
+                            TAG,
+                            "DEBUG auto-accept enabled — allowing unconsented caller " +
+                                "${identity.packageName} (uid=$uid) WITHOUT user consent",
+                        )
+                    }
+                    // Fall through to the main rate limit + return identity.
+                } else {
+                    // v0.10: there is no legacy approval inbox. An unconsented
+                    // caller obtains access via the consent-Intent flow
+                    // (Mindlayer.connect → ConsentRequired → ConsentActivity).
+                    // We still rate-limit the rejection bookkeeping so a flooder
+                    // cannot drive unbounded log writes.
+                    if (rateLimiter.tryAcquireRejection(uid)) {
+                        MindlayerLog.w(
+                            TAG,
+                            "Unconsented caller ${identity.packageName} (uid=$uid) — consent required",
+                        )
+                    }
+                    throw typedBinderException(
+                        MindlayerErrorCode.CONSENT_REQUIRED,
+                        "App access requires user consent",
                     )
                 }
-                throw typedBinderException(
-                    MindlayerErrorCode.CONSENT_REQUIRED,
-                    "App access requires user consent",
-                )
         }
 
         // 2. Rate-limit only callers that have cleared identity + allowlist.

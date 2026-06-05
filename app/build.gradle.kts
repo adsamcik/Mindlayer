@@ -683,6 +683,7 @@ tasks.withType<Test> {
         // Replaces DebugAllowlistSeederReleaseAbsenceTest (subject deleted in
         // the v0.10 consent migration). See ConsentReleaseSmokeTest.
         filter.includeTestsMatching("com.adsamcik.mindlayer.service.security.ConsentReleaseSmokeTest")
+        filter.includeTestsMatching("com.adsamcik.mindlayer.service.security.DebugAutoAcceptReleaseAbsenceTest")
     }
 }
 
