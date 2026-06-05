@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.annotation.RequiresApi
 import androidx.core.app.ServiceCompat
 import com.adsamcik.mindlayer.service.engine.DeferredDatabase
 import com.adsamcik.mindlayer.service.engine.DeferredStore
@@ -315,11 +316,7 @@ class MindlayerMlService : Service() {
         // path.
         if (intent?.action == ACTION_STOP) {
             MindlayerLog.i(TAG, "ACTION_STOP received; cancelling all inferences and stopping")
-            try {
-                orchestrator.cancelAll()
-            } catch (t: Throwable) {
-                MindlayerLog.w(TAG, "orchestrator.cancelAll() raised: ${t.safeLabel()}")
-            }
+            cancelForegroundCountedSubsystems()
             try {
                 ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             } catch (_: Throwable) { /* best-effort */ }
@@ -336,6 +333,69 @@ class MindlayerMlService : Service() {
         }
         // START_NOT_STICKY: don't auto-restart; recovery is client-driven
         return START_NOT_STICKY
+    }
+
+    /**
+     * R-22: defensive foreground-service timeout handler.
+     *
+     * Today the `specialUse` FGS type is exempt from the Android 15
+     * (API 35) `dataSync`/`mediaProcessing` 6-hour cumulative timeout, so
+     * the platform does not currently call this. But if a future platform
+     * or Play policy revision extends time limits to `specialUse`, the OS
+     * invokes `onTimeout(...)` and then crashes the service with
+     * "did not stop within its timeout" if it is left unhandled. We demote
+     * the FGS and cancel in-flight inference so the service degrades
+     * cleanly instead of being force-killed.
+     */
+    @RequiresApi(34)
+    override fun onTimeout(startId: Int) {
+        handleFgsTimeout(startId, fgsType = null)
+    }
+
+    @RequiresApi(35)
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        handleFgsTimeout(startId, fgsType)
+    }
+
+    private fun handleFgsTimeout(startId: Int, fgsType: Int?) {
+        MindlayerLog.w(
+            TAG,
+            "FGS onTimeout(startId=$startId, fgsType=$fgsType) — cancelling inferences and demoting",
+        )
+        cancelForegroundCountedSubsystems()
+        try {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        } catch (_: Throwable) { /* best-effort */ }
+        synchronized(stateLock) { activeInferenceCount = 0 }
+    }
+
+    /**
+     * R-9 / R-22: cancel EVERY foreground-counted subsystem (LLM
+     * orchestrator, embedding coordinator, OCR sessions) so none keeps
+     * running native work after the FGS notification is dropped on
+     * ACTION_STOP or an FGS onTimeout. Each cancelled job releases its own
+     * foreground refcount as it unwinds.
+     */
+    private fun cancelForegroundCountedSubsystems() {
+        try {
+            orchestrator.cancelAll()
+        } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "orchestrator.cancelAll() raised: ${t.safeLabel()}")
+        }
+        if (::embeddingCoordinator.isInitialized) {
+            try {
+                embeddingCoordinator.cancelAll()
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "embeddingCoordinator.cancelAll() raised: ${t.safeLabel()}")
+            }
+        }
+        if (::ocrSessionManager.isInitialized) {
+            try {
+                ocrSessionManager.cancelAllForMemoryPressure()
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "ocrSessionManager cancel raised: ${t.safeLabel()}")
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -473,10 +533,20 @@ class MindlayerMlService : Service() {
             }
             unloadPaddleOcrForMemoryPressure()
             unloadEmbeddingForMemoryPressure()
-            if (sessionManager.hasActiveStreaming()) {
-                orchestrator.awaitAllJobs(timeoutMs = 5_000)
-            }
+            // R-15: cancel in-flight streams FIRST, then await them, so the
+            // restart actually frees the native heap at the moment of
+            // greatest OOM danger. Pre-fix the stream-cancelling
+            // applyMemoryPressure ran AFTER awaitAllJobs and BEFORE the
+            // hasActiveStreaming() re-check, so the asynchronous cancellation
+            // had not unwound when the predicate was evaluated — it still saw
+            // live streams and SKIPPED the heap-freeing restart exactly when
+            // it was needed most.
             sessionManager.applyMemoryPressure(level)
+            // Now await the cancelled jobs so every client receives its
+            // terminal "cancelled" frame (written under NonCancellable) and
+            // native generation has actually stopped before we tear the
+            // process down.
+            orchestrator.awaitAllJobs(timeoutMs = EMERGENCY_DRAIN_TIMEOUT_MS)
             // Process-restart instead of in-process engine shutdown.
             // Same LiteRT-LM #2028 reason as the thermal-switch path:
             // shutdownIfIdle would null the Engine and the next
@@ -486,26 +556,18 @@ class MindlayerMlService : Service() {
             // process, freeing the entire native heap rather than just
             // the LiteRT engine allocations.
             //
-            // We still preserve the streaming-aware contract from
-            // shutdownIfIdle: if any session is mid-stream the predicate
-            // fails and we skip the restart. Predicate evaluated under
-            // EngineManager's mutex so a fresh start-of-inference cannot
-            // race the restart decision.
-            if (!sessionManager.hasActiveStreaming()) {
-                // Lazy-invalidate idle sessions; they re-warm on next
-                // access after the post-restart engine init.
-                sessionManager.invalidateIdleSessionsForBackendSwitch()
-                engineManager.shutdownAndRestart(
-                    reason = "memory_pressure_emergency",
-                    targetBackend = null,
-                )
-                // Unreachable; process is gone.
-            } else {
-                MindlayerLog.i(
-                    TAG,
-                    "Memory pressure EMERGENCY but active streaming — skipping engine restart",
-                )
-            }
+            // Under EMERGENCY (near-OOM) we restart unconditionally — even
+            // if a stream stubbornly refused to finish cancelling within the
+            // deadline above. We already issued cancelProcess via
+            // applyMemoryPressure, clients have their terminal frames, and
+            // the alternative is a harsher OS low-memory kill with no
+            // persisted restart intent and no clean re-init.
+            sessionManager.invalidateIdleSessionsForBackendSwitch()
+            engineManager.shutdownAndRestart(
+                reason = "memory_pressure_emergency",
+                targetBackend = null,
+            )
+            // Unreachable; process is gone.
             return
         }
 
@@ -683,17 +745,26 @@ class MindlayerMlService : Service() {
                     logRepository.logFgsPromoted(activeInferenceCount)
                     MindlayerLog.i(TAG, "Entered foreground")
                 } catch (e: Exception) {
+                    // R-16: promotion failed — do NOT let the (possibly
+                    // multi-minute) inference run as an unprotected background
+                    // service where the OS can freeze/kill it mid-stream and
+                    // silently drop the stream. Roll back the refcount and
+                    // propagate so the orchestrator aborts with a typed error
+                    // the client can retry (promotion self-heals on the next
+                    // attempt once the app is foregroundable again).
+                    activeInferenceCount = (activeInferenceCount - 1).coerceAtLeast(0)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                         e is ForegroundServiceStartNotAllowedException
                     ) {
                         MindlayerLog.e(
                             TAG,
-                            "Foreground service start not allowed: ${e.safeLabel()}",
+                            "Foreground service start not allowed; aborting inference: ${e.safeLabel()}",
                             throwable = null,
                         )
                     } else {
-                        MindlayerLog.e(TAG, "Failed to enter foreground: ${e.safeLabel()}")
+                        MindlayerLog.e(TAG, "Failed to enter foreground; aborting inference: ${e.safeLabel()}")
                     }
+                    throw e
                 }
             }
         }

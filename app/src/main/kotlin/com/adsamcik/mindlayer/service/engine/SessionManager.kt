@@ -588,6 +588,18 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     fun getSession(id: String): SessionHandle? {
         val handle = sessions[id] ?: return null
         if (System.currentTimeMillis() - handle.createdAtMs > handle.expirationMs) {
+            // R-5: never destroy a session that is mid-stream from an expiry
+            // check. destroySessionInternal is @Synchronized and, for a
+            // streaming session, blocks in runBlocking { handle.mutex.withLock }
+            // until the inference (incl. up to a 30 s tool-result await)
+            // releases the mutex — stalling EVERY SessionManager lifecycle op
+            // behind the class monitor. The session is actively in use, so let
+            // the inference finish; expiry is re-evaluated on the next access
+            // once streaming completes.
+            if (handle.isStreaming) {
+                handle.recordAccess()
+                return handle
+            }
             MindlayerLog.i(TAG, "Session expired", sessionId = id)
             destroySessionInternal(id, com.adsamcik.mindlayer.shared.MindlayerErrorCode.SESSION_EXPIRED)
             return null
@@ -726,6 +738,11 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         try {
             runBlocking {
                 handle.mutex.withLock {
+                    // R-TOCTOU: mark destroyed under the same mutex an
+                    // in-flight runInference re-checks after staging, so a
+                    // request that captured this handle before destroy aborts
+                    // instead of inferring on / re-warming a dead session.
+                    handle.destroyed = true
                     handle.activeRequestId = null
                     handle.isStreaming = false
                     // Hot-swap: try to evict any warm Conversation under
@@ -999,7 +1016,13 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     private fun cleanupExpiredSessions() {
         val now = System.currentTimeMillis()
         val expired = sessions.filter { (_, handle) ->
-            now - handle.createdAtMs > handle.expirationMs
+            // R-5: exclude mid-stream sessions. Destroying a streaming session
+            // here would block this (potentially @Synchronized-reached) sweep
+            // in runBlocking { handle.mutex.withLock } until the active
+            // inference releases the mutex (up to the 30 s tool-await),
+            // stalling all session lifecycle ops. A streaming session is in
+            // use; it expires on the next sweep after the stream finishes.
+            now - handle.createdAtMs > handle.expirationMs && !handle.isStreaming
         }
         expired.forEach { (id, _) ->
             destroySessionInternal(id, com.adsamcik.mindlayer.shared.MindlayerErrorCode.SESSION_EXPIRED)
@@ -1167,6 +1190,16 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         @Volatile var clientPriorityHint: Int = 0
         @Volatile var activeRequestId: String? = null
         @Volatile var backendInvalidated: Boolean = false
+
+        /**
+         * Set to `true` under [mutex] by [destroySessionInternal] the moment a
+         * destroy begins closing this handle's [Conversation]. An inference that
+         * captured this handle before destroy (e.g. while staging media outside
+         * the lock) re-checks this flag as the first thing it does after
+         * acquiring [mutex] and aborts instead of re-warming a fresh
+         * [Conversation] on an already-destroyed session.
+         */
+        @Volatile var destroyed: Boolean = false
 
         /**
          * Rolling per-session conversation history seeded from

@@ -22,11 +22,20 @@
         <exclude domain="database" path="mindlayer_history.db-shm" />
         <exclude domain="database" path="mindlayer_history.db-wal" />
         <exclude domain="sharedpref" path="mindlayer_sdk_db_key.xml" />
+        <!-- Security review S-10: the current wrapped-DB-key blob lives in
+             filesDir as mindlayer_sdk_db_key.bin (the legacy SharedPreferences
+             path above is kept only for migration). Exclude it (and its
+             lock sidecar) so the Keystore-wrapped key never leaves the
+             device in a backup. -->
+        <exclude domain="file" path="mindlayer_sdk_db_key.bin" />
+        <exclude domain="file" path="mindlayer_sdk_db_key.lock" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="database" path="mindlayer_history.db" />
         <exclude domain="database" path="mindlayer_history.db-shm" />
         <exclude domain="database" path="mindlayer_history.db-wal" />
         <exclude domain="sharedpref" path="mindlayer_sdk_db_key.xml" />
+        <exclude domain="file" path="mindlayer_sdk_db_key.bin" />
+        <exclude domain="file" path="mindlayer_sdk_db_key.lock" />
     </device-transfer>
 </data-extraction-rules>

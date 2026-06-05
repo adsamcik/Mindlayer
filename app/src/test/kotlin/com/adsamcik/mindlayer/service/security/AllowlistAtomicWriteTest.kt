@@ -55,16 +55,16 @@ class AllowlistAtomicWriteTest {
         )
         assertTrue("entries.json must exist", entriesFile.exists())
 
-        // Production format (post-b15b656 H7 hardening): the persisted
-        // shape is `{"version":<N>,"entries":[...],"mac":"<hex>"}` — an
-        // HMAC-integrity envelope around the entry array. The current
-        // SIGNED_FILE_VERSION is 3 (bumped from 2 in the v0.10
-        // consent-architecture for the denial-side permanent+scope HMAC
-        // fix — entries.json structure is unchanged but it carries the
-        // global file-format version). Earlier versions of this test
-        // asserted the file was a raw JSON array, which silently broke
-        // when integrity was added. We now assert both the envelope
-        // shape AND the inner entries layout.
+        // Production format (post-b15b656 H7 hardening; v3): the persisted
+        // shape is `{"version":3,"entries":[...],"mac":"<hex>"}` — an
+        // HMAC-integrity envelope around the entry array. SIGNED_FILE_VERSION
+        // was bumped to 3 by the v0.10 consent-architecture (denial-side
+        // permanent+scope HMAC fix) and security-review S-9 (entry `prevSig`
+        // binding); the entries.json structure is otherwise unchanged but it
+        // carries the global file-format version. Earlier versions of this
+        // test asserted the file was a raw JSON array, which silently broke
+        // when integrity was added. We now assert both the envelope shape AND
+        // the inner entries layout.
         val text = entriesFile.readText()
         val envelope = JSONObject(text)
         assertEquals("envelope version must be 3", 3, envelope.getInt("version"))

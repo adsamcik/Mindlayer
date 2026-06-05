@@ -55,7 +55,7 @@ Mindlayer is **fully on-device, network-free, and user-consent-gated**. These ar
 
 - Add no `INTERNET` / network permission to `:app` or `:sdk` manifests.
 - Add no third-party telemetry, analytics, or cloud-fallback paths.
-- Keep camera frames, recognized text, and structured model output in RAM only — never `filesDir` / `cacheDir` / external storage. Caller may persist via the existing SQLCipher-backed history.
+- Keep recognized text and structured model output in RAM only — never `filesDir` / `cacheDir` / external storage. Camera frames and audio are staged **encrypted at rest** (AES-256-GCM, process-ephemeral key) under `cacheDir/media_staging` because LiteRT-LM consumes media by file path; the plaintext is materialized on demand and purged with the request, and the staging dir is purged on startup. Caller may persist via the existing SQLCipher-backed history.
 - Verify model file integrity (pinned SHA-256) at first load.
 - Validate every new parcelable field in `IpcInputValidator` with explicit bounds before the engine sees it.
 

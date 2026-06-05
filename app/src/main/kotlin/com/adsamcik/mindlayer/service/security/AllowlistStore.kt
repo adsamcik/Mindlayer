@@ -111,6 +111,16 @@ class AllowlistStore(
     private val hmacKeyFile: File = File(baseDir, "allowlist.hmac")
 
     /**
+     * S-8: AndroidKeyStore wrapper for the HMAC key. The key file is no
+     * longer plaintext base64 on devices with a working Keystore — the
+     * random HMAC key is wrapped (AES-256-GCM) so a filesDir-write attacker
+     * cannot read it and forge a valid allowlist/denial signature. Aliased
+     * per store dir so independent stores (test fixtures) don't collide.
+     */
+    private val hmacKeyWrapper: KeystoreSecretWrapper =
+        KeystoreSecretWrapper(alias = "mindlayer.allowlist.hmac.${baseDir.name}")
+
+    /**
      * JVM-wide mutex that serialises threads in this process before they
      * race for the kernel-level [java.nio.channels.FileLock] on
      * [lockFile]. Java NIO `FileChannel.lock()` is a **process-wide**
@@ -744,8 +754,8 @@ class AllowlistStore(
                 if (i > 0) append(',')
                 val item = array.getJSONObject(i)
                 when (arrayKey) {
-                    ENTRIES_KEY -> appendCanonicalEntry(item, timestampKey = "grantedAtMs", version)
-                    DENIED_KEY -> appendCanonicalDenied(item, version)
+                    ENTRIES_KEY -> appendCanonicalEntry(item, timestampKey = "grantedAtMs", version = version)
+                    DENIED_KEY -> appendCanonicalDenied(item, version = version)
                     else -> throw IllegalArgumentException("Unknown allowlist array key: $arrayKey")
                 }
             }
@@ -753,11 +763,6 @@ class AllowlistStore(
         }
 
     private fun StringBuilder.appendCanonicalEntry(item: JSONObject, timestampKey: String, version: Int) {
-        // version is currently unused for entry canonical (the v2→v3 bump
-        // was for the denied envelope only — entry shape is unchanged
-        // beyond the v3 HMAC pre-image including the version+key
-        // domain separator already present at line 808).
-        @Suppress("UNUSED_PARAMETER") val v = version
         append('{')
         append("\"pkg\":").append(JSONObject.quote(item.getString("pkg")))
         append(",\"sig\":").append(JSONObject.quote(item.getString("sig")))
@@ -765,6 +770,16 @@ class AllowlistStore(
         val displayName = item.optString("displayName").ifEmpty { null }
         if (displayName != null) {
             append(",\"displayName\":").append(JSONObject.quote(displayName))
+        }
+        // S-9 (v3+): bind the persisted, trusted `prevSig` (cert-rotation
+        // metadata) into the HMAC pre-image so a filesDir-tamper attacker
+        // cannot rewrite it without breaking the signature. Version-gated so
+        // existing v2 files still verify under their original canonical form.
+        if (version >= SIGNED_FILE_VERSION_METADATA) {
+            val prevSig = item.optString("prevSig").ifEmpty { null }
+            if (prevSig != null) {
+                append(",\"prevSig\":").append(JSONObject.quote(prevSig))
+            }
         }
         append('}')
     }
@@ -786,11 +801,13 @@ class AllowlistStore(
         }
         append(",\"deniedAtMs\":").append(item.optLong("deniedAtMs", 0L))
         append(",\"expiresAtMs\":").append(item.optLong("expiresAtMs", 0L))
-        if (version >= 3) {
-            // v3 closes rubber-duck Issue #11: the permanent flag and the
-            // scope are now HMAC-authenticated so an offline attacker
-            // cannot demote a permanent denial to a TTL one or widen the
-            // scope of a denial to package-wide.
+        if (version >= SIGNED_FILE_VERSION_METADATA) {
+            // v3 (security-review S-9 + rubber-duck Issue #11): the `permanent`
+            // tombstone flag AND the denial `scope` are HMAC-authenticated so a
+            // filesDir-tamper attacker cannot (a) flip a sticky permanent revoke
+            // into an expirable one and re-allow a revoked app after the TTL,
+            // nor (b) widen a cert-pair denial to package-wide. Pre-v3 neither
+            // was authenticated.
             append(",\"permanent\":").append(item.optBoolean("permanent", false))
             val scope = item.optString("scope").ifEmpty { DenialScope.CERT_PAIR.name }
             append(",\"scope\":").append(JSONObject.quote(scope))
@@ -837,8 +854,34 @@ class AllowlistStore(
                 quarantineCorruptHmacKey("read failed: ${t.javaClass.simpleName}")
                 return generateAndPersistHmacKey()
             }
+            // S-8: wrapped-key path (mlks1:...). Unwrap via the Keystore.
+            if (hmacKeyWrapper.isWrapped(encoded)) {
+                val unwrapped = hmacKeyWrapper.unwrap(encoded)
+                if (unwrapped != null && unwrapped.size >= HMAC_KEY_BYTES) return unwrapped
+                // Wrapped blob present but Keystore key gone/invalid (user
+                // cleared credentials, key migrated off device). Regenerate;
+                // affected callers must be re-approved — the same recovery
+                // semantics as a corrupt key.
+                quarantineCorruptHmacKey("keystore unwrap failed")
+                return generateAndPersistHmacKey()
+            }
+            // Legacy plaintext base64 path.
             val decoded = runCatching { Base64.getDecoder().decode(encoded) }.getOrNull()
-            if (decoded != null && decoded.size >= HMAC_KEY_BYTES) return decoded
+            if (decoded != null && decoded.size >= HMAC_KEY_BYTES) {
+                // S-8 migration: if the Keystore is now available, re-persist
+                // the existing key in wrapped form so it stops sitting in
+                // plaintext. Keep the SAME key bytes so existing signatures
+                // still verify. Best-effort — a write failure leaves the
+                // plaintext file in place and we retry next launch.
+                if (hmacKeyWrapper.isAvailable) {
+                    val wrapped = hmacKeyWrapper.wrap(decoded)
+                    if (wrapped != null) {
+                        runCatching { atomicWrite(hmacKeyFile, wrapped) }
+                            .onSuccess { MindlayerLog.i(TAG, "Migrated plaintext allowlist HMAC key to Keystore-wrapped form") }
+                    }
+                }
+                return decoded
+            }
             quarantineCorruptHmacKey("decode failed or wrong length (${decoded?.size ?: -1})")
         }
         return generateAndPersistHmacKey()
@@ -857,7 +900,15 @@ class AllowlistStore(
     private fun generateAndPersistHmacKey(): ByteArray {
         val key = ByteArray(HMAC_KEY_BYTES)
         SecureRandom().nextBytes(key)
-        atomicWrite(hmacKeyFile, Base64.getEncoder().encodeToString(key))
+        // S-8: persist Keystore-wrapped when possible; fall back to legacy
+        // plaintext base64 only when the Keystore is unavailable (a broken/
+        // rooted host where the filesDir-write threat is already moot).
+        val wrapped = hmacKeyWrapper.wrap(key)
+        if (wrapped != null) {
+            atomicWrite(hmacKeyFile, wrapped)
+        } else {
+            atomicWrite(hmacKeyFile, Base64.getEncoder().encodeToString(key))
+        }
         return key
     }
 
@@ -881,24 +932,27 @@ class AllowlistStore(
          */
         private val PROCESS_LOCKS = ConcurrentHashMap<String, ReentrantLock>()
 
-        // Bumped to 3 when DeniedEntry gained scope (v0.10
-        // consent-architecture: cert-pair vs package-wide denial scopes)
-        // and the canonical denied-entry payload was extended to include
-        // both `permanent` and `scope` so an offline attacker can no
-        // longer flip a 24h denial to permanent or widen a cert-pair
-        // denial to package-wide by editing the JSON (rubber-duck Issue
-        // #11 — pre-v3 the permanent flag was NOT HMAC-authenticated).
-        // Bumped to 2 previously when canonicalPayload was changed to
-        // include version+arrayKey domain separator (audit M6).
+        // Bumped to 3 (v0.10 consent-architecture + security-review S-9):
+        //  - DeniedEntry gained `scope` (cert-pair vs package-wide), and the
+        //    canonical denied payload now binds both `permanent` and `scope`
+        //    so an offline attacker can no longer flip a 24h denial to
+        //    permanent or widen a cert-pair denial to package-wide
+        //    (rubber-duck Issue #11);
+        //  - the entry canonical binds the trusted `prevSig` cert-rotation
+        //    metadata (S-9).
+        // Bumped to 2 previously when canonicalPayload was changed to include
+        // the version+arrayKey domain separator (audit M6).
         //
-        // Entry shape (ENTRIES_KEY) is unchanged in v3 — v2 entries read
-        // back as v3 without migration. Verifier accepts
-        // MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION so legacy v2 files
-        // still verify; canonicalPayload() is version-aware so the v3
-        // pre-image picks up the new denied fields only when the file
-        // declares v3.
+        // Entry shape (ENTRIES_KEY) is otherwise unchanged in v3 — v2 entries
+        // read back as v3 without migration. The verifier accepts
+        // MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION so legacy v2 files still
+        // verify; canonicalPayload() is version-aware so the v3 pre-image picks
+        // up the new fields only when the file declares v3.
         private const val SIGNED_FILE_VERSION = 3
         private const val MIN_SUPPORTED_VERSION = 2
+
+        /** First version whose canonical pre-image binds `prevSig`/`permanent`. */
+        private const val SIGNED_FILE_VERSION_METADATA = 3
         private const val ENTRIES_KEY = "entries"
         private const val DENIED_KEY = "denied"
         private const val MAC_KEY = "mac"

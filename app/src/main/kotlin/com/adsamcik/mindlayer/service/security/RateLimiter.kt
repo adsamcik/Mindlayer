@@ -12,16 +12,19 @@ import java.util.concurrent.atomic.AtomicLong
  * bucket object. The bucket map itself is a [ConcurrentHashMap].
  *
  * **First-call grant (F-027 refinement).** Brand-new buckets start with
- * exactly [initialFirstCallTokens] (default `2.0`), not the full capacity
- * and not zero. This lets the documented connect handshake
- * (`bindService` → `onServiceConnected` → `registerClient` cost 1.0 →
- * `getCapabilities` cost 0.25, optionally followed by a feature-gate
- * `getCapabilities`) succeed without waiting for the refill cadence
- * (~1 token/sec at the default 60 RPM), while still preventing the
- * "burst, idle past [idleEvictMs], burst again" evasion that motivated
- * F-027: the grant is two tokens, never the full capacity, and is
- * consumed by the opening handshake. From there only elapsed-time
- * refill governs, exactly as before.
+ * exactly [initialFirstCallTokens] (default [INITIAL_FIRST_CALL_TOKENS] =
+ * `50.0`), not the full capacity and not zero. This lets the documented
+ * connect handshake (`registerClient` cost 1.0 → `getCapabilities`
+ * cost 0.25, plus SDK reconnect/rebind retries during the ~30 s cold
+ * engine init) succeed without waiting for the refill cadence, while
+ * still preventing the "burst, idle past [idleEvictMs], burst again"
+ * evasion from approaching the full capacity: the grant is one-shot and
+ * far below capacity, and the bucket can never accumulate beyond
+ * `capacity` regardless of age. At the default 300 RPM the grant is ~1/6
+ * of capacity, so the residual idle-evict regrant averages a negligible
+ * few RPM over the eviction window — intentionally not suppressed,
+ * because doing so would break reconnect-after-restart resilience for
+ * established first-party clients.
  */
 class RateLimiter(
     private val maxRequestsPerMinute: Int = DEFAULT_RPM,
@@ -203,7 +206,13 @@ class RateLimiter(
      * token was available; false means swallow the rejection silently.
      */
     fun tryAcquireRejection(uid: Int): Boolean {
-        val bucket = buckets.getOrPut(uid) { Bucket(capacity = maxRequestsPerMinute.toDouble()) }
+        // Use newEmptyBucket() so a caller whose FIRST interaction is a
+        // rejection (un-allowlisted) gets the documented cold-start grant
+        // ([INITIAL_FIRST_CALL_TOKENS]) in its main bucket — NOT a full
+        // capacity bucket. The raw `Bucket(capacity=…)` constructor defaults
+        // tokens to capacity, which silently handed a later-approved caller
+        // the full RPM burst (security-review S-7).
+        val bucket = buckets.getOrPut(uid) { newEmptyBucket() }
         synchronized(bucket) {
             val now = timeSource()
             val elapsed = now - bucket.lastRejectionRefillMs

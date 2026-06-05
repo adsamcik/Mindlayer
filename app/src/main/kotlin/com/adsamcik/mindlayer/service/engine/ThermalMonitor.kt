@@ -193,6 +193,14 @@ class ThermalMonitor(
     // ---- Public API --------------------------------------------------------
 
     fun start() {
+        // R-21: idempotent. A second start() without an intervening stop()
+        // must not orphan the prior 1 Hz poll job or register a duplicate
+        // thermal listener (both would outlive stop() and leak for the
+        // process lifetime).
+        if (pollJob != null || statusListener != null) {
+            MindlayerLog.w(TAG, "ThermalMonitor.start() ignored — already running")
+            return
+        }
         // Register status listener (API 29+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val listener = PowerManager.OnThermalStatusChangedListener { status ->

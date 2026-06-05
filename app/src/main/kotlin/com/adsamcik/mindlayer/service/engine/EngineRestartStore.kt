@@ -128,6 +128,46 @@ class EngineRestartStore @VisibleForTesting internal constructor(
     }
 
     /**
+     * R-7: read the intent and **mark an attempt** without clearing it.
+     *
+     * Unlike [consume] (read + delete), this bumps [RestartIntent.attemptCount]
+     * and re-persists it BEFORE the caller runs `initialize()`, then leaves
+     * the intent in place. The caller clears it via [clear] only AFTER a
+     * confirmed-successful init. This is the crash-loop guard's load-bearing
+     * fix: if `initialize()` SIGSEGVs (the LiteRT-LM #2028 case this whole
+     * mechanism guards against), the bumped intent survives the process
+     * death, so the next boot sees an incremented count and the loop guard
+     * actually trips at [MAX_RESTART_ATTEMPTS] instead of resetting to 1 on
+     * every crash.
+     *
+     * Returns the bumped intent to attempt, or `null` when there is no
+     * intent or the cap has been reached (in which case the file is cleared
+     * so the service falls back to the default backend chain).
+     */
+    fun beginAttempt(): RestartIntent? {
+        var attempt: RestartIntent? = null
+        try {
+            withFileLock {
+                val existing = readSnapshotLocked() ?: return@withFileLock
+                if (existing.attemptCount >= MAX_RESTART_ATTEMPTS) {
+                    deleteStateFileLocked()
+                    return@withFileLock
+                }
+                val bumped = existing.copy(attemptCount = existing.attemptCount + 1)
+                writeSnapshotLocked(bumped)
+                attempt = bumped
+            }
+        } catch (t: Throwable) {
+            MindlayerLog.w(
+                TAG,
+                "Engine restart-store beginAttempt failed: ${t.safeLabel()}",
+                throwable = null,
+            )
+        }
+        return attempt
+    }
+
+    /**
      * Persist a new restart intent. If an intent already exists for the
      * same [targetBackend], [RestartIntent.attemptCount] is incremented;
      * otherwise the record is replaced with a fresh one (count = 1).

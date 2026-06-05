@@ -1,0 +1,60 @@
+name: Dependency Review
+
+# Supply-chain gate for pull requests. Surfaces newly-introduced dependencies
+# that carry known vulnerabilities (and, optionally, disallowed licenses)
+# before they land on `main`. This enforces the project's documented invariants
+# (privacy/offline, "no telemetry SDKs", and the Apache-2.0 / MIT / BSD-3
+# license allow-list) at review time rather than after merge.
+#
+# Public-repo dependency review is free and needs no GitHub Advanced Security.
+# It reads the dependency graph already populated by the existing
+# "Automatic Dependency Submission (Gradle)" workflow and Dependabot.
+
+on:
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Review dependency changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Needed to post the summary comment back onto the PR.
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          # Conservative gate: block only on high-severity (or worse)
+          # vulnerabilities to keep false-positive churn low. Tighten to
+          # `moderate` once the team is comfortable with the signal.
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
+          # Gradle dependency data comes from submitted snapshots (via the
+          # Automatic Dependency Submission graph), which can lag a PR's head
+          # SHA. Retry briefly so the gate sees complete data instead of
+          # passing on a partial/empty snapshot.
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 300
+          # No license allow/deny-list is configured, so licenses are NOT
+          # gated today — only vulnerabilities at/above `fail-on-severity`
+          # block the PR. dependency-review evaluates every transitive license
+          # string, and a strict allow-list is prone to false positives on
+          # indirect deps. To turn the project's documented allow-list into a
+          # hard gate, add:
+          #   allow-licenses: Apache-2.0, MIT, BSD-3-Clause, BSD-2-Clause
+          # (keep `warn-only: false` so violations actually fail the check).
+          warn-only: false

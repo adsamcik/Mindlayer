@@ -6,6 +6,14 @@ on:
       - 'v*'    # e.g. v0.1.0, v1.2.3
   workflow_dispatch:
 
+# Serialize publishes for a given ref. `cancel-in-progress: false` is
+# deliberate: a tag publish (Maven upload + GitHub Release + signed AAB
+# attach) must never be interrupted half-way, which could leave a partially
+# published version. Overlapping runs for the *same* tag simply queue.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 

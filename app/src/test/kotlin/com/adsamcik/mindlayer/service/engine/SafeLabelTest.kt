@@ -63,26 +63,37 @@ class SafeLabelTest {
     }
 
     @Test
-    fun `safeLabelWithDetail includes message for IllegalArgumentException (boundary validators)`() {
-        // Boundary-validator IAEs throw fixed field labels + numeric
-        // bounds — never user content. Surfacing the message is a UX
-        // win for SDK callers debugging config issues.
-        val t = IllegalArgumentException("maxTokens must be between 128 and 8192, got 32")
+    fun `safeLabelWithDetail strips message for IllegalArgumentException (may embed native content)`() {
+        // SECURITY: IAE can be thrown from native LiteRT-LM tokenizer /
+        // template code with prompt fragments inlined. Because the
+        // allowlist keys on type not throw-site, IAE detail is NOT
+        // surfaced. Boundary-validator detail is surfaced separately via
+        // ServiceBinder's INVALID_REQUEST translation, not this helper.
+        val t = IllegalArgumentException("system-prompt: 'patient Adam Smith' rejected")
         val labelled = t.safeLabelWithDetail()
-        assertTrue(
-            "IAE message should be included for actionability",
-            labelled.contains("maxTokens must be between 128 and 8192"),
-        )
-        assertTrue(labelled.startsWith("IllegalArgumentException("))
-        assertTrue(labelled.endsWith(")"))
+        assertFalse("IAE message must not leak", labelled.contains("Adam Smith"))
+        assertFalse(labelled.contains("system-prompt"))
+        assertEquals("IllegalArgumentException", labelled)
     }
 
     @Test
-    fun `safeLabelWithDetail includes message for IllegalStateException`() {
-        val t = IllegalStateException("engine not initialised")
+    fun `safeLabelWithDetail strips message for IllegalStateException`() {
+        val t = IllegalStateException("decode produced: 'secret model output'")
         val labelled = t.safeLabelWithDetail()
-        assertTrue(labelled.contains("engine not initialised"))
-        assertTrue(labelled.startsWith("IllegalStateException("))
+        assertFalse("ISE message must not leak", labelled.contains("secret model output"))
+        assertEquals("IllegalStateException", labelled)
+    }
+
+    @Test
+    fun `safeLabelWithDetail strips message for native LiteRT-family exceptions`() {
+        // We can't depend on the LiteRT AAR from a JVM unit test, so we
+        // mimic the package prefix with a local subclass. The fix removed
+        // the `com.google.ai.edge.litert` prefix match; native exception
+        // messages (which can embed prompt text) must now be class-only.
+        val t = FakeLiteRtLmException("Failed to decode prompt: 'PII here'")
+        val labelled = t.safeLabelWithDetail()
+        assertFalse("native message must not leak", labelled.contains("PII here"))
+        assertFalse(labelled.contains("Failed to decode prompt"))
     }
 
     @Test
@@ -103,18 +114,18 @@ class SafeLabelTest {
     @Test
     fun `safeLabelWithDetail truncates very long messages`() {
         val veryLong = "x".repeat(500)
-        val t = IllegalArgumentException(veryLong)
+        val t = java.io.FileNotFoundException(veryLong)
         val labelled = t.safeLabelWithDetail(maxMessageChars = 64)
-        // Class header is "IllegalArgumentException(" + 64 chars + ")".
+        // Class header is "FileNotFoundException(" + 64 chars + ")".
         assertTrue(
             "labelled length should be bounded by maxMessageChars (got ${labelled.length})",
-            labelled.length <= "IllegalArgumentException(".length + 64 + 1,
+            labelled.length <= "FileNotFoundException(".length + 64 + 1,
         )
     }
 
     @Test
     fun `safeLabelWithDetail strips newlines from message to prevent log injection`() {
-        val t = IllegalArgumentException("config invalid\n[FAKE] AdminGranted=true")
+        val t = java.io.FileNotFoundException("config invalid\n[FAKE] AdminGranted=true")
         val labelled = t.safeLabelWithDetail()
         assertFalse("must not contain newlines (log spoofing)", labelled.contains('\n'))
         assertFalse(
@@ -129,8 +140,11 @@ class SafeLabelTest {
         val nullMsg = RuntimeException()
         assertEquals("RuntimeException", nullMsg.safeLabelWithDetail())
 
-        val blankMsg = IllegalArgumentException("   ")
+        val blankMsg = java.io.FileNotFoundException("   ")
         // Blank message falls through to base label.
-        assertEquals("IllegalArgumentException", blankMsg.safeLabelWithDetail())
+        assertEquals("FileNotFoundException", blankMsg.safeLabelWithDetail())
     }
+
+    /** Mimics a `com.google.ai.edge.litert*` runtime exception by class name. */
+    private class FakeLiteRtLmException(message: String) : RuntimeException(message)
 }

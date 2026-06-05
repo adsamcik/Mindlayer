@@ -26,6 +26,7 @@ import com.google.gson.Gson
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -357,7 +358,16 @@ class InferenceOrchestrator(
                 (if (audio != null) com.adsamcik.mindlayer.service.ipc.MAX_MEDIA_BYTES.toLong() else 0L)
             sharedMemoryPool.precheckBounds(numImages, numAudios, expectedBytes)?.let { throw it }
         }
-        val job = scope.launch {
+        // R-13: register the job in `activeJobs` and install the completion
+        // handler BEFORE it can start running. With the default (eager)
+        // start, a concurrent cancelInference()/binder-death between
+        // `scope.launch { … }` returning and `activeJobs[scopedKey] = job`
+        // would find neither the job nor an `activeRequestId` (set inside
+        // runInference) and silently no-op — leaving the inference to run
+        // for an already-cancelled/dead client. LAZY + explicit start()
+        // closes that window: the job is discoverable (and cancellable)
+        // the instant it can execute.
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             runInference(scopedKey, meta, image, audio, pipeWriteEnd)
         }
         activeJobs[scopedKey] = job
@@ -365,6 +375,7 @@ class InferenceOrchestrator(
             activeJobs.remove(scopedKey)
             onComplete?.invoke()
         }
+        job.start()
     }
 
     fun cancelInference(scopedKey: String) {
@@ -399,7 +410,12 @@ class InferenceOrchestrator(
     }
 
     fun shutdown() {
-        activeJobs.values.forEach { it.cancel() }
+        // R-NATIVE-CANCEL: stop native generation FIRST. Job.cancel() only
+        // cancels the coroutine; LiteRT-LM keeps decoding until
+        // Conversation.cancelProcess() is called. cancelAll() routes every
+        // active request through cancelInference(), which calls cancelProcess()
+        // (and cancels the job) before we await + tear down.
+        cancelAll()
         runBlocking { awaitAllJobs(timeoutMs = 5_000) }
         activeJobs.clear()
         sharedMemoryPool.cleanupAll()
@@ -539,6 +555,26 @@ class InferenceOrchestrator(
         val deadlineNs = System.nanoTime() + INFERENCE_DEADLINE_MS * 1_000_000L
         // Single-writer: serialize sends for this session
         handle.mutex.withLock {
+            // R-TOCTOU: a destroySession() may have closed this handle while we
+            // were staging media outside the lock. If so, abort instead of
+            // re-warming a fresh Conversation on a destroyed/removed session
+            // (which would stream tokens for a dead session and leak the warm
+            // slot). The destroy path sets `destroyed` under this same mutex.
+            if (handle.destroyed) {
+                MindlayerLog.w(
+                    TAG,
+                    "Session destroyed during media staging; aborting inference",
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                )
+                sharedMemoryPool.cleanup(scopedKey)
+                writerFactory(pipeWriteEnd).closeWithError(
+                    0,
+                    "Session destroyed",
+                    MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                )
+                return
+            }
             handle.activeRequestId = scopedKey
             handle.isStreaming = true
             val writer = writerFactory(pipeWriteEnd)
@@ -632,10 +668,14 @@ class InferenceOrchestrator(
                     parts.add(Content.Text(ToolOutputSanitizer.scrub(textContent)))
                 }
                 if (stagedImage != null) {
-                    parts.add(Content.ImageFile(stagedImage.filePath))
+                    // P-MEDIA: stagedImage.filePath is encrypted at rest; pass
+                    // the JIT-materialized plaintext path to the native decoder.
+                    // The plaintext temp is cleaned up with the rest of this
+                    // request's staging files in the finally block below.
+                    parts.add(Content.ImageFile(sharedMemoryPool.materializePlaintext(stagedImage)))
                 }
                 if (stagedAudio != null) {
-                    parts.add(Content.AudioFile(stagedAudio.filePath))
+                    parts.add(Content.AudioFile(sharedMemoryPool.materializePlaintext(stagedAudio)))
                 }
 
                 val contents = if (parts.isNotEmpty()) {
@@ -1112,12 +1152,28 @@ class InferenceOrchestrator(
                 throw e
             } catch (t: Throwable) {
                 toolCallBridge.cancel(scopedKey)
-                // safeLabelWithDetail surfaces the native LiteRT-LM JNI
-                // error message ("Failed to allocate KV cache", "Model
-                // load failed", op-not-supported etc.) to both logcat
-                // and the wire-level MindlayerException the SDK sees.
-                // The allowlist confines this to provably-safe technical
-                // exception classes — prompt fragments never reach here.
+                // R-20: stop native generation on this terminal path too.
+                // The Cancellation/Timeout branches already call
+                // cancelProcess(); a generic throwable (e.g. a writer or
+                // tool-bridge failure raised while the engine is still
+                // decoding) must not leave native work running orphaned and
+                // holding the warm-conversation slot.
+                try {
+                    handle.conversation?.cancelProcess()
+                } catch (ct: Throwable) {
+                    MindlayerLog.w(
+                        TAG,
+                        "cancelProcess() after inference failure raised ${ct.safeLabel()}",
+                        requestId = meta.requestId,
+                        sessionId = meta.sessionId,
+                    )
+                }
+                // safeLabelWithDetail surfaces ONLY file-system / kernel
+                // exception detail (model-file path, errno, lock conflict).
+                // Native LiteRT-LM / generic IAE-ISE messages — which can
+                // embed prompt text — are reduced to their class name by
+                // safeLabelWithDetail, so prompt fragments never reach
+                // logcat, the persisted log row, or the wire error.
                 val safe = t.safeLabelWithDetail()
                 trace.markError(safe)
                 MindlayerLog.e(

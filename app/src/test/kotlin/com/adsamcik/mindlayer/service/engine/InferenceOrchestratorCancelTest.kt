@@ -22,6 +22,7 @@ import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import org.junit.After
@@ -182,6 +183,18 @@ class InferenceOrchestratorCancelTest {
         }
     }
 
+    /**
+     * Emits a single token then suspends (cheaply) until cancelled. Reaches the
+     * "in flight" state like [endlessFlow] but does NOT spew a fresh mockk
+     * [Message] every 50ms, so a test that holds the request in flight for a
+     * while (e.g. across a `shutdown()` await) cannot exhaust the JVM heap with
+     * recorded mockk interactions. Cancels instantly when the Job is cancelled.
+     */
+    private fun inFlightFlow(): Flow<Message> = flow {
+        emit(textMessage("tok-0"))
+        kotlinx.coroutines.awaitCancellation()
+    }
+
     /** Spin-wait until the predicate is true or timeoutMs elapses. */
     private fun await(timeoutMs: Long, intervalMs: Long = 25, predicate: () -> Boolean): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
@@ -317,6 +330,87 @@ class InferenceOrchestratorCancelTest {
         // and call cancelProcess(), because LiteRT-LM keeps decoding
         // natively otherwise. If a future refactor drops that catch or
         // removes cancelProcess from it, native generation leaks forever.
+        verify(timeout = 2_000L, atLeast = 1) { mockConversation.cancelProcess() }
+    }
+
+    /**
+     * P0 / R-TOCTOU (consumer side): if a session handle is marked `destroyed`
+     * after runInference captured it but before it acquires the per-session
+     * mutex (the exact window a concurrent destroySession() opens during media
+     * staging), runInference must observe the flag under the mutex and abort
+     * instead of re-warming a fresh Conversation and streaming tokens into the
+     * void. Setting the flag directly keeps this deterministic and fast.
+     */
+    @Test
+    fun `runInference aborts when the session handle was destroyed mid-flight`() {
+        val sid = sessionManager.createSession(SessionConfig(maxTokens = 2048))
+        // Mark the captured handle destroyed (still in the map), simulating the
+        // concurrent destroy that races runInference's mutex acquisition.
+        sessionManager.getSession(sid)!!.destroyed = true
+        val out = ByteArrayOutputStream()
+        outputStreamQueue.add(out)
+        every { mockConversation.sendMessageAsync(any<Contents>()) } returns inFlightFlow()
+
+        val pfd = mockk<ParcelFileDescriptor>(relaxed = true)
+        val meta = RequestMeta(requestId = "req-toctou", sessionId = sid, textContent = "hi")
+        orchestrator.infer("100:req-toctou", meta, image = null, audio = null, pipeWriteEnd = pfd)
+
+        var events = emptyList<TestPipeHelper.ParsedEvent>()
+        val gotError = await(5_000L) {
+            events = TestPipeHelper.parseFrames(
+                TestPipeHelper.readFrames(ByteArrayInputStream(out.toByteArray()))
+            )
+            events.any { it.kind == "error" }
+        }
+        assertTrue("Expected an abort error frame; events=$events", gotError)
+        assertTrue(
+            "Abort must use SESSION_NOT_FOUND_OR_NOT_OWNED; events=$events",
+            events.any {
+                it.kind == "error" &&
+                    it.errorCode == MindlayerErrorCode.nameOf(MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED)
+            },
+        )
+        // The dead session must NEVER have started native generation.
+        verify(exactly = 0) { mockConversation.sendMessageAsync(any<Contents>()) }
+    }
+
+    /**
+     * P0 / R-TOCTOU (producer side): destroySession() must set the handle's
+     * `destroyed` flag under the per-session mutex so an in-flight runInference
+     * (above) can observe it. Captures the handle before destroy and asserts the
+     * flag flips.
+     */
+    @Test
+    fun `destroySession marks the handle destroyed`() {
+        val sid = sessionManager.createSession(SessionConfig(maxTokens = 2048))
+        val handle = sessionManager.getSession(sid)!!
+        assertTrue("handle starts not-destroyed", !handle.destroyed)
+
+        sessionManager.destroySession(sid)
+
+        assertTrue("destroySession must mark the handle destroyed", handle.destroyed)
+    }
+
+    /**
+     * P0 / R-NATIVE-CANCEL: `shutdown()` must stop native LiteRT-LM generation
+     * (via `cancelProcess()`), not merely cancel the coroutine Job. Before the
+     * fix it called `Job.cancel()` first, leaving the engine decoding until a
+     * later teardown step.
+     */
+    @Test
+    fun `shutdown drives native cancelProcess for in-flight inference`() {
+        val sid = sessionManager.createSession(SessionConfig(maxTokens = 2048))
+        every { mockConversation.sendMessageAsync(any<Contents>()) } returns inFlightFlow()
+        val pfd = mockk<ParcelFileDescriptor>(relaxed = true)
+        val meta = RequestMeta(requestId = "req-shutdown", sessionId = sid, textContent = "hi")
+        orchestrator.infer("100:req-shutdown", meta, image = null, audio = null, pipeWriteEnd = pfd)
+        assertTrue(
+            "inference must reach in-flight state within 5s",
+            await(5_000L) { sessionManager.findSessionByActiveRequest("100:req-shutdown") != null },
+        )
+
+        orchestrator.shutdown()
+
         verify(timeout = 2_000L, atLeast = 1) { mockConversation.cancelProcess() }
     }
 }

@@ -133,6 +133,19 @@ class TokenStreamWriter private constructor(
      */
     @Volatile private var closed = false
 
+    /**
+     * Reliability review R-1: distinct from [closed]. `closed` means
+     * "no more frames may be written" (set by a failed `writeFrame` so a
+     * doomed pipe isn't written again); `resourcesClosed` means "the
+     * underlying FDs have been released". Keeping them separate fixes a
+     * descriptor leak: a `writeFrame` IOException set `closed = true` and
+     * threw WITHOUT closing the pipe, and the later [close] short-circuited
+     * on `closed` — so on every broken-pipe/client-death the pipe FD leaked
+     * until the process died. All resource release now funnels through the
+     * idempotent [closeResourcesQuietly], guarded by this flag.
+     */
+    @Volatile private var resourcesClosed = false
+
     @Volatile private var logRepository: LogRepository? = null
 
     fun attachLogRepository(repository: LogRepository?): TokenStreamWriter {
@@ -357,7 +370,13 @@ class TokenStreamWriter private constructor(
     }
 
     fun close() {
-        if (closed) return
+        // R-1: even if `closed` was already set by a failed writeFrame
+        // (broken pipe / backpressure timeout), we MUST still release the
+        // FD. Pre-fix this returned early and leaked the pipe descriptor.
+        if (closed) {
+            closeResourcesQuietly()
+            return
+        }
         closed = true
         // v0.5: drain any pending batched tokens via a synchronous best-
         // effort flush. Suspend isn't available in close(), so we call the
@@ -393,6 +412,24 @@ class TokenStreamWriter private constructor(
             MindlayerLog.w(TAG, "IOException flushing pipe (client may have disconnected): ${e.safeLabel()}")
         } catch (t: Throwable) {
             MindlayerLog.w(TAG, "Non-IOException flushing pipe: ${t.safeLabel()}")
+        }
+        closeResourcesQuietly()
+    }
+
+    /**
+     * Idempotently release the pipe descriptor + writer executor. Safe to
+     * call from any terminal path (success close, broken-pipe writeFrame,
+     * backpressure timeout) and safe to call more than once — guarded by
+     * [resourcesClosed]. Closing both [pfd] and [output] is deliberate
+     * belt-and-suspenders: `output` is an `AutoCloseOutputStream(pfd)`, so
+     * either close releases the fd, but a double close is a harmless no-op
+     * and guarantees the descriptor is gone on every code path.
+     */
+    private fun closeResourcesQuietly() {
+        if (resourcesClosed) return
+        resourcesClosed = true
+        try { pfd?.close() } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "pfd.close() raised: ${t.safeLabel()}")
         }
         try {
             runBlockingIo { output.close() }
@@ -544,12 +581,8 @@ class TokenStreamWriter private constructor(
             logRepository?.logStreamBackpressure(writeTimeoutMs)
             MindlayerLog.w(TAG, "Pipe write timed out after ${writeTimeoutMs}ms; closing", throwable = null)
             closed = true
-            try { pfd?.close() } catch (t: Throwable) {
-                MindlayerLog.w(TAG, "pfd.close() after timeout raised: ${t.safeLabel()}")
-            }
-            try { output.close() } catch (t: Throwable) {
-                MindlayerLog.w(TAG, "output.close() after timeout raised: ${t.safeLabel()}")
-            }
+            // R-1: release the FD immediately on backpressure timeout.
+            closeResourcesQuietly()
             throw CancellationException("backpressure_timeout").apply { initCause(e) }
         } catch (e: IOException) {
             MindlayerLog.w(
@@ -558,6 +591,9 @@ class TokenStreamWriter private constructor(
                 throwable = null,
             )
             closed = true
+            // R-1: a broken pipe must release the descriptor here — close()
+            // alone used to short-circuit on `closed` and leak the FD.
+            closeResourcesQuietly()
             // Re-raise as CancellationException so the enclosing inference
             // coroutine unwinds promptly and native cancelProcess() fires.
             throw CancellationException("Pipe write failed; client likely disconnected").apply { initCause(e) }
