@@ -70,16 +70,31 @@ below).
 
 ### Connect to the service
 
+Reuse **one client per process** and route every feature (LLM, OCR, embeddings)
+through it. `Mindlayer.shared(context)` returns a process-wide singleton, so your
+ViewModels / coordinators can't accidentally open a *separate* binding — and a
+separate consent/resume flow — per feature:
+
 ```kotlin
 import com.adsamcik.mindlayer.sdk.Mindlayer
 import com.adsamcik.mindlayer.sdk.MindlayerEvent
 
-// Connect (binds to the Mindlayer service in the background)
-val mindlayer = Mindlayer.connect(context)
+// One shared client for the whole app process (LLM + OCR + embeddings).
+val mindlayer = Mindlayer.shared(context)
 
 // Wait until connected (optional — chat() does this automatically)
 mindlayer.awaitConnected()
 ```
+
+- The shared client lives for the **process**. Tear it down only at app shutdown
+  or in tests via `Mindlayer.disconnectShared()` — do **not** call `disconnect()`
+  on it. The `historyPolicy` is fixed on first use; a later `shared()` with a
+  *different* policy throws (it is privacy-sensitive, never silently ignored).
+- Use `Mindlayer.connect(context, historyPolicy, observer)` instead only when you
+  genuinely need an **isolated** client (a distinct history policy / observer, or
+  an independent disconnect lifetime). `connect()` opens a fresh binding on every
+  call, so two `connect()`s = two bindings + two consent flows.
+- "Shared" is per Android **process**, not per app package.
 
 ### First-run user consent
 

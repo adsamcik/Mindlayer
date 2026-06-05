@@ -357,6 +357,55 @@ sequenceDiagram
     ML-->>Client: success
 ```
 
+## Client connection model (share one client; resume after consent)
+
+`Mindlayer.connect()` builds a **fresh binding per call**, so a consumer that
+connects separately for LLM and OCR (e.g. one client per ViewModel) opens two
+independent bindings, two `registerClient` handshakes, and two
+`connectionState`s — and must then drive consent/resume on each. To avoid that
+"half-share" footgun:
+
+- **Share one client per process** with `Mindlayer.shared(context)`. Every
+  feature (LLM, OCR, embeddings) calling `shared()` gets the *same* instance, so
+  there is one binding and one consent/resume flow. It lives for the process;
+  tear it down only at app shutdown / in tests via `Mindlayer.disconnectShared()`
+  (do **not** call `disconnect()` on a shared client). `historyPolicy` is fixed
+  on first creation — a later `shared()` with a different policy throws, since
+  the policy is privacy-sensitive. Reserve `connect()` for a genuinely isolated
+  client (distinct policy/observer or independent lifetime).
+
+- **Resume after consent is just `awaitConnected()`** — there is no separate
+  "resume" call. A pre-consent call lands the shared client in
+  `REJECTED_NOT_APPROVED`; once the user grants consent, the next
+  `awaitConnected()` rebinds once (gated by `REJECTION_RECHECK_COOLDOWN_MS`) and
+  re-asks the service.
+
+```kotlin
+// One client for the whole app:
+val mindlayer = Mindlayer.shared(context)
+
+suspend fun ensureAiReady(activityResultLauncher: ActivityResultLauncher<IntentSenderRequest>) {
+    try {
+        mindlayer.awaitConnected(10.seconds)            // also the "resume" path
+    } catch (e: MindlayerException) {
+        if (e.code == MindlayerErrorCode.CONSENT_REQUIRED) {
+            // Show your "Enable AI" affordance, then on tap:
+            when (val r = MindlayerConsent.requestConsent(context)) {
+                is ConsentRequestResult.Available ->
+                    activityResultLauncher.launch(IntentSenderRequest.Builder(r.intentSender).build())
+                ConsentRequestResult.AlreadyApproved -> mindlayer.awaitConnected(10.seconds)
+                else -> { /* surface Denied / ServiceUnavailable / Failed */ }
+            }
+            // After the consent Activity returns RESULT_OK, call awaitConnected()
+            // again — it rebinds and the client transitions to CONNECTED.
+        }
+    }
+}
+```
+
+> Caveat: "shared" is **per Android process**. An app that hosts SDK consumers
+> in multiple processes still gets one client per process.
+
 ## Pre-consent API surface
 
 With no permission gate, every installed app can bind and call AIDL. `authorizeCall()` runs for every method. Two methods are **deliberately reachable pre-consent**:

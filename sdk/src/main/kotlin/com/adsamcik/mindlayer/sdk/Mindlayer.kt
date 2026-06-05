@@ -2,6 +2,7 @@ package com.adsamcik.mindlayer.sdk
 
 import android.content.Context
 import android.graphics.Bitmap
+import androidx.annotation.VisibleForTesting
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.json.JsonObject
 import java.io.File
@@ -494,6 +495,16 @@ interface Mindlayer {
          * Construct a [Mindlayer] client bound to the on-device service and
          * begin the asynchronous bind handshake.
          *
+         * **Reuse one instance per process.** A single [Mindlayer] routes *all*
+         * features — [infer], [ocr], [ocrSession], [embed] — through one
+         * binding. Creating a separate client per feature (e.g. one per
+         * ViewModel) opens a *separate* Binder connection, [registerClient]
+         * handshake, and [connectionState] for each, so consent/resume must be
+         * driven independently on each. Prefer [shared] when several call sites
+         * need the service; reserve [connect] for cases that genuinely need an
+         * isolated client (a distinct [historyPolicy]/[observer], or an
+         * independent disconnect lifetime).
+         *
          * @param observer optional observability hook (Spike-E §3). As of C2 it
          *   is wired into the canonical call path: every [infer] / [ocr] /
          *   [ocrSession] / [embed] is bracketed by one
@@ -509,6 +520,107 @@ interface Mindlayer {
             mgr.connect(context)
             val store = HistoryStore(context, historyPolicy)
             return MindlayerImpl(mgr, store).also { it.observer = observer }
+        }
+
+        @Volatile
+        private var sharedInstance: Mindlayer? = null
+
+        @Volatile
+        private var sharedHistoryPolicy: HistoryPolicy? = null
+
+        private val sharedLock = Any()
+
+        /**
+         * Test seam: when non-null, [shared] builds the singleton from this
+         * factory instead of [connect], so the singleton lifecycle can be
+         * exercised without a real Binder bind / history DB. Production never
+         * sets this.
+         */
+        @VisibleForTesting
+        internal var sharedConnectFactory: ((Context, HistoryPolicy) -> Mindlayer)? = null
+
+        /**
+         * Returns a **process-wide singleton** [Mindlayer] so every feature
+         * (LLM, OCR, embeddings) shares one binding. This is the "can't
+         * half-share" entry point: call it from each ViewModel / coordinator and
+         * they all get the same client, the same [connectionState], and a single
+         * consent/resume flow.
+         *
+         * Lifecycle:
+         * - The shared client lives for the **process** (it is *not* reference
+         *   counted), bound to the application context. Tear it down only at app
+         *   shutdown or in tests via [disconnectShared] — do **not** call
+         *   [disconnect] on it (that would strand the singleton; as a safety net
+         *   the next [shared] call rebuilds a disconnected one).
+         * - [historyPolicy] is honored on the **first** call that creates the
+         *   singleton. Because the policy is privacy-sensitive, a later call that
+         *   passes a *different* policy throws [IllegalStateException] rather
+         *   than silently ignoring it — re-initialize via [disconnectShared]
+         *   first if you must change it.
+         * - There is intentionally no `observer` parameter: a process-lifetime
+         *   singleton must not retain a UI-scoped [MindlayerObserver]. Use
+         *   [connect] if you need per-instance observability.
+         *
+         * Resuming after consent: if a call fails with `CONSENT_REQUIRED` (the
+         * client lands in [ConnectionState.REJECTED_NOT_APPROVED]), just call
+         * [awaitConnected] again once the user has granted consent (e.g. from an
+         * "Enable AI" button) — it rebinds once and re-asks the service. No
+         * separate "resume" call is needed.
+         *
+         * Caveat: "shared" is **per Android process**. An app that hosts
+         * consumers in multiple processes still gets one client per process.
+         */
+        fun shared(
+            context: Context,
+            historyPolicy: HistoryPolicy = HistoryPolicy.METADATA_ONLY,
+        ): Mindlayer {
+            sharedInstance?.let { existing ->
+                if (existing.connectionState.value != ConnectionState.DISCONNECTED) {
+                    requireMatchingSharedPolicy(historyPolicy)
+                    return existing
+                }
+            }
+            return synchronized(sharedLock) {
+                val existing = sharedInstance
+                if (existing != null &&
+                    existing.connectionState.value != ConnectionState.DISCONNECTED
+                ) {
+                    requireMatchingSharedPolicy(historyPolicy)
+                    existing
+                } else {
+                    val appContext = context.applicationContext
+                    val created = sharedConnectFactory?.invoke(appContext, historyPolicy)
+                        ?: connect(appContext, historyPolicy)
+                    sharedInstance = created
+                    sharedHistoryPolicy = historyPolicy
+                    created
+                }
+            }
+        }
+
+        /**
+         * Disconnects and clears the process-shared client created by [shared].
+         * The next [shared] call builds a fresh one. Use at app shutdown or in
+         * tests; ordinary feature code should not need it.
+         */
+        fun disconnectShared() {
+            synchronized(sharedLock) {
+                sharedInstance?.disconnect()
+                sharedInstance = null
+                sharedHistoryPolicy = null
+            }
+        }
+
+        private fun requireMatchingSharedPolicy(requested: HistoryPolicy) {
+            val current = sharedHistoryPolicy
+            if (current != null && current != requested) {
+                throw IllegalStateException(
+                    "Mindlayer.shared() is already initialized with historyPolicy=$current " +
+                        "but was called with $requested. The process-shared client uses a single " +
+                        "history policy; pass the same value, or call disconnectShared() first to " +
+                        "re-initialize.",
+                )
+            }
         }
     }
 }

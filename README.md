@@ -39,7 +39,7 @@ Mindlayer runs as a headless Android service that loads the Gemma 4 model once a
 ### For client apps (SDK consumer)
 
 ```kotlin
-val mindlayer = Mindlayer.connect(context)
+val mindlayer = Mindlayer.shared(context) // one shared client per process
 val caps = mindlayer.getCapabilities()
 require(caps.supports(ServiceCapabilities.FEATURE_PIPE_STREAM_V1))
 val sessionId = mindlayer.createSession {
@@ -54,6 +54,13 @@ handle.events.collect { event ->
     }
 }
 ```
+
+> **First-run user consent.** Mindlayer is default-deny: the first call lands the
+> client in `REJECTED_NOT_APPROVED` (`MindlayerErrorCode.CONSENT_REQUIRED`). Use
+> `MindlayerConsent.requestConsent(context)` to show the consent screen, then
+> retry via `awaitConnected()`. Reuse one client (`Mindlayer.shared(context)`) so
+> every feature shares a single binding + consent flow. Full walkthrough and a
+> copy-paste example: [`SDK_INTEGRATION.md`](SDK_INTEGRATION.md#first-run-user-consent).
 
 ### Building
 
