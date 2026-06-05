@@ -313,7 +313,11 @@ class EmbeddingCoordinator(
      * foreground refcount.
      */
     fun cancelAll() {
-        val keys = activeJobs.keys.toList()
+        // toMutableList(), NOT toList(): activeJobs is a ConcurrentHashMap whose
+        // entries completing jobs remove concurrently. Kotlin toList()'s size==1
+        // fast path reads size then iterator().next() non-atomically and throws
+        // NoSuchElementException if the lone entry is removed in between.
+        val keys = activeJobs.keys.toMutableList()
         keys.forEach { activeJobs.remove(it)?.cancel() }
         if (keys.isNotEmpty()) {
             MindlayerLog.i(TAG, "Cancelled ${keys.size} embedding job(s) (service stop/timeout)")

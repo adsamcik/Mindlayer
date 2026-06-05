@@ -565,12 +565,15 @@ class OcrSessionManager(
 
     /** Cancel in-flight OCR recognition before pressure-driven native delegate unload. */
     suspend fun drainForMemoryPressure() {
-        sessions.entries.toList().forEach { cleanupSession(it.key, it.value, cancelJobs = true) }
+        // toMutableList(): concurrency-safe snapshot of the ConcurrentHashMap
+        // entries (see drainActiveJobs — toList()'s size==1 path races concurrent
+        // session removal and throws NoSuchElementException).
+        sessions.entries.toMutableList().forEach { cleanupSession(it.key, it.value, cancelJobs = true) }
         recognitionDispatcher?.drainForMemoryPressure()
     }
 
     fun cancelAllForMemoryPressure() {
-        sessions.entries.toList().forEach { (id, session) ->
+        sessions.entries.toMutableList().forEach { (id, session) ->
             if (sessions.remove(id, session)) {
                 session.phase = OcrSessionState.PHASE_CLOSED
                 session.activeJobs.forEach { it.cancel() }
@@ -656,7 +659,14 @@ class OcrSessionManager(
 
     private suspend fun drainActiveJobs(session: OcrSession, cancel: Boolean) {
         while (true) {
-            val jobs = session.activeJobs.toList()
+            // toMutableList(), NOT toList(): activeJobs is a ConcurrentHashMap
+            // keySet that job-completion callbacks (invokeOnCompletion { remove })
+            // mutate concurrently. Kotlin's toList() has a size==1 fast path that
+            // reads size then calls iterator().next() non-atomically — if the lone
+            // job completes between the two, the set is empty and next() throws
+            // NoSuchElementException. toMutableList() copies via the concurrency-
+            // safe ConcurrentHashMap toArray() and never iterator().next()s.
+            val jobs = session.activeJobs.toMutableList()
             if (jobs.isEmpty()) return
             if (cancel) jobs.forEach { it.cancel() }
             jobs.joinAll()
