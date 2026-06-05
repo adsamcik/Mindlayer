@@ -91,8 +91,13 @@ object MindlayerConsent {
     }
 
     private fun classifyError(t: Throwable): ConsentRequestResult {
-        val code = MindlayerErrorCode.codeFromWireMessage(t.message)
-        val msg = MindlayerErrorCode.messageFromWireMessage(t.message)
+        return classifyWireMessage(t.message)
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun classifyWireMessage(wireMessage: String?): ConsentRequestResult {
+        val code = MindlayerErrorCode.codeFromWireMessage(wireMessage)
+        val msg = MindlayerErrorCode.messageFromWireMessage(wireMessage)
         return when (code) {
             MindlayerErrorCode.INVALID_REQUEST ->
                 // requestConsentChallenge throws INVALID_REQUEST when the
@@ -100,13 +105,14 @@ object MindlayerConsent {
                 ConsentRequestResult.AlreadyApproved
             MindlayerErrorCode.CONSENT_DENIED ->
                 ConsentRequestResult.Denied(parseUntil(msg))
-            null -> ConsentRequestResult.Failed(MindlayerErrorCode.UNKNOWN, t.message)
+            null -> ConsentRequestResult.Failed(MindlayerErrorCode.UNKNOWN, wireMessage)
             else -> ConsentRequestResult.Failed(code, msg)
         }
     }
 
     /** Parse `until=<epochMs>` or `until=permanent` from a CONSENT_DENIED message. */
-    private fun parseUntil(message: String?): Long? {
+    @androidx.annotation.VisibleForTesting
+    internal fun parseUntil(message: String?): Long? {
         if (message == null) return null
         val token = message.split(' ', ',')
             .firstOrNull { it.startsWith("until=") }
