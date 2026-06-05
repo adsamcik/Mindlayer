@@ -127,6 +127,15 @@ class ServiceBinder(
     private val diagnosticsRefreshInFlight = AtomicBoolean(false)
     private val engineWarmupInFlight = AtomicBoolean(false)
 
+    /**
+     * P4-DECOMP: multi-frame OCR session endpoint logic extracted off this
+     * 3000-line AIDL god class. The authorization gate (authorizeCall) stays on
+     * each override at the binder boundary; the validated post-auth work
+     * delegates here. `::typedBinderException` keeps wire-error mapping
+     * single-sourced.
+     */
+    private val ocrEndpoints = OcrEndpoints(ocrSessionManager, sharedMemoryPool, ::typedBinderException)
+
     @Volatile
     private var diagnosticsSnapshot: String = """{"status":"warming"}"""
 
@@ -2566,19 +2575,7 @@ class ServiceBinder(
 
     override fun createOcrSession(cfg: com.adsamcik.mindlayer.OcrSessionConfig): String {
         authorizeCall(cost = 1.0)
-        IpcInputValidator.validateOcrSessionConfig(cfg)
-        val uid = Binder.getCallingUid()
-        return try {
-            ocrSessionManager.createSession(uid, cfg)
-        } catch (e: IllegalStateException) {
-            val msg = e.message.orEmpty()
-            val code = when {
-                msg.contains("concurrent session limit", ignoreCase = true) ->
-                    MindlayerErrorCode.CONCURRENT_LIMIT
-                else -> MindlayerErrorCode.OCR_SCHEMA_INVALID
-            }
-            throw typedBinderException(code, msg)
-        }
+        return ocrEndpoints.createOcrSession(cfg)
     }
 
     override fun pushOcrFrame(
@@ -2587,77 +2584,7 @@ class ServiceBinder(
         meta: com.adsamcik.mindlayer.OcrFrameMeta,
     ): com.adsamcik.mindlayer.OcrFrameAck {
         authorizeCall(cost = 0.15)
-        IpcInputValidator.validateId(sessionId, "sessionId")
-        IpcInputValidator.validateOcrFrameMeta(meta)
-        val uid = Binder.getCallingUid()
-        try {
-            IpcInputValidator.validateImageTransfer(frame, MAX_MEDIA_BYTES)
-        } catch (t: Throwable) {
-            try { frame.source.close() } catch (_: Throwable) { /* fine */ }
-            MindlayerLog.w(
-                TAG,
-                "OCR frame MediaPart rejected: ${t.safeLabel()}",
-                sessionId = sanitizeLogField(sessionId),
-                throwable = null,
-            )
-            throw typedBinderException(MindlayerErrorCode.INVALID_REQUEST, "Invalid OCR MediaPart: ${t.safeLabel()}")
-        }
-        if (!ocrSessionManager.isOwner(uid, sessionId)) {
-            try { frame.source.close() } catch (_: Throwable) { /* fine */ }
-            throw typedBinderException(
-                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
-                "Session not found or not owned by caller",
-            )
-        }
-        val pool = sharedMemoryPool
-            ?: return ocrSessionManager.pushFrameMetadataOnly(uid, sessionId, meta)
-
-        val scopedKey = "ocr:$uid:$sessionId:${meta.frameId}"
-        val extracted = try {
-            MediaPartYPlaneExtractor.extractY(frame, pool, scopedKey)
-        } catch (e: SecurityException) {
-            try { frame.source.close() } catch (_: Throwable) { /* fine */ }
-            MindlayerLog.w(
-                TAG,
-                "OCR Y-plane extraction rejected: ${e.safeLabel()}",
-                requestId = scopedKey,
-                sessionId = sanitizeLogField(sessionId),
-                throwable = null,
-            )
-            throw e
-        } catch (e: com.adsamcik.mindlayer.service.ipc.SharedMemoryPoolExhaustedException) {
-            try { frame.source.close() } catch (_: Throwable) { /* fine */ }
-            MindlayerLog.w(
-                TAG,
-                "OCR Y-plane extraction resource exhausted: ${e.safeLabel()}",
-                requestId = scopedKey,
-                sessionId = sanitizeLogField(sessionId),
-                throwable = null,
-            )
-            throw typedBinderException(
-                MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
-                "shm_pool_exhausted reason=${e.reason} retryAfterMs=${e.retryAfterMs}",
-            )
-        } catch (t: Throwable) {
-            try { frame.source.close() } catch (_: Throwable) { /* fine */ }
-            MindlayerLog.w(
-                TAG,
-                "OCR Y-plane extraction failed: ${t.safeLabelWithDetail()}",
-                requestId = scopedKey,
-                sessionId = sanitizeLogField(sessionId),
-                throwable = null,
-            )
-            return ocrSessionManager.rejectFrame(uid, sessionId, meta)
-        }
-
-        return ocrSessionManager.pushFrame(
-            uid = uid,
-            sessionId = sessionId,
-            meta = meta,
-            yPlane = extracted.yPlane,
-            width = extracted.width,
-            height = extracted.height,
-        )
+        return ocrEndpoints.pushOcrFrame(sessionId, frame, meta)
     }
 
     override fun streamOcrEvents(
@@ -2665,91 +2592,27 @@ class ServiceBinder(
         eventWriteEnd: android.os.ParcelFileDescriptor,
     ) {
         authorizeCall(cost = 0.25)
-        IpcInputValidator.validateId(sessionId, "sessionId")
-        val uid = Binder.getCallingUid()
-        if (!ocrSessionManager.isOwner(uid, sessionId)) {
-            try {
-                eventWriteEnd.close()
-            } catch (_: java.io.IOException) {
-                // best-effort
-            }
-            throw typedBinderException(
-                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
-                "Session not found or not owned by caller",
-            )
-        }
-        // Phase 2 #2: attach the OCR_V1 event-stream writer to the
-        // session. The writer takes ownership of the PFD (the
-        // wrapped AutoCloseOutputStream closes it on writer close).
-        val writer = com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter(eventWriteEnd)
-        val attached = ocrSessionManager.attachEventWriter(uid, sessionId, writer)
-        if (!attached) {
-            // Ownership flipped between isOwner check and attach —
-            // close the writer (which closes the PFD).
-            try {
-                writer.close()
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            throw typedBinderException(
-                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
-                "Session not found or not owned by caller",
-            )
-        }
+        ocrEndpoints.streamOcrEvents(sessionId, eventWriteEnd)
     }
 
     override fun getOcrSessionState(sessionId: String): com.adsamcik.mindlayer.OcrSessionState {
         authorizeCall(cost = 0.1)
-        IpcInputValidator.validateId(sessionId, "sessionId")
-        val uid = Binder.getCallingUid()
-        if (!ocrSessionManager.isOwner(uid, sessionId)) {
-            throw typedBinderException(
-                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
-                "Session not found or not owned by caller",
-            )
-        }
-        return try {
-            ocrSessionManager.stateOf(uid, sessionId)
-        } catch (e: IllegalStateException) {
-            throw typedBinderException(
-                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
-                "Session not found or not owned by caller",
-            )
-        }
+        return ocrEndpoints.getOcrSessionState(sessionId)
     }
 
     override fun finalizeOcrSession(sessionId: String) {
         authorizeCall(cost = 1.0)
-        IpcInputValidator.validateId(sessionId, "sessionId")
-        val uid = Binder.getCallingUid()
-        if (!ocrSessionManager.isOwner(uid, sessionId)) {
-            throw typedBinderException(
-                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
-                "Session not found or not owned by caller",
-            )
-        }
-        runBlocking { ocrSessionManager.finalize(uid, sessionId) }
+        ocrEndpoints.finalizeOcrSession(sessionId)
     }
 
     override fun closeOcrSession(sessionId: String) {
         authorizeCall(cost = 0.1)
-        IpcInputValidator.validateId(sessionId, "sessionId")
-        val uid = Binder.getCallingUid()
-        // Idempotent: closing a non-owned session is a no-op (mirrors
-        // close-semantics-for-already-closed-streams). We do NOT
-        // anti-enumerate here because close() returning silently for
-        // unowned-sessions is indistinguishable from close()-of-closed.
-        try {
-            runBlocking { ocrSessionManager.close(uid, sessionId) }
-        } catch (_: IllegalStateException) {
-            // Session not found or not owned — silently no-op.
-        }
+        ocrEndpoints.closeOcrSession(sessionId)
     }
 
     override fun getOcrLimits(): com.adsamcik.mindlayer.OcrLimits {
         authorizeCall(cost = 0.1)
-        // Returns the manager configured limits regardless of whether FEATURE_OCR_SESSION is advertised.
-        return ocrSessionManager.getLimits()
+        return ocrEndpoints.getOcrLimits()
     }
 
     /**
