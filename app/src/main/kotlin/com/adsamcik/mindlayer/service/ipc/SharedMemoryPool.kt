@@ -649,22 +649,31 @@ class SharedMemoryPool(cacheDir: File) {
             )
         }
 
-        val res = reservations.computeIfAbsent(scopedKey) { Reservation() }
-        val ok = synchronized(res) {
+        // Create-or-update the per-request ledger entry ATOMICALLY with respect
+        // to the reservations map. compute() holds the map's per-key bin lock
+        // for the whole remap, closing the window where a concurrent
+        // releaseAllReservations()/cleanup() could remove the entry between a
+        // lookup and its mutation — which would orphan this increment and leak
+        // global capacity. releaseReservation()/releaseAllReservations() use the
+        // same map-atomic protocol so the ledger and the global counters stay
+        // consistent (no double-decrement, no leak).
+        var perRequestExceeded = false
+        reservations.compute(scopedKey) { _, existing ->
+            val res = existing ?: Reservation()
             if (res.count + 1 > MAX_PFDS_PER_REQUEST) {
-                false
+                // Leave any pre-existing reservation untouched and never create
+                // an empty entry on the rejection path.
+                perRequestExceeded = true
+                existing
             } else {
                 res.count += 1
                 res.bytes += addBytes
-                true
+                res
             }
         }
-        if (!ok) {
+        if (perRequestExceeded) {
             activeBytes.addAndGet(-addBytes)
             activeCount.decrementAndGet()
-            // Don't remove the reservation entry here — it may have been
-            // populated by an earlier successful reserve for this same
-            // scopedKey (the binder enforces 1+1, but defence-in-depth).
             throw SharedMemoryPoolExhaustedException(
                 reason = "per_request_pfds",
                 currentCount = activeCount.get(),
@@ -685,31 +694,38 @@ class SharedMemoryPool(cacheDir: File) {
     @androidx.annotation.VisibleForTesting
     internal fun releaseReservation(scopedKey: String, count: Int, bytes: Long) {
         if (count == 0 && bytes == 0L) return
-        activeCount.addAndGet(-count)
-        activeBytes.addAndGet(-bytes)
-        val res = reservations[scopedKey] ?: return
-        val drained = synchronized(res) {
-            res.count -= count
-            res.bytes -= bytes
-            res.count <= 0 && res.bytes <= 0L
+        // Idempotent + clamped: only decrement the global counters by what the
+        // per-request ledger actually still holds, and mutate the ledger
+        // atomically via computeIfPresent. A second release (double-release) or
+        // a release after cleanup()/releaseAllReservations() finds no entry and
+        // is a safe no-op, so the global counters can never be driven negative.
+        var releasedCount = 0
+        var releasedBytes = 0L
+        reservations.computeIfPresent(scopedKey) { _, res ->
+            val c = count.coerceAtMost(res.count)
+            val b = bytes.coerceAtMost(res.bytes)
+            res.count -= c
+            res.bytes -= b
+            releasedCount = c
+            releasedBytes = b
+            if (res.count <= 0 && res.bytes <= 0L) null else res
         }
-        if (drained) {
-            // computeIfPresent-equivalent: only remove when still drained
-            // by the time we're holding the map slot, otherwise a
-            // subsequent reserve that re-allocated the entry stays.
-            reservations.remove(scopedKey, res)
-        }
+        if (releasedCount != 0) activeCount.addAndGet(-releasedCount)
+        if (releasedBytes != 0L) activeBytes.addAndGet(-releasedBytes)
     }
 
     /** Release the entire per-scopedKey reservation. Called from [cleanup]. */
     private fun releaseAllReservations(scopedKey: String) {
+        // Atomically detach the entry. Once removed, no concurrent
+        // tryReserve()/releaseReservation() can mutate THIS instance (they
+        // operate on the map key via compute()/computeIfPresent()), so reading
+        // its fields here without a lock is safe and the global decrement
+        // matches exactly what was reserved for this key.
         val res = reservations.remove(scopedKey) ?: return
-        synchronized(res) {
-            if (res.count != 0) activeCount.addAndGet(-res.count)
-            if (res.bytes != 0L) activeBytes.addAndGet(-res.bytes)
-            res.count = 0
-            res.bytes = 0L
-        }
+        if (res.count != 0) activeCount.addAndGet(-res.count)
+        if (res.bytes != 0L) activeBytes.addAndGet(-res.bytes)
+        res.count = 0
+        res.bytes = 0L
     }
 
     /**

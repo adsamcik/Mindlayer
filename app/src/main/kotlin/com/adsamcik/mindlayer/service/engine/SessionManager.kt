@@ -726,6 +726,11 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         try {
             runBlocking {
                 handle.mutex.withLock {
+                    // R-TOCTOU: mark destroyed under the same mutex an
+                    // in-flight runInference re-checks after staging, so a
+                    // request that captured this handle before destroy aborts
+                    // instead of inferring on / re-warming a dead session.
+                    handle.destroyed = true
                     handle.activeRequestId = null
                     handle.isStreaming = false
                     // Hot-swap: try to evict any warm Conversation under
@@ -1167,6 +1172,16 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         @Volatile var clientPriorityHint: Int = 0
         @Volatile var activeRequestId: String? = null
         @Volatile var backendInvalidated: Boolean = false
+
+        /**
+         * Set to `true` under [mutex] by [destroySessionInternal] the moment a
+         * destroy begins closing this handle's [Conversation]. An inference that
+         * captured this handle before destroy (e.g. while staging media outside
+         * the lock) re-checks this flag as the first thing it does after
+         * acquiring [mutex] and aborts instead of re-warming a fresh
+         * [Conversation] on an already-destroyed session.
+         */
+        @Volatile var destroyed: Boolean = false
 
         /**
          * Rolling per-session conversation history seeded from
