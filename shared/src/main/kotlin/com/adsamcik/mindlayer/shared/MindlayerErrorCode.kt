@@ -253,12 +253,27 @@ object MindlayerErrorCode {
     /** SDK observed a malformed or prematurely terminated pipe protocol. */
     const val PROTOCOL_VIOLATION = 5020
 
+    // ---- 3xxx consent / input validation (continued) ----------------------
+
+    /**
+     * v0.10: caller-supplied input failed the third-party prompt-injection
+     * scoring heuristics. Emitted only for THIRD_PARTY-tier callers; first-
+     * party callers bypass the scoring. The wire message body carries
+     * `score=<int>` and `threshold=<int>` for SDK telemetry; the
+     * service log records the score but **never** the rejected content.
+     */
+    const val INPUT_REJECTED = 3009
+
     // ---- 6xxx auth / allowlist ---------------------------------------------
 
-    /** App not on the allowlist; user approval pending in the dashboard. */
-    const val ALLOWLIST_PENDING = 6001
-
-    /** App approval was revoked; user must re-approve. */
+    /**
+     * App approval was revoked; user must re-consent. Still emitted as the
+     * **eviction / cancellation reason code** when `revokeApp` or a
+     * permanent block tears down a caller's in-flight sessions
+     * (`InferenceOrchestrator` / `SessionManager`). Distinct from
+     * [CONSENT_REQUIRED] (returned by the auth gate to an un-consented
+     * caller) and [CONSENT_DENIED] (returned to a user-denied caller).
+     */
     const val ALLOWLIST_REVOKED = 6002
 
     /** Caller identity could not be resolved (shared-UID, unknown package). */
@@ -266,6 +281,24 @@ object MindlayerErrorCode {
 
     /** Android denied binding to the service before the Mindlayer auth gate. */
     const val PERMISSION_DENIED = 6004
+
+    /**
+     * v0.10: caller is not approved in `entries.json` and must obtain
+     * user consent via the consent-Intent flow. The SDK translates this
+     * to `MindlayerConnectResult.ConsentRequired(intent)` where `intent`
+     * is the PendingIntent returned by
+     * [com.adsamcik.mindlayer.IMindlayerService.requestConsentChallenge].
+     */
+    const val CONSENT_REQUIRED = 6005
+
+    /**
+     * v0.10: user explicitly denied consent for this caller. The wire
+     * message body carries either `until=<epochMs>` for a temporary
+     * (24-hour) denial or `until=permanent` for a package-wide block.
+     * The SDK translates this to
+     * `MindlayerConnectResult.ConsentDenied(until)`.
+     */
+    const val CONSENT_DENIED = 6006
 
     /** Internal service error; should not be observed in healthy operation. */
     const val INTERNAL = 9999
@@ -314,7 +347,7 @@ object MindlayerErrorCode {
         OCR_IDLE_TIMEOUT, OCR_MAX_DURATION -> Category.SESSION
         INVALID_REQUEST, INVALID_SESSION_CONFIG, INVALID_TOOL_RESULT,
         DUPLICATE_REQUEST, NO_ACTIVE_REQUEST,
-        INPUT_EXCEEDS_CONTEXT,
+        INPUT_EXCEEDS_CONTEXT, INPUT_REJECTED,
         OCR_SCHEMA_INVALID, OCR_SESSION_FINALIZED -> Category.VALIDATION
         THERMAL_CRITICAL, MEMORY_PRESSURE, LOW_MEMORY,
         CONCURRENT_LIMIT, RATE_LIMITED, SERVICE_THROTTLED,
@@ -327,8 +360,9 @@ object MindlayerErrorCode {
         FRAME_DROPPED_BUSY, FRAME_REJECTED_QUALITY,
         FEATURE_NOT_SUPPORTED, SERVICE_UNAVAILABLE, CONNECT_TIMEOUT,
         PROTOCOL_VIOLATION -> Category.RESOURCE
-        ALLOWLIST_PENDING, ALLOWLIST_REVOKED, IDENTITY_UNKNOWN,
-        PERMISSION_DENIED -> Category.AUTH
+        ALLOWLIST_REVOKED,
+        IDENTITY_UNKNOWN, PERMISSION_DENIED,
+        CONSENT_REQUIRED, CONSENT_DENIED -> Category.AUTH
         INTERNAL -> Category.UNKNOWN
         else -> Category.UNKNOWN
     }
@@ -382,10 +416,12 @@ object MindlayerErrorCode {
         CONNECT_TIMEOUT -> "CONNECT_TIMEOUT"
         PROTOCOL_VIOLATION -> "PROTOCOL_VIOLATION"
         UNSUPPORTED_ANDROID_VERSION -> "UNSUPPORTED_ANDROID_VERSION"
-        ALLOWLIST_PENDING -> "ALLOWLIST_PENDING"
+        INPUT_REJECTED -> "INPUT_REJECTED"
         ALLOWLIST_REVOKED -> "ALLOWLIST_REVOKED"
         IDENTITY_UNKNOWN -> "IDENTITY_UNKNOWN"
         PERMISSION_DENIED -> "PERMISSION_DENIED"
+        CONSENT_REQUIRED -> "CONSENT_REQUIRED"
+        CONSENT_DENIED -> "CONSENT_DENIED"
         INTERNAL -> "INTERNAL"
         else -> null
     }

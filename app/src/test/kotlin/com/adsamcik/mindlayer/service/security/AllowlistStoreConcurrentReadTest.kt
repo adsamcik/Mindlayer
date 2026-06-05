@@ -116,8 +116,8 @@ class AllowlistStoreConcurrentReadTest {
 
     @Test
     fun `concurrent mixed reads and writes never throw`() {
-        // Simulates dashboard polling (list/listPending reads) while
-        // approve/revoke writes happen — same FileLock contention surface.
+        // Simulates dashboard polling while approve/revoke writes happen —
+        // same FileLock contention surface.
         val sig = "e".repeat(64)
         store.approveDirect("com.example.a", sig, "A")
         store.approveDirect("com.example.b", sig, "B")
@@ -137,7 +137,7 @@ class AllowlistStoreConcurrentReadTest {
                         when (id % 4) {
                             0 -> store.isAllowed("com.example.a", sig)
                             1 -> store.list()
-                            2 -> store.listPending()
+                            2 -> store.lookupAllowed("com.example.b", sig)
                             3 -> store.isDenied("com.example.a", sig)
                         }
                     }

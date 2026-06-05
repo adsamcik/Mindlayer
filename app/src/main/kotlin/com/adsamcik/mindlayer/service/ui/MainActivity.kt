@@ -58,7 +58,7 @@ class MainActivity : ComponentActivity() {
             android.view.WindowManager.LayoutParams.FLAG_SECURE,
         )
         window.decorView.filterTouchesWhenObscured = true
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S_V2) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
             try {
                 window.setHideOverlayWindows(true)
             } catch (_: Throwable) {

@@ -1035,10 +1035,10 @@ class ServiceBinderTest {
         }
     }
 
-    // ---- H2: allowlist before main rate-limit; rejection bucket caps recordPending
+    // ---- H2: allowlist before main rate-limit; rejection bucket caps logging
 
     @Test
-    fun `un-allowlisted UID hammered N times triggers bounded recordPending count`() {
+    fun `un-allowlisted UID hammered N times returns consent required without main rate limit`() {
         val store = mockk<AllowlistStore>(relaxed = true)
         every { store.isDenied(any(), any()) } returns false
         every { store.isAllowed(any(), any()) } returns false
@@ -1070,18 +1070,20 @@ class ServiceBinderTest {
         mockkStatic(android.os.Binder::class)
         every { android.os.Binder.getCallingUid() } returns externalUid
         try {
+            var rejectionCount = 0
             repeat(50) {
-                try { localBinder.getStatus() } catch (_: SecurityException) { /* expected */ }
+                try {
+                    localBinder.getStatus()
+                } catch (_: SecurityException) {
+                    rejectionCount++
+                }
             }
+            assertEquals(50, rejectionCount)
         } finally {
             io.mockk.unmockkStatic(android.os.Binder::class)
         }
 
-        // Only the first ~6 rejections in the minute should call recordPending.
-        // Looser upper bound (8) to absorb minor refill timing variance.
-        verify(atLeast = 1, atMost = 8) {
-            store.recordPending(any(), any(), any())
-        }
+        verify(atLeast = 1) { store.isAllowed("evil.app", "evilsig") }
     }
 
     // ---- H4-binder: engineWarming in getStatus ----------------------------
@@ -1123,7 +1125,7 @@ class ServiceBinderTest {
     // ---- M7: allowlist rejection does not consume main rate-limit ----------
 
     @Test
-    fun `authorizeCall records pending without consuming main rate-limit for allowlist-rejected callers`() {
+    fun `authorizeCall rejects unconsented caller without consuming main rate-limit`() {
         mockkStatic(Binder::class)
         every { Binder.getCallingUid() } returns 1001
 
@@ -1159,11 +1161,10 @@ class ServiceBinderTest {
                 testBinder.getStatus()
                 fail("Expected SecurityException from allowlist")
             } catch (e: SecurityException) {
-                // expected
+                // expected — CONSENT_REQUIRED
             }
             verify(exactly = 0) { mockRateLimiter.tryAcquire(1001, any()) }
             verify { mockRateLimiter.tryAcquireRejection(1001) }
-            verify { mockAllowlist.recordPending("test.caller", "testsig", "Test Caller") }
         } finally {
             io.mockk.unmockkStatic(Binder::class)
         }

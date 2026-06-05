@@ -28,6 +28,9 @@ import com.adsamcik.mindlayer.OcrLimits;
 import com.adsamcik.mindlayer.OcrImageOptions;
 import com.adsamcik.mindlayer.OcrImageResult;
 import com.adsamcik.mindlayer.HealthCheck;
+import com.adsamcik.mindlayer.ConsentChallenge;
+import com.adsamcik.mindlayer.ConsentIdentity;
+import com.adsamcik.mindlayer.ConsentDecision;
 import com.adsamcik.mindlayer.IClientCallback;
 
 interface IMindlayerService {
@@ -188,6 +191,30 @@ interface IMindlayerService {
     // getStatus() (heavier) or assume the service is alive when this
     // call simply doesn't exist.
     HealthCheck ping();
+
+    // v0.10 consent-Intent flow — replaces the legacy dashboard
+    // "Pending approvals" inbox. See docs/CONSENT_ARCHITECTURE.md.
+    //
+    // requestConsentChallenge: invoked by an un-approved external caller
+    //   to obtain a server-issued PendingIntent that, when fired via
+    //   startActivityForResult, launches Mindlayer's ConsentActivity.
+    //   Caller identity is captured server-side at this call via real
+    //   Binder.getCallingUid(); the activity NEVER re-derives identity
+    //   from Activity-layer APIs. Rate-limited per-UID (default
+    //   10/hour) — the rate limit IS the primary spam defence.
+    //   Bypasses the allowlist gate (this is the entry point for
+    //   un-approved callers).
+    //
+    // lookupChallenge / completeConsent: self-UID only. ConsentActivity
+    //   (which runs in Mindlayer's main process) uses these to retrieve
+    //   the pinned identity for UI rendering and to submit the user's
+    //   decision back. Both methods enforce
+    //   Binder.getCallingUid() == Process.myUid() server-side. Returns
+    //   null from lookupChallenge if the nonce is expired, consumed, or
+    //   unknown.
+    ConsentChallenge requestConsentChallenge();
+    @nullable ConsentIdentity lookupChallenge(String nonce);
+    void completeConsent(String nonce, in ConsentDecision decision);
 }
 
 

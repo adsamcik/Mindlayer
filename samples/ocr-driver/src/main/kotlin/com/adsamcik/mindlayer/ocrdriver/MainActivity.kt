@@ -1,8 +1,12 @@
 package com.adsamcik.mindlayer.ocrdriver
 
+import android.app.Activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts.StartIntentSenderForResult
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +25,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -79,6 +84,17 @@ private fun DriverScaffold(vm: DriverViewModel) {
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = listOf("Connection", "Inference", "Embeddings", "OCR", "Diagnostics", "Validation")
 
+    // Launch the Mindlayer consent screen when the ViewModel asks, and feed the
+    // result (approved / declined) back so it can retry the connection.
+    val consentLauncher = rememberLauncherForActivityResult(StartIntentSenderForResult()) { result ->
+        vm.onConsentResult(result.resultCode == Activity.RESULT_OK)
+    }
+    LaunchedEffect(Unit) {
+        vm.consentPrompts.collect { sender ->
+            consentLauncher.launch(IntentSenderRequest.Builder(sender).build())
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(title = { Text("Mindlayer driver") })
@@ -124,6 +140,7 @@ private fun DriverScaffold(vm: DriverViewModel) {
                             onConnect = vm::connect,
                             onDisconnect = vm::disconnect,
                             onRefresh = vm::refreshCapabilities,
+                            onRequestConsent = vm::requestConsent,
                         )
                         1 -> InferenceTab(
                             slice = state.inference,

@@ -73,8 +73,8 @@ object CallerVerifier {
 
     /**
      * F-031: resolve a [CallerIdentity] from a package name only. Used at
-     * approve-tap time to re-verify the live signing certificate against the
-     * sig pinned in the displayed [PendingApproval] row.
+     * consent-grant time to re-verify the live signing certificate against
+     * the sig captured when the consent challenge was issued.
      *
      * Returns `null` if the package is not installed, has no signing
      * certificate, or fails sig resolution. Does NOT consult the calling
@@ -98,6 +98,33 @@ object CallerVerifier {
         pm.getApplicationLabel(appInfo).toString()
     } catch (_: Throwable) {
         null
+    }
+
+    /**
+     * Resolve the package name of the installer that put [pkg] on the
+     * device, for the consent UI's supply-chain badge ("Installed from
+     * Google Play" / "Side-loaded" / etc.). Returns `null` when the
+     * source is unknown or unresolvable.
+     *
+     * On API 30+ uses `getInstallSourceInfo().installingPackageName`
+     * (the most trustworthy attribution Android exposes to a non-system
+     * app). Below that falls back to the deprecated
+     * `getInstallerPackageName`. This is a **signal for the user**, not
+     * a trust gate — installer attribution can be self-reported by a
+     * sideloading installer, so the UI must present it as context only.
+     */
+    @Suppress("DEPRECATION")
+    fun installSource(context: Context, pkg: String): String? {
+        val pm = context.packageManager
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                pm.getInstallSourceInfo(pkg).installingPackageName
+            } else {
+                pm.getInstallerPackageName(pkg)
+            }
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     @Suppress("DEPRECATION")

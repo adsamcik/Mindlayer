@@ -5,56 +5,23 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
-    <!-- F-029: BiometricPrompt for Approve / Revoke gating in the dashboard. -->
+    <!-- F-029: BiometricPrompt for Approve / Revoke gating in the dashboard
+         and the consent screen. -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
-        Android 11 (R, API 30) hides every installed package from
-        `PackageManager.getPackageInfo` by default. The Mindlayer service
-        cannot enforce its allowlist without seeing the caller's signing
-        certificates, so we declare QUERY_ALL_PACKAGES here.
-
-        Why this is the right answer (and not a narrow `<queries>` block):
-          - A bound service cannot see its callers without explicit query
-            visibility. `<queries><package name="…"/></queries>` would force
-            us to enumerate every potential client app at build time, which
-            defeats the purpose of a dynamic allowlist + dashboard approval
-            flow.
-          - `<queries><intent>…</intent></queries>` only matches apps that
-            declare a matching `<intent-filter>`. SDK consumers bind to our
-            service via AIDL — they have no reason to expose a public
-            intent-filter, and forcing them to would leak a discoverable
-            attack surface.
-          - Google Play policy explicitly permits QUERY_ALL_PACKAGES for
-            "apps that need to query and/or interact with any and all
-            installed apps for the core user functionality of the app"
-            including security / device management tooling. Per-caller
-            signing-cert verification is exactly that.
-          - Without this permission, the dashboard's Approve button calls
-            `CallerVerifier.identifyByPackage` → `pm.getPackageInfo` →
-            `NameNotFoundException` (silently filtered) → AllowlistStore
-            throws `SecurityException("Package … no longer installed")`,
-            even though the package IS installed and the binder DID see it
-            when the client first bound. This was the bug that left a
-            pending entry stuck because Approve always failed.
-
-        The `tools:ignore="QueryAllPackagesPermission"` below silences
-        Android Lint's blanket warning for this permission. The rationale
-        above documents the explicit, security-driven need; without the
-        ignore, `:app:lintDebug` fails CI because the check's default
-        severity is Error and we have `abortOnError = true`.
+        v0.10 consent architecture (docs/CONSENT_ARCHITECTURE.md):
+        Mindlayer no longer declares QUERY_ALL_PACKAGES or a
+        signature|knownSigner BIND_ML_SERVICE permission. The trust boundary
+        is per-app user consent via ConsentActivity. Any app may bind to
+        MindlayerMlService, but every AIDL method except requestConsentChallenge
+        and a coarse ping() requires an approved (packageName, signingCert)
+        entry that only the consent flow can create. Caller identity is resolved
+        via Binder.getCallingUid() for active callers (automatically visible to
+        the service per Android's package-visibility rules for bound services),
+        so no broad package-visibility permission is needed.
     -->
-    <uses-permission
-        android:name="android.permission.QUERY_ALL_PACKAGES"
-        tools:ignore="QueryAllPackagesPermission" />
-
-    <permission
-        android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE"
-        android:label="@string/permission_bind_ml_service_label"
-        android:description="@string/permission_bind_ml_service_description"
-        android:protectionLevel="signature|knownSigner"
-        android:knownCerts="@array/mindlayer_trusted_client_certs" />
 
     <application
         android:label="@string/app_name"
@@ -78,11 +45,28 @@
             </intent-filter>
         </activity>
 
+        <!--
+            v0.10 consent-Intent flow (docs/CONSENT_ARCHITECTURE.md).
+            Launched only by an explicit, Mindlayer-minted PendingIntent
+            (no intent-filter). exported=true is required because the
+            PendingIntent is fired by arbitrary client UIDs; the nonce in
+            the Intent data is the capability, and lookupChallenge enforces
+            self-UID so only Mindlayer can resolve it. excludeFromRecents +
+            noHistory keep the consent screen out of the recents list and
+            prevent it lingering after the decision.
+        -->
+        <activity
+            android:name=".ui.consent.ConsentActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.Mindlayer" />
+
         <service
             android:name=".MindlayerMlService"
             android:process=":ml"
             android:exported="true"
-            android:permission="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"

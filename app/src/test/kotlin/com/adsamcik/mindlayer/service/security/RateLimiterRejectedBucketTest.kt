@@ -6,9 +6,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * F-033: dedicated rejected-bucket throttles flooders BEFORE
- * [AllowlistStore.recordPending] hits disk, while remaining isolated from the
- * main-traffic bucket.
+ * Dedicated rejected-bucket throttles flooders while remaining isolated
+ * from the main-traffic bucket.
  */
 class RateLimiterRejectedBucketTest {
 
@@ -99,8 +98,8 @@ class RateLimiterRejectedBucketTest {
         )
         // F-027 refinement: the rejected-callers bucket follows the same
         // first-call grant policy as the main bucket — a brand-new unknown
-        // caller gets the bookkeeping budget so its first `recordPending`
-        // lands. Pin grant=2.0 explicitly so the test's 3-call burst-blocked
+        // caller gets limited rejection-bookkeeping budget. Pin grant=2.0
+        // explicitly so the test's 3-call burst-blocked
         // assertion is independent of the default-tokens bump for the
         // legitimate-traffic bucket. The semantic being tested is "rejected
         // bucket grant has the same cap structure as the main one"; the

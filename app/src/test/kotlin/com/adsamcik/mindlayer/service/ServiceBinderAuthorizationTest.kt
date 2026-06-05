@@ -66,21 +66,39 @@ class ServiceBinderAuthorizationTest {
 
     @After fun tearDown() = unmockkAll()
 
-    @Test fun `first time UID records pending before main rate limit is consumed`() {
+    @Test fun `unconsented UID is rejected with CONSENT_REQUIRED before main rate limit is consumed`() {
         assertThrows(SecurityException::class.java) { binder.getStatus() }
 
         verify { allowlist.isAllowed("first.time", "sig") }
         verify { rateLimiter.tryAcquireRejection(24_681) }
-        verify { allowlist.recordPending("first.time", "sig", "First Time") }
         verify(exactly = 0) { rateLimiter.tryAcquire(24_681, any()) }
     }
 
-    @Test fun `ping uses ping-specific throttle without allowlist gate`() {
-        every { rateLimiter.tryAcquirePing(24_681) } returns false
+    @Test fun `ping uses pre-consent throttle for non-allowlisted callers`() {
+        // v0.10: a non-allowlisted caller gets the COARSE pre-consent ping,
+        // charged against the pre-consent bucket (not the 150/min ping
+        // bucket). The coarse-vs-full decision DOES consult the allowlist.
+        every { rateLimiter.tryAcquirePreConsentPing(24_681) } returns false
 
         assertThrows(SecurityException::class.java) { binder.ping() }
 
-        verify { rateLimiter.tryAcquirePing(24_681) }
-        verify(exactly = 0) { allowlist.isAllowed(any(), any()) }
+        verify { rateLimiter.tryAcquirePreConsentPing(24_681) }
+        verify { allowlist.isAllowed("first.time", "sig") }
+    }
+
+    @Test fun `non-allowlisted caller gets a coarse ping response`() {
+        every { rateLimiter.tryAcquirePreConsentPing(24_681) } returns true
+
+        val health = binder.ping()
+
+        // Coarse shape: no uptime, all engine states IDLE — nothing an
+        // un-approved peer could fingerprint on.
+        org.junit.Assert.assertEquals(0L, health.serviceUptimeMs)
+        org.junit.Assert.assertEquals(
+            com.adsamcik.mindlayer.HealthCheck.ENGINE_STATE_IDLE,
+            health.llmEngineState,
+        )
+        org.junit.Assert.assertEquals(ServiceBinder.CURRENT_API_VERSION, health.apiVersion)
+        verify(exactly = 0) { rateLimiter.tryAcquirePing(any()) }
     }
 }

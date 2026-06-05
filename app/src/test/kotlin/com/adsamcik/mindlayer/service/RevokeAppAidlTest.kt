@@ -204,13 +204,9 @@ class RevokeAppAidlTest {
             binder.revokeApp("com.target.app")
         }
 
-        verify {
-            logRepository.logAllowlistPendingRecorded(
-                uid = externalUid,
-                packageName = "test.caller",
-                sigShaPrefix = any(),
-            )
-        }
+        // The consent-Intent flow handles access requests; this external
+        // caller is simply rejected and the target's allowlist entry remains
+        // untouched.
         assertTrue(allowlistStore.isAllowed("com.target.app", "deadbeef"))
     }
 

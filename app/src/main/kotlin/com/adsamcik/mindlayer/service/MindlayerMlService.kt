@@ -48,11 +48,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
-import com.adsamcik.mindlayer.service.security.AllowlistEntry
 import com.adsamcik.mindlayer.service.security.AllowlistStore
-import com.adsamcik.mindlayer.service.security.CallerVerifier
 import com.adsamcik.mindlayer.service.security.EvictionRegistry
-import com.adsamcik.mindlayer.service.security.debugSeedIfApplicable
 
 class MindlayerMlService : Service() {
 
@@ -89,35 +86,6 @@ class MindlayerMlService : Service() {
          * the foreground state.
          */
         const val ACTION_STOP = "com.adsamcik.mindlayer.service.ACTION_STOP"
-
-        /**
-         * First-party clients that should be approved on a fresh install.
-         *
-         * Each entry pins (packageName, signingCertSha256). The hash format is
-         * lowercase hex with no separators (matches `CallerVerifier.sha256Hex`).
-         * For Play-distributed apps, use the Play app signing certificate
-         * SHA-256, not the upload key (Play Console → App integrity → App
-         * signing → "SHA-256 certificate fingerprint").
-         *
-         * `seedIfEmpty` verifies each entry against the currently installed APK
-         * signature before insertion, so multiple entries per package (e.g.
-         * Play hash + debug-keystore hash) are safe — only the matching one
-         * is inserted on a given device.
-         */
-        internal val FIRST_PARTY_ALLOWLIST_SEEDS: List<AllowlistEntry> = listOf(
-            AllowlistEntry(
-                packageName = "com.adsamcik.starlitcoffee",
-                signingCertSha256 = "5932936267cac21efd4bb7a25200bb9eaf58d890f566fadae4f0daa1a9bbae47",
-                grantedAtMs = 0L,
-                displayName = "Starlit Coffee",
-            ),
-            AllowlistEntry(
-                packageName = "com.adsamcik.expenses",
-                signingCertSha256 = "027fde453b4fc327e5c4d7ac7d3f54b1fc711503e5a155fd72f31ff3a9a2e9bc",
-                grantedAtMs = 0L,
-                displayName = "Ledgit",
-            ),
-        )
     }
 
     lateinit var engineManager: EngineManager
@@ -246,9 +214,6 @@ class MindlayerMlService : Service() {
         logRepository = LogRepository(logDb.logDao())
 
         val allowlistStore = AllowlistStore(this, logRepository = logRepository)
-        val callerVerifier = CallerVerifier
-        allowlistStore.seedIfEmpty(FIRST_PARTY_ALLOWLIST_SEEDS)
-        debugSeedIfApplicable(this, allowlistStore, callerVerifier, logRepository)
 
         engineManager = EngineManager(this, logRepository)
         memoryBudget = MemoryBudget(this, serviceScope, logRepository)
@@ -342,7 +307,7 @@ class MindlayerMlService : Service() {
         val diagnosticExporter = DiagnosticExporter(
             engineManager, thermalMonitor, memoryBudget, sessionManager, logDb.logDao()
         )
-        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, allowlistStore = allowlistStore, logRepository = logRepository, mlHealthRecorder = mlHealthRecorder, deferredStore = deferredStore, embeddingCoordinator = embeddingCoordinator, callbackRegistry = callbackRegistry, ocrSessionManager = ocrSessionManager, sharedMemoryPool = sharedMemoryPool, paddleOcrEngine = paddleOcrEngine, ocrLlmExtractor = ocrLlmExtractor)
+        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, allowlistStore = allowlistStore, consentChallengeStore = com.adsamcik.mindlayer.service.security.ConsentChallengeStore(this), consentAttemptStore = com.adsamcik.mindlayer.service.security.ConsentAttemptStore(this), logRepository = logRepository, mlHealthRecorder = mlHealthRecorder, deferredStore = deferredStore, embeddingCoordinator = embeddingCoordinator, callbackRegistry = callbackRegistry, ocrSessionManager = ocrSessionManager, sharedMemoryPool = sharedMemoryPool, paddleOcrEngine = paddleOcrEngine, ocrLlmExtractor = ocrLlmExtractor)
 
         logRepository.log(LogEntry(
             timestampMs = System.currentTimeMillis(),

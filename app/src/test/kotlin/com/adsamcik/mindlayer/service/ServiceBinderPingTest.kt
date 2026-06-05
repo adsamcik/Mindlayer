@@ -106,10 +106,14 @@ class ServiceBinderPingTest {
         verify(exactly = 1) { rateLimiter.tryAcquirePing(any()) }
     }
 
-    @Test fun `ping does NOT consult the allowlist`() {
+    @Test fun `ping consults the allowlist to choose full vs coarse response`() {
+        // v0.10: ping() now consults the allowlist to decide between the
+        // full response (self-UID or allowlisted) and the coarse
+        // pre-consent response. This caller is allowlisted, so the
+        // allowlist IS consulted and the full ping path runs.
         binder.ping()
-        verify(exactly = 0) { allow.isAllowed(any(), any()) }
-        verify(exactly = 0) { allow.isDenied(any(), any()) }
+        verify { allow.isAllowed(any(), any()) }
+        verify(exactly = 1) { rateLimiter.tryAcquirePing(any()) }
     }
 
     @Test fun `apiVersion matches binder CURRENT_API_VERSION`() {

@@ -1,67 +1,82 @@
 # Caller Authorization
 
-Mindlayer runs as a standalone Android service and exposes on-device LLM
-inference over AIDL. Any app on the device can *attempt* to bind to it, so
-every AIDL entry point enforces a four-stage gate before any work is done:
+> **Current model: v0.10 consent architecture.**
+>
+> The service no longer uses the legacy `signature|knownSigner` manifest
+> permission, `QUERY_ALL_PACKAGES`, trusted-certificate arrays, first-party
+> seeding, or a dashboard pending-approval inbox. The design rationale and
+> migration details live in [`CONSENT_ARCHITECTURE.md`](CONSENT_ARCHITECTURE.md);
+> keep this reference aligned with that document whenever authorization changes.
 
-1. **Identity verification** — resolve the calling UID to a single package
-   and its current signing-cert SHA-256.
-2. **Allowlist check** — the (package, signing-cert) pair must appear in a
-   user-approved allowlist.
-3. **Rate limiting** — per-UID request-per-minute and concurrent-inference
-   caps.
+Mindlayer runs as a standalone Android service and exposes on-device LLM
+inference over AIDL. The service is exported with **no bind permission**, so any
+installed app can bind and obtain the Binder. Binding is not trust: every real
+AIDL entry point enforces authorization before doing work.
+
+The current gate is:
+
+1. **Identity verification** — resolve `Binder.getCallingUid()` to one package
+   and its current signing-cert SHA-256. Binder identity inside the AIDL
+   transaction is authoritative; Activity caller identity is never trusted.
+2. **Consent / denial check** — explicit denials reject with
+   `CONSENT_DENIED`; missing approvals reject with `CONSENT_REQUIRED`.
+3. **Rate limiting** — approved callers share the same per-UID RPM and
+   concurrent-inference budgets.
 4. **Session ownership** — session-scoped operations (`infer`, `destroy`,
    `cancel`, …) must target a session the caller previously created.
 
-This document describes how the allowlist works end-to-end: the data model,
-cross-process semantics, the approval UX, failure modes, and the guarantees
-callers can rely on.
+The dashboard runs under Mindlayer's own UID and keeps the self-UID bypass so it
+can poll `:ml` over the same AIDL surface without needing user consent.
 
 ## TL;DR for client integrators
 
-- The first time your app calls any AIDL method, it will fail with
-  `SecurityException("App <pkg> not authorized — user approval required")`.
-- The service has recorded your package as **pending**. The user must open
-  the Mindlayer dashboard and tap **Approve** next to your entry.
-- Once approved, the next call succeeds. Mindlayer has pinned the SHA-256
-  of your **current** signing certificate at approval time. A re-signed
-  APK is implicitly rejected and must be re-approved.
-- The user can revoke access at any time from the dashboard.
-- See [`SDK_INTEGRATION.md`](../SDK_INTEGRATION.md#first-run-user-approval)
-  for the SDK-side API (`ConnectionState.REJECTED_NOT_APPROVED`).
+- Any installed app can bind to `MindlayerMlService`; there is no
+  `BIND_ML_SERVICE` permission to request.
+- Before consent, only `requestConsentChallenge()` and `ping()` are reachable.
+  `ping()` returns only coarse `{ alive, apiVersion }` liveness.
+- A real AIDL method called before approval fails with
+  `CONSENT_REQUIRED = 6005`. Use
+  `MindlayerConsent.requestConsent(context): ConsentRequestResult` and launch
+  the returned `Available(intentSender)` in a user-visible flow.
+- The consent screen is Mindlayer-owned. `requestConsentChallenge()` captures
+  the caller's UID/package/cert server-side, mints a 256-bit single-use nonce
+  and immutable one-shot `PendingIntent`, and `ConsentActivity` displays that
+  recorded identity.
+- Approval requires `BiometricPrompt`. On `GRANT`, the service re-verifies the
+  live signing certificate under the allowlist file lock before writing the
+  `(packageName, signingCertSha256)` approval. `RESULT_OK` means the next
+  bind+AIDL call from that app can succeed.
+- Users can choose **Not now**, **Deny for 24 hours**, or **Block permanently**.
+  Denied callers receive `CONSENT_DENIED = 6006` until the denial lapses or the
+  user unblocks them from the dashboard.
+- The full SDK migration of `connect` / `createSession` / `getStatus` to Result
+  types is deferred; do not rely on those APIs being fully Result-based yet.
 
 ## Default-deny posture
 
-Mindlayer uses a two-layer trust model:
+Mindlayer now has one trust boundary: per-app user consent. The app and SDK
+manifests do not declare or request `com.adsamcik.mindlayer.permission.BIND_ML_SERVICE`,
+and the service declaration intentionally has no `android:permission` attribute.
+`QUERY_ALL_PACKAGES`, `mindlayer_trusted_client_certs`, `seedIfEmpty`,
+`seedVerified`, and debug first-party cert seeding are removed.
 
-1. **OS-level gate** — `BIND_ML_SERVICE` is declared as
-   `signature|knownSigner` with trusted first-party cert hashes in
-   `R.array.mindlayer_trusted_client_certs`. On Android 12 (API 31+) this
-   lets known first-party apps signed with different Play app-signing keys
-   bind to the service. On API 26–30, `knownSigner` is ignored by the
-   platform and the permission degrades to plain `signature`, so only
-   Mindlayer's own UID / same-signing-key callers can bind.
-2. **AIDL-level gate** — every Binder method still runs identity → allowlist
-   → rate-limit → ownership. First-party callers are seeded as exact
-   `(packageName, signingCertSha256)` pairs in
-   `MindlayerMlService.FIRST_PARTY_ALLOWLIST_SEEDS`.
+Default-deny still holds because an unapproved Binder can do only two things:
 
-The manifest cert array and seed list must stay in sync; the
-`TrustedClientCertParityTest` unit test fails CI if they drift.
+1. call `requestConsentChallenge()` to ask the user for consent; or
+2. call `ping()` for coarse service liveness.
 
-Unknown callers remain default-deny. The only production path for an
-unrecognized app to enter the allowlist is:
+Every other method fails closed until an approved allowlist row exists. Existing
+approved allowlist entries are preserved during upgrade; legacy `PENDING` /
+`pending.json` state is discarded because in-flight consent now lives only in
+memory.
 
-1. The app attempts to bind (or make any AIDL call) and passes the OS-level
-   permission gate.
-2. The service writes a **pending** entry containing its observed
-   `(packageName, signingCertSha256, displayName)`.
-3. A human with access to the device opens the dashboard and taps **Approve**
-   on that entry.
+## Public authorization error codes
 
-This is deliberate. Allowing manual entry of a package name + cert hash
-would let a user approve a package they have never observed running on the
-device, trading the sig-pin protection for typos.
+| Code | Value | Meaning |
+|---|---:|---|
+| `CONSENT_REQUIRED` | 6005 | Caller is identified but lacks an approved `(packageName, signingCertSha256)` row. Start the consent-Intent flow. |
+| `CONSENT_DENIED` | 6006 | Caller is explicitly denied, blocked, in cooldown, or cannot be trusted enough to show consent. |
+| `INPUT_REJECTED` | 3009 | Request content failed input validation before reaching the engine. This is not a consent state. |
 
 ## Components
 
@@ -69,7 +84,7 @@ device, trading the sig-pin protection for typos.
 
 Pure utility that turns `Binder.getCallingUid()` into a `CallerIdentity`:
 
-```
+```kotlin
 data class CallerIdentity(
     val packageName: String,
     val signingCertSha256: String,
@@ -80,10 +95,10 @@ data class CallerIdentity(
 Rules:
 
 - If the UID maps to more than one package (shared UID), returns `null`.
-  Shared-UID callers are refused outright — their identity is ambiguous.
+  Shared-UID callers are refused outright because their identity is ambiguous.
 - On API 28+ uses `PackageManager.GET_SIGNING_CERTIFICATES` + `SigningInfo`:
-  - **Single signer, rotated**: pins the *current* signer (the last entry
-    in `signingCertificateHistory`). Rotating *away* from a compromised key
+  - **Single signer, rotated**: pins the current signer (the last entry in
+    `signingCertificateHistory`). Rotating away from a compromised key
     invalidates prior approvals, which is the point.
   - **Multi-signer APKs**: hashes each cert, sorts the hex digests,
     concatenates with `:`, and hashes the result. Ordering in
@@ -96,324 +111,277 @@ Rules:
 
 File-backed JSON store under `filesDir/mindlayer_allowlist/`:
 
-| File            | Contents                                                        |
-|-----------------|-----------------------------------------------------------------|
-| `entries.json`  | Approved callers: `[{pkg, sig, grantedAtMs, displayName?}, …]`  |
-| `pending.json`  | Unapproved callers that have tried to connect                   |
-| `allowlist.lock`| Sidecar file used for a cross-process `FileLock` on writes      |
+| File | Contents |
+|---|---|
+| `entries.json` | Approved callers: `[{pkg, sig, grantedAtMs, displayName?}, …]` |
+| `denied.json` | Explicit denials, including cert-pair 24-hour denials and package-wide permanent blocks |
+| `consent_attempts.json` | HMAC-signed dismiss/cooldown tracking for repeated **Not now** outcomes |
+| `allowlist.lock` | Sidecar file used for a cross-process `FileLock` on writes |
 
 Key invariants:
 
-- `isAllowed(pkg, sig)` **always re-reads from disk**. This is critical:
-  the dashboard Compose UI lives in the main process while the AIDL server
-  lives in the `:ml` isolated process, so any in-memory cache would go
-  stale after an approval. The hot-path cost is bounded because the RPC
-  rate limit caps external callers at ~60 RPM per UID by default.
+- `isAllowed(pkg, sig)` **always re-reads from disk**. This is critical: the
+  dashboard Compose UI lives in the main process while the AIDL server lives in
+  the `:ml` process, so any in-memory cache would go stale after a consent
+  grant, revoke, or unblock.
 - Writes are serialised across processes with `FileLock` on the sidecar
   `.lock` file, then an atomic `tmp -> rename` replaces the target JSON.
-- `StateFlow<List<…>>` per-process streams are maintained for the UI to
-  observe; they are refreshed either by the mutating API itself or by
-  `refresh()`, which is polled every 2s by the dashboard card.
-- `approve()` implicitly clears any matching entry from `pending.json`.
+- `approve(context, pkg, expectedSig, displayName)` re-resolves the live signing
+  certificate under that file lock before writing. This F-031 check closes the
+  time-of-check/time-of-use window between the consent prompt and the stored
+  approval.
+- Legacy `pending.json` is not part of the live architecture. Upgrade migration
+  deletes it; deprecated symbols that may still physically exist are not a live
+  approval path.
+
+### `ConsentChallengeStore` (app/src/main/.../security/ConsentChallengeStore.kt)
+
+In-memory challenge table owned by the `:ml` process. Each
+`requestConsentChallenge()` call:
+
+1. rate-limits the caller at 10/hour/UID;
+2. resolves the caller identity from `Binder.getCallingUid()`;
+3. checks explicit denial and dismiss cooldown state;
+4. mints a 256-bit URL-safe random nonce;
+5. stores the full caller identity, display label, install source, previous
+   signer (if any), creation time, and 5-minute expiry; and
+6. returns only the nonce plus a one-shot immutable `PendingIntent` to the
+   client.
+
+Nonces are single-use and in-memory only. If `:ml` dies before the user acts,
+the challenge is lost and the client must request a fresh one.
 
 ### `ServiceBinder.authorizeCall()` (app/src/main/.../ServiceBinder.kt)
 
-Called as the first statement of every AIDL entry point. Sequence:
+Called as the first statement of every real AIDL entry point. Sequence:
 
-```
+```kotlin
 uid = Binder.getCallingUid()
-if (uid == Process.myUid())      -> return SELF_IDENTITY   # dashboard
+if (uid == Process.myUid())      -> return SELF_IDENTITY   // dashboard
 identity = CallerVerifier.identifyCaller(ctx, uid)
-    ?: { rateLimiter.tryAcquireRejected(uid) || throw "Rate limit"
-         throw SecurityException }                          # F-033 reject bucket
+    ?: throw SecurityException(CONSENT_DENIED)
+if (allowlistStore.isDenied(identity.pkg, identity.sig)) {
+    throw SecurityException(CONSENT_DENIED)
+}
 if (!allowlistStore.isAllowed(identity.pkg, identity.sig)) {
-    rateLimiter.tryAcquireRejection(uid) || throw "Rate limit"  # pending-write bucket
-    allowlistStore.recordPending(identity.pkg, identity.sig, identity.displayName)
-    throw SecurityException("... user approval required")
+    throw SecurityException(CONSENT_REQUIRED)
 }
 if (!rateLimiter.tryAcquire(uid)) throw SecurityException("Rate limit exceeded")
 return identity
 ```
 
-The self-UID bypass is there because the built-in dashboard binds to its
-own `:ml` service over AIDL (cross-process within the same app). Without
-the bypass it would self-deny (never user-approved) and self-throttle
-(polling ~3 RPCs every 2s exceeds the 60 RPM default).
+`requestConsentChallenge()` and `ping()` are the only deliberate pre-consent
+exceptions. Session-scoped entry points add a second hop after authorization:
+`requireOwnership(sessionId)` looks up the session's creator UID in the
+`InferenceOrchestrator` and rejects calls from any other UID. Unknown sessions
+are also rejected to avoid leaking which session IDs exist to arbitrary callers.
 
-#### Two-tier rate limiting (F-033)
+### Open exported service declaration
 
-There are now **two** independent token buckets per UID:
-
-- **Main bucket** (`tryAcquire`, default 60 RPM) — consumed only by callers
-  that have already cleared identity + allowlist. Sized for normal traffic.
-- **Rejected bucket** (`tryAcquireRejected`, default 6 RPM) — consumed
-  whenever a caller fails identity verification.
-- **Pending-write bucket** (`tryAcquireRejection`, default 6 RPM) — consumed
-  *after* an allowlist miss and *before* `recordPending`. This bounds the
-  disk I/O a hostile flooder can trigger; the FileLock + fsync on
-  `pending.json` was previously the cheapest way to saturate the service.
-
-Order matters: the main bucket is consumed strictly **after** the allowlist
-decision, so a first-time UID can still create a pending approval even though
-brand-new main buckets start empty. The pending-write bucket is isolated from
-normal traffic. An additional in-memory `(pkg, sig)` dedup TTL inside
-`AllowlistStore.recordPending` (30 s) short-circuits hot retries before
-they even touch the file lock.
-
-Session-scoped entry points add a second hop: `requireOwnership(sessionId)`
-looks up the session's creator UID in the `InferenceOrchestrator` and
-rejects calls from any other UID. Unknown sessions are also rejected to
-avoid leaking which session IDs exist to arbitrary callers.
-
-### Signature / known-signer manifest permission
-
-`AndroidManifest.xml` declares:
+The service remains exported so external apps can bind, but the manifest carries
+no custom bind permission:
 
 ```xml
-<permission
-    android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE"
-    android:protectionLevel="signature|knownSigner"
-    android:knownCerts="@array/mindlayer_trusted_client_certs" />
 <service
     android:name=".MindlayerMlService"
-    android:permission="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE"
-    …/>
+    android:exported="true"
+    android:process=":ml">
+    …
+</service>
 ```
 
-`signature` preserves the self-UID / same-key path used by the dashboard.
-`knownSigner` (API 31+) additionally grants the permission to callers whose
-signing certificate SHA-256 appears in `mindlayer_trusted_client_certs`.
-The AIDL allowlist still pins exact `(pkg, sig)` pairs underneath, so a
-known cert on the wrong package name is rejected by `authorizeCall()`.
-
-On API 26–30 the platform silently ignores the `knownSigner` flag and
-falls back to `signature`. Cross-app first-party integration with different
-Play app-signing keys is therefore supported only on API 31+. The SDK
-surfaces this as `MindlayerException` with
-`MindlayerErrorCode.UNSUPPORTED_ANDROID_VERSION`.
+This is intentional. Android's manifest permission layer no longer decides who
+is trusted; user consent and per-method AIDL checks do. The old API 26–30
+`knownSigner` quirk is therefore gone with the permission.
 
 ### Rate limiter
 
 `RateLimiter` (per-UID token bucket for RPM + a per-UID semaphore for
-concurrent inferences) runs after the allowlist gate, so it never counts
-rejected callers against legitimate traffic and never leaks
-allowlist state via timing.
+concurrent inferences) runs after consent for real methods. All approved callers
+receive the same default budget; there are no first-party / third-party trust
+tiers or per-tier validator caps.
+
+Pre-consent endpoints have separate small buckets: `requestConsentChallenge()` is
+limited to 10/hour/UID, and `ping()` has its own liveness bucket so unapproved
+apps cannot fingerprint the service at high frequency.
 
 ### Deferred result privacy exception
 
-The normal service invariant is "return model output over IPC, do not persist
-it in service storage." Deferred APIs are the documented exception:
+The normal service invariant is "return model output over IPC, do not persist it
+in service storage." Deferred APIs are the documented exception:
 
 - `inferDeferred` persists generated text in the SQLCipher-encrypted
   `mindlayer-deferred.db` until fetch/ack/cancel or expiry.
 - `embedBatchDeferred` persists embedding vectors as AES-256-GCM encrypted
-  blobs under `cacheDir/embedding-blobs/<uid>/<requestId>.bin`. The blob key
-  is derived per UID from the same Keystore-wrapped SQLCipher root key, with
+  blobs under `cacheDir/embedding-blobs/<uid>/<requestId>.bin`. The blob key is
+  derived per UID from the same Keystore-wrapped SQLCipher root key, with
   `mindlayer-embed-blob-v1` authenticated as AAD.
 - Deferred rows and encrypted blobs are caller-scoped by UID. Fetch, cancel,
-  acknowledge, quota eviction, startup orphan sweep, and expiry all enforce
-  that scope before returning or deleting data.
+  acknowledge, quota eviction, startup orphan sweep, and expiry all enforce that
+  scope before returning or deleting data.
 - The retention policy is 24 hours by default (`DeferredStore.DEFAULT_TTL_MS`)
   unless the caller acknowledges/cancels earlier.
 
-## Cert rotation runbook
+## Signing-cert changes
 
-1. Add the new Play app-signing certificate hash to both
-   `R.array.mindlayer_trusted_client_certs` and
-   `FIRST_PARTY_ALLOWLIST_SEEDS` in the same Mindlayer PR.
-2. Ship the updated Mindlayer build. First-party clients can stay on the old
-   cert during the overlap window.
-3. Once telemetry shows the rotated client is the only version in use,
-   remove the old hash from both lists.
+Allowlist approvals pin the caller's current signing certificate. If an app is
+re-signed or rotates certificates, the old `(pkg, sig)` approval no longer
+matches and real AIDL methods return `CONSENT_REQUIRED`.
 
-> **Caveat — old installs are not retroactively protected.** Removing a
-> compromised cert from `mindlayer_trusted_client_certs` only takes effect
-> once a user has updated Mindlayer to the build that no longer lists it.
-> Older installed builds keep the old `knownCerts` set baked into their
-> manifest and continue to honour the compromised cert at the OS gate. The
-> user-allowlist layer still requires explicit approval per (pkg, sig), so
-> the practical exposure is bounded, but treat cert removal as "in flight"
-> until update telemetry confirms the rollout.
+The consent prompt can show a cert-rotation warning when the same package has a
+previous approval under a different signer. A successful `GRANT` still calls
+`AllowlistStore.approve(...)`, which re-checks the live certificate under the
+file lock before writing the new row. A mismatch fails closed and the client must
+start over with a fresh challenge.
+
+There are no trusted-cert arrays or first-party seed lists to update for
+rotation.
 
 ## Local sideloading
 
-Production builds remain default-deny for unknown callers: a sideloaded app
-must be observed by the service and approved in the dashboard before it can
-use AIDL methods.
+Production and debug builds use the same consent model. A sideloaded app binds,
+receives `CONSENT_REQUIRED` for real methods, launches the consent-Intent flow,
+and succeeds only after the user approves the Mindlayer-owned prompt.
 
-Debug builds add `DebugAllowlistSeeder` from the `src/debug` source set. It
-discovers installed packages signed with the same debug certificate as the
-Mindlayer debug build and seeds them automatically, while preserving revoked
-/ denied packages. Release builds physically do not contain this class (the
-release unit test asserts it is absent).
+Debug builds do not auto-seed apps signed with the Android debug keystore. This
+avoids accidentally trusting unrelated debug APKs installed on the same emulator
+or device.
 
-> **Caveat — your debug.keystore auto-trusts every app you build.** Android's
-> default debug.keystore is shared by every project built on your machine
-> and is not user-specific. `DebugAllowlistSeeder` matches purely on signing
-> cert, so if you `adb install` any other debug-signed APK (including one
-> built by a third party that happens to use the default Android debug
-> keystore, or a malicious sample you're triaging) it will be auto-seeded
-> on the next Mindlayer debug-build start. Mitigation: only run Mindlayer
-> debug builds in a clean test environment / dedicated emulator profile,
-> and never install untrusted debug-signed APKs alongside it.
-
-## The approval flow
+## The consent flow
 
 ```
-┌─────────────────┐          ┌─────────────────────┐         ┌─────────────────┐
-│   Client app    │          │  Mindlayer :ml svc  │         │ Dashboard (UI)  │
-│ (external UID)  │          │    ServiceBinder    │         │  (main process) │
-└────────┬────────┘          └──────────┬──────────┘         └────────┬────────┘
-         │                              │                             │
-   1. bind / AIDL call                  │                             │
-         │────────────────────────────► │                             │
-         │                              │ authorizeCall()             │
-         │                              │   identifyCaller()          │
-         │                              │   isAllowed(pkg,sig) = false│
-         │                              │   recordPending(...)        │
-         │                              │     ├── writes pending.json │
-         │ SecurityException            │                             │
-         │ ◄──────────────────────────────                            │
-         │                              │                             │
-   2. Client surfaces "please approve"  │                             │
-      prompt; user opens dashboard.     │                             │
-         │                              │                             │
-         │                              │                             │   refresh() every 2s
-         │                              │                             │   reads pending.json
-         │                              │                             │       │
-         │                              │                             │ shows "Pending approvals"
-         │                              │                             │       │
-         │                              │                             │  user taps "Approve"
-         │                              │                             │   store.approve(...)
-         │                              │                             │     ├── writes entries.json
-         │                              │                             │     └── rewrites pending.json
-         │                              │                             │
-   3. Retry bind / AIDL call            │                             │
-         │────────────────────────────► │                             │
-         │                              │ authorizeCall()             │
-         │                              │   isAllowed(...) = true     │
-         │                              │   rateLimiter.tryAcquire()  │
-         │   success response           │                             │
-         │ ◄──────────────────────────────                            │
+┌─────────────────┐        ┌─────────────────────┐        ┌───────────────────┐
+│   Client app    │        │  Mindlayer :ml svc  │        │ ConsentActivity   │
+│ (external UID)  │        │    ServiceBinder    │        │  (main process)   │
+└────────┬────────┘        └──────────┬──────────┘        └────────┬──────────┘
+         │                            │                            │
+   1. bindService()                   │                            │
+         │──────────────────────────► │                            │
+   2. requestConsentChallenge()       │                            │
+         │──────────────────────────► │                            │
+         │                            │ Binder UID -> pkg + cert   │
+         │                            │ deny/cooldown checks       │
+         │                            │ nonce + PendingIntent      │
+         │ ConsentRequestResult       │                            │
+         │ ◄──────────────────────────│                            │
+         │                            │                            │
+   3. startActivityForResult /        │                            │
+      launch IntentSender             │                            │
+         │────────────────────────────────────────────────────────► │
+         │                            │                            │ bind as self UID
+         │                            │ ◄──────────────────────────│ lookupChallenge(nonce)
+         │                            │ identity snapshot          │
+         │                            │──────────────────────────► │
+         │                            │                            │ show label, cert,
+         │                            │                            │ install source
+         │                            │                            │
+         │                            │                            │ Approve -> biometric
+         │                            │ ◄──────────────────────────│ completeConsent(GRANT)
+         │                            │ live cert reverify + write │
+         │                            │──────────────────────────► │ success
+         │ RESULT_OK                  │                            │
+         │ ◄────────────────────────────────────────────────────────│
+   4. retry bind + real AIDL call     │                            │
+         │──────────────────────────► │ authorizeCall() passes     │
 ```
 
 Key points:
 
-- The dashboard does not have to be open when the client first calls.
-  Pending entries persist on disk until the user reviews them.
-- Multiple retries by an un-approved caller are idempotent: `recordPending`
-  short-circuits on a 30-second in-memory dedup, then de-duplicates by
-  `(packageName, sig)` under the file lock. The pending list is **append-only**
-  across cert mismatches (F-031) — a sig swap appends a new row instead of
-  silently overwriting the prior one, so the user always sees what was on
-  screen.
-- If the caller *rotates their signing cert*, the new pending row carries
-  `previousSigSha256` and the dashboard renders a red banner + an "I
-  understand" gate before the Approve button enables (F-032). A successful
-  approval after rotation is logged with a distinct
-  `approve_after_cert_rotation` audit event for grep-ability.
-- The dashboard's Approve / Revoke / Deny buttons are gated by
-  `BiometricPrompt` with `BIOMETRIC_STRONG | DEVICE_CREDENTIAL` fallback
-  (F-029). A device with no enrolled biometric AND no screen lock cannot
-  approve — this is intentional default-deny.
-- At the moment the user taps Approve, `AllowlistStore.approve(context, …)`
-  re-resolves the live signing certificate via
-  `CallerVerifier.identifyByPackage` *under the file lock* and throws
-  `CertificateMismatchException` if it disagrees with the sig the user saw
-  (F-031). This closes the TOCTOU window between dashboard render and tap.
-- The pending list is FIFO-capped at `MAX_PENDING_ROWS = 32` so a flooder
-  cannot push the file to unbounded size; combined with the 6 RPM rejected
-  bucket per UID it would take >5 minutes to evict a real user-driven
-  request, by which time the user will have noticed.
+- The client does not tell Mindlayer who it is. The service captures identity
+  from Binder when issuing the challenge, and the Activity can only look up that
+  server-side record by nonce.
+- `ConsentActivity` is exported only so the Mindlayer-created `PendingIntent`
+  can launch it. It has no public intent filter. It uses an opaque, branded UI,
+  overlay hiding, `FLAG_SECURE`, and obscured-touch filtering.
+- **Approve** requires `BiometricPrompt` with device credential fallback.
+- **Not now** records a dismiss. After repeated dismisses the caller enters a
+  silent cooldown (3 dismisses -> 1 hour, 4+ -> 24 hours) before the prompt can
+  be shown again.
+- **Deny for 24 hours** writes a cert-pair denial that expires after 24 hours.
+- **Block permanently** writes a package-wide denial (`signingCertSha256 = null`)
+  so cert rotation cannot bypass the user's block. The user must unblock it from
+  the dashboard's **Blocked apps** list.
 
-## Revocation
+## Revocation and blocking
 
-`AllowlistStore.revoke(pkg)` removes the entry from `entries.json`. The
-next `isAllowed()` check (hot-path, re-reads disk) will return `false` and
-the caller will be rejected again. Any *already in-flight* AIDL call on a
-live binder is not interrupted — there's no active revocation mechanism
-mid-call — but:
+`AllowlistStore.revoke(pkg)` removes approved entries from `entries.json`. The
+next `isAllowed()` check (hot path, re-reads disk) returns `false`, so real AIDL
+methods return `CONSENT_REQUIRED` again. Already in-flight AIDL calls are not
+interrupted; revoke takes effect on the next call.
 
-- No new session or inference can start.
-- The SDK's `ConnectionManager` will observe the first new failure and
-  transition back to `REJECTED_NOT_APPROVED`.
-- Ongoing sessions owned by the UID are still tied to the binder death
-  recipient, so if the client process terminates they are torn down
-  normally.
+Blocking is stronger than revoke. A package-wide permanent denial causes future
+consent attempts to return `CONSENT_DENIED` without showing UI until the user
+unblocks the package from the dashboard. A 24-hour denial applies only to the
+observed `(packageName, signingCertSha256)` pair and expires automatically.
 
 If you need hard revocation (kill in-flight requests too), call
-`orchestrator.closeAllOwnedBy(uid)` alongside `revoke()`. This is not
-currently exposed in the dashboard UI — add it if the threat model
-requires it.
+`orchestrator.closeAllOwnedBy(uid)` alongside `revoke()`. This is not currently
+exposed in the dashboard UI — add it only if the threat model requires it.
 
 ## Failure modes and user-visible behaviour
 
-| Situation                                   | Behaviour                                                    |
-|---------------------------------------------|--------------------------------------------------------------|
-| Client lacks `BIND_ML_SERVICE` permission   | `bindService` fails at the OS layer; AIDL never invoked.     |
-| Shared-UID caller                           | `CallerVerifier` returns `null`; `SecurityException`, no pending entry recorded. |
-| Unknown package / `PackageManager` error    | `SecurityException`, no pending entry recorded.              |
-| Package not in allowlist                    | `SecurityException`, **pending entry recorded**.             |
-| Package in allowlist, cert mismatch         | `SecurityException`, pending entry **upserted** with new sig. |
-| Allowlist OK, rate limit exhausted          | `SecurityException("Rate limit exceeded …")`.                |
-| Allowlist + RPM OK, but concurrent cap hit  | `infer()` rejects with `SecurityException("Concurrent … exceeded")`. |
-| Session-scoped call from non-owner UID      | `SecurityException("Session not found or not owned …")`.     |
-
-`recordPending` is deliberately **not** called for the top three rows —
-those callers are either broken, malicious, or system edge cases, and we
-don't want them to pollute the dashboard's pending list.
+| Situation | Behaviour |
+|---|---|
+| Mindlayer not installed / service disabled | `bindService` fails or returns null binding; SDK reports service unavailable. |
+| Client calls `ping()` before consent | Coarse `{ alive, apiVersion }` only; no engine state, diagnostics, or uptime. |
+| Client calls `requestConsentChallenge()` while not denied | Returns a single-use challenge `PendingIntent` unless the 10/hour/UID bucket is exhausted. |
+| Client calls a real AIDL method without consent | `SecurityException` with `CONSENT_REQUIRED = 6005`; no pending dashboard entry is written. |
+| Client is in dismiss cooldown or has an active 24-hour / permanent denial | `CONSENT_DENIED = 6006`; the prompt is not shown until the denial lapses or the user unblocks. |
+| Shared-UID caller | `CallerVerifier` returns `null`; request is rejected with `CONSENT_DENIED` and no consent prompt. |
+| Unknown package / `PackageManager` error | Request is rejected with `CONSENT_DENIED`; fail closed. |
+| Nonce expired or already consumed | `ConsentActivity` finishes `RESULT_CANCELED`; client must request a fresh challenge. |
+| User dismisses consent UI (back / swipe / home) | Treated as **Not now**; dismiss count increments and `RESULT_CANCELED` is returned. |
+| User taps Approve but biometric fails / no enrollment | UI shows an error and can retry; repeated failures are treated as dismisses. |
+| Caller cert changes between challenge and grant | Live revalidation fails under the file lock; consent commit fails closed and the client must request a fresh challenge. |
+| Approved caller rate limit exhausted | AIDL call rejects with `SecurityException("Rate limit exceeded …")`. |
+| Session-scoped call from non-owner UID | `SecurityException("Session not found or not owned …")`. |
 
 ## What is *not* currently in place
 
-These are intentional non-goals today; flag them if your threat model
-requires them:
+These are intentional non-goals or follow-ups; do not document them as live
+features:
 
-- **First-party seeding is opt-in and guarded.** `MindlayerMlService.onCreate`
-  calls `AllowlistStore.seedIfEmpty(...)` with the baked-in first-party seed
-  list. The hook only runs when the allowlist is empty, verifies each installed
-  package against its pinned signing-cert hash, skips previously denied/revoked
-  packages, and writes a `security_decision` log row for each insertion. Add new
-  co-signed first-party apps in `MindlayerMlService.FIRST_PARTY_ALLOWLIST_SEEDS`.
-- **No manual "Add app" UI.** See the rationale in
-  [Default-deny posture](#default-deny-posture).
-- **No SDK "waiting for approval" coroutine.** Clients see
-  `REJECTED_NOT_APPROVED` once and must decide when to retry. The SDK
-  does not poll the service (doing so would burn the rate-limit budget
-  of *every* un-approved caller).
-- **No time-limited approvals.** Entries are sticky until revoked.
-- **Security audit logging is local-only and metadata-only.**
-  `LogRepository.logSecurityDecision` records allowlist seed events (debug
-  builds), dashboard approve, deny, revoke, and `revokeApp`; rate-limit
-  rejections are recorded by `logRateLimitReject`. Rows live in the
-  SQLCipher-encrypted `usage_logs` DB and are retained by the current
-  `LogRepository.cleanup(retentionDays = 7)` policy. The dashboard self-UID
-  can see aggregate diagnostics; external UIDs receive scoped diagnostics for
-  their own sessions/decisions only.
+- **No dashboard pending-approval inbox.** The old Approve-from-dashboard flow is
+  gone. In-flight consent is nonce-scoped and in-memory.
+- **No first-party cert seeding.** `seedIfEmpty`, `seedVerified`, trusted-cert
+  arrays, and debug allowlist seeders are removed.
+- **No trust tiers.** Approved callers share one rate-limit class and one set of
+  `IpcInputValidator` bounds. Heavy usage should be surfaced to the user, not
+  hidden behind static per-app budgets.
+- **Usage-monitoring notifications are planned, not shipped here.** The service
+  already records metadata-only usage; a follow-up may notify the user when one
+  approved app dominates on-device AI workload.
+- **Full SDK Result migration is deferred.** The shipped consent entry point is
+  `MindlayerConsent.requestConsent(context): ConsentRequestResult`; the rest of
+  the SDK control surface is not fully Result-based in this change.
+- **No time-limited approvals.** Approvals are sticky until revoked; denials can
+  be temporary.
+- **Security audit logging is local-only and metadata-only.** Logs never include
+  prompt text, model output, camera frames, recognized text, or structured model
+  output.
 
 ### `ping()` liveness exception
 
-`ping()` intentionally bypasses the allowlist so a same-signature or
-known-signer app can confirm that the service is alive before the user grants
-approval. It still requires the manifest `BIND_ML_SERVICE` permission and now
-uses a ping-specific per-UID token bucket (`RateLimiter.DEFAULT_PING_RPM`, 30
-RPM) so an unapproved peer cannot poll the endpoint at high frequency for
-fingerprinting.
+`ping()` intentionally bypasses consent so an SDK can distinguish "service alive"
+from "needs consent" without surfacing model state. Pre-consent callers receive
+only `{ alive, apiVersion }`; approved callers can use the normal status and
+diagnostics APIs subject to caller scoping.
 
 ## Testing
 
-The authorization path is covered by:
+The authorization path is covered by unit and instrumented tests around:
 
-- `app/src/test/.../security/AllowlistStoreTest.kt` — approve/deny,
-  persistence, sig case-insensitivity, pending dedup, cross-process
-  writer (two `AllowlistStore` instances on the same directory).
-- `app/src/test/.../security/CallerVerifierTest.kt` — shared UID rejection,
-  SHA-256 computation, multi-signer normalisation.
-- `app/src/test/.../ServiceBinderTest.kt` — authorize gate integration:
-  unknown caller, un-approved caller records pending, approved caller
-  passes, self-UID bypass, ownership checks.
+- `AllowlistStore` approval, denial, HMAC persistence, schema migration, and
+  cross-process file locking.
+- `CallerVerifier` shared-UID rejection, SHA-256 computation, and multi-signer
+  normalisation.
+- `ConsentChallengeStore` nonce creation, lookup, expiry, single-use semantics,
+  and cooldown handling.
+- `ServiceBinder` integration: pre-consent `ping` / `requestConsentChallenge`,
+  `CONSENT_REQUIRED`, `CONSENT_DENIED`, approved caller pass-through, self-UID
+  bypass, rate limiting, and ownership checks.
+- `ConsentActivity` user decisions, biometric-gated grant, denial variants, and
+  stale nonce handling.
 
-Run with:
-
-```
-./gradlew :app:testDebugUnitTest --tests "*Allowlist*" --tests "*CallerVerifier*" --tests "*ServiceBinder*"
-```
+Run the relevant unit tests with the existing Gradle test tasks documented in
+`.github/context/DEVELOPMENT.md`.

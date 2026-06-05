@@ -13,12 +13,18 @@
              connection, exercise each documented scenario, write a JSON
              report to `externalFilesDir/ocr-validation/`.
 
-        It uses BIND_ML_SERVICE the same way any external first-party app
-        would. The permission is protectionLevel="signature|knownSigner";
-        on a developer machine both this APK and the `:app` APK are auto-
-        signed with `~/.android/debug.keystore` so the signature side
-        matches at install time. The user still has to approve the app
-        once via the dashboard — that flow is part of what we validate.
+        No bind permission is required: Mindlayer dropped the
+        `BIND_ML_SERVICE` signature permission. Any installed app can bind
+        the service; access is gated per-app by explicit USER CONSENT. The
+        Connection tab's "Request consent" button launches the Mindlayer
+        consent screen (MindlayerConsent.requestConsent); after the user
+        approves once, Connect succeeds. That consent handshake is part of
+        what this harness exercises.
+
+        The <queries> block keeps the service package visible to this app on
+        Android 11+ (package-visibility), which the SDK needs to resolve and
+        bind the service by component name. It is NOT QUERY_ALL_PACKAGES —
+        only the two Mindlayer service packages are listed.
 
         No INTERNET / CAMERA permissions: the realtime scenarios feed
         pre-bundled fixture images into the OCR session as encoded
@@ -26,8 +32,6 @@
         OS camera dependency. That keeps the validation harness
         deterministic and runnable on emulators with no virtual camera.
     -->
-
-    <uses-permission android:name="com.adsamcik.mindlayer.permission.BIND_ML_SERVICE" />
 
     <queries>
         <package android:name="com.adsamcik.mindlayer.service" />

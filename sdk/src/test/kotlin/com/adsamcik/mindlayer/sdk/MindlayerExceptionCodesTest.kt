@@ -109,7 +109,6 @@ class MindlayerExceptionCodesTest {
             MindlayerErrorCode.MEMORY_PRESSURE to MindlayerErrorCode.Category.RESOURCE,
             MindlayerErrorCode.CONCURRENT_LIMIT to MindlayerErrorCode.Category.RESOURCE,
             MindlayerErrorCode.RATE_LIMITED to MindlayerErrorCode.Category.RESOURCE,
-            MindlayerErrorCode.ALLOWLIST_PENDING to MindlayerErrorCode.Category.AUTH,
             MindlayerErrorCode.ALLOWLIST_REVOKED to MindlayerErrorCode.Category.AUTH,
             MindlayerErrorCode.IDENTITY_UNKNOWN to MindlayerErrorCode.Category.AUTH,
         )

@@ -276,9 +276,8 @@ data class ServiceCapabilities(
          *
          * Distinct from [getStatus] (heavier dashboard snapshot) and
          * [getCapabilities] (one-time wire handshake). Bypasses the
-         * allowlist gate so co-signed peers in pending-approval can
-         * still confirm the service is alive; charges zero rate-limit
-         * cost.
+         * allowlist gate so co-signed peers that still need consent can
+         * confirm the service is alive; charges zero rate-limit cost.
          *
          * Old services that don't advertise this flag also won't
          * implement `ping()` — the SDK catches `NoSuchMethodError` /

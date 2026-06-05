@@ -7,8 +7,6 @@ import io.mockk.mockkObject
 import io.mockk.unmockkAll
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -47,7 +45,6 @@ class AllowlistStoreSigReVerifyAtApproveTest {
 
     @Test
     fun `approve fails closed when live signer disagrees with expected sig`() {
-        store.recordPending("com.example", "AAAA", "Example")
         mockkObject(CallerVerifier)
         every { CallerVerifier.identifyByPackage(any(), "com.example") } returns
             CallerIdentity("com.example", "BBBB", "Example")
@@ -61,15 +58,12 @@ class AllowlistStoreSigReVerifyAtApproveTest {
             assertEquals("BBBB", e.liveSig)
         }
 
-        // Entries.json untouched, pending row preserved.
+        // Entries.json untouched.
         assertTrue(store.list().isEmpty())
-        assertEquals(1, store.listPending().size)
-        assertEquals("AAAA", store.listPending().first().signingCertSha256)
     }
 
     @Test
     fun `approve succeeds when live signer matches expected`() {
-        store.recordPending("com.example", "AAAA")
         mockkObject(CallerVerifier)
         every { CallerVerifier.identifyByPackage(any(), "com.example") } returns
             CallerIdentity("com.example", "AAAA", "Example")
@@ -77,32 +71,11 @@ class AllowlistStoreSigReVerifyAtApproveTest {
         store.approve(context, "com.example", "AAAA", "Example")
         assertTrue(store.isAllowed("com.example", "AAAA"))
         assertEquals(1, store.list().size)
-        // The matching pending row is gone.
-        assertTrue(store.listPending().none {
-            it.packageName == "com.example" && it.signingCertSha256.equals("AAAA", true)
-        })
     }
 
-    @Test
-    fun `approve removes only the matching sig pending row, not other sig rows for same pkg`() {
-        store.recordPending("com.example", "AAAA")
-        store.recordPending("com.example", "BBBB")
-        assertEquals(2, store.listPending().size)
-
-        mockkObject(CallerVerifier)
-        every { CallerVerifier.identifyByPackage(any(), "com.example") } returns
-            CallerIdentity("com.example", "AAAA", "Example")
-
-        store.approve(context, "com.example", "AAAA")
-        // Pending row with sig BBBB is preserved — sig swap is not silent.
-        val remaining = store.listPending()
-        assertEquals(1, remaining.size)
-        assertEquals("BBBB", remaining.first().signingCertSha256)
-    }
 
     @Test
     fun `approve throws SecurityException when package no longer installed`() {
-        store.recordPending("com.gone", "AAAA")
         mockkObject(CallerVerifier)
         every { CallerVerifier.identifyByPackage(any(), "com.gone") } returns null
 
