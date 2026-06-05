@@ -86,6 +86,31 @@ class ServiceBinderInitBlockingTest {
         verify(exactly = 0) { orchestrator.createSession(any(), any()) }
     }
 
+    @Test
+    fun `cold createSession maps the bounded-wait timeout to retryable ENGINE_INITIALIZING (R-17)`() = runBlocking {
+        // R-17: when the bounded warmup wait elapses with the engine still
+        // initialising, awaitReady returns the synthetic Failed(NativeError
+        // "init timeout"). createSession must surface a RETRYABLE
+        // ENGINE_INITIALIZING (not a terminal failure) and must not create a
+        // session — the binder thread is freed for other callers.
+        val timedOut = CompletableDeferred<EngineState>()
+        val orchestrator = mockOrchestrator()
+        val engineManager = mockEngineManager(timedOut)
+        val binder = binder(engineManager, orchestrator)
+
+        val call = async(Dispatchers.IO) {
+            runCatching { binder.createSession(SessionConfig(maxTokens = 2048)) }
+                .exceptionOrNull() as SecurityException
+        }
+        timedOut.complete(EngineState.Failed(InitFailure.NativeError("init timeout")))
+
+        assertEquals(
+            MindlayerErrorCode.ENGINE_INITIALIZING,
+            MindlayerErrorCode.codeFromWireMessage(call.await().message),
+        )
+        verify(exactly = 0) { orchestrator.createSession(any(), any()) }
+    }
+
     private fun binder(
         engineManager: EngineManager,
         orchestrator: InferenceOrchestrator,
@@ -111,7 +136,11 @@ class ServiceBinderInitBlockingTest {
     private fun mockEngineManager(state: CompletableDeferred<EngineState>): EngineManager =
         mockk(relaxed = true) {
             every { isInitialized } returns false
-            coEvery { awaitReady() } coAnswers { state.await() }
+            // R-17: production now calls the bounded awaitReady(timeoutMs)
+            // overload; stub that one. The mock ignores the timeout and just
+            // awaits the test-driven deferred, so Ready/Failed/synthetic-
+            // timeout outcomes are all exercised by completing `state`.
+            coEvery { awaitReady(any()) } coAnswers { state.await() }
             coEvery { initialize(any(), any()) } returns mockk(relaxed = true)
         }
 
