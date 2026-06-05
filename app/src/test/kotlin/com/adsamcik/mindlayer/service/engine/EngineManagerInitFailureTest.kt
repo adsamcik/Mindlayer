@@ -380,6 +380,74 @@ class EngineManagerInitFailureTest {
         verify(exactly = 0) { logRepository.logInitFailureCategorized(InitFailure.IntegrityMismatch) }
     }
 
+    // ---- S-11 verify+load TOCTOU bookend ----------------------------------
+
+    @Test
+    fun `model file swapped during native load is detected as IntegrityMismatch`() = runTest {
+        // S-11: the on-disk SHA-256 matches the pinned manifest at verify
+        // time, but an attacker swaps the file during the native load window.
+        // The post-load identity bookend must catch the change, close the
+        // engine, fail closed, and categorise as IntegrityMismatch (NOT
+        // BackendUnavailable).
+        writeModelFile()
+        stubAvailMem()
+        val modelFile = File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME)
+
+        val mgr = EngineManager(context, logRepository)
+        // Pin a manifest that MATCHES the original file so the pre-load
+        // verify() passes; the swap happens after verification.
+        mgr.expectedModelSha256 = sha256Of(modelFile)
+        mgr.engineFactory = { _ ->
+            mockk<Engine>(relaxed = true) {
+                every { initialize() } answers {
+                    // Simulate a privileged in-flight swap: grow the file so
+                    // its identity (size) differs from the pre-load capture.
+                    java.io.RandomAccessFile(modelFile, "rw").use { it.setLength(8192L) }
+                    Unit
+                }
+            }
+        }
+
+        try {
+            mgr.initialize(preferredBackend = "CPU")
+            fail("Expected SecurityException for load-window model swap")
+        } catch (e: SecurityException) {
+            assertTrue(
+                "Expected integrity-check failure message, got: ${e.message}",
+                e.message!!.contains("Model integrity check failed"),
+            )
+        }
+
+        assertEquals(InitFailure.IntegrityMismatch, mgr.lastInitFailure)
+        verify(exactly = 1) { logRepository.logInitFailureCategorized(InitFailure.IntegrityMismatch) }
+    }
+
+    @Test
+    fun `matching manifest with an unchanged file loads without a false TOCTOU trip`() = runTest {
+        // S-11 false-positive guard: a pinned manifest that matches the file
+        // AND no swap during load must succeed. Pins that the bookend doesn't
+        // break the normal release-build load path.
+        writeModelFile()
+        stubAvailMem()
+        val modelFile = File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME)
+
+        val mgr = EngineManager(context, logRepository)
+        mgr.expectedModelSha256 = sha256Of(modelFile)
+        val engineMock = mockk<Engine>(relaxed = true) {
+            every { initialize() } returns Unit
+        }
+        mgr.engineFactory = { _ -> engineMock }
+
+        val result = mgr.initialize(preferredBackend = "CPU")
+
+        assertNotNull("Engine must initialise when file is unchanged", result)
+        assertNull(
+            "Unchanged file must not trip the TOCTOU bookend",
+            mgr.lastInitFailure,
+        )
+        verify(exactly = 0) { logRepository.logInitFailureCategorized(InitFailure.IntegrityMismatch) }
+    }
+
     // ---- F-006 safeLabel invariant ----------------------------------------
 
     @Test
@@ -467,6 +535,19 @@ class EngineManagerInitFailureTest {
         java.io.RandomAccessFile(modelFile, "rw").use { raf ->
             raf.setLength(4096L)
         }
+    }
+
+    private fun sha256Of(file: File): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n == -1) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
     }
 
     private fun stubAvailMem(availBytes: Long = 4L * 1024 * 1024 * 1024) {
