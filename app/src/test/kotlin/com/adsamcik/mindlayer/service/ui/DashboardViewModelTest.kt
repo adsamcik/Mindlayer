@@ -231,6 +231,86 @@ class DashboardViewModelTest {
         )
     }
 
+    @Test
+    fun `drainOcrEvents does not count empty-JSON finalized snapshot as recognized text`() = runTest {
+        // Regression for the false-PASS: for zero detections the service emits
+        // OCR_RESULT_FINALIZED with fullJson "{}". drainOcrEvents surfaces that
+        // as recognizedText="{}" (non-blank) — which previously satisfied
+        // `recognized.isNotBlank()` and made the dashboard report PASS despite
+        // 0 recognized lines. The pass decision must instead rely on structured
+        // signals (lineCount + recognizedValues), so ocrProducedText is false.
+        val pipe = ParcelFileDescriptor.createReliablePipe()
+        val readEnd = pipe[0]
+        val writeEnd = pipe[1]
+
+        val writer = com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter(writeEnd)
+        writer.writeHeader("ocr-empty-session")
+        writer.writeFrameProcessed(frameId = 1L, lineCount = 0, durationMs = 500L)
+        writer.writeResultFinalized(fullJson = "{}")
+        writer.writeDone("ocr_complete")
+        writer.close()
+
+        val viewModel = DashboardViewModel()
+        val result = viewModel.drainOcrEvents(readEnd)
+
+        assertEquals(0, result.lineCount)
+        assertTrue("Expected finalized=true", result.finalized)
+        assertTrue("No field values expected for an empty result", result.recognizedValues.isEmpty())
+        assertFalse(
+            "An empty-JSON finalized snapshot must not count as recognized text",
+            viewModel.ocrProducedText(result),
+        )
+    }
+
+    @Test
+    fun `ocrProducedText requires real lines or alphanumeric field values`() {
+        val viewModel = DashboardViewModel()
+        fun drain(lineCount: Int, values: List<String>) = DashboardViewModel.OcrDrainResult(
+            totalEvents = 1,
+            frameProcessedCount = 1,
+            errorCount = 0,
+            finalized = true,
+            recognizedText = "",
+            recognizedValues = values,
+            lineCount = lineCount,
+        )
+        // No lines and no meaningful values -> not produced.
+        assertFalse(viewModel.ocrProducedText(drain(0, emptyList())))
+        assertFalse(viewModel.ocrProducedText(drain(0, listOf("{}"))))
+        assertFalse(viewModel.ocrProducedText(drain(0, listOf("[]", "   "))))
+        // A real recognized line count, or any alphanumeric value, counts.
+        assertTrue(viewModel.ocrProducedText(drain(1, emptyList())))
+        assertTrue(viewModel.ocrProducedText(drain(0, listOf("1234"))))
+        assertTrue(viewModel.ocrProducedText(drain(0, listOf("Hello world"))))
+    }
+
+    @Test
+    fun `streamTestOutcome fails when the engine produced no usable output`() {
+        val viewModel = DashboardViewModel()
+        fun outcome(
+            output: String,
+            unparsed: Int = 0,
+            errors: Int = 0,
+            readError: String? = null,
+        ) = viewModel.streamTestOutcome(
+            output = output,
+            eventCount = 1,
+            finishReason = "stop",
+            unparsedEventCount = unparsed,
+            errorEventCount = errors,
+            streamReadError = readError,
+        )
+        // No usable output -> ERROR (was WARNING).
+        assertEquals(DashboardMessageTone.ERROR, outcome("").tone)
+        assertEquals(DashboardMessageTone.ERROR, outcome("   ").tone)
+        assertEquals(DashboardMessageTone.ERROR, outcome("", unparsed = 2).tone)
+        assertEquals(DashboardMessageTone.ERROR, outcome("Hi", errors = 1).tone)
+        assertEquals(DashboardMessageTone.ERROR, outcome("Hi", readError = "boom").tone)
+        // Real output -> SUCCESS; output with parser warnings stays WARNING.
+        assertEquals(DashboardMessageTone.SUCCESS, outcome("Hello there").tone)
+        assertEquals(DashboardMessageTone.WARNING, outcome("Hello", unparsed = 1).tone)
+    }
+
     private fun testService(calls: MutableList<String>): IMindlayerService {
         return Proxy.newProxyInstance(
             IMindlayerService::class.java.classLoader,
