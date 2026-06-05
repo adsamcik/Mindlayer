@@ -613,31 +613,14 @@ class DashboardViewModel : ViewModel() {
                 }
 
                 val completedAt = System.currentTimeMillis()
-                val (status, tone) = when {
-                    streamReadError != null -> {
-                        "Stream read failed after $eventCount event(s)" to DashboardMessageTone.ERROR
-                    }
-
-                    errorEventCount > 0 -> {
-                        "Service returned $errorEventCount error event(s)" to DashboardMessageTone.ERROR
-                    }
-
-                    output.isNotEmpty() && unparsedEventCount > 0 -> {
-                        "Completed with $unparsedEventCount parser warning(s)" to DashboardMessageTone.WARNING
-                    }
-
-                    output.isNotEmpty() -> {
-                        "Completed • $eventCount event(s) • finish=$finishReason" to DashboardMessageTone.SUCCESS
-                    }
-
-                    unparsedEventCount > 0 -> {
-                        "Received $unparsedEventCount unparsed event(s)" to DashboardMessageTone.WARNING
-                    }
-
-                    else -> {
-                        "No output received ($eventCount event(s))" to DashboardMessageTone.WARNING
-                    }
-                }
+                val (status, tone) = streamTestOutcome(
+                    output = output,
+                    eventCount = eventCount,
+                    finishReason = finishReason,
+                    unparsedEventCount = unparsedEventCount,
+                    errorEventCount = errorEventCount,
+                    streamReadError = streamReadError,
+                )
 
                 _uiState.update {
                     it.copy(
@@ -779,7 +762,7 @@ class DashboardViewModel : ViewModel() {
                     it.copy(embeddingTest = EngineTestState(
                         isRunning = false,
                         status = status,
-                        tone = if (passed) DashboardMessageTone.SUCCESS else DashboardMessageTone.WARNING,
+                        tone = if (passed) DashboardMessageTone.SUCCESS else DashboardMessageTone.ERROR,
                         output = output,
                         lastCompletedAtMs = System.currentTimeMillis(),
                     ))
@@ -937,16 +920,12 @@ class DashboardViewModel : ViewModel() {
                 val drained = withContext(Dispatchers.IO) { drainOcrEvents(readEnd) }
 
                 val recognized = drained.recognizedText
-                val producedText = drained.lineCount > 0 || recognized.isNotBlank()
-                val pass = drained.finalized &&
-                    drained.frameProcessedCount > 0 &&
-                    drained.errorCount == 0 &&
-                    producedText
+                val producedText = ocrProducedText(drained)
                 val tone = when {
                     drained.errorCount > 0 -> DashboardMessageTone.ERROR
-                    !drained.finalized -> DashboardMessageTone.WARNING
-                    drained.frameProcessedCount == 0 -> DashboardMessageTone.WARNING
-                    !producedText -> DashboardMessageTone.WARNING
+                    !drained.finalized -> DashboardMessageTone.ERROR
+                    drained.frameProcessedCount == 0 -> DashboardMessageTone.ERROR
+                    !producedText -> DashboardMessageTone.ERROR
                     else -> DashboardMessageTone.SUCCESS
                 }
                 val status = when {
@@ -1035,8 +1014,68 @@ class DashboardViewModel : ViewModel() {
         val errorCount: Int,
         val finalized: Boolean,
         val recognizedText: String,
+        val recognizedValues: List<String>,
         val lineCount: Int,
     )
+
+    internal data class EngineTestOutcome(
+        val status: String,
+        val tone: DashboardMessageTone,
+    )
+
+    /**
+     * True only when the OCR run produced actual recognized text. Derived from
+     * structured signals — the recognized line count and recognized field
+     * values — never from the finalized `fullJson` display string, which is the
+     * literal "{}" for zero detections. Counting that empty-JSON string as
+     * "recognized text" previously made a 0-line result read as a PASS.
+     */
+    internal fun ocrProducedText(drained: OcrDrainResult): Boolean =
+        drained.lineCount > 0 ||
+            drained.recognizedValues.any { value -> value.any(Char::isLetterOrDigit) }
+
+    /**
+     * Shared outcome decision for the raw-pipe stream verifications (chat
+     * inference + image inference). A verification FAILS (ERROR) when the
+     * engine produced no usable output — a stream read failure, a service
+     * error event, an empty/blank stream, or only unparsed events — so the
+     * dashboard reports the absent expected result instead of a soft warning.
+     * Genuine soft caveats (real output present alongside parser warnings)
+     * stay WARNING.
+     */
+    internal fun streamTestOutcome(
+        output: CharSequence,
+        eventCount: Int,
+        finishReason: String,
+        unparsedEventCount: Int,
+        errorEventCount: Int,
+        streamReadError: String?,
+    ): EngineTestOutcome = when {
+        streamReadError != null -> EngineTestOutcome(
+            "Stream read failed after $eventCount event(s)",
+            DashboardMessageTone.ERROR,
+        )
+        errorEventCount > 0 -> EngineTestOutcome(
+            "Service returned $errorEventCount error event(s)",
+            DashboardMessageTone.ERROR,
+        )
+        output.isNotBlank() && unparsedEventCount > 0 -> EngineTestOutcome(
+            "Completed with $unparsedEventCount parser warning(s)",
+            DashboardMessageTone.WARNING,
+        )
+        output.isNotBlank() -> EngineTestOutcome(
+            "Completed \u2022 $eventCount event(s) \u2022 finish=$finishReason",
+            DashboardMessageTone.SUCCESS,
+        )
+        unparsedEventCount > 0 -> EngineTestOutcome(
+            "No usable output \u2014 $unparsedEventCount unparsed event(s)",
+            DashboardMessageTone.ERROR,
+        )
+        else -> EngineTestOutcome(
+            "No output received ($eventCount event(s))",
+            DashboardMessageTone.ERROR,
+        )
+    }
 
     @androidx.annotation.VisibleForTesting
     internal suspend fun drainOcrEvents(readEnd: ParcelFileDescriptor): OcrDrainResult =
@@ -1122,6 +1161,7 @@ class DashboardViewModel : ViewModel() {
                 errorCount = errorCount,
                 finalized = finalized,
                 recognizedText = recognized,
+                recognizedValues = recognizedLines,
                 lineCount = lineCount,
             )
         }
@@ -1349,31 +1389,14 @@ class DashboardViewModel : ViewModel() {
                 }
 
                 val completedAt = System.currentTimeMillis()
-                val (status, tone) = when {
-                    streamReadError != null -> {
-                        "Stream read failed after $eventCount event(s)" to DashboardMessageTone.ERROR
-                    }
-
-                    errorEventCount > 0 -> {
-                        "Service returned $errorEventCount error event(s)" to DashboardMessageTone.ERROR
-                    }
-
-                    output.isNotEmpty() && unparsedEventCount > 0 -> {
-                        "Completed with $unparsedEventCount parser warning(s)" to DashboardMessageTone.WARNING
-                    }
-
-                    output.isNotEmpty() -> {
-                        "Completed • $eventCount event(s) • finish=$finishReason" to DashboardMessageTone.SUCCESS
-                    }
-
-                    unparsedEventCount > 0 -> {
-                        "Received $unparsedEventCount unparsed event(s)" to DashboardMessageTone.WARNING
-                    }
-
-                    else -> {
-                        "No output received ($eventCount event(s))" to DashboardMessageTone.WARNING
-                    }
-                }
+                val (status, tone) = streamTestOutcome(
+                    output = output,
+                    eventCount = eventCount,
+                    finishReason = finishReason,
+                    unparsedEventCount = unparsedEventCount,
+                    errorEventCount = errorEventCount,
+                    streamReadError = streamReadError,
+                )
 
                 _uiState.update {
                     it.copy(imageInferenceTest = EngineTestState(
@@ -1520,7 +1543,7 @@ class DashboardViewModel : ViewModel() {
                 val completedAt = System.currentTimeMillis()
                 val (status, tone) = when {
                     response.isNotBlank() -> "Completed • ${response.length} chars" to DashboardMessageTone.SUCCESS
-                    else -> "infer returned empty response" to DashboardMessageTone.WARNING
+                    else -> "infer returned empty response" to DashboardMessageTone.ERROR
                 }
                 _uiState.update {
                     it.copy(sdkInferAsyncTest = EngineTestState(
@@ -1621,9 +1644,9 @@ class DashboardViewModel : ViewModel() {
 
                 val completedAt = System.currentTimeMillis()
                 val (status, tone) = when {
-                    output.isNotEmpty() && done -> "Completed • $deltaCount delta(s)" to DashboardMessageTone.SUCCESS
-                    output.isNotEmpty() -> "Stream ended without Done event" to DashboardMessageTone.WARNING
-                    else -> "inferRealtime returned empty stream" to DashboardMessageTone.WARNING
+                    output.isNotBlank() && done -> "Completed • $deltaCount delta(s)" to DashboardMessageTone.SUCCESS
+                    output.isNotBlank() -> "Stream ended without a terminal Done event" to DashboardMessageTone.ERROR
+                    else -> "inferRealtime returned empty stream" to DashboardMessageTone.ERROR
                 }
                 _uiState.update {
                     it.copy(sdkInferRealtimeTest = EngineTestState(
@@ -1706,7 +1729,7 @@ class DashboardViewModel : ViewModel() {
                     val completedAt = System.currentTimeMillis()
                     val (status, tone) = when {
                         response.isNotBlank() -> "Completed • ${response.length} chars" to DashboardMessageTone.SUCCESS
-                        else -> "infer (image+text) returned empty response" to DashboardMessageTone.WARNING
+                        else -> "infer (image+text) returned empty response" to DashboardMessageTone.ERROR
                     }
                     _uiState.update {
                         it.copy(sdkGenerateWithImageTest = EngineTestState(
@@ -1800,7 +1823,7 @@ class DashboardViewModel : ViewModel() {
                 }
                 val (status, tone) = when {
                     lineCount > 0 -> "Completed • $summary" to DashboardMessageTone.SUCCESS
-                    else -> "OCR returned 0 lines — recognition model may not have loaded" to DashboardMessageTone.WARNING
+                    else -> "OCR returned 0 lines — no recognizable text was extracted" to DashboardMessageTone.ERROR
                 }
                 val outputText = buildString {
                     result.lines.forEachIndexed { i, line -> appendLine("[$i] ${line.text}") }
