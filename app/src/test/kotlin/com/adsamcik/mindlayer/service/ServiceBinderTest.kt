@@ -266,7 +266,7 @@ class ServiceBinderTest {
                 maxTokens = 2048,
             )
         } returns mockk(relaxed = true)
-        coEvery { engineManager.awaitReady() } returns EngineState.Failed(InitFailure.NativeError("IllegalStateException"))
+        coEvery { engineManager.awaitReady(any()) } returns EngineState.Failed(InitFailure.NativeError("IllegalStateException"))
 
         val config = SessionConfig(sessionId = "s1", backend = "CPU", maxTokens = 2048)
 

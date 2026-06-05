@@ -260,6 +260,17 @@ class ServiceBinder(
          */
         const val MAX_MEDIA_PARTS_PER_REQUEST = 2
 
+        /**
+         * R-17: how long a cold-start `createSession` will block its binder
+         * thread waiting for the engine to finish initialising before
+         * returning a retryable `ENGINE_INITIALIZING`. Far below the ~30 s
+         * full init timeout so a burst of clients connecting during a cold
+         * start (e.g. after the EMERGENCY/thermal process-restart) cannot pin
+         * the bounded binder thread pool for 30 s each. The background init
+         * job keeps running, so a retry shortly after lands on a ready engine.
+         */
+        const val CREATE_SESSION_WARMUP_WAIT_MS: Long = 3_000L
+
         /** Lower bound on the caller-supplied [prewarmAndAwait] timeout (ms). */
         const val PREWARM_AWAIT_MIN_TIMEOUT_MS: Long = 1_000L
 
@@ -843,9 +854,27 @@ class ServiceBinder(
                     preferredBackend = safeConfig.backend,
                     maxTokens = safeConfig.maxTokens,
                 )
-                when (val state = engineManager.awaitReady()) {
+                // R-17: bound the binder-thread wait. Pre-fix this blocked for
+                // up to ~30 s (DEFAULT_AWAIT_READY_TIMEOUT_MS) on a cold start,
+                // so a connect burst could pin the whole binder pool. We wait
+                // only CREATE_SESSION_WARMUP_WAIT_MS; if the engine is still
+                // warming we return a retryable ENGINE_INITIALIZING and let the
+                // background init job continue.
+                when (val state = engineManager.awaitReady(CREATE_SESSION_WARMUP_WAIT_MS)) {
                     is EngineState.Ready -> Unit
-                    is EngineState.Failed -> throw initFailureBinderException(state.cause)
+                    is EngineState.Failed -> {
+                        val cause = state.cause
+                        if (cause is InitFailure.NativeError && cause.safeLabel == "init timeout") {
+                            // Synthetic await-timeout: the init is still in
+                            // flight, not a terminal failure. Surface the
+                            // retryable code so the SDK backs off + retries.
+                            throw typedBinderException(
+                                MindlayerErrorCode.ENGINE_INITIALIZING,
+                                "engine_initializing",
+                            )
+                        }
+                        throw initFailureBinderException(cause)
+                    }
                     EngineState.Idle, EngineState.Initializing -> throw typedBinderException(
                         MindlayerErrorCode.ENGINE_INITIALIZING,
                         "engine_initializing",
