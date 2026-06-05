@@ -6,9 +6,12 @@ import com.adsamcik.mindlayer.shared.StreamEventType
 import com.adsamcik.mindlayer.shared.StreamHeader
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
@@ -65,93 +68,116 @@ object TokenStreamReader {
             ),
         )
 
-        try {
-            while (true) {
-                val len = try {
-                    // DataInputStream reads big-endian; wire is little-endian
-                    Integer.reverseBytes(input.readInt())
-                } catch (_: EOFException) {
-                    break
+        kotlinx.coroutines.coroutineScope {
+            // R-19c: a blocking readInt()/readFully() on the pipe cannot be
+            // interrupted by coroutine cancellation alone. This watcher closes
+            // the read-end fd when the flow is cancelled, which makes the
+            // blocked read throw and unwind promptly instead of lingering
+            // until the service happens to close its write end. Fires only on
+            // cancellation; on normal EOF the watcher is cancelled in finally
+            // before it can close anything.
+            val watcher = launch(dispatcher) {
+                try {
+                    kotlinx.coroutines.awaitCancellation()
+                } finally {
+                    runCatching { readEnd.close() }
                 }
-
-                // Guard all per-frame operations: a malicious service must not crash the collector.
-                // emit() is intentionally placed OUTSIDE the try block so CancellationException
-                // from a cancelled collector propagates correctly and is never swallowed.
-                var terminalError: InferenceEvent.Error? = null
-                val parsedEvents: List<InferenceEvent>? = try {
-                    require(len in 0..MAX_FRAME_BYTES) { "Invalid frame length: $len" }
-                    val payload = ByteArray(len)
-                    input.readFully(payload)
-                    parseFrameMulti(payload.decodeToString())
-                } catch (e: EOFException) {
-                    terminalError = InferenceEvent.Error(
-                        message = "Protocol error: truncated frame",
-                        code = "PROTOCOL_ERROR_EOF",
-                        seq = -1,
-                    )
-                    null
-                } catch (e: IllegalArgumentException) {
-                    terminalError = InferenceEvent.Error(
-                        message = "Protocol error: invalid frame length",
-                        code = "PROTOCOL_ERROR_LENGTH",
-                        seq = -1,
-                    )
-                    null
-                } catch (e: SerializationException) {
-                    // Defensive: parseFrameMulti already catches this, but guard against future changes.
-                    terminalError = InferenceEvent.Error(
-                        message = "Protocol error: invalid frame encoding",
-                        code = "PROTOCOL_ERROR_JSON",
-                        seq = -1,
-                    )
-                    null
-                } catch (e: Throwable) {
-                    terminalError = InferenceEvent.Error(
-                        message = "Protocol error",
-                        code = "PROTOCOL_ERROR",
-                        seq = -1,
-                    )
-                    null
-                }
-
-                when {
-                    terminalError != null -> { emit(terminalError); break }
-                    parsedEvents == null -> {
-                        // Unrecognised frame — not a StreamEvent or StreamHeader.
-                        emit(
-                            InferenceEvent.Error(
-                                message = "Protocol error: unrecognised frame",
-                                code = "PROTOCOL_ERROR_JSON",
-                                seq = -1,
-                            ),
-                        )
+            }
+            try {
+                while (true) {
+                    val len = try {
+                        // DataInputStream reads big-endian; wire is little-endian
+                        Integer.reverseBytes(input.readInt())
+                    } catch (_: EOFException) {
                         break
+                    } catch (e: IOException) {
+                        // R-19c: the cancellation watcher closed the fd to
+                        // unblock us — exit cleanly. A genuine mid-stream
+                        // IOException with the flow still active is rethrown
+                        // and surfaces below as a PIPE_ERROR via checkError.
+                        if (!coroutineContext.isActive) break else throw e
                     }
-                    else -> {
-                        // Most frames produce one event; v0.5 TOKEN_DELTA_BATCH
-                        // expands into many ordered TextDelta emissions.
-                        for (event in parsedEvents) {
-                            emit(event)
+
+                    // Guard all per-frame operations: a malicious service must not crash the collector.
+                    // emit() is intentionally placed OUTSIDE the try block so CancellationException
+                    // from a cancelled collector propagates correctly and is never swallowed.
+                    var terminalError: InferenceEvent.Error? = null
+                    val parsedEvents: List<InferenceEvent>? = try {
+                        require(len in 0..MAX_FRAME_BYTES) { "Invalid frame length: $len" }
+                        val payload = ByteArray(len)
+                        input.readFully(payload)
+                        parseFrameMulti(payload.decodeToString())
+                    } catch (e: EOFException) {
+                        terminalError = InferenceEvent.Error(
+                            message = "Protocol error: truncated frame",
+                            code = "PROTOCOL_ERROR_EOF",
+                            seq = -1,
+                        )
+                        null
+                    } catch (e: IllegalArgumentException) {
+                        terminalError = InferenceEvent.Error(
+                            message = "Protocol error: invalid frame length",
+                            code = "PROTOCOL_ERROR_LENGTH",
+                            seq = -1,
+                        )
+                        null
+                    } catch (e: SerializationException) {
+                        // Defensive: parseFrameMulti already catches this, but guard against future changes.
+                        terminalError = InferenceEvent.Error(
+                            message = "Protocol error: invalid frame encoding",
+                            code = "PROTOCOL_ERROR_JSON",
+                            seq = -1,
+                        )
+                        null
+                    } catch (e: Throwable) {
+                        terminalError = InferenceEvent.Error(
+                            message = "Protocol error",
+                            code = "PROTOCOL_ERROR",
+                            seq = -1,
+                        )
+                        null
+                    }
+
+                    when {
+                        terminalError != null -> { emit(terminalError); break }
+                        parsedEvents == null -> {
+                            // Unrecognised frame — not a StreamEvent or StreamHeader.
+                            emit(
+                                InferenceEvent.Error(
+                                    message = "Protocol error: unrecognised frame",
+                                    code = "PROTOCOL_ERROR_JSON",
+                                    seq = -1,
+                                ),
+                            )
+                            break
+                        }
+                        else -> {
+                            // Most frames produce one event; v0.5 TOKEN_DELTA_BATCH
+                            // expands into many ordered TextDelta emissions.
+                            for (event in parsedEvents) {
+                                emit(event)
+                            }
                         }
                     }
                 }
-            }
 
-            // EOF reached — check whether the service closed cleanly
-            try {
-                readEnd.checkError()
-            } catch (e: IOException) {
-                emit(
-                    InferenceEvent.Error(
-                        message = "Service pipe error: ${e.message}",
-                        code = "PIPE_ERROR",
-                        seq = -1,
-                        tsMs = null,
-                    ),
-                )
+                // EOF reached — check whether the service closed cleanly
+                try {
+                    readEnd.checkError()
+                } catch (e: IOException) {
+                    emit(
+                        InferenceEvent.Error(
+                            message = "Service pipe error: ${e.message}",
+                            code = "PIPE_ERROR",
+                            seq = -1,
+                            tsMs = null,
+                        ),
+                    )
+                }
+            } finally {
+                watcher.cancel()
+                input.close()
             }
-        } finally {
-            input.close()
         }
     }.flowOn(dispatcher)
 

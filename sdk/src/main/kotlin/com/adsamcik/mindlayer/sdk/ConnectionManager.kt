@@ -14,6 +14,7 @@ import com.adsamcik.mindlayer.IMindlayerService
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
@@ -202,6 +203,16 @@ class ConnectionManager {
     private var consecutiveFailures = 0
 
     /**
+     * R-19: the single in-flight reconnect coroutine. Every
+     * [scheduleReconnect] cancels the prior job before launching a new one,
+     * so a reconnect storm (repeated onBindingDied / SERVICE_THROTTLED)
+     * cannot stack multiple delayed `doBind()`s that each create a live
+     * binding. Cleared on a successful connect and on [disconnect].
+     */
+    @Volatile
+    private var reconnectJob: Job? = null
+
+    /**
      * Wall-clock millis of the last [awaitConnected]-triggered re-bind that
      * was launched in response to a [ConnectionState.REJECTED_NOT_APPROVED]
      * state. Used to floor consecutive on-demand re-checks at
@@ -255,6 +266,8 @@ class ConnectionManager {
     /** Unbind and release all resources. */
     fun disconnect() {
         _state.value = ConnectionState.DISCONNECTED
+        reconnectJob?.cancel()
+        reconnectJob = null
         doUnbind()
         scope.cancel()
     }
@@ -378,6 +391,13 @@ class ConnectionManager {
 
     private fun doBind() {
         val ctx = boundContext ?: return
+        // R-19: never leak a prior binding. If a previous ServiceConnection
+        // is still registered (e.g. a reconnect raced an existing bind),
+        // unbind it before creating a new one so we can't end up with two
+        // live ServiceConnections fighting over binderRef / currentConnection.
+        if (currentConnection != null) {
+            doUnbind()
+        }
         _state.value = ConnectionState.CONNECTING
 
         val conn = object : ServiceConnection {
@@ -457,11 +477,28 @@ class ConnectionManager {
                     doUnbind()
                     return
                 } catch (e: Exception) {
-                    Log.w(TAG, "registerClient failed (transient)", e)
-                    // Non-security failure (e.g. RemoteException mid-bind) — fall
-                    // through to CONNECTED; the next RPC will surface any issue.
+                    // R-19: a non-security failure (e.g. RemoteException) means
+                    // the service never registered our liveness token, so the
+                    // service-side linkToDeath teardown of our sessions won't
+                    // fire. Pre-fix we published CONNECTED anyway, handing out a
+                    // binder the service isn't tracking. Treat it as a
+                    // recoverable bind failure instead: unlink, invalidate,
+                    // unbind, and reconnect so a fresh registerClient is
+                    // attempted.
+                    Log.w(TAG, "registerClient failed (transient) — recovering", e)
+                    try { binder.unlinkToDeath(recipient, 0) } catch (_: Throwable) { }
+                    deathRecipient = null
+                    invalidateBinder()
+                    _state.value = ConnectionState.RECOVERING
+                    doUnbind()
+                    scheduleReconnect()
+                    return
                 }
 
+                // R-19: registration succeeded — cancel any pending reconnect
+                // so a stale delayed doBind() can't tear down this live binding.
+                reconnectJob?.cancel()
+                reconnectJob = null
                 _state.value = ConnectionState.CONNECTED
                 // Successful registration — reset the rejection-recheck floor
                 // so a future REJECTED_NOT_APPROVED (e.g. user revokes approval
@@ -609,7 +646,10 @@ class ConnectionManager {
             Log.w(TAG, "Bind gave up after $MAX_RECONNECT_ATTEMPTS attempts; explicit reconnect required")
             return
         }
-        scope.launch {
+        // R-19: single in-flight reconnect — cancel any prior scheduled
+        // rebind so a storm of triggers can't stack multiple doBind()s.
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
             val wait = backoffMs
             Log.i(TAG, "Reconnecting in ${wait}ms")
             delay(wait)
@@ -627,7 +667,9 @@ class ConnectionManager {
      * fails again (cycle repeats with the same caller-supplied wait).
      */
     private fun scheduleReconnect(delayMs: Long) {
-        scope.launch {
+        // R-19: single in-flight reconnect — cancel any prior scheduled rebind.
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
             Log.i(TAG, "Reconnecting in ${delayMs}ms (deferred)")
             delay(delayMs)
             doBind()

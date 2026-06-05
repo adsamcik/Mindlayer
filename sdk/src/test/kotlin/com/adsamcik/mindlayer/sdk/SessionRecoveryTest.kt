@@ -80,6 +80,30 @@ class SessionRecoveryTest {
         assertEquals(2_000, SessionRecovery.EMERGENCY_REPLAY_BUDGET)
     }
 
+    @Test
+    fun `recoverSession re-throws CancellationException from destroySession (R-19e)`() = runTest {
+        val turns = listOf(makeTurn("t1", TurnRole.USER, "Hello"))
+        stubReplayData(turns = turns, pendingUserTurn = null)
+        coEvery { mockHistoryStore.cleanupInterruptedTurns(oldSessionId) } returns 0
+        // The best-effort destroySession must NOT swallow cooperative
+        // cancellation; a cancelled recovery flow has to stop here rather
+        // than proceeding to create a fresh server session.
+        every { mockService.destroySession(oldSessionId) } throws
+            kotlinx.coroutines.CancellationException("cancelled")
+
+        var thrown: Throwable? = null
+        try {
+            recovery.recoverSession(oldSessionId)
+        } catch (t: Throwable) {
+            thrown = t
+        }
+
+        assertNotNull("CancellationException must propagate", thrown)
+        org.junit.Assert.assertTrue(thrown is kotlinx.coroutines.CancellationException)
+        // The flow stopped before creating the replacement session.
+        verify(exactly = 0) { mockService.createSession(any()) }
+    }
+
     // -- recoverSession with valid history ------------------------------------
 
     @Test
