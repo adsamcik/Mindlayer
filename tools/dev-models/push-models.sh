@@ -293,6 +293,24 @@ push_one() {
   local remote="$REMOTE_DIR/$filename"
   local local_size
   local_size="$(wc -c < "$local_path" | tr -d ' ')"
+
+  # Guard: refuse a stale / mis-converted PaddleOCR model that carries an
+  # unresolved ONNX_LAYERNORMALIZATION custom op. Mirrors the build-time guard
+  # in scripts/build-paddleocr-models/convert.sh: such a rec model fails to
+  # invoke on every accelerator, so OCR silently returns 0 lines.
+  case "$filename" in
+    paddleocr-*.tflite)
+      if grep -aq 'ONNX_LAYERNORMALIZATION' "$local_path"; then
+        echo "error: refusing to push '$filename': it contains an unresolved" >&2
+        echo "       ONNX_LAYERNORMALIZATION custom op (stale or mis-converted model" >&2
+        echo "       that fails to invoke on every accelerator). Rebuild via" >&2
+        echo "       scripts/build-paddleocr-models (or download the latest CI artifact)" >&2
+        echo "       and refresh your model cache before pushing." >&2
+        return 1
+      fi
+      ;;
+  esac
+
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "  [dry-run] adb $(adb_args | tr '\n' ' ')push $local_path $remote"
     echo "  [dry-run] adb $(adb_args | tr '\n' ' ')shell ls -l $remote"
