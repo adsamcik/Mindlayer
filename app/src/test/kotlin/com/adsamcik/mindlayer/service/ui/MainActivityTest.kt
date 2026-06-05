@@ -1,7 +1,8 @@
 package com.adsamcik.mindlayer.service.ui
 
 import android.view.WindowManager
-import org.junit.Assert.assertTrue
+import com.adsamcik.mindlayer.service.BuildConfig
+import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -13,13 +14,17 @@ import org.robolectric.annotation.Config
 class MainActivityTest {
 
     @Test
-    fun `dashboard window uses FLAG_SECURE`() {
+    fun `dashboard window applies FLAG_SECURE only in release builds`() {
         val activity = Robolectric.buildActivity(MainActivity::class.java)
             .create()
             .get()
 
-        assertTrue(
-            activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0,
-        )
+        val isSecure =
+            activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0
+
+        // FLAG_SECURE is gated to production (release) builds so debug builds stay
+        // screenshottable for manual QA. The debug unit-test variant has
+        // BuildConfig.DEBUG == true (flag absent); release has it false (flag set).
+        assertEquals(!BuildConfig.DEBUG, isSecure)
     }
 }
