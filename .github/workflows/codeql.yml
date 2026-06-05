@@ -31,8 +31,11 @@ name: CodeQL
 #        give the job `timeout-minutes: 30`.
 #     3. Re-enable in tandem with a default-setup teardown (already done here).
 #
-# `actions` + `python` ARE analysed: they are interpreted, so extraction is
-# build-free and never depends on the Kotlin/JDK toolchain — reliable and fast.
+# `actions` IS analysed: it is interpreted, so extraction is build-free and
+# never depends on the Kotlin/JDK toolchain — reliable and fast. (Python is
+# intentionally not scanned: the only Python in the repo is the manual,
+# human-reviewed PaddleOCR model-conversion pipeline in
+# build-paddleocr-models.yml, which never ships in the app.)
 
 on:
   push:
@@ -71,8 +74,6 @@ jobs:
       matrix:
         include:
           - language: actions
-            build-mode: none
-          - language: python
             build-mode: none
 
     steps:
