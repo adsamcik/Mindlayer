@@ -2018,6 +2018,31 @@ class ServiceBinder(
     private fun inferenceKey(uid: Int, requestId: String): String = "$uid:$requestId"
 
     /**
+     * S-4: run a synchronous heavy native call (embedding / OCR) under the
+     * same per-UID + global concurrent-inference cap that [infer] honours.
+     * Without this, `embed*` / `ocrImage` could burst expensive `runBlocking`
+     * work on binder threads and bypass the concurrency limits, exhausting
+     * the binder pool and competing with chat inference for native memory.
+     *
+     * Throws [SecurityException] (wire `CONCURRENT_LIMIT`) when the slot
+     * cannot be acquired; always releases the slot in `finally`.
+     */
+    private inline fun <T> withConcurrencySlot(uid: Int, methodLabel: String, block: () -> T): T {
+        if (!rateLimiter.beginInference(uid)) {
+            logRepository?.logRateLimitReject(methodLabel, uid, 1.0)
+            throw typedBinderException(
+                MindlayerErrorCode.CONCURRENT_LIMIT,
+                "Concurrent inference limit exceeded",
+            )
+        }
+        try {
+            return block()
+        } finally {
+            rateLimiter.endInference(uid)
+        }
+    }
+
+    /**
      * Hard cap on a single media payload accepted from a client. Matches
      * `SharedMemoryPool.MAX_MEDIA_BYTES` — kept here to validate before
      * the AIDL transaction returns.
@@ -2457,16 +2482,22 @@ class ServiceBinder(
     override fun embed(req: com.adsamcik.mindlayer.EmbeddingRequest): com.adsamcik.mindlayer.EmbeddingResult {
         authorizeCall(cost = 1.0)
         validateEmbeddingRequestOrThrow(req)
-        val requestId = "emb-${Binder.getCallingUid()}-${UUID.randomUUID()}"
-        return runBlocking { requireEmbeddingCoordinator().embed(Binder.getCallingUid(), req, requestId) }
+        val uid = Binder.getCallingUid()
+        val requestId = "emb-$uid-${UUID.randomUUID()}"
+        return withConcurrencySlot(uid, "embed") {
+            runBlocking { requireEmbeddingCoordinator().embed(uid, req, requestId) }
+        }
     }
 
     override fun embedBatch(reqs: List<com.adsamcik.mindlayer.EmbeddingRequest>?): com.adsamcik.mindlayer.EmbeddingBatchResult {
         authorizeCall(cost = ((reqs?.size ?: 0) * 0.5).coerceAtMost(RateLimiter.MAX_COST))
         val list = reqs ?: emptyList()
         validateEmbeddingRequestsOrThrow(list, requireEmbeddingCoordinator().maxBatchInline)
-        val requestId = "emb-${Binder.getCallingUid()}-${UUID.randomUUID()}"
-        return runBlocking { requireEmbeddingCoordinator().embedBatch(Binder.getCallingUid(), list, requestId) }
+        val uid = Binder.getCallingUid()
+        val requestId = "emb-$uid-${UUID.randomUUID()}"
+        return withConcurrencySlot(uid, "embedBatch") {
+            runBlocking { requireEmbeddingCoordinator().embedBatch(uid, list, requestId) }
+        }
     }
 
     override fun embedBatchShm(reqs: List<com.adsamcik.mindlayer.EmbeddingRequest>?): com.adsamcik.mindlayer.EmbeddingBatchTransfer {
@@ -2485,8 +2516,11 @@ class ServiceBinder(
         }
         val list = reqs ?: emptyList()
         validateEmbeddingRequestsOrThrow(list, requireEmbeddingCoordinator().maxBatchShm)
-        val requestId = "emb-${Binder.getCallingUid()}-${UUID.randomUUID()}"
-        return runBlocking { requireEmbeddingCoordinator().embedBatchShm(Binder.getCallingUid(), list, requestId) }
+        val uid = Binder.getCallingUid()
+        val requestId = "emb-$uid-${UUID.randomUUID()}"
+        return withConcurrencySlot(uid, "embedBatchShm") {
+            runBlocking { requireEmbeddingCoordinator().embedBatchShm(uid, list, requestId) }
+        }
     }
 
     override fun embedBatchDeferred(reqs: List<com.adsamcik.mindlayer.EmbeddingRequest>?): DeferredHandle {
@@ -2881,6 +2915,19 @@ class ServiceBinder(
         )
 
         val ocrStartedNs = System.nanoTime()
+        // S-4: gate the heavy native OCR (+ optional LLM) work under the same
+        // concurrent-inference cap that chat honours, so a burst of ocrImage
+        // calls can't bypass the limit and exhaust binder threads / native
+        // memory. The Y-plane extraction above is already bounded by the
+        // SharedMemoryPool; this slot covers the model-execution portion.
+        if (!rateLimiter.beginInference(uid)) {
+            logRepository?.logRateLimitReject("ocrImage", uid, 1.0)
+            throw typedBinderException(
+                MindlayerErrorCode.CONCURRENT_LIMIT,
+                "Concurrent inference limit exceeded",
+            )
+        }
+        try {
         val ocrOutput = try {
             runBlocking {
                 engine.recognise(
@@ -2980,6 +3027,10 @@ class ServiceBinder(
             llmDurationMs = llmDurationMs,
             totalDurationMs = totalDurationMs,
         )
+        } finally {
+            // S-4: release the concurrency slot acquired before recognise.
+            rateLimiter.endInference(uid)
+        }
     }
 
     /** Map the engine-side verbalized confidence to the wire-int scale. */
