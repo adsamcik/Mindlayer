@@ -428,8 +428,8 @@ class DashboardViewModel : ViewModel() {
         const val TEST_INFERENCE_PREWARM_TIMEOUT_MS = 180_000L
 
         const val OCR_FIXTURE_TEXT = "Hello world 1234"
-        const val OCR_FIXTURE_WIDTH = 480
-        const val OCR_FIXTURE_HEIGHT = 140
+        const val OCR_FIXTURE_WIDTH = 800
+        const val OCR_FIXTURE_HEIGHT = 200
 
         const val IMAGE_INFERENCE_FIXTURE_WIDTH = 320
         const val IMAGE_INFERENCE_FIXTURE_HEIGHT = 240
@@ -1472,12 +1472,19 @@ class DashboardViewModel : ViewModel() {
             canvas.drawColor(Color.WHITE)
             val paint = Paint().apply {
                 color = Color.BLACK
-                textSize = 56f
+                textSize = 64f
                 isAntiAlias = true
                 typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             }
-            // Centred-ish baseline so the entire glyph fits comfortably.
-            canvas.drawText(OCR_FIXTURE_TEXT, 24f, OCR_FIXTURE_HEIGHT * 0.65f, paint)
+            // Measure + centre so the full string is never clipped — the old
+            // fixed x=24 / textSize=56 on a 480px-wide strip ran the text off
+            // the right edge, which the detector can reject outright. Vertically
+            // centre the glyph box so PaddleOCR sees a clean, well-margined line.
+            val textWidth = paint.measureText(OCR_FIXTURE_TEXT)
+            val x = ((OCR_FIXTURE_WIDTH - textWidth) / 2f).coerceAtLeast(16f)
+            val fm = paint.fontMetrics
+            val baseline = OCR_FIXTURE_HEIGHT / 2f - (fm.ascent + fm.descent) / 2f
+            canvas.drawText(OCR_FIXTURE_TEXT, x, baseline, paint)
             val file = File(cacheDir, "ocr-dashboard-fixture.png")
             file.outputStream().use { out ->
                 check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
@@ -1795,6 +1802,26 @@ class DashboardViewModel : ViewModel() {
                     file.readBytes()
                 }
                 sdk.awaitConnected(kotlin.time.Duration.INFINITE)
+                // Single-image OCR (ocrImage / FEATURE_OCR_IMAGE_ONESHOT) is
+                // capability-gated and only advertised once the OCR engine is
+                // ready. The SDK caches capabilities at connect, so refresh
+                // before the precheck; if it's still unavailable, skip with a
+                // clear WARNING instead of throwing a bare exception.
+                val caps = withContext(Dispatchers.IO) { sdk.getCapabilities(forceRefresh = true) }
+                if (com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT !in
+                    caps.supportedFeatures
+                ) {
+                    _uiState.update {
+                        it.copy(ocrLlmExtractionTest = it.ocrLlmExtractionTest.copy(
+                            isRunning = false,
+                            status = "Skipped — single-image OCR not currently available " +
+                                "(engine not ready or build lacks support)",
+                            tone = DashboardMessageTone.WARNING,
+                            lastCompletedAtMs = System.currentTimeMillis(),
+                        ))
+                    }
+                    return@launch
+                }
                 _uiState.update {
                     it.copy(ocrLlmExtractionTest = it.ocrLlmExtractionTest.copy(
                         status = "Calling ocr with LLM extraction…",
@@ -1839,26 +1866,32 @@ class DashboardViewModel : ViewModel() {
                     ))
                 }
             } catch (e: Exception) {
-                val rendered = e.toInferenceErrorMessage()
-                val rawMsg = e.message.orEmpty()
-                val tone = if (
-                    rendered.contains("OCR_IMAGE_ONESHOT") ||
-                    rendered.contains("unsupported", ignoreCase = true) ||
-                    rawMsg.contains("OCR_IMAGE_ONESHOT") ||
-                    rawMsg.contains("unsupported", ignoreCase = true)
-                ) {
-                    DashboardMessageTone.WARNING
+                val sdkException = e as? com.adsamcik.mindlayer.sdk.MindlayerException
+                if (sdkException?.code == MindlayerErrorCode.FEATURE_NOT_SUPPORTED) {
+                    // SDK-authored capability message (no model output) — safe to
+                    // surface verbatim. Treated as a skip, not a hard failure.
+                    val message = sdkException.message?.takeIf { it.isNotBlank() }
+                        ?: "single-image OCR not available"
+                    _uiState.update {
+                        it.copy(ocrLlmExtractionTest = it.ocrLlmExtractionTest.copy(
+                            isRunning = false,
+                            status = "Skipped — $message",
+                            tone = DashboardMessageTone.WARNING,
+                            output = message,
+                            lastCompletedAtMs = System.currentTimeMillis(),
+                        ))
+                    }
                 } else {
-                    DashboardMessageTone.ERROR
-                }
-                _uiState.update {
-                    it.copy(ocrLlmExtractionTest = it.ocrLlmExtractionTest.copy(
-                        isRunning = false,
-                        status = "OCR + LLM extraction test failed: $rendered",
-                        tone = tone,
-                        output = rendered,
-                        lastCompletedAtMs = System.currentTimeMillis(),
-                    ))
+                    val rendered = e.toInferenceErrorMessage()
+                    _uiState.update {
+                        it.copy(ocrLlmExtractionTest = it.ocrLlmExtractionTest.copy(
+                            isRunning = false,
+                            status = "OCR + LLM extraction test failed: $rendered",
+                            tone = DashboardMessageTone.ERROR,
+                            output = rendered,
+                            lastCompletedAtMs = System.currentTimeMillis(),
+                        ))
+                    }
                 }
             } finally {
                 if (ownedSdk) sdk.disconnect()
@@ -1883,30 +1916,51 @@ class DashboardViewModel : ViewModel() {
      */
     fun runAllVerifications(context: Context) {
         viewModelScope.launch {
-            runEmbeddingTest()
-            awaitEmbeddingTestComplete()
+            // Share ONE SDK connection across the four SDK verification tests
+            // (infer-async, infer-realtime, generate-with-image, OCR+LLM).
+            // Churning a fresh Mindlayer.connect()/disconnect() per test amplifies
+            // transient bind/register/unbind races against a service that may
+            // briefly restart under heavy verify-all memory load (the observed
+            // DeadObjectException). Only claim a shared client when one is not
+            // already injected (the unit-test mock seam).
+            val sharedSdk = if (sdkClientForTest == null) {
+                com.adsamcik.mindlayer.sdk.Mindlayer.connect(context)
+                    .also { sdkClientForTest = it }
+            } else {
+                null
+            }
+            try {
+                runEmbeddingTest()
+                awaitEmbeddingTestComplete()
 
-            runOcrTest(context)
-            awaitOcrTestComplete()
+                runOcrTest(context)
+                awaitOcrTestComplete()
 
-            runImageInferenceTest(context)
-            awaitImageInferenceTestComplete()
+                runImageInferenceTest(context)
+                awaitImageInferenceTestComplete()
 
-            runSdkInferAsyncTest(context)
-            awaitSdkInferAsyncTestComplete()
+                runSdkInferAsyncTest(context)
+                awaitSdkInferAsyncTestComplete()
 
-            runSdkInferRealtimeTest(context)
-            awaitSdkInferRealtimeTestComplete()
+                runSdkInferRealtimeTest(context)
+                awaitSdkInferRealtimeTestComplete()
 
-            runSdkGenerateWithImageTest(context)
-            awaitSdkGenerateWithImageTestComplete()
+                runSdkGenerateWithImageTest(context)
+                awaitSdkGenerateWithImageTestComplete()
 
-            runOcrLlmExtractionTest(context)
-            awaitOcrLlmExtractionTestComplete()
+                runOcrLlmExtractionTest(context)
+                awaitOcrLlmExtractionTestComplete()
 
-            runTestInference()
-            // Don't await chat — the dashboard already shows its progress
-            // and the user can move on while the LLM warms up.
+                runTestInference()
+                // Don't await chat — the dashboard already shows its progress
+                // and the user can move on while the LLM warms up.
+            } finally {
+                if (sharedSdk != null) {
+                    // Relinquish the seam only if it still points at our client.
+                    if (sdkClientForTest === sharedSdk) sdkClientForTest = null
+                    runCatching { sharedSdk.disconnect() }
+                }
+            }
         }
     }
 
