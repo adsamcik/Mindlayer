@@ -271,7 +271,7 @@ class AllowlistStoreTest {
         val envelope = JSONObject(entriesFile.readText())
         val entry = envelope.getJSONArray("entries").getJSONObject(0)
         entriesFile.writeText(
-            """{"version":2,"entries":[{"displayName":"${entry.getString("displayName")}","grantedAtMs":${entry.getLong("grantedAtMs")},"sig":"${entry.getString("sig")}","pkg":"${entry.getString("pkg")}"}],"mac":"${envelope.getString("mac")}"}""",
+            """{"version":3,"entries":[{"displayName":"${entry.getString("displayName")}","grantedAtMs":${entry.getLong("grantedAtMs")},"sig":"${entry.getString("sig")}","pkg":"${entry.getString("pkg")}"}],"mac":"${envelope.getString("mac")}"}""",
         )
 
         assertTrue(store.isAllowed("com.example", "sig"))
@@ -403,6 +403,32 @@ class AllowlistStoreTest {
         val row = arr.getJSONObject(0)
         assertFalse("denyPending must not mark the row permanent", row.optBoolean("permanent", false))
         assertTrue(row.getLong("expiresAtMs") < Long.MAX_VALUE)
+    }
+
+    @Test
+    fun `tampering the permanent flag on a denied entry is detected by the v3 MAC (S-9)`() {
+        store.approveDirect("com.evil", "sigEvil")
+        store.revoke("com.evil") // sticky (permanent) denial, v3-signed
+        assertTrue("revoked app must be denied", store.isDenied("com.evil", "sigEvil"))
+
+        // Attacker with filesDir write access tries to SILENTLY downgrade the
+        // sticky revoke into an expirable one by removing the `permanent`
+        // field while keeping the original MAC. Pre-fix (v2) `permanent` was
+        // NOT in the HMAC pre-image, so this tamper went undetected and the
+        // denial would expire after the TTL, re-allowing the revoked app.
+        val deniedFile = File(dir(), "denied.json")
+        val env = JSONObject(deniedFile.readText())
+        env.getJSONArray("denied").getJSONObject(0).remove("permanent")
+        deniedFile.writeText(env.toString())
+
+        // Reopen to force a fresh disk read with MAC verification. v3 binds
+        // `permanent` into the MAC, so the tamper breaks verification and the
+        // forged entry is rejected — the downgrade is detected, not honoured.
+        val reopened = AllowlistStore(context, dirName)
+        assertFalse(
+            "tampered denied.json must fail MAC verification (downgrade not honoured)",
+            reopened.isDenied("com.evil", "sigEvil"),
+        )
     }
 
     private fun String.sanitizedForPath(): String =

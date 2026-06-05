@@ -223,16 +223,26 @@ class RateLimiterFirstCallTest {
     }
 
     @Test
-    fun `default constructor exposes INITIAL_FIRST_CALL_TOKENS = 50_0`() {
-        // Lock the production default so an accidental change to the
-        // companion const fails CI loudly. The grant must accommodate
-        // the documented connect handshake (registerClient +
-        // getCapabilities = 1.25) PLUS the SDK rebind storm that fires
-        // during a ~30 s cold engine init (each retry costs ~1.0) PLUS
-        // a small burst of immediate inference calls (developer
-        // iteration, test harness batch runs) without re-opening the
-        // burst-after-eviction calculation by approaching the per-minute
-        // capacity (default 300).
-        assertEquals(50.0, RateLimiter.INITIAL_FIRST_CALL_TOKENS, 0.0)
+    fun `rejection path seeds main bucket with cold-start grant, not full capacity`() {
+        // Security-review S-7: an un-allowlisted caller trips
+        // tryAcquireRejection() (which lazily creates the MAIN bucket)
+        // BEFORE it is approved. Pre-fix that path used the raw
+        // Bucket(capacity=…) constructor, defaulting `tokens` to full
+        // capacity — so once the user approved the app, its first
+        // tryAcquire() saw a full RPM burst instead of the bounded
+        // cold-start grant. The fix routes through newEmptyBucket().
+        val clock = FakeClock(now = 1L)
+        val rl = RateLimiter(maxRequestsPerMinute = 60, initialFirstCallTokens = 2.0, timeSource = clock)
+
+        // Un-approved caller hits the rejection-bookkeeping path first.
+        rl.tryAcquireRejection(uid = 7000)
+
+        // Now approved: the main bucket must expose the 2.0 grant, NOT 60.
+        assertTrue("grant call 1", rl.tryAcquire(7000, cost = 1.0))
+        assertTrue("grant call 2", rl.tryAcquire(7000, cost = 1.0))
+        assertFalse(
+            "third call must reject — rejection path must NOT seed full capacity",
+            rl.tryAcquire(7000, cost = 1.0),
+        )
     }
 }

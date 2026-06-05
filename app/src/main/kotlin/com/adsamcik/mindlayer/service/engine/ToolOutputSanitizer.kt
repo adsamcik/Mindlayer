@@ -1,7 +1,7 @@
 package com.adsamcik.mindlayer.service.engine
 
 import com.adsamcik.mindlayer.service.security.IpcInputValidator
-import kotlin.random.Random
+import java.security.SecureRandom
 
 /**
  * F-035: Scrubs Gemma turn-tokens and wraps tool output in an unforgeable
@@ -12,10 +12,11 @@ import kotlin.random.Random
  * template flattens [com.google.ai.edge.litertlm.Content.ToolResponse]
  * into prompt text where these markers flip role.
  *
- * Each call to [wrap] produces a fresh per-request 8-byte hex nonce that
- * is included in BOTH the opening and closing tags. Because the model has
- * never seen this nonce before (it is sampled at scrub time), it cannot
- * predictively forge the closing tag inside the payload.
+ * Each call to [wrap] produces a fresh per-request 16-hex-char nonce
+ * (8 bytes of [java.security.SecureRandom]) that is included in BOTH the
+ * opening and closing tags. Because the model has never seen this nonce
+ * before (it is sampled at scrub time), it cannot predictively forge the
+ * closing tag inside the payload.
  *
  * Threading: pure / stateless. Safe to call from any coroutine.
  */
@@ -73,8 +74,8 @@ object ToolOutputSanitizer {
      * - The literal string `</tool_output` (envelope-close prefix) inside
      *   the payload is escaped to `<\/tool_output` so the payload cannot
      *   prematurely terminate its own envelope.
-     * - The 8-byte hex nonce is sampled per-call from
-     *   [Random.Default.nextBytes] — unguessable by the model in-context.
+     * - The 16-hex-char nonce is sampled per-call from a
+     *   [java.security.SecureRandom] — unguessable by the model in-context.
      * - The result is capped to [IpcInputValidator.MAX_TOOL_RESULT_LEN]
      *   (post-scrub, post-escape).
      *
@@ -121,11 +122,17 @@ object ToolOutputSanitizer {
             }
         }
 
-        // 3. Escape the envelope-close prefix so the payload cannot
-        //    terminate the wrapper. Match `</tool_output` (without the
-        //    nonce-bearing close because the nonce only exists in `wrap`).
+        // 3. Escape BOTH envelope delimiters so a hostile tool result can
+        //    neither prematurely terminate the wrapper nor forge a nested
+        //    opening tag (security-review S-12). Escape the closing form
+        //    first, then the opening literal; the two substrings are
+        //    distinct so order is not strictly required, but closing-first
+        //    keeps the intent obvious.
         if (s.contains("</tool_output")) {
             s = s.replace("</tool_output", "<\\/tool_output")
+        }
+        if (s.contains("<tool_output")) {
+            s = s.replace("<tool_output", "<\\tool_output")
         }
 
         // 4. Cap to MAX_TOOL_RESULT_LEN. Truncation can only happen if
@@ -144,15 +151,15 @@ object ToolOutputSanitizer {
             .take(IpcInputValidator.MAX_TOOL_NAME_LEN)
 
     /**
-     * 8 hex characters from 4 bytes of `Random.Default`. Kotlin's default
-     * RNG is a non-cryptographic SplitMix variant on Android, but the
-     * nonce only needs to be unguessable to a model that has never seen
-     * the bytes before — not cryptographically strong. The 32-bit space
-     * (~4×10⁹) is far beyond what any in-context sampler can brute-force.
+     * 16 hex characters from 8 bytes of [SecureRandom] (security-review
+     * S-12). A cryptographically-strong, 64-bit nonce that the model has
+     * never seen in-context, so it cannot predictively forge either the
+     * opening or closing envelope tag inside a payload.
      */
     private fun newNonce(): String {
-        val bytes = Random.Default.nextBytes(4)
-        val sb = StringBuilder(8)
+        val bytes = ByteArray(8)
+        SECURE_RANDOM.nextBytes(bytes)
+        val sb = StringBuilder(16)
         for (b in bytes) {
             val v = b.toInt() and 0xFF
             sb.append(HEX[v ushr 4])
@@ -160,6 +167,8 @@ object ToolOutputSanitizer {
         }
         return sb.toString()
     }
+
+    private val SECURE_RANDOM = SecureRandom()
 
     private val HEX = "0123456789abcdef".toCharArray()
 }

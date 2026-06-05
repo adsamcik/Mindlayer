@@ -106,40 +106,45 @@ fun Throwable.safeLabel(): String =
  * tensor-shape mismatches, native compile failures). Everything outside
  * the allowlist falls through to plain [safeLabel].
  *
- * Use this at SDK / AIDL boundaries where a generic
- * `"OCR recognise failed: LiteRtException"` message tells the caller
- * **nothing** about whether it's a model-load problem, an op-set
- * problem, an OOM, or a transient device error. With the allowlist
- * extension the caller sees
- * `"OCR recognise failed: LiteRtException(Failed to invoke the
- * compiled model)"` and can immediately route to the right
- * remediation page.
+ * Use this only for the narrow set of file-system / kernel exception
+ * classes whose messages identify device state (a model-file path, a
+ * lock conflict, an `errno`) and provably **cannot** carry
+ * caller-supplied strings, prompts, tool arguments, or model output.
  *
- * The allowlist is intentionally tight: native LiteRT / LiteRT-LM
- * runtime exceptions, `IllegalArgumentException` / `IllegalStateException`
- * from our own boundary validators (their messages are field names +
- * numeric bounds), and the standard JDK
- * `java.nio.channels.OverlappingFileLockException` / `IOException`
- * subset whose messages identify file-system / kernel state, never
- * user content.
+ * ## Security: why LiteRT/LiteRT-LM and generic IAE/ISE are NOT here
+ *
+ * The allowlist keys on exception *type*, not throw *site*. Native
+ * LiteRT / LiteRT-LM exceptions (`com.google.ai.edge.litert*`) and
+ * generic `IllegalArgumentException` / `IllegalStateException` can be
+ * raised from tokenizer / template / vocab code with prompt fragments
+ * or model output inlined in the message — see
+ * `.github/instructions/engine.instructions.md` ("LiteRT-LM error
+ * messages and stack traces can embed prompt text"). Appending their
+ * messages to logcat, the persisted `LogRepository` row, or the wire
+ * error would leak that content, violating the metadata-only logging
+ * invariant. They therefore fall through to class-name-only
+ * [safeLabel].
+ *
+ * Boundary-validator detail is surfaced separately and intentionally:
+ * `ServiceBinder` translates an `IpcInputValidator` `IllegalArgumentException`
+ * into a typed `INVALID_REQUEST` error using the validator's own
+ * (content-free, field-name + numeric-bound) message — that path does
+ * not depend on this helper.
  *
  * Add a class here ONLY after auditing every throw site in the source
  * to confirm the message cannot contain caller-supplied strings,
- * prompts, or model output.
+ * prompts, or model output — and add a paired test in `SafeLabelTest`.
  */
 fun Throwable.safeLabelWithDetail(maxMessageChars: Int = 160): String {
     val base = safeLabel()
     val msg = message
     if (msg.isNullOrBlank()) return base
     val fqcn = this::class.java.name
-    // Note: `com.google.ai.edge.litert` matches BOTH the base LiteRT
-    // runtime (`com.google.ai.edge.litert.LiteRtException`) AND the
-    // LiteRT-LM wrapper (`com.google.ai.edge.litertlm.LiteRtLmJniException`)
-    // because the latter package literally starts with the former.
-    val allow = fqcn.startsWith("com.google.ai.edge.litert") ||
-        fqcn == "java.lang.IllegalArgumentException" ||
-        fqcn == "java.lang.IllegalStateException" ||
-        fqcn == "java.nio.channels.OverlappingFileLockException" ||
+    // Strictly file-system / kernel classes only. Do NOT add
+    // `com.google.ai.edge.litert*`, `IllegalArgumentException`, or
+    // `IllegalStateException` — their messages can embed prompt /
+    // model content depending on the throw site (see KDoc).
+    val allow = fqcn == "java.nio.channels.OverlappingFileLockException" ||
         fqcn == "java.io.FileNotFoundException" ||
         fqcn == "android.system.ErrnoException"
     if (!allow) return base

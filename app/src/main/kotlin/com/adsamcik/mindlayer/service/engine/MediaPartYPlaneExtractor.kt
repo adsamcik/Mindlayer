@@ -3,11 +3,15 @@ package com.adsamcik.mindlayer.service.engine
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.ParcelFileDescriptor
+import androidx.annotation.VisibleForTesting
 import com.adsamcik.mindlayer.MediaPart
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
+import java.io.InputStream
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 
 /**
  * Service-side Y-plane extractor for the v0.8 multi-frame OCR API.
@@ -195,17 +199,75 @@ object MediaPartYPlaneExtractor {
     }
 
     private fun readExactlyAndClose(source: ParcelFileDescriptor, size: Int): ByteArray {
+        val input = ParcelFileDescriptor.AutoCloseInputStream(source)
+        return readExactlyWithWatchdog(input, size) {
+            // Force-closing the PFD makes a read() that is blocked on a
+            // never-fed pipe/socket throw, unwinding the call.
+            try { source.close() } catch (_: Throwable) {}
+        }
+    }
+
+    /**
+     * SECURITY (DoS, V-B): read exactly [size] bytes from [input], but
+     * bound the total time with a watchdog so a caller that hands us a
+     * pipe/socket FD, declares a large `payloadBytes`, and never writes
+     * the bytes cannot block the binder thread forever inside `read()`.
+     *
+     * `readExactlyAndClose` previously looped on a blocking `read()` with
+     * no timeout and no FD-type guard; this watchdog force-closes the
+     * underlying FD (via [forceClose]) after [rawYReadTimeoutMs], which
+     * makes the blocked read throw and the call unwind. Legitimate
+     * frames populate the FD in well under the timeout.
+     *
+     * Exposed for unit testing with an in-memory blocking stream.
+     */
+    @VisibleForTesting
+    internal fun readExactlyWithWatchdog(
+        input: InputStream,
+        size: Int,
+        forceClose: () -> Unit,
+    ): ByteArray {
         val out = ByteArray(size)
-        ParcelFileDescriptor.AutoCloseInputStream(source).use { input ->
-            var offset = 0
-            while (offset < size) {
-                val read = input.read(out, offset, size - offset)
-                if (read == -1) throw wireError("Raw Y-plane PFD ended early")
-                offset += read
+        val watchdog = readWatchdog.schedule({
+            forceClose()
+            try { input.close() } catch (_: Throwable) {}
+        }, rawYReadTimeoutMs, TimeUnit.MILLISECONDS)
+        try {
+            input.use { ins ->
+                var offset = 0
+                while (offset < size) {
+                    val read = ins.read(out, offset, size - offset)
+                    if (read == -1) {
+                        throw wireError("Raw Y-plane PFD ended early or timed out")
+                    }
+                    offset += read
+                }
             }
+        } finally {
+            watchdog.cancel(false)
         }
         return out
     }
+
+    /** Daemon scheduler backing the raw-Y read watchdog. */
+    private val readWatchdog: ScheduledExecutorService =
+        java.util.concurrent.ScheduledThreadPoolExecutor(1) { r ->
+            Thread(r, "mindlayer-rawY-read-watchdog").apply { isDaemon = true }
+        }.apply {
+            // Evict cancelled watchdog tasks promptly rather than letting
+            // them linger in the delay queue until their deadline.
+            removeOnCancelPolicy = true
+        }
+
+    /**
+     * Wall-clock budget for reading a single raw Y-plane frame off its
+     * PFD. Far above any legitimate near-instant SHM/file copy, well
+     * below "binder thread is wedged". [VisibleForTesting] so tests can
+     * shrink it.
+     */
+    @VisibleForTesting
+    @JvmField
+    var rawYReadTimeoutMs: Long = 5_000L
 
     /**
      * Convert an ARGB / RGBA decoded [Bitmap] to an 8-bit greyscale

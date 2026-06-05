@@ -120,20 +120,39 @@ class EmbeddingModelRegistryTest {
     }
 
     @Test
-    fun `discoverModels requires valid integrity metadata when requested`() {
+    fun `discoverModels rejects sidecar-only integrity under requireIntegrity (S-5)`() {
+        // Security-review S-5: a sidecar `.sha256` file next to the model is
+        // attacker-controllable (writable model dir / post-discovery swap).
+        // Under requireIntegrity=true (release builds) the expected digest
+        // must come ONLY from the packaged, build-pinned manifest — a
+        // self-declared sidecar must NOT be trusted as the source of truth.
         val bytes = "trusted".toByteArray()
-        val model = File(context.filesDir, "embedding-trusted.tflite").apply { writeBytes(bytes) }
-        val tokenizerBytes = "tok".toByteArray()
-        File(context.filesDir, "sentencepiece.model").writeBytes(tokenizerBytes)
+        File(context.filesDir, "embedding-trusted.tflite").writeBytes(bytes)
+        File(context.filesDir, "sentencepiece.model").writeBytes("tok".toByteArray())
         File(context.filesDir, "embedding-trusted.tflite.sha256").writeText(sha256(bytes))
-        File(context.filesDir, "sentencepiece.model.sha256").writeText(sha256(tokenizerBytes))
-        File(context.filesDir, "embedding-untrusted.tflite").writeText("no hash")
+        File(context.filesDir, "sentencepiece.model.sha256").writeText(sha256("tok".toByteArray()))
 
         val models = EmbeddingModelRegistry.discoverModels(context, requireIntegrity = true)
 
+        assertTrue(
+            "sidecar-only integrity must be rejected when requireIntegrity=true",
+            models.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `discoverModels still accepts matching sidecar integrity in debug builds`() {
+        // Debug builds (requireIntegrity=false) keep the sidecar fallback as
+        // a convenience for local model iteration.
+        val bytes = "trusted".toByteArray()
+        File(context.filesDir, "embedding-trusted.tflite").writeBytes(bytes)
+        File(context.filesDir, "sentencepiece.model").writeBytes("tok".toByteArray())
+        File(context.filesDir, "embedding-trusted.tflite.sha256").writeText(sha256(bytes))
+        File(context.filesDir, "sentencepiece.model.sha256").writeText(sha256("tok".toByteArray()))
+
+        val models = EmbeddingModelRegistry.discoverModels(context, requireIntegrity = false)
+
         assertEquals(listOf("embedding-trusted"), models.map { it.id })
-        assertEquals(model.absolutePath, models.single().modelPath)
-        assertEquals(sha256(bytes), models.single().sha256)
     }
 
     @Test

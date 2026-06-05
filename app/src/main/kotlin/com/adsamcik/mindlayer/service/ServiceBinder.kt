@@ -363,14 +363,23 @@ class ServiceBinder(
      * **Self-UID bypass**: when the caller is in the same UID as this process
      * (the built-in dashboard speaking to its own `:ml` service over AIDL),
      * we skip the allowlist + rate-limit checks. Without this the dashboard
-     * would self-deny (never user-approved) and self-rate-limit (polling
-     * 3 RPCs every 2s = 90 RPM > default 60 RPM).
+     * would self-deny (never user-approved) and self-rate-limit (it polls
+     * several cheap RPCs every 2s).
      *
-     * **Order matters** (H2): rate-limit BEFORE allowlist so an un-approved
-     * caller cannot drive unbounded `recordPending` disk I/O simply by
-     * spamming the binder. The rejection-bookkeeping path is further
-     * throttled by [RateLimiter.tryAcquireRejection] — only ~6 rejections
-     * per minute per UID actually call `recordPending`.
+     * **Order** (security-review V-E/V-G): identity → allowlist
+     * (`isDenied`/`isAllowed`) → main rate-limit. Rate-limiting runs *after*
+     * the allowlist so a rate-limit rejection's timing cannot be used to
+     * probe allowlist membership. The disk/HMAC cost of the allowlist reads
+     * is bounded independently per UID: the no-identity flood path uses
+     * [RateLimiter.tryAcquireRejected], the un-approved (`recordPending`)
+     * path uses [RateLimiter.tryAcquireRejection], and the revoked/`isDenied`
+     * path is throttled by [RateLimiter.tryAcquireRejected] as well — so a
+     * hostile peer cannot drive unbounded allowlist I/O without first
+     * exhausting a small per-UID rejection budget.
+     *
+     * Approved first-party callers are bounded by the main per-UID bucket
+     * (`DEFAULT_RPM` = 300 RPM, cost-weighted; concurrent-inference + global
+     * caps in [RateLimiter]).
      */
     private fun authorizeCall(): CallerIdentity = authorizeCall(cost = 1.0)
 
@@ -428,6 +437,15 @@ class ServiceBinder(
         // 1. Allowlist check. A previously-denied caller is rejected silently.
         val store = allowlistStore
         if (store.isDenied(identity.packageName, identity.signingCertSha256)) {
+            // Security-review V-G: throttle revoked-caller floods so a
+            // denied app cannot force unbounded `isDenied` disk reads +
+            // HMAC verifies by re-binding in a loop. Same per-UID flood
+            // budget used for the no-identity path; the typed error is
+            // unchanged for callers that still have budget.
+            if (!rateLimiter.tryAcquireRejected(uid)) {
+                logRepository?.logRateLimitReject(callerAidlMethodName(), uid, cost)
+                throw typedBinderException(MindlayerErrorCode.RATE_LIMITED, "Rate limit exceeded")
+            }
             throw typedBinderException(
                 MindlayerErrorCode.ALLOWLIST_REVOKED,
                 "App not authorized — approval revoked",
@@ -1332,10 +1350,12 @@ class ServiceBinder(
         meta: RequestMeta,
         media: List<com.adsamcik.mindlayer.MediaPart>?,
     ): DeferredHandle {
+        val parts = media ?: emptyList()
+        var handedOff = false
+        try {
         val identity = authorizeCall()
         val uid = Binder.getCallingUid()
         val ownerToken = requireRegisteredClient()
-        val parts = media ?: emptyList()
         try {
             IpcInputValidator.validateRequestMeta(meta)
             IpcInputValidator.validateMediaParts(
@@ -1406,7 +1426,6 @@ class ServiceBinder(
         // submission-side OOM before `scope.launch` returns) we clean up
         // here. The matching SDK-side cleanup of caller-owned source PFDs
         // lives in `Mindlayer.chatDeferred()` (H-D2).
-        var handedOff = false
         // M-D2: map known synchronous preflight exceptions to their typed
         // wire codes. Mirrors the translation `inferMulti` applies at
         // ServiceBinder.kt:1157-1184 — without this, callers see a
@@ -1522,6 +1541,20 @@ class ServiceBinder(
         logRepository?.logDeferredSubmit(requestId, meta.sessionId, parts.size)
         mlHealthRecorder?.recordDeferredSubmit()
         return handle
+        } finally {
+            // R-11: close caller-owned media source FDs on ANY early
+            // rejection (auth, validation, ownership, rate-limit, quota,
+            // duplicate) that returns/throws before the orchestrator takes
+            // ownership. The inner finally only covers dispatch-phase
+            // failures; this outer one covers everything before it.
+            if (!handedOff) {
+                val callerSources = java.util.Collections.newSetFromMap(
+                    java.util.IdentityHashMap<ParcelFileDescriptor, Boolean>(),
+                )
+                parts.forEach { callerSources.add(it.source) }
+                callerSources.forEach { src -> try { src.close() } catch (_: Exception) {} }
+            }
+        }
     }
 
     override fun fetchDeferredResult(requestId: String): DeferredResult {
@@ -1985,6 +2018,31 @@ class ServiceBinder(
     private fun inferenceKey(uid: Int, requestId: String): String = "$uid:$requestId"
 
     /**
+     * S-4: run a synchronous heavy native call (embedding / OCR) under the
+     * same per-UID + global concurrent-inference cap that [infer] honours.
+     * Without this, `embed*` / `ocrImage` could burst expensive `runBlocking`
+     * work on binder threads and bypass the concurrency limits, exhausting
+     * the binder pool and competing with chat inference for native memory.
+     *
+     * Throws [SecurityException] (wire `CONCURRENT_LIMIT`) when the slot
+     * cannot be acquired; always releases the slot in `finally`.
+     */
+    private inline fun <T> withConcurrencySlot(uid: Int, methodLabel: String, block: () -> T): T {
+        if (!rateLimiter.beginInference(uid)) {
+            logRepository?.logRateLimitReject(methodLabel, uid, 1.0)
+            throw typedBinderException(
+                MindlayerErrorCode.CONCURRENT_LIMIT,
+                "Concurrent inference limit exceeded",
+            )
+        }
+        try {
+            return block()
+        } finally {
+            rateLimiter.endInference(uid)
+        }
+    }
+
+    /**
      * Hard cap on a single media payload accepted from a client. Matches
      * `SharedMemoryPool.MAX_MEDIA_BYTES` — kept here to validate before
      * the AIDL transaction returns.
@@ -2424,16 +2482,22 @@ class ServiceBinder(
     override fun embed(req: com.adsamcik.mindlayer.EmbeddingRequest): com.adsamcik.mindlayer.EmbeddingResult {
         authorizeCall(cost = 1.0)
         validateEmbeddingRequestOrThrow(req)
-        val requestId = "emb-${Binder.getCallingUid()}-${UUID.randomUUID()}"
-        return runBlocking { requireEmbeddingCoordinator().embed(Binder.getCallingUid(), req, requestId) }
+        val uid = Binder.getCallingUid()
+        val requestId = "emb-$uid-${UUID.randomUUID()}"
+        return withConcurrencySlot(uid, "embed") {
+            runBlocking { requireEmbeddingCoordinator().embed(uid, req, requestId) }
+        }
     }
 
     override fun embedBatch(reqs: List<com.adsamcik.mindlayer.EmbeddingRequest>?): com.adsamcik.mindlayer.EmbeddingBatchResult {
         authorizeCall(cost = ((reqs?.size ?: 0) * 0.5).coerceAtMost(RateLimiter.MAX_COST))
         val list = reqs ?: emptyList()
         validateEmbeddingRequestsOrThrow(list, requireEmbeddingCoordinator().maxBatchInline)
-        val requestId = "emb-${Binder.getCallingUid()}-${UUID.randomUUID()}"
-        return runBlocking { requireEmbeddingCoordinator().embedBatch(Binder.getCallingUid(), list, requestId) }
+        val uid = Binder.getCallingUid()
+        val requestId = "emb-$uid-${UUID.randomUUID()}"
+        return withConcurrencySlot(uid, "embedBatch") {
+            runBlocking { requireEmbeddingCoordinator().embedBatch(uid, list, requestId) }
+        }
     }
 
     override fun embedBatchShm(reqs: List<com.adsamcik.mindlayer.EmbeddingRequest>?): com.adsamcik.mindlayer.EmbeddingBatchTransfer {
@@ -2452,8 +2516,11 @@ class ServiceBinder(
         }
         val list = reqs ?: emptyList()
         validateEmbeddingRequestsOrThrow(list, requireEmbeddingCoordinator().maxBatchShm)
-        val requestId = "emb-${Binder.getCallingUid()}-${UUID.randomUUID()}"
-        return runBlocking { requireEmbeddingCoordinator().embedBatchShm(Binder.getCallingUid(), list, requestId) }
+        val uid = Binder.getCallingUid()
+        val requestId = "emb-$uid-${UUID.randomUUID()}"
+        return withConcurrencySlot(uid, "embedBatchShm") {
+            runBlocking { requireEmbeddingCoordinator().embedBatchShm(uid, list, requestId) }
+        }
     }
 
     override fun embedBatchDeferred(reqs: List<com.adsamcik.mindlayer.EmbeddingRequest>?): DeferredHandle {
@@ -2848,6 +2915,19 @@ class ServiceBinder(
         )
 
         val ocrStartedNs = System.nanoTime()
+        // S-4: gate the heavy native OCR (+ optional LLM) work under the same
+        // concurrent-inference cap that chat honours, so a burst of ocrImage
+        // calls can't bypass the limit and exhaust binder threads / native
+        // memory. The Y-plane extraction above is already bounded by the
+        // SharedMemoryPool; this slot covers the model-execution portion.
+        if (!rateLimiter.beginInference(uid)) {
+            logRepository?.logRateLimitReject("ocrImage", uid, 1.0)
+            throw typedBinderException(
+                MindlayerErrorCode.CONCURRENT_LIMIT,
+                "Concurrent inference limit exceeded",
+            )
+        }
+        try {
         val ocrOutput = try {
             runBlocking {
                 engine.recognise(
@@ -2947,6 +3027,10 @@ class ServiceBinder(
             llmDurationMs = llmDurationMs,
             totalDurationMs = totalDurationMs,
         )
+        } finally {
+            // S-4: release the concurrency slot acquired before recognise.
+            rateLimiter.endInference(uid)
+        }
     }
 
     /** Map the engine-side verbalized confidence to the wire-int scale. */

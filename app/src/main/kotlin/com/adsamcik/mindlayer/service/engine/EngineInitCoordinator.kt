@@ -119,6 +119,13 @@ internal class EngineInitCoordinator(
                 // (thermal switch or memory-pressure unload) just before
                 // killing itself.
                 //
+                // R-7: use beginPendingRestartAttempt() (bump + persist,
+                // keep) rather than consume (read + delete). The intent is
+                // cleared only AFTER a successful initialize() below, so if
+                // this init SIGSEGVs the bumped attempt count survives the
+                // process death and the crash-loop guard accumulates instead
+                // of resetting to 1 on every crash.
+                //
                 // Defensive against:
                 //  - store-IO failure (catch any throwable → fall back
                 //    to the caller's preferredBackend)
@@ -129,7 +136,7 @@ internal class EngineInitCoordinator(
                 //    attemptCount.coerceAtLeast(1), so 0 is impossible
                 //    for a real persisted intent).
                 val intent = @Suppress("TooGenericExceptionCaught") try {
-                    engineManager.consumePendingRestartIntent()?.takeIf { it.attemptCount > 0 }
+                    engineManager.beginPendingRestartAttempt()?.takeIf { it.attemptCount > 0 }
                 } catch (_: Throwable) {
                     null
                 }

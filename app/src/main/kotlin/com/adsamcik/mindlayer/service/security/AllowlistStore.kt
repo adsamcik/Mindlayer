@@ -120,6 +120,16 @@ class AllowlistStore(
     private val hmacKeyFile: File = File(baseDir, "allowlist.hmac")
 
     /**
+     * S-8: AndroidKeyStore wrapper for the HMAC key. The key file is no
+     * longer plaintext base64 on devices with a working Keystore — the
+     * random HMAC key is wrapped (AES-256-GCM) so a filesDir-write attacker
+     * cannot read it and forge a valid allowlist/denial signature. Aliased
+     * per store dir so independent stores (test fixtures) don't collide.
+     */
+    private val hmacKeyWrapper: KeystoreSecretWrapper =
+        KeystoreSecretWrapper(alias = "mindlayer.allowlist.hmac.${baseDir.name}")
+
+    /**
      * JVM-wide mutex that serialises threads in this process before they
      * race for the kernel-level [java.nio.channels.FileLock] on
      * [lockFile]. Java NIO `FileChannel.lock()` is a **process-wide**
@@ -807,16 +817,16 @@ class AllowlistStore(
                 if (i > 0) append(',')
                 val item = array.getJSONObject(i)
                 when (arrayKey) {
-                    ENTRIES_KEY -> appendCanonicalEntry(item, timestampKey = "grantedAtMs")
-                    PENDING_KEY -> appendCanonicalEntry(item, timestampKey = "firstRequestedAtMs")
-                    DENIED_KEY -> appendCanonicalDenied(item)
+                    ENTRIES_KEY -> appendCanonicalEntry(item, timestampKey = "grantedAtMs", version = version)
+                    PENDING_KEY -> appendCanonicalEntry(item, timestampKey = "firstRequestedAtMs", version = version)
+                    DENIED_KEY -> appendCanonicalDenied(item, version = version)
                     else -> throw IllegalArgumentException("Unknown allowlist array key: $arrayKey")
                 }
             }
             append(']')
         }
 
-    private fun StringBuilder.appendCanonicalEntry(item: JSONObject, timestampKey: String) {
+    private fun StringBuilder.appendCanonicalEntry(item: JSONObject, timestampKey: String, version: Int) {
         append('{')
         append("\"pkg\":").append(JSONObject.quote(item.getString("pkg")))
         append(",\"sig\":").append(JSONObject.quote(item.getString("sig")))
@@ -825,15 +835,31 @@ class AllowlistStore(
         if (displayName != null) {
             append(",\"displayName\":").append(JSONObject.quote(displayName))
         }
+        // S-9 (v3+): bind the persisted, trusted `prevSig` (cert-rotation
+        // metadata) into the HMAC pre-image so a filesDir-tamper attacker
+        // cannot rewrite it without breaking the signature. Version-gated so
+        // existing v2 files still verify under their original canonical form.
+        if (version >= SIGNED_FILE_VERSION_METADATA) {
+            val prevSig = item.optString("prevSig").ifEmpty { null }
+            if (prevSig != null) {
+                append(",\"prevSig\":").append(JSONObject.quote(prevSig))
+            }
+        }
         append('}')
     }
 
-    private fun StringBuilder.appendCanonicalDenied(item: JSONObject) {
+    private fun StringBuilder.appendCanonicalDenied(item: JSONObject, version: Int) {
         append('{')
         append("\"pkg\":").append(JSONObject.quote(item.getString("pkg")))
         append(",\"sig\":").append(JSONObject.quote(item.getString("sig")))
         append(",\"deniedAtMs\":").append(item.optLong("deniedAtMs", 0L))
         append(",\"expiresAtMs\":").append(item.optLong("expiresAtMs", 0L))
+        // S-9 (v3+): bind the `permanent` tombstone flag into the HMAC so a
+        // filesDir-tamper attacker cannot flip a sticky (permanent) revoke
+        // into an expirable one and re-allow a revoked app after the TTL.
+        if (version >= SIGNED_FILE_VERSION_METADATA && item.optBoolean("permanent", false)) {
+            append(",\"permanent\":true")
+        }
         append('}')
     }
 
@@ -876,8 +902,34 @@ class AllowlistStore(
                 quarantineCorruptHmacKey("read failed: ${t.javaClass.simpleName}")
                 return generateAndPersistHmacKey()
             }
+            // S-8: wrapped-key path (mlks1:...). Unwrap via the Keystore.
+            if (hmacKeyWrapper.isWrapped(encoded)) {
+                val unwrapped = hmacKeyWrapper.unwrap(encoded)
+                if (unwrapped != null && unwrapped.size >= HMAC_KEY_BYTES) return unwrapped
+                // Wrapped blob present but Keystore key gone/invalid (user
+                // cleared credentials, key migrated off device). Regenerate;
+                // affected callers must be re-approved — the same recovery
+                // semantics as a corrupt key.
+                quarantineCorruptHmacKey("keystore unwrap failed")
+                return generateAndPersistHmacKey()
+            }
+            // Legacy plaintext base64 path.
             val decoded = runCatching { Base64.getDecoder().decode(encoded) }.getOrNull()
-            if (decoded != null && decoded.size >= HMAC_KEY_BYTES) return decoded
+            if (decoded != null && decoded.size >= HMAC_KEY_BYTES) {
+                // S-8 migration: if the Keystore is now available, re-persist
+                // the existing key in wrapped form so it stops sitting in
+                // plaintext. Keep the SAME key bytes so existing signatures
+                // still verify. Best-effort — a write failure leaves the
+                // plaintext file in place and we retry next launch.
+                if (hmacKeyWrapper.isAvailable) {
+                    val wrapped = hmacKeyWrapper.wrap(decoded)
+                    if (wrapped != null) {
+                        runCatching { atomicWrite(hmacKeyFile, wrapped) }
+                            .onSuccess { MindlayerLog.i(TAG, "Migrated plaintext allowlist HMAC key to Keystore-wrapped form") }
+                    }
+                }
+                return decoded
+            }
             quarantineCorruptHmacKey("decode failed or wrong length (${decoded?.size ?: -1})")
         }
         return generateAndPersistHmacKey()
@@ -896,7 +948,15 @@ class AllowlistStore(
     private fun generateAndPersistHmacKey(): ByteArray {
         val key = ByteArray(HMAC_KEY_BYTES)
         SecureRandom().nextBytes(key)
-        atomicWrite(hmacKeyFile, Base64.getEncoder().encodeToString(key))
+        // S-8: persist Keystore-wrapped when possible; fall back to legacy
+        // plaintext base64 only when the Keystore is unavailable (a broken/
+        // rooted host where the filesDir-write threat is already moot).
+        val wrapped = hmacKeyWrapper.wrap(key)
+        if (wrapped != null) {
+            atomicWrite(hmacKeyFile, wrapped)
+        } else {
+            atomicWrite(hmacKeyFile, Base64.getEncoder().encodeToString(key))
+        }
         return key
     }
 
@@ -937,9 +997,16 @@ class AllowlistStore(
         private const val DEDUP_MAP_SOFT_CAP = 256
 
         // Bumped to 2 when canonicalPayload was changed to include version+arrayKey
-        // domain separator (audit M6). Verifier accepts MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION.
-        private const val SIGNED_FILE_VERSION = 2
+        // domain separator (audit M6). Bumped to 3 (security-review S-9) to bind
+        // the trusted `prevSig`/`permanent` fields into the HMAC pre-image.
+        // Verifier accepts MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION, so files
+        // written by an older build (v2) still verify under their original
+        // canonical form; new writes are signed as v3.
+        private const val SIGNED_FILE_VERSION = 3
         private const val MIN_SUPPORTED_VERSION = 2
+
+        /** First version whose canonical pre-image binds `prevSig`/`permanent`. */
+        private const val SIGNED_FILE_VERSION_METADATA = 3
         private const val ENTRIES_KEY = "entries"
         private const val PENDING_KEY = "pending"
         private const val DENIED_KEY = "denied"

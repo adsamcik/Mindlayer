@@ -54,6 +54,8 @@ class ServiceBinderEmbeddingTest {
         every { rateLimiter.tryAcquire(any(), any()) } returns true
         every { rateLimiter.tryAcquireRejected(any()) } returns true
         every { rateLimiter.tryAcquireRejection(any()) } returns true
+        // S-4: synchronous embed/ocr calls now acquire a concurrency slot.
+        every { rateLimiter.beginInference(any()) } returns true
         val allow = mockk<AllowlistStore>(relaxed = true)
         every { allow.isDenied(any(), any()) } returns false
         every { allow.isAllowed(any(), any()) } returns true
@@ -123,6 +125,26 @@ class ServiceBinderEmbeddingTest {
         io.mockk.coVerify(exactly = 0) { coordinator.cancelEmbeddingBatch(any(), any()) }
         io.mockk.coVerify(exactly = 0) { coordinator.acknowledgeEmbeddingBatchResult(any(), any()) }
         verify(exactly = 0) { coordinator.cancelEmbed(any(), any()) }
+    }
+
+    @Test fun `embed acquires and releases a concurrency slot (S-4)`() {
+        binder.embed(EmbeddingRequest(text = "x"))
+        verify { rateLimiter.beginInference(42) }
+        verify { rateLimiter.endInference(42) }
+    }
+
+    @Test fun `embed rejects with CONCURRENT_LIMIT when the slot is unavailable (S-4)`() {
+        every { rateLimiter.beginInference(42) } returns false
+        val ex = assertThrows(SecurityException::class.java) {
+            binder.embed(EmbeddingRequest(text = "x"))
+        }
+        assertTrue(
+            "should surface the typed concurrent-limit error",
+            (ex.message ?: "").contains("CONCURRENT_LIMIT") ||
+                (ex.message ?: "").contains("Concurrent inference limit"),
+        )
+        // The heavy coordinator call must NOT run when the slot is refused.
+        io.mockk.coVerify(exactly = 0) { coordinator.embed(any(), any(), any()) }
     }
 
     @Test fun `self uid bypasses external rate limit`() {

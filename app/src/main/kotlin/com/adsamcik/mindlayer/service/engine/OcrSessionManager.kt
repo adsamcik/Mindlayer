@@ -543,8 +543,15 @@ class OcrSessionManager(
         session.mutex.withLock {
             (writer as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter)
                 ?.runCatching { writeHeader(sessionId) }
+            // R-18: close the previously-attached writer (if any) so its pipe
+            // FD doesn't leak and a stale SDK reader gets a clean EOF instead
+            // of hanging when a session's event stream is re-attached.
+            val previous = session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter
             session.eventWriter = writer
             session.streamAttached = true
+            if (previous != null && previous !== writer) {
+                previous.runCatching { close() }
+            }
         }
         true
     }

@@ -742,6 +742,16 @@ class EngineManager(
         restartStore.consume()
 
     /**
+     * R-7: begin a post-restart init attempt — bumps + persists the attempt
+     * count and returns the intent without clearing it. Pair with
+     * [clearPendingRestartIntent] AFTER a successful init so a crashing
+     * init (LiteRT-LM #2028 SIGSEGV) leaves the bumped count behind and the
+     * crash-loop guard actually trips at the cap.
+     */
+    fun beginPendingRestartAttempt(): EngineRestartStore.RestartIntent? =
+        restartStore.beginAttempt()
+
+    /**
      * Clear any pending restart intent without consuming it. Called
      * after a successful post-restart [initialize] so a subsequent
      * unrelated init failure doesn't fall back to "attempt 2 of the
