@@ -26,4 +26,22 @@
         android:knownCerts="@array/knowncerts_format_test_empty"
         android:protectionLevel="signature|knownSigner" />
 
+    <!--
+        DEBUG-ONLY: adb/CI hook for the "auto-accept all callers" developer
+        toggle. Absent from release builds (this manifest is debug-only).
+        Guarded by android.permission.DUMP so only the shell (adb) and system
+        can trigger it; an ordinary app on the device cannot. See
+        DebugAutoAcceptReceiver for the adb command.
+    -->
+    <application>
+        <receiver
+            android:name="com.adsamcik.mindlayer.service.security.DebugAutoAcceptReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="com.adsamcik.mindlayer.debug.SET_AUTO_ACCEPT" />
+            </intent-filter>
+        </receiver>
+    </application>
+
 </manifest>

@@ -11,6 +11,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -34,10 +35,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.adsamcik.mindlayer.service.BuildConfig
 import com.adsamcik.mindlayer.service.R
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.security.AllowlistEntry
 import com.adsamcik.mindlayer.service.security.AllowlistStore
+import com.adsamcik.mindlayer.service.security.debugAutoAcceptAllEnabled
+import com.adsamcik.mindlayer.service.security.debugSetAutoAcceptAll
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
@@ -51,6 +55,46 @@ internal fun formatCertHash(sha: String): String {
     if (sha.isBlank()) return "(missing)"
     if (sha.length < 64) return sha
     return sha.chunked(8).joinToString(" ")
+}
+
+/**
+ * DEBUG-only dashboard switch for the "auto-accept all callers" developer
+ * toggle. Hidden in release builds (gated by [BuildConfig.DEBUG] at the call
+ * site; the release seam is a no-op regardless). Flipping it on lets any
+ * bind-authorized app skip the interactive consent prompt — explicitly denied
+ * apps stay blocked. The same flag can be flipped headlessly via
+ * `DebugAutoAcceptReceiver` (adb broadcast) for CI.
+ */
+@Composable
+private fun DebugAutoAcceptToggle() {
+    val ctx = LocalContext.current.applicationContext
+    var enabled by remember { mutableStateOf(debugAutoAcceptAllEnabled(ctx)) }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = stringResource(R.string.debug_auto_accept_title),
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            Text(
+                text = stringResource(R.string.debug_auto_accept_body),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(
+            checked = enabled,
+            onCheckedChange = { requested ->
+                // The sentinel write is a single tiny file op; reflect the
+                // *actual* on-disk result so a failed write never lies.
+                enabled = debugSetAutoAcceptAll(ctx, requested)
+            },
+        )
+    }
 }
 
 /**
@@ -97,6 +141,10 @@ fun AllowedAppsCard(
                 text = stringResource(R.string.allowed_apps_title),
                 style = MaterialTheme.typography.titleMedium,
             )
+
+            if (BuildConfig.DEBUG) {
+                DebugAutoAcceptToggle()
+            }
 
             if (entries.isEmpty()) {
                 Text(
