@@ -1065,7 +1065,10 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     /** Destroy all sessions. Called during service teardown. */
     fun shutdown() {
         initCoordinator.shutdown()
-        val ids = sessions.keys.toList()
+        // toMutableList(): concurrency-safe snapshot of the ConcurrentHashMap
+        // keySet — toList()'s size==1 fast path can NoSuchElementException when a
+        // session is removed (expiry / binder death) concurrently during teardown.
+        val ids = sessions.keys.toMutableList()
         for (id in ids) {
             destroySession(id)
         }

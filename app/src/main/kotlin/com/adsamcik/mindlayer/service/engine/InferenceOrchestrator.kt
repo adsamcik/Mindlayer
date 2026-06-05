@@ -430,7 +430,10 @@ class InferenceOrchestrator(
      * frame on the pipe.
      */
     fun cancelAll() {
-        activeJobs.keys.toList().forEach { scopedKey ->
+        // toMutableList(): concurrency-safe snapshot of the ConcurrentHashMap
+        // keySet (see EmbeddingCoordinator.cancelAll — toList()'s size==1 path
+        // races concurrent self-removal and throws NoSuchElementException).
+        activeJobs.keys.toMutableList().forEach { scopedKey ->
             try {
                 cancelInference(scopedKey)
             } catch (t: Throwable) {
@@ -446,7 +449,8 @@ class InferenceOrchestrator(
      * Conversation.cancelProcess(); Flow cancellation alone is insufficient.
      */
     fun cancelAllActiveStreams(reason: Int = MindlayerErrorCode.LOW_MEMORY) {
-        activeJobs.keys.toList().forEach { scopedKey ->
+        // toMutableList(): concurrency-safe snapshot (see cancelAll above).
+        activeJobs.keys.toMutableList().forEach { scopedKey ->
             val publicRequestId = scopedKey.substringAfter(':', scopedKey)
             val handle = sessionManager.findSessionByActiveRequest(scopedKey)
             // M-E2: merge with the existing reason so a higher-priority

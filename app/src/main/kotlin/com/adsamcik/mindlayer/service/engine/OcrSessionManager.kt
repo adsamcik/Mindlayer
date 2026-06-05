@@ -565,12 +565,15 @@ class OcrSessionManager(
 
     /** Cancel in-flight OCR recognition before pressure-driven native delegate unload. */
     suspend fun drainForMemoryPressure() {
-        sessions.entries.toList().forEach { cleanupSession(it.key, it.value, cancelJobs = true) }
+        // toMutableList(): concurrency-safe snapshot of the ConcurrentHashMap
+        // entries (see drainActiveJobs — toList()'s size==1 path races concurrent
+        // session removal and throws NoSuchElementException).
+        sessions.entries.toMutableList().forEach { cleanupSession(it.key, it.value, cancelJobs = true) }
         recognitionDispatcher?.drainForMemoryPressure()
     }
 
     fun cancelAllForMemoryPressure() {
-        sessions.entries.toList().forEach { (id, session) ->
+        sessions.entries.toMutableList().forEach { (id, session) ->
             if (sessions.remove(id, session)) {
                 session.phase = OcrSessionState.PHASE_CLOSED
                 session.activeJobs.forEach { it.cancel() }
