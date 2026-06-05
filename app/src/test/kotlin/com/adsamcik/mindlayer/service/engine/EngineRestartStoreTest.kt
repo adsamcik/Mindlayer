@@ -154,6 +154,51 @@ class EngineRestartStoreTest {
     }
 
     @Test
+    fun `beginAttempt bumps and persists the count without clearing, then trips the cap (R-7)`() {
+        // R-7: simulate the crash loop. record() seeds intent{count=1}.
+        // Each beginAttempt() models a boot that bumps the count BEFORE
+        // initialize() and would clear ONLY on success. If init keeps
+        // SIGSEGV-ing (no clear), the persisted count must accumulate and
+        // eventually trip the cap — unlike consume() which deleted the
+        // intent up front and reset the loop guard to 1 on every crash.
+        val store = newStore()
+        store.record(reason = "thermal_switch", targetBackend = "GPU", maxTokens = 4096)
+
+        val a1 = store.beginAttempt()
+        assertNotNull(a1)
+        assertEquals(2, a1!!.attemptCount)
+        // Not cleared: a re-read still sees the bumped intent (crash before clear).
+        assertEquals(2, store.peek()?.attemptCount)
+
+        val a2 = store.beginAttempt()
+        assertNotNull(a2)
+        assertEquals(3, a2!!.attemptCount)
+
+        // Cap reached: the next attempt gives up (default chain) and clears.
+        assertNull("crash-loop guard must trip at the cap", store.beginAttempt())
+        assertNull("file cleared after giving up", store.peek())
+    }
+
+    @Test
+    fun `beginAttempt clears on a successful attempt path (R-7)`() {
+        // The production success path: beginAttempt() bumps, then the
+        // coordinator calls clear() after a good init. Confirm clear()
+        // removes the intent so a later unrelated failure starts fresh.
+        val store = newStore()
+        store.record(reason = "thermal_switch", targetBackend = "GPU", maxTokens = 4096)
+        assertEquals(2, store.beginAttempt()!!.attemptCount)
+        store.clear()
+        assertNull(store.peek())
+        // A fresh record starts the count back at 1.
+        assertEquals(1, store.record(reason = "thermal_switch", targetBackend = "GPU", maxTokens = 4096)!!.attemptCount)
+    }
+
+    @Test
+    fun `beginAttempt returns null when no intent is recorded`() {
+        assertNull(newStore().beginAttempt())
+    }
+
+    @Test
     fun `malformed JSON yields null peek`() {
         val store = newStore()
         File(baseDir, EngineRestartStore.STATE_FILE_NAME).writeText("{not valid json")
