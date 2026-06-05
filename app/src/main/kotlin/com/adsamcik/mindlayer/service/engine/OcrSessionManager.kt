@@ -656,7 +656,14 @@ class OcrSessionManager(
 
     private suspend fun drainActiveJobs(session: OcrSession, cancel: Boolean) {
         while (true) {
-            val jobs = session.activeJobs.toList()
+            // toMutableList(), NOT toList(): activeJobs is a ConcurrentHashMap
+            // keySet that job-completion callbacks (invokeOnCompletion { remove })
+            // mutate concurrently. Kotlin's toList() has a size==1 fast path that
+            // reads size then calls iterator().next() non-atomically — if the lone
+            // job completes between the two, the set is empty and next() throws
+            // NoSuchElementException. toMutableList() copies via the concurrency-
+            // safe ConcurrentHashMap toArray() and never iterator().next()s.
+            val jobs = session.activeJobs.toMutableList()
             if (jobs.isEmpty()) return
             if (cancel) jobs.forEach { it.cancel() }
             jobs.joinAll()

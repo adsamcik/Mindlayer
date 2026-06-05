@@ -512,7 +512,12 @@ class OcrRecognitionDispatcher(
      */
     suspend fun finalize(sessionId: String, writer: OcrTokenStreamWriter?) {
         val state = perSession[sessionId] ?: return
-        state.activeJobs.toList().forEach { it.join() }
+        // toMutableList(), NOT toList(): see OcrSessionManager.drainActiveJobs —
+        // toList()'s size==1 fast path races with concurrent job-completion
+        // removal from this ConcurrentHashMap keySet and can throw
+        // NoSuchElementException. toMutableList() snapshots via a concurrency-safe
+        // toArray() copy.
+        state.activeJobs.toMutableList().forEach { it.join() }
         // Idempotency gate: only one finalize path emits the terminal
         // OCR_RESULT_FINALIZED + DONE pair per session, even when the
         // auto-finalize (fired from OcrSessionManager when maxFrames is
