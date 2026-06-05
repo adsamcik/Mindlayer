@@ -48,6 +48,21 @@ class LowMemoryException(
     "Insufficient memory: availMb=$availMb requiredMb=$requiredMb",
 )
 
+/**
+ * S-11: thrown when the on-disk model file's identity changes between the
+ * pre-load SHA-256 verification and the completion of native init — i.e. a
+ * verify-then-load TOCTOU swap was detected across the load window. Extends
+ * [SecurityException] so [EngineManager]'s `classifyInitFailure` maps it to
+ * [InitFailure.IntegrityMismatch], and the message keeps the existing
+ * "Model integrity check failed" substring the dashboard/tests key on.
+ *
+ * Distinct private type (not a bare `SecurityException`) so the per-backend
+ * fallback loop can re-throw it immediately instead of mistaking an unrelated
+ * native `SecurityException` for an integrity violation.
+ */
+private class ModelIntegrityViolation :
+    SecurityException("Model integrity check failed: file changed during load")
+
 sealed class EngineState {
     object Idle : EngineState()
     object Initializing : EngineState()
@@ -308,6 +323,16 @@ class EngineManager(
         // loads. When `BuildConfig.MODEL_SHA256` is empty (the dev/CI
         // default) we emit a loud warning instead of failing — once the
         // build pipeline pins the manifest, mismatches must hard-fail.
+        // S-11: bookend the verify+load window with a cheap file-identity
+        // check so a model-file swap BETWEEN the SHA-256 hash and the native
+        // loader's open() (a verify-then-load TOCTOU) is detected and fails
+        // closed. Capture identity BEFORE hashing so the hash itself falls
+        // inside the guarded interval. Only meaningful when a release manifest
+        // is pinned; the dev/CI empty-manifest path skips both the hash and
+        // this bookend.
+        val integrityEnforced = expectedModelSha256.isNotEmpty()
+        val preLoadModelIdentity: ModelFileIdentity? =
+            if (integrityEnforced) captureModelFileIdentity(File(path)) else null
         try {
             verifyModelIntegrity(File(path))
         } catch (e: SecurityException) {
@@ -443,6 +468,31 @@ class EngineManager(
                     }
                 }
 
+                // S-11: best-effort TOCTOU detection. If the on-disk model
+                // file's identity (size / mtime / inode) changed across the
+                // hash+load window, the bytes the native loader mmap'd may not
+                // be the bytes we verified — fail closed. This is a detection
+                // bookend, NOT a cryptographic guarantee that the exact loaded
+                // bytes were hashed: a privileged attacker could swap-and-
+                // restore within the window. A full fd-load fix is impossible
+                // while EngineConfig only accepts a path string. On Android
+                // the inode-bearing fileKey catches rename/replace swaps that
+                // preserve size and mtime.
+                if (preLoadModelIdentity != null &&
+                    !modelFileIdentityUnchanged(
+                        preLoadModelIdentity,
+                        captureModelFileIdentity(File(path)),
+                    )
+                ) {
+                    runCatching { eng.close() }
+                    MindlayerLog.e(
+                        TAG,
+                        "Model file identity changed during native load " +
+                            "(TOCTOU); refusing to use engine.",
+                    )
+                    throw ModelIntegrityViolation()
+                }
+
                 val elapsed = (System.nanoTime() - startNs) / 1_000_000_000f
                 val durationMs = ((System.nanoTime() - startNs) / 1_000_000)
                 MindlayerLog.i(TAG, "Engine initialized: model=${target.id}, backend=$name, time=${elapsed}s (tried ${backends.map { backendName(it) }})")
@@ -462,6 +512,14 @@ class EngineManager(
                 _state.value = EngineState.Ready
                 return eng
 
+            } catch (e: ModelIntegrityViolation) {
+                // S-11: a load-window model swap is a security failure, not a
+                // backend problem — do NOT fall through to the next backend.
+                // Record IntegrityMismatch here so it can't be masked by an
+                // earlier BackendUnavailable from a prior backend in the chain
+                // (the outer catch keeps the first-recorded failure).
+                recordInitFailure(InitFailure.IntegrityMismatch)
+                throw e
             } catch (t: Throwable) {
                 // F-006: never persist or surface raw native exception text.
                 // LiteRT-LM tokenizer/template exceptions can inline prompt
@@ -591,6 +649,51 @@ class EngineManager(
             diff = diff or (a[i].code xor b[i].code)
         }
         return diff == 0
+    }
+
+    /**
+     * S-11: lightweight identity of the on-disk model file used by the
+     * verify+load TOCTOU bookend. On Android/Linux [fileKey] is a non-null
+     * `UnixFileKey` encoding (st_dev, st_ino), so a rename/replace swap that
+     * preserves size and mtime is still detected via the inode change. On a
+     * Windows dev host [fileKey] may be null; the bookend then degrades to
+     * (size, mtime), which is adequate for the unit tests (they mutate size).
+     */
+    private data class ModelFileIdentity(
+        val sizeBytes: Long,
+        val lastModifiedMs: Long,
+        val fileKey: Any?,
+    )
+
+    private fun captureModelFileIdentity(file: File): ModelFileIdentity? = runCatching {
+        val attrs = java.nio.file.Files.readAttributes(
+            file.toPath(),
+            java.nio.file.attribute.BasicFileAttributes::class.java,
+        )
+        ModelFileIdentity(
+            sizeBytes = attrs.size(),
+            lastModifiedMs = attrs.lastModifiedTime().toMillis(),
+            fileKey = attrs.fileKey(),
+        )
+    }.getOrNull()
+
+    /**
+     * True only when [after] is non-null and matches [before] on size, mtime,
+     * and (when both are present) the inode-bearing [ModelFileIdentity.fileKey].
+     * A null [after] (file vanished mid-load) is treated as changed so the
+     * caller fails closed.
+     */
+    private fun modelFileIdentityUnchanged(
+        before: ModelFileIdentity,
+        after: ModelFileIdentity?,
+    ): Boolean {
+        if (after == null) return false
+        if (before.sizeBytes != after.sizeBytes) return false
+        if (before.lastModifiedMs != after.lastModifiedMs) return false
+        val a = before.fileKey
+        val b = after.fileKey
+        if (a != null && b != null && a != b) return false
+        return true
     }
 
     /** Returns the current [Engine] or throws if not yet initialized. */
