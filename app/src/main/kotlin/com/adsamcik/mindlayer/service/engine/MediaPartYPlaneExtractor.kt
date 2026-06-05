@@ -10,7 +10,6 @@ import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import java.io.InputStream
-import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
@@ -252,8 +251,12 @@ object MediaPartYPlaneExtractor {
 
     /** Daemon scheduler backing the raw-Y read watchdog. */
     private val readWatchdog: ScheduledExecutorService =
-        Executors.newSingleThreadScheduledExecutor { r ->
+        java.util.concurrent.ScheduledThreadPoolExecutor(1) { r ->
             Thread(r, "mindlayer-rawY-read-watchdog").apply { isDaemon = true }
+        }.apply {
+            // Evict cancelled watchdog tasks promptly rather than letting
+            // them linger in the delay queue until their deadline.
+            removeOnCancelPolicy = true
         }
 
     /**

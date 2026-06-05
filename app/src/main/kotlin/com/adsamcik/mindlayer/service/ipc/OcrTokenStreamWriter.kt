@@ -21,7 +21,6 @@ import java.io.IOException
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -448,8 +447,14 @@ class OcrTokenStreamWriter private constructor(
 
         /** Daemon scheduler backing the OCR write watchdog. */
         private val WRITE_WATCHDOG: ScheduledExecutorService =
-            Executors.newSingleThreadScheduledExecutor { r ->
+            java.util.concurrent.ScheduledThreadPoolExecutor(1) { r ->
                 Thread(r, "mindlayer-ocr-pipe-watchdog").apply { isDaemon = true }
+            }.apply {
+                // A watchdog is scheduled+cancelled on every writeFrame and
+                // OCR advisory events can fire tens/sec per session; evict
+                // cancelled tasks promptly so the delay queue can't grow a
+                // (bounded) backlog of dead tasks until their deadline.
+                removeOnCancelPolicy = true
             }
 
         /**
