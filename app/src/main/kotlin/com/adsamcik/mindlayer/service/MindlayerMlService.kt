@@ -568,10 +568,20 @@ class MindlayerMlService : Service() {
             }
             unloadPaddleOcrForMemoryPressure()
             unloadEmbeddingForMemoryPressure()
-            if (sessionManager.hasActiveStreaming()) {
-                orchestrator.awaitAllJobs(timeoutMs = 5_000)
-            }
+            // R-15: cancel in-flight streams FIRST, then await them, so the
+            // restart actually frees the native heap at the moment of
+            // greatest OOM danger. Pre-fix the stream-cancelling
+            // applyMemoryPressure ran AFTER awaitAllJobs and BEFORE the
+            // hasActiveStreaming() re-check, so the asynchronous cancellation
+            // had not unwound when the predicate was evaluated — it still saw
+            // live streams and SKIPPED the heap-freeing restart exactly when
+            // it was needed most.
             sessionManager.applyMemoryPressure(level)
+            // Now await the cancelled jobs so every client receives its
+            // terminal "cancelled" frame (written under NonCancellable) and
+            // native generation has actually stopped before we tear the
+            // process down.
+            orchestrator.awaitAllJobs(timeoutMs = EMERGENCY_DRAIN_TIMEOUT_MS)
             // Process-restart instead of in-process engine shutdown.
             // Same LiteRT-LM #2028 reason as the thermal-switch path:
             // shutdownIfIdle would null the Engine and the next
@@ -581,26 +591,18 @@ class MindlayerMlService : Service() {
             // process, freeing the entire native heap rather than just
             // the LiteRT engine allocations.
             //
-            // We still preserve the streaming-aware contract from
-            // shutdownIfIdle: if any session is mid-stream the predicate
-            // fails and we skip the restart. Predicate evaluated under
-            // EngineManager's mutex so a fresh start-of-inference cannot
-            // race the restart decision.
-            if (!sessionManager.hasActiveStreaming()) {
-                // Lazy-invalidate idle sessions; they re-warm on next
-                // access after the post-restart engine init.
-                sessionManager.invalidateIdleSessionsForBackendSwitch()
-                engineManager.shutdownAndRestart(
-                    reason = "memory_pressure_emergency",
-                    targetBackend = null,
-                )
-                // Unreachable; process is gone.
-            } else {
-                MindlayerLog.i(
-                    TAG,
-                    "Memory pressure EMERGENCY but active streaming — skipping engine restart",
-                )
-            }
+            // Under EMERGENCY (near-OOM) we restart unconditionally — even
+            // if a stream stubbornly refused to finish cancelling within the
+            // deadline above. We already issued cancelProcess via
+            // applyMemoryPressure, clients have their terminal frames, and
+            // the alternative is a harsher OS low-memory kill with no
+            // persisted restart intent and no clean re-init.
+            sessionManager.invalidateIdleSessionsForBackendSwitch()
+            engineManager.shutdownAndRestart(
+                reason = "memory_pressure_emergency",
+                targetBackend = null,
+            )
+            // Unreachable; process is gone.
             return
         }
 

@@ -345,6 +345,44 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `getSession does not destroy an expired session that is mid-stream (R-5)`() {
+        // R-5: destroying a streaming session from the expiry check would
+        // block in destroySessionInternal's runBlocking { mutex.withLock }
+        // (held by the active inference for up to the 30 s tool-await) while
+        // holding the @Synchronized monitor — stalling all session lifecycle
+        // ops. getSession must instead return the in-use handle and defer
+        // expiry until the stream finishes.
+        val convo = mockk<Conversation>(relaxed = true)
+        every { mockEngine.createConversation(any()) } returns convo
+
+        // 1 ms expiry so the session is already expired on the next access.
+        val id = sessionManager.createSession(SessionConfig(sessionId = "exp-stream", expirationMs = 1L))
+        val handle = sessionManager.getSession(id)!!
+        handle.conversation = convo
+        handle.isStreaming = true
+        Thread.sleep(5) // ensure now - createdAtMs > expirationMs
+
+        val returned = sessionManager.getSession(id)
+
+        assertNotNull("expired-but-streaming session must NOT be destroyed", returned)
+        assertEquals(id, returned!!.sessionId)
+        // Crucially: no destroy ⇒ no blocking close/cancel from the expiry path.
+        io.mockk.verify(exactly = 0) { convo.close() }
+    }
+
+    @Test
+    fun `getSession destroys an expired session that is NOT streaming (R-5 boundary)`() {
+        val convo = mockk<Conversation>(relaxed = true)
+        every { mockEngine.createConversation(any()) } returns convo
+
+        val id = sessionManager.createSession(SessionConfig(sessionId = "exp-idle", expirationMs = 1L))
+        sessionManager.getSession(id)!!.conversation = convo
+        Thread.sleep(5)
+
+        assertNull("expired idle session must be destroyed/evicted", sessionManager.getSession(id))
+    }
+
+    @Test
     fun `destroySession removes session`() {
         val id = createDefaultSession(sessionId = "to-destroy")
         assertEquals(1, sessionManager.sessionCount)
