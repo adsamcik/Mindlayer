@@ -24,13 +24,22 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.EOFException
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.IOException
 import java.nio.ByteBuffer
+import java.security.SecureRandom
 import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import javax.crypto.Cipher
+import javax.crypto.CipherInputStream
+import javax.crypto.CipherOutputStream
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 /**
  * Hard upper bound on a single media payload accepted from a client.
@@ -75,9 +84,12 @@ private const val MAX_IMAGE_DIM: Int = 8192
 /**
  * Staged media ready for LiteRT-LM consumption.
  *
- * The [filePath] points to a cache file that LiteRT-LM can open directly
- * via `Content.ImageFile(path)` or `Content.AudioFile(path)`.
- * Call [cleanup] (or [SharedMemoryPool.cleanup]) when inference completes.
+ * [filePath] points to the AES-256-GCM **encrypted-at-rest** cache file. The
+ * plaintext the native decoder needs is materialised on demand — consumers MUST
+ * call [SharedMemoryPool.materializePlaintext] to obtain a decoder-readable
+ * plaintext path rather than reading [filePath] directly.
+ * Call [cleanup] (or [SharedMemoryPool.cleanup]) when inference completes; it
+ * removes the ciphertext and any materialized plaintext temp.
  */
 data class StagedMedia(
     val scopedKey: String,
@@ -166,6 +178,19 @@ class SharedMemoryPool(cacheDir: File) {
         private const val COPY_BUFFER_SIZE = 8192
 
         /**
+         * P-MEDIA: at-rest encryption parameters for staged media. Encoded
+         * images and audio are encrypted on disk under [STAGING_DIR] with a
+         * process-ephemeral AES-256-GCM key (see [stagingKey]); the plaintext
+         * the native LiteRT-LM decoder needs is only materialised on demand via
+         * [materializePlaintext] and removed by [cleanup]. Nonce is random and
+         * unique per file, prepended to the ciphertext.
+         */
+        private const val ENCRYPTED_EXT = "enc"
+        private const val PLAINTEXT_PREFIX = "pt"
+        private const val GCM_NONCE_BYTES = 12
+        private const val GCM_TAG_BITS = 128
+
+        /**
          * F-010: maximum wall time the audio-staging copy may run before
          * the watchdog forcibly closes the source PFD. Audio uses
          * `knownSize = null` and reads-until-EOF; without this watchdog a
@@ -243,6 +268,29 @@ class SharedMemoryPool(cacheDir: File) {
 
     private val stagingDir = File(cacheDir, STAGING_DIR).also { it.mkdirs() }
     private val stagingDirCanonical: String = stagingDir.canonicalPath
+
+    /**
+     * P-MEDIA: process-ephemeral AES-256-GCM key for encrypting staged media at
+     * rest. Generated fresh from [SecureRandom] on construction, held in RAM
+     * only — NEVER persisted, NEVER wrapped in Keystore (it does not need to
+     * outlive the process), and NEVER sent over AIDL. When the `:ml` process
+     * dies the key dies with it, so any staging file left behind by an unclean
+     * shutdown is undecryptable ciphertext — and is purged on next startup
+     * anyway ([purgeStagingDir]).
+     */
+    private val stagingKey: SecretKey =
+        KeyGenerator.getInstance("AES").apply { init(256, SecureRandom()) }.generateKey()
+    private val secureRandom = SecureRandom()
+
+    init {
+        // P-MEDIA / B: purge any staging artifacts left by a previous (possibly
+        // crashed) process before serving any request. Pre-fix files are
+        // plaintext; post-fix files are ciphertext encrypted with a now-gone
+        // key. Both are useless and a privacy liability, so we always start
+        // from a clean staging directory.
+        purgeStagingDir()
+        restrictPathPermissions(stagingDir)
+    }
     private val stagedFiles = ConcurrentHashMap<String, MutableList<File>>()
     private val activePfds = ConcurrentHashMap<String, MutableSet<ParcelFileDescriptor>>()
 
@@ -362,15 +410,19 @@ class SharedMemoryPool(cacheDir: File) {
                 untrackActivePfd(scopedKey, transfer.source)
             }
 
-            trackFile(scopedKey, staged)
+            // P-MEDIA: encrypt the staged file at rest. The plaintext only
+            // existed transiently for the compress/probe pipeline above; the
+            // native decoder reads a JIT-materialized temp, not this file.
+            val encrypted = encryptStagedFile(staged)
+            trackFile(scopedKey, encrypted)
             MindlayerLog.d(
                 TAG,
-                "Staged image for request ${requestLabel(scopedKey)} -> ${staged.name} ($mime)",
+                "Staged image (encrypted at rest) for request ${requestLabel(scopedKey)} -> ${encrypted.name} ($mime)",
             )
 
             return StagedMedia(
                 scopedKey = scopedKey,
-                filePath = staged.absolutePath,
+                filePath = encrypted.absolutePath,
                 mimeType = mime,
                 cleanup = { cleanup(scopedKey) },
             )
@@ -453,15 +505,17 @@ class SharedMemoryPool(cacheDir: File) {
                 untrackActivePfd(scopedKey, transfer.source)
             }
 
-            trackFile(scopedKey, staged)
+            // P-MEDIA: encrypt the staged audio at rest (see stageImage).
+            val encrypted = encryptStagedFile(staged)
+            trackFile(scopedKey, encrypted)
             MindlayerLog.d(
                 TAG,
-                "Staged audio for request ${requestLabel(scopedKey)} -> ${staged.name} (${transfer.mimeType})",
+                "Staged audio (encrypted at rest) for request ${requestLabel(scopedKey)} -> ${encrypted.name} (${transfer.mimeType})",
             )
 
             return StagedMedia(
                 scopedKey = scopedKey,
-                filePath = staged.absolutePath,
+                filePath = encrypted.absolutePath,
                 mimeType = transfer.mimeType,
                 cleanup = { cleanup(scopedKey) },
             )
@@ -1271,6 +1325,109 @@ class SharedMemoryPool(cacheDir: File) {
             Collections.synchronizedList(mutableListOf())
         }
         files.add(file)
+    }
+
+    // ---- P-MEDIA: at-rest encryption ---------------------------------------
+
+    /** Delete every file under [stagingDir] (startup / shutdown purge). */
+    private fun purgeStagingDir() {
+        runCatching { stagingDir.listFiles()?.forEach { it.delete() } }
+    }
+
+    /**
+     * Best-effort owner-only (0600 file / 0700 dir) permissions. cacheDir is
+     * already app-private; this is defence-in-depth so staged media is never
+     * group/other-readable even if the cache root's mode is ever loosened.
+     */
+    private fun restrictPathPermissions(path: File) {
+        runCatching {
+            path.setReadable(false, false)
+            path.setReadable(true, true)
+            path.setWritable(false, false)
+            path.setWritable(true, true)
+            if (path.isDirectory) {
+                path.setExecutable(false, false)
+                path.setExecutable(true, true)
+            }
+        }
+    }
+
+    /**
+     * Encrypt a freshly-staged plaintext file at rest and delete the plaintext.
+     * Streaming AES-256-GCM with a random 96-bit nonce prepended to the
+     * ciphertext; the key is the process-ephemeral [stagingKey]. Returns the
+     * `.enc` file. The plaintext only ever existed transiently for the
+     * compress/probe pipeline that the native decoders cannot run on ciphertext.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun encryptStagedFile(plaintext: File): File {
+        val enc = File(plaintext.parentFile, plaintext.name + ".$ENCRYPTED_EXT")
+        val nonce = ByteArray(GCM_NONCE_BYTES).also { secureRandom.nextBytes(it) }
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
+            init(Cipher.ENCRYPT_MODE, stagingKey, GCMParameterSpec(GCM_TAG_BITS, nonce))
+        }
+        try {
+            FileInputStream(plaintext).use { input ->
+                FileOutputStream(enc).use { rawOut ->
+                    rawOut.write(nonce)
+                    CipherOutputStream(rawOut, cipher).use { cipherOut ->
+                        input.copyTo(cipherOut, COPY_BUFFER_SIZE)
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            runCatching { enc.delete() }
+            throw t
+        } finally {
+            // Plaintext is no longer needed on disk — the native decoder reads a
+            // freshly-materialized temp ([materializePlaintext]), not this file.
+            runCatching { plaintext.delete() }
+        }
+        restrictPathPermissions(enc)
+        return enc
+    }
+
+    /**
+     * Decrypt an at-rest [StagedMedia] (`.enc`) to a fresh plaintext temp the
+     * native LiteRT-LM decoder can read by path. The temp is tracked under the
+     * media's scopedKey so [cleanup] removes it at the end of the request,
+     * bounding the plaintext-on-disk window to a single inference. Throws if the
+     * ciphertext fails GCM authentication (tamper / corruption).
+     *
+     * Consumers (the inference orchestrator's `Content.ImageFile/AudioFile` and
+     * the OCR Y-plane extractor) MUST call this instead of reading
+     * [StagedMedia.filePath] directly — that path now points at ciphertext.
+     */
+    fun materializePlaintext(staged: StagedMedia): String {
+        val enc = File(staged.filePath)
+        // staged name is e.g. "img_<uuid>.png.enc" -> recover the "png" ext so
+        // the materialized temp keeps a decoder-friendly extension.
+        val withoutEnc = staged.filePath.removeSuffix(".$ENCRYPTED_EXT")
+        val ext = withoutEnc.substringAfterLast('.', missingDelimiterValue = "bin")
+        val temp = createStagingFile(PLAINTEXT_PREFIX, ext.ifEmpty { "bin" })
+        try {
+            FileInputStream(enc).use { rawIn ->
+                val nonce = ByteArray(GCM_NONCE_BYTES)
+                var read = 0
+                while (read < GCM_NONCE_BYTES) {
+                    val n = rawIn.read(nonce, read, GCM_NONCE_BYTES - read)
+                    if (n < 0) throw IOException("staged media truncated (nonce)")
+                    read += n
+                }
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
+                    init(Cipher.DECRYPT_MODE, stagingKey, GCMParameterSpec(GCM_TAG_BITS, nonce))
+                }
+                CipherInputStream(rawIn, cipher).use { cipherIn ->
+                    FileOutputStream(temp).use { out -> cipherIn.copyTo(out, COPY_BUFFER_SIZE) }
+                }
+            }
+        } catch (t: Throwable) {
+            runCatching { temp.delete() }
+            throw t
+        }
+        restrictPathPermissions(temp)
+        trackFile(staged.scopedKey, temp)
+        return temp.absolutePath
     }
 
     private fun pixelFormatToBitmapConfig(pixelFormat: Int): Bitmap.Config = when (pixelFormat) {

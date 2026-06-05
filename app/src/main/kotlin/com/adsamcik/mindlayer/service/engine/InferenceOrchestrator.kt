@@ -657,10 +657,14 @@ class InferenceOrchestrator(
                     parts.add(Content.Text(ToolOutputSanitizer.scrub(textContent)))
                 }
                 if (stagedImage != null) {
-                    parts.add(Content.ImageFile(stagedImage.filePath))
+                    // P-MEDIA: stagedImage.filePath is encrypted at rest; pass
+                    // the JIT-materialized plaintext path to the native decoder.
+                    // The plaintext temp is cleaned up with the rest of this
+                    // request's staging files in the finally block below.
+                    parts.add(Content.ImageFile(sharedMemoryPool.materializePlaintext(stagedImage)))
                 }
                 if (stagedAudio != null) {
-                    parts.add(Content.AudioFile(stagedAudio.filePath))
+                    parts.add(Content.AudioFile(sharedMemoryPool.materializePlaintext(stagedAudio)))
                 }
 
                 val contents = if (parts.isNotEmpty()) {
