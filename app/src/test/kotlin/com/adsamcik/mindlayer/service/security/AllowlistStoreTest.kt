@@ -383,6 +383,58 @@ class AllowlistStoreTest {
         assertTrue(row.getLong("expiresAtMs") < Long.MAX_VALUE)
     }
 
+    @Test
+    fun `denialFor returns a DENY_24H row for the same pkg and sig only`() {
+        store.deny("com.example", "sigA", com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H)
+        // Same pkg+sig is denied.
+        val hit = store.denialFor("com.example", "sigA")
+        assertTrue("DENY_24H must match same pkg+sig", hit != null)
+        assertFalse("DENY_24H is not permanent", hit!!.permanent)
+        assertEquals(DenialScope.CERT_PAIR, hit.scope)
+        // A different signer under the same package is NOT covered by a
+        // CERT_PAIR denial (cert rotation re-asks, which is intended for 24h).
+        assertTrue(store.denialFor("com.example", "sigB") == null)
+        // A different package is unaffected.
+        assertTrue(store.denialFor("com.other", "sigA") == null)
+    }
+
+    @Test
+    fun `denialFor matches any cert for a DENY_PERMANENT package-wide block`() {
+        store.deny("com.example", "sigA", com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_PERMANENT)
+        // Same package, ANY signer is blocked — cert rotation cannot bypass.
+        val hitA = store.denialFor("com.example", "sigA")
+        val hitB = store.denialFor("com.example", "totally-different-sig")
+        assertTrue("permanent block must match the original signer", hitA != null)
+        assertTrue("permanent block must match a rotated signer", hitB != null)
+        assertTrue("permanent block is permanent", hitA!!.permanent)
+        assertEquals(DenialScope.PACKAGE_WIDE, hitA.scope)
+        // A different package is unaffected.
+        assertTrue(store.denialFor("com.other", "sigA") == null)
+    }
+
+    @Test
+    fun `denialFor agrees with isDenied across scopes`() {
+        // denialFor must be the row-returning twin of the boolean isDenied:
+        // wherever isDenied is true, denialFor returns a row, and vice-versa.
+        store.deny("com.cert", "sigA", com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H)
+        store.deny("com.wide", "sigX", com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_PERMANENT)
+
+        val probes = listOf(
+            "com.cert" to "sigA",   // CERT_PAIR hit
+            "com.cert" to "sigB",   // CERT_PAIR miss (different sig)
+            "com.wide" to "sigX",   // PACKAGE_WIDE hit
+            "com.wide" to "sigROT", // PACKAGE_WIDE hit (rotated sig)
+            "com.none" to "sigA",   // no denial
+        )
+        for ((pkg, sig) in probes) {
+            assertEquals(
+                "denialFor/isDenied must agree for $pkg/$sig",
+                store.isDenied(pkg, sig),
+                store.denialFor(pkg, sig) != null,
+            )
+        }
+    }
+
     private fun String.sanitizedForPath(): String =
         replace(Regex("[^A-Za-z0-9_.-]"), "_")
 }

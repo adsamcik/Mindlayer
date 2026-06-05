@@ -237,11 +237,6 @@ class AllowlistStore(
      * between [com.adsamcik.mindlayer.IMindlayerService.requestConsentChallenge]
      * and the user's `completeConsent(GRANT)` in `ConsentActivity`).
      *
-     * @param trustTier v0.10: the tier to record on the new [AllowlistEntry].
-     *   See `docs/CONSENT_ARCHITECTURE.md § Trust tiers` for the assignment
-     *   rules used by `ConsentActivity`. Defaults to [TrustTier.FIRST_PARTY]
-     *   for back-compat with legacy code paths (e.g. [seedVerified]).
-     *
      * @throws CertificateMismatchException if the live signer disagrees with
      *   what the user saw on screen.
      * @throws SecurityException if the package is no longer installed or its
@@ -464,6 +459,30 @@ class AllowlistStore(
             entry.packageName == pkg &&
                 entry.scope == DenialScope.PACKAGE_WIDE &&
                 (entry.permanent || entry.expiresAtMs > now)
+        }
+    }
+
+    /**
+     * v0.10: the in-effect [DeniedEntry] for `(pkg, sigSha256)`, or `null` if
+     * the caller is not currently denied. Honours [DenialScope] exactly like
+     * [isDenied] but returns the row so callers can surface the unblock time
+     * (`expiresAtMs`) and permanence.
+     *
+     * `requestConsentChallenge` uses this to refuse minting a fresh consent
+     * `PendingIntent` for an app the user has already told "no" — without it,
+     * a denied app could re-trigger the prompt immediately and the user's
+     * 24h / permanent choice would only suppress inference calls (via
+     * `authorizeCall`'s [isDenied] gate), not the re-prompt itself.
+     */
+    fun denialFor(pkg: String, sigSha256: String): DeniedEntry? {
+        val now = System.currentTimeMillis()
+        return readDenied().firstOrNull { entry ->
+            entry.packageName == pkg && (entry.permanent || entry.expiresAtMs > now) &&
+                when (entry.scope) {
+                    DenialScope.PACKAGE_WIDE -> true
+                    DenialScope.CERT_PAIR ->
+                        entry.signingCertSha256?.equals(sigSha256, ignoreCase = true) == true
+                }
         }
     }
 

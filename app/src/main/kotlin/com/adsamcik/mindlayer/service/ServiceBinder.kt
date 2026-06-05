@@ -3076,6 +3076,25 @@ class ServiceBinder(
             )
         }
 
+        // User already said "no" (24h or permanent). Refuse to mint a fresh
+        // consent PendingIntent so the denial actually suppresses the
+        // re-prompt — not just downstream inference calls (which
+        // authorizeCall's isDenied gate already blocks). The until= token
+        // lets the SDK distinguish a temporary cooldown from a permanent
+        // block.
+        allowlistStore.denialFor(identity.packageName, identity.signingCertSha256)?.let { denied ->
+            logRepository?.logSecurityDecision(
+                action = "consent_request_blocked_denied",
+                packageName = identity.packageName,
+                sigShaPrefix = identity.signingCertSha256.take(8),
+            )
+            val until = if (denied.permanent) "permanent" else denied.expiresAtMs.toString()
+            throw typedBinderException(
+                MindlayerErrorCode.CONSENT_DENIED,
+                "until=$until reason=user_denied",
+            )
+        }
+
         // Dismiss-escalation + device-wide throttle gate.
         when (val gate = consentAttemptStore.checkGate(identity.packageName, identity.signingCertSha256)) {
             is com.adsamcik.mindlayer.service.security.ConsentGate.Allow -> Unit
@@ -3167,6 +3186,15 @@ class ServiceBinder(
             )
         }
         val record = consentChallengeStore.lookup(nonce) ?: return null
+        // Defence-in-depth against a concurrent-deny race: if a second
+        // in-flight challenge for the same app was already resolved with a
+        // Deny while this PendingIntent was queued, refuse to render the
+        // prompt. requestConsentChallenge is the primary chokepoint; this
+        // closes the narrow window where a stale nonce outlives the denial.
+        if (allowlistStore.denialFor(record.packageName, record.signingCertSha256) != null) {
+            consentChallengeStore.consume(nonce)
+            return null
+        }
         // A non-null lookup means ConsentActivity is about to render the
         // prompt (requestConsentChallenge already rejected approved/blocked
         // callers). Count it toward the device-wide throttle now so a
@@ -3212,6 +3240,24 @@ class ServiceBinder(
 
         when (kind) {
             com.adsamcik.mindlayer.ConsentDecision.KIND_GRANT -> {
+                // Race guard: a second challenge for this app may have been
+                // issued before any denial existed, then denied (24h /
+                // permanent) while THIS prompt was already on screen. The
+                // denial is the user's most recent authoritative "no", so a
+                // GRANT from a now-stale prompt must NOT override it (approve()
+                // would otherwise clear the denial row). Fail closed.
+                allowlistStore.denialFor(pkg, sig)?.let { denied ->
+                    logRepository?.logSecurityDecision(
+                        action = "consent_grant_blocked_denied",
+                        packageName = pkg,
+                        sigShaPrefix = sig.take(8),
+                    )
+                    val until = if (denied.permanent) "permanent" else denied.expiresAtMs.toString()
+                    throw typedBinderException(
+                        MindlayerErrorCode.CONSENT_DENIED,
+                        "until=$until reason=user_denied",
+                    )
+                }
                 // F-031: re-verify the LIVE signer under the file lock. If the
                 // package was updated / cert-rotated between requestConsent-
                 // Challenge and now, approve() throws and we fail closed.
