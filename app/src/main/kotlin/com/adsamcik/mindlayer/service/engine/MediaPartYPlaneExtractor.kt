@@ -130,8 +130,12 @@ object MediaPartYPlaneExtractor {
 
         val staged = sharedMemoryPool.stageImage(scopedKey, imageTransfer)
         try {
-            val bitmap = BitmapFactory.decodeFile(staged.filePath)
-                ?: throw wireError("Failed to decode staged image at ${staged.filePath}")
+            // P-MEDIA: staged.filePath is encrypted at rest; materialize the
+            // plaintext temp the bitmap decoder needs (cleaned up with the rest
+            // of this scopedKey's files below).
+            val plaintextPath = sharedMemoryPool.materializePlaintext(staged)
+            val bitmap = BitmapFactory.decodeFile(plaintextPath)
+                ?: throw wireError("Failed to decode staged image at $plaintextPath")
             try {
                 val pixels = bitmap.width.toLong() * bitmap.height.toLong()
                 if (pixels > MAX_Y_PIXELS) {

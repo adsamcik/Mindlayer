@@ -97,11 +97,16 @@ class SharedMemoryPoolTest {
 
         assertEquals("req-audio-1", result.scopedKey)
         assertEquals("audio/wav", result.mimeType)
-        assertTrue("Staged file should exist", File(result.filePath).exists())
-        assertTrue("File path should end with .wav", result.filePath.endsWith(".wav"))
+        assertTrue("Staged file (encrypted at rest) should exist", File(result.filePath).exists())
+        assertTrue("Staged file path should be encrypted (.enc)", result.filePath.endsWith(".wav.enc"))
 
-        val stagedContent = File(result.filePath).readBytes()
-        assertTrue("Staged file content should match source", audioBytes.contentEquals(stagedContent))
+        // P-MEDIA: at-rest bytes are ciphertext; the original is recovered via materialize.
+        assertFalse(
+            "At-rest staged bytes must be ciphertext, not the plaintext",
+            audioBytes.contentEquals(File(result.filePath).readBytes()),
+        )
+        val plaintext = File(pool.materializePlaintext(result)).readBytes()
+        assertTrue("Materialized plaintext should match source", audioBytes.contentEquals(plaintext))
     }
 
     @Test
@@ -202,11 +207,16 @@ class SharedMemoryPoolTest {
 
         assertEquals("req-img-1", result.scopedKey)
         assertEquals("image/png", result.mimeType)
-        assertTrue("File path should end with .png", result.filePath.endsWith(".png"))
-        assertTrue("Staged file should exist", File(result.filePath).exists())
+        assertTrue("Staged file path should be encrypted (.enc)", result.filePath.endsWith(".png.enc"))
+        assertTrue("Staged file (encrypted at rest) should exist", File(result.filePath).exists())
 
-        val stagedContent = File(result.filePath).readBytes()
-        assertTrue("Staged file content should match source", pngBytes.contentEquals(stagedContent))
+        // P-MEDIA: at-rest bytes are ciphertext; the original is recovered via materialize.
+        assertFalse(
+            "At-rest staged bytes must be ciphertext, not the plaintext",
+            pngBytes.contentEquals(File(result.filePath).readBytes()),
+        )
+        val plaintext = File(pool.materializePlaintext(result)).readBytes()
+        assertTrue("Materialized plaintext should match source", pngBytes.contentEquals(plaintext))
     }
 
     @Test(expected = IllegalArgumentException::class)
@@ -292,9 +302,10 @@ class SharedMemoryPoolTest {
             "Staged file should exist on disk after cache trim recovery",
             secondStaged.exists(),
         )
+        val recovered = File(pool.materializePlaintext(secondResult)).readBytes()
         assertTrue(
-            "Staged file content should match the source after recovery",
-            secondPng.contentEquals(secondStaged.readBytes()),
+            "Materialized plaintext should match the source after recovery",
+            secondPng.contentEquals(recovered),
         )
     }
 

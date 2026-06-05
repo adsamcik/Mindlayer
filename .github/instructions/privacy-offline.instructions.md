@@ -57,7 +57,7 @@ The existing log policy ("persist metadata only; never prompt text or model outp
 
 | Data | Allowed storage | Retention |
 |---|---|---|
-| Camera frames, audio buffers | RAM only (SharedMemoryPool) | Released on session end / binder-death / ack timeout |
+| Camera frames, audio buffers | Staged **encrypted at rest** (AES-256-GCM, process-ephemeral in-memory key) under `cacheDir/media_staging`; plaintext is only materialized on demand for the native LiteRT-LM decoder (which reads by path) and removed with the request; staging dir purged on process startup | Released on session end / binder-death / ack timeout; leftover ciphertext is undecryptable after process death (key died with the process) and purged on next startup |
 | Recognized OCR text + bounding boxes | RAM only | Released on session end; never `filesDir` / `cacheDir` / external |
 | Structured JSON output (OCR or chat) | Returned over the pipe | Not persisted by service; caller may store in their own SQLCipher-backed DB |
 | Per-frame quality scores | RAM only | Released on session end |

@@ -192,9 +192,12 @@ class SharedMemoryPoolAudioTimeoutTest {
             val staged = pool.stageAudioWithTimeout("test-ok", transfer, timeoutMs = 5_000L)
 
             val file = File(staged.filePath)
-            assertTrue("Staged file must exist", file.exists())
-            assertEquals(payload.size, file.length().toInt())
-            assertTrue(payload.contentEquals(file.readBytes()))
+            assertTrue("Staged file (encrypted at rest) must exist", file.exists())
+            // P-MEDIA: ciphertext is nonce(12) + payload + GCM tag(16); recover
+            // the plaintext via materialize to verify the round-trip.
+            val plaintext = File(pool.materializePlaintext(staged)).readBytes()
+            assertEquals(payload.size, plaintext.size)
+            assertTrue(payload.contentEquals(plaintext))
         } finally {
             sourceFile.delete()
         }
