@@ -3240,33 +3240,35 @@ class ServiceBinder(
 
         when (kind) {
             com.adsamcik.mindlayer.ConsentDecision.KIND_GRANT -> {
-                // Race guard: a second challenge for this app may have been
-                // issued before any denial existed, then denied (24h /
-                // permanent) while THIS prompt was already on screen. The
-                // denial is the user's most recent authoritative "no", so a
-                // GRANT from a now-stale prompt must NOT override it (approve()
-                // would otherwise clear the denial row). Fail closed.
-                allowlistStore.denialFor(pkg, sig)?.let { denied ->
-                    logRepository?.logSecurityDecision(
-                        action = "consent_grant_blocked_denied",
-                        packageName = pkg,
-                        sigShaPrefix = sig.take(8),
-                    )
-                    val until = if (denied.permanent) "permanent" else denied.expiresAtMs.toString()
-                    throw typedBinderException(
-                        MindlayerErrorCode.CONSENT_DENIED,
-                        "until=$until reason=user_denied",
-                    )
-                }
-                // F-031: re-verify the LIVE signer under the file lock. If the
-                // package was updated / cert-rotated between requestConsent-
-                // Challenge and now, approve() throws and we fail closed.
-                allowlistStore.approve(
+                // Atomic grant: the denial check and the F-031 live-signer
+                // re-verify + write happen under ONE AllowlistStore file lock
+                // (approveFromConsent), so a concurrent deny() cannot slip
+                // between a separate check and the approve. A second challenge
+                // for this app may have been issued before any denial existed,
+                // then denied (24h / permanent) while THIS prompt was on
+                // screen; the denial is the user's most recent authoritative
+                // "no", so a stale GRANT must NOT override it. If the package
+                // was updated / cert-rotated since requestConsentChallenge,
+                // approveFromConsent throws and we fail closed.
+                val blocking = allowlistStore.approveFromConsent(
                     context = context,
                     pkg = pkg,
                     expectedSigSha256 = sig,
                     displayName = record.displayName,
                 )
+                if (blocking != null) {
+                    logRepository?.logSecurityDecision(
+                        action = "consent_grant_blocked_denied",
+                        packageName = pkg,
+                        sigShaPrefix = sig.take(8),
+                    )
+                    val until =
+                        if (blocking.permanent) "permanent" else blocking.expiresAtMs.toString()
+                    throw typedBinderException(
+                        MindlayerErrorCode.CONSENT_DENIED,
+                        "until=$until reason=user_denied",
+                    )
+                }
                 consentAttemptStore.clear(pkg, sig)
                 logRepository?.logSecurityDecision(
                     action = if (record.previousSigSha256 == null) "consent_granted"

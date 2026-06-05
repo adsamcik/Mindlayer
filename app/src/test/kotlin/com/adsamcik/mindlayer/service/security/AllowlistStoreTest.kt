@@ -435,6 +435,32 @@ class AllowlistStoreTest {
         }
     }
 
+    @Test
+    fun `approveFromConsent refuses and preserves an in-effect denial`() {
+        // The atomic grant path must NOT clear a denial that is in effect:
+        // it returns the blocking row and writes no approval. (The success
+        // branch needs a real installed package for the live cert re-verify,
+        // so it is covered by the instrumented / ServiceBinder-level tests;
+        // here we pin the security-critical refusal branch, which returns
+        // before any package lookup.)
+        store.deny("com.example", "sigA", com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H)
+        val blocking = store.approveFromConsent(context, "com.example", "sigA")
+        assertTrue("a 24h-denied app must be refused", blocking != null)
+        assertEquals("com.example", blocking!!.packageName)
+        assertFalse("no approval may be written", store.isAllowed("com.example", "sigA"))
+        assertTrue("the denial must survive the refused grant", store.isDenied("com.example", "sigA"))
+    }
+
+    @Test
+    fun `approveFromConsent refusal honours a package-wide permanent block`() {
+        store.deny("com.example", "sigA", com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_PERMANENT)
+        // A rotated signer is still blocked by the PACKAGE_WIDE permanent row.
+        val blocking = store.approveFromConsent(context, "com.example", "rotated-sig")
+        assertTrue("permanent block must refuse any cert", blocking != null)
+        assertTrue(blocking!!.permanent)
+        assertFalse(store.isAllowed("com.example", "rotated-sig"))
+    }
+
     private fun String.sanitizedForPath(): String =
         replace(Regex("[^A-Za-z0-9_.-]"), "_")
 }

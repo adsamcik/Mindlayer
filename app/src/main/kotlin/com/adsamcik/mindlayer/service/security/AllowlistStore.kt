@@ -266,6 +266,52 @@ class AllowlistStore(
     }
 
     /**
+     * v0.10: atomic consent-grant. Combines the in-effect-denial check and the
+     * F-031 [approve] write into a SINGLE [withFileLock] critical section, so a
+     * concurrent `deny()` cannot slip between a separate denial-check and the
+     * approve (which clears denials). Closes the grant/deny race flagged by the
+     * security review: two challenges for the same app can be issued before any
+     * denial exists, the user denies one prompt and approves the other, and a
+     * stale GRANT would otherwise wipe the user's most recent "no".
+     *
+     * Returns the blocking [DeniedEntry] (leaving the denial intact, NO approval
+     * written) if an in-effect denial exists; `null` after a successful approve.
+     * Cert-mismatch / package-gone still throw exactly as [approve] does.
+     */
+    fun approveFromConsent(
+        context: Context,
+        pkg: String,
+        expectedSigSha256: String,
+        displayName: String? = null,
+    ): DeniedEntry? {
+        val now = System.currentTimeMillis()
+        return withFileLock {
+            val blocking = readDenied().firstOrNull { entry ->
+                entry.packageName == pkg && (entry.permanent || entry.expiresAtMs > now) &&
+                    when (entry.scope) {
+                        DenialScope.PACKAGE_WIDE -> true
+                        DenialScope.CERT_PAIR ->
+                            entry.signingCertSha256?.equals(expectedSigSha256, ignoreCase = true) == true
+                    }
+            }
+            if (blocking != null) return@withFileLock blocking
+            val live = CallerVerifier.identifyByPackage(context, pkg)
+                ?: throw SecurityException("Package $pkg no longer installed or signer unresolved")
+            if (!live.signingCertSha256.equals(expectedSigSha256, ignoreCase = true)) {
+                throw CertificateMismatchException(
+                    pkg = pkg,
+                    expectedSig = expectedSigSha256,
+                    liveSig = live.signingCertSha256,
+                )
+            }
+            val sanitized = CallerVerifier.sanitizeLabel(live.displayName ?: displayName)
+            writeApprovalLocked(pkg, live.signingCertSha256, sanitized)
+            writeDenied(readDenied().filterNot { it.packageName == pkg })
+            null
+        }
+    }
+
+    /**
      * F-031 / data-layer: direct write of an approval entry without sig
      * re-verify. **Production code must use the [approve] overload that
      * takes a [Context]** — this entry point is intended for tests and

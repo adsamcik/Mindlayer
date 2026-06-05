@@ -65,6 +65,7 @@ class ServiceBinderConsentFlowTest {
             every { isDenied(any(), any()) } returns false
             every { isAllowed(any(), any()) } returns false
             every { denialFor(any(), any()) } returns null
+            every { approveFromConsent(any(), any(), any(), any()) } returns null
             every { list() } returns emptyList()
         }
         rateLimiter = mockk(relaxed = true) {
@@ -236,7 +237,7 @@ class ServiceBinderConsentFlowTest {
             expiresAtMs = Long.MAX_VALUE,
         )
         binder.completeConsent("n1", ConsentDecision(kind = ConsentDecision.KIND_GRANT))
-        verify { allowlist.approve(any(), "com.client", "sigC", "Client") }
+        verify { allowlist.approveFromConsent(any(), "com.client", "sigC", "Client") }
         verify { attemptStore.clear("com.client", "sigC") }
     }
 
@@ -254,8 +255,9 @@ class ServiceBinderConsentFlowTest {
             expiresAtMs = Long.MAX_VALUE,
         )
         // A concurrent challenge for the same app was denied (24h) while this
-        // prompt was on screen.
-        every { allowlist.denialFor("com.client", "sigC") } returns DeniedEntry(
+        // prompt was on screen. approveFromConsent atomically refuses, leaving
+        // the denial intact, and returns the blocking row.
+        every { allowlist.approveFromConsent(any(), "com.client", "sigC", any()) } returns DeniedEntry(
             packageName = "com.client",
             signingCertSha256 = "sigC",
             deniedAtMs = 0L,
@@ -266,8 +268,8 @@ class ServiceBinderConsentFlowTest {
         assertThrows(SecurityException::class.java) {
             binder.completeConsent("nA", ConsentDecision(kind = ConsentDecision.KIND_GRANT))
         }
-        // The stale GRANT must NOT approve (which would clear the denial).
-        verify(exactly = 0) { allowlist.approve(any(), any(), any(), any()) }
+        // A blocked grant must not clear the dismiss-escalation tracking.
+        verify(exactly = 0) { attemptStore.clear("com.client", "sigC") }
     }
 
     @Test fun `completeConsent DENY_ONCE records a dismiss`() {
