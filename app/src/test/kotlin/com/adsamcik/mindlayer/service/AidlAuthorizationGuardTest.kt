@@ -65,7 +65,7 @@ class AidlAuthorizationGuardTest {
             .replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), "")
             .lines()
             .joinToString("\n") { it.substringBefore("//") }
-        return Regex("(?:^|\\n)\\s*(?:oneway\\s+)?[\\w<>,\\[\\] ]+?\\s+(\\w+)\\s*\\(")
+        return Regex("(?:^|\\n)\\s*(?:@\\w+\\s+)?(?:oneway\\s+)?[\\w<>,\\[\\] ]+?\\s+(\\w+)\\s*\\(")
             .findAll(noComments)
             .map { it.groupValues[1] }
             .filter { it.isNotBlank() }
@@ -93,11 +93,26 @@ class AidlAuthorizationGuardTest {
     }
 
     private companion object {
-        // ping() deliberately bypasses the allowlist gate (a co-signed peer in
-        // pending-approval may still confirm liveness) and uses a ping-specific
-        // throttle instead — see IMindlayerService.aidl docs +
-        // ServiceBinderAuthorizationTest. Adding a new exemption here MUST be a
-        // deliberate, reviewed decision.
-        private val EXEMPT = setOf("ping")
+        // Methods that deliberately bypass the standard authorizeCall() gate and
+        // enforce their own gating instead. Adding a new exemption here MUST be a
+        // deliberate, reviewed decision — each entry below is justified against
+        // its ServiceBinder override + IMindlayerService.aidl docs.
+        //
+        //  - ping(): a co-signed peer in pending-approval may still confirm
+        //    liveness; uses a ping-specific pre-consent throttle.
+        //  - requestConsentChallenge(): the entry point for UN-approved callers,
+        //    so by design it cannot run the default-deny allowlist gate. It is
+        //    instead rate-limited per-UID (rateLimiter.tryAcquireConsentChallenge)
+        //    with identity-verification + denial + cooldown checks.
+        //  - lookupChallenge() / completeConsent(): self-UID only
+        //    (Binder.getCallingUid() == Process.myUid()); ConsentActivity, which
+        //    runs in Mindlayer's own process, uses them to render the prompt and
+        //    submit the user's decision. See docs/CONSENT_ARCHITECTURE.md.
+        private val EXEMPT = setOf(
+            "ping",
+            "requestConsentChallenge",
+            "lookupChallenge",
+            "completeConsent",
+        )
     }
 }
