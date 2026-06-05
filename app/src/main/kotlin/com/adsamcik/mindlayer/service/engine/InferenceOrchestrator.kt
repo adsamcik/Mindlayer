@@ -1150,9 +1150,29 @@ class InferenceOrchestrator(
                     }
                 }
                 throw e
-            } catch (t: Throwable) {
+            } catch (e: EngineNotReadyException) {
+                // R-6: enterForeground rejected this inference because the
+                // service is quiescing for a backend-switch process restart.
+                // Surface a RETRYABLE code so the SDK backs off and retries
+                // after the restart instead of treating it as a terminal
+                // INTERNAL failure. Native generation never started (rejection
+                // happens at enterForeground before the first send), so no
+                // cancelProcess is needed.
                 toolCallBridge.cancel(scopedKey)
-                // R-20: stop native generation on this terminal path too.
+                trace.markError("engine_restarting")
+                MindlayerLog.i(
+                    TAG,
+                    "Inference rejected — service quiescing for backend-switch restart",
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                )
+                writer.closeWithError(
+                    0,
+                    "engine_restarting",
+                    MindlayerErrorCode.ENGINE_INITIALIZING,
+                )
+                return@withWarmConversation
+            } catch (t: Throwable) {
                 // The Cancellation/Timeout branches already call
                 // cancelProcess(); a generic throwable (e.g. a writer or
                 // tool-bridge failure raised while the engine is still

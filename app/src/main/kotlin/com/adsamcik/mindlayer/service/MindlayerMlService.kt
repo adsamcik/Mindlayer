@@ -25,6 +25,7 @@ import com.adsamcik.mindlayer.service.engine.MemoryPressure
 import com.adsamcik.mindlayer.service.engine.OcrSessionManager
 import com.adsamcik.mindlayer.service.engine.PaddleOcrEngine
 import com.adsamcik.mindlayer.service.engine.SessionManager
+import com.adsamcik.mindlayer.service.engine.ThermalBand
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
 import com.adsamcik.mindlayer.service.health.MlHealthRecorder
 import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
@@ -62,6 +63,20 @@ class MindlayerMlService : Service() {
         private const val LOG_CLEANUP_INTERVAL_MS = 24L * 60 * 60 * 1000
         private const val OCR_SESSION_SWEEP_INTERVAL_MS = 60_000L
         private const val EMERGENCY_DRAIN_TIMEOUT_MS = 2_000L
+
+        /**
+         * R-3: how long a thermal-driven GPU→CPU downshift may be deferred
+         * (because inference is in flight) before it is FORCED under a
+         * CRITICAL thermal band. Pre-fix the switch only applied when
+         * activeInferenceCount hit 0, so sustained overlapping inferences
+         * could starve it and keep the SoC decoding on an overheating GPU.
+         * 20 s balances "let a short inference finish" against "don't cook
+         * the device".
+         */
+        private const val THERMAL_FORCE_SWITCH_DEADLINE_MS = 20_000L
+
+        /** R-3: bounded wait for cancelled jobs to unwind before a forced restart. */
+        private const val FORCED_SWITCH_DRAIN_TIMEOUT_MS = 3_000L
 
         const val STATE_IDLE = "idle"
         const val STATE_LOADING = "loading"
@@ -149,6 +164,25 @@ class MindlayerMlService : Service() {
 
     @Volatile
     private var pendingBackend: String? = null
+
+    /**
+     * R-3: wall-clock (elapsedRealtime) at which the current [pendingBackend]
+     * switch first started being deferred because inference was in flight.
+     * `0L` = not currently deferring. Guarded by [stateLock]. Used to force
+     * an overdue thermal downshift under a CRITICAL band instead of starving
+     * it indefinitely under sustained load.
+     */
+    private var pendingBackendSince: Long = 0L
+
+    /**
+     * R-6: set under [stateLock] when [applyPendingBackendSwitch] has decided
+     * to restart the process for a backend switch. While true, [enterForeground]
+     * rejects new inferences so none can race the restart between the
+     * decision and the actual process kill. Never cleared on the happy path
+     * (the process dies); reset only if the restart launch fails.
+     */
+    @Volatile
+    private var quiescingForRestart = false
 
     var activeInferenceCount = 0
         private set
@@ -674,20 +708,75 @@ class MindlayerMlService : Service() {
                 val recommended = policy.recommendedBackend
 
                 if (recommended == current) {
-                    pendingBackend = null
+                    synchronized(stateLock) {
+                        pendingBackend = null
+                        pendingBackendSince = 0L
+                    }
                     return@collect
                 }
 
                 MindlayerLog.i(TAG, "Thermal recommends $recommended, currently on $current")
-                pendingBackend = recommended
-                logRepository.logBackendSwitch(current, recommended, "queued")
 
-                if (activeInferenceCount == 0) {
-                    applyPendingBackendSwitch()
+                val applyNow: Boolean
+                val forceOverdue: Boolean
+                synchronized(stateLock) {
+                    val firstDefer = pendingBackend != recommended || pendingBackendSince == 0L
+                    pendingBackend = recommended
+                    if (activeInferenceCount == 0) {
+                        applyNow = true
+                        forceOverdue = false
+                    } else {
+                        // R-3: track when this deferral began and force the
+                        // switch once it has been deferred past the deadline
+                        // under a CRITICAL band, instead of starving it under
+                        // sustained load.
+                        if (firstDefer) pendingBackendSince = android.os.SystemClock.elapsedRealtime()
+                        applyNow = false
+                        forceOverdue = shouldForceOverdueThermalSwitch(
+                            band = policy.band,
+                            pendingSince = pendingBackendSince,
+                            now = android.os.SystemClock.elapsedRealtime(),
+                        )
+                    }
                 }
-                // Otherwise, will be applied in exitForeground()
+                logRepository.logBackendSwitch(current, recommended, if (applyNow) "started" else "queued")
+
+                if (applyNow) {
+                    applyPendingBackendSwitch()
+                } else if (forceOverdue) {
+                    MindlayerLog.w(
+                        TAG,
+                        "Thermal switch to $recommended overdue (>${THERMAL_FORCE_SWITCH_DEADLINE_MS}ms) " +
+                            "under CRITICAL band — forcing, cancelling in-flight inference",
+                    )
+                    applyPendingBackendSwitch(force = true)
+                }
+                // Otherwise, applied in exitForeground() when inference finishes.
             }
         }
+    }
+
+    /**
+     * R-3: decide whether an overdue, deferred thermal downshift must be
+     * forced. Forced only when the device is in the CRITICAL band (genuinely
+     * too hot) AND the switch has been deferred past [deadlineMs]. Extracted
+     * as a pure function so the starvation-guard policy is unit-testable
+     * without the live thermal flow.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun shouldForceOverdueThermalSwitch(
+        band: ThermalBand,
+        pendingSince: Long,
+        now: Long,
+        deadlineMs: Long = THERMAL_FORCE_SWITCH_DEADLINE_MS,
+    ): Boolean = band == ThermalBand.CRITICAL &&
+        pendingSince != 0L &&
+        now - pendingSince >= deadlineMs
+
+    /** R-6 test seam: drive the quiescing flag without standing up the restart. */
+    @androidx.annotation.VisibleForTesting
+    internal fun setQuiescingForRestartForTest(value: Boolean) {
+        quiescingForRestart = value
     }
 
     /**
@@ -702,16 +791,19 @@ class MindlayerMlService : Service() {
      * observe an inconsistent state between the idleness check and the
      * destructive coroutine launch.
      */
-    private fun applyPendingBackendSwitch() {
+    private fun applyPendingBackendSwitch(force: Boolean = false) {
         val target: String
         synchronized(stateLock) {
             target = pendingBackend ?: return
             // Re-check idleness under the same lock that enterForeground uses.
-            // If an inference just started, exitForeground() will retry.
-            if (activeInferenceCount > 0) return
+            // If an inference just started, exitForeground() will retry — UNLESS
+            // we're forcing an overdue thermal downshift (R-3), in which case we
+            // proceed and cancel the in-flight inference below.
+            if (!force && activeInferenceCount > 0) return
             val current = engineManager.currentBackend
             if (target == current) {
                 pendingBackend = null
+                pendingBackendSince = 0L
                 return
             }
             if (target == "GPU" && !thermalMonitor.canReenableGpu()) {
@@ -719,17 +811,33 @@ class MindlayerMlService : Service() {
                 return
             }
             pendingBackend = null
+            pendingBackendSince = 0L
+            // R-6: quiesce — from here new inferences are rejected in
+            // enterForeground so none can race the restart between this lock
+            // release and the awaitAllJobs/shutdownAndRestart below. Both this
+            // and enterForeground take stateLock, so the check-then-set is
+            // atomic against a concurrent start.
+            quiescingForRestart = true
         }
 
         val fromBackend = engineManager.currentBackend
-        MindlayerLog.i(TAG, "Applying backend switch: ${engineManager.currentBackend} → $target")
+        MindlayerLog.i(TAG, "Applying backend switch: ${engineManager.currentBackend} → $target (force=$force)")
         logRepository.logBackendSwitch(fromBackend, target, "started")
 
         serviceScope.launch {
             try {
-                // Wait for any coroutine that slipped in before we took the
-                // lock to finish — avoids killing the process mid-inference.
-                orchestrator.awaitAllJobs()
+                if (force) {
+                    // R-3: pre-empt the in-flight inferences we're overriding so
+                    // the thermal downshift isn't starved. cancelAll() emits a
+                    // terminal frame + cancelProcess() per request, so clients
+                    // get a clean signal and can retry on the cooler backend.
+                    orchestrator.cancelAll()
+                    orchestrator.awaitAllJobs(timeoutMs = FORCED_SWITCH_DRAIN_TIMEOUT_MS)
+                } else {
+                    // Wait for any coroutine that slipped in before we took the
+                    // lock to finish — avoids killing the process mid-inference.
+                    orchestrator.awaitAllJobs()
+                }
                 // Lazy-invalidate idle sessions; they re-warm on next access
                 // after the post-restart engine init.
                 sessionManager.invalidateIdleSessionsForBackendSwitch()
@@ -747,10 +855,18 @@ class MindlayerMlService : Service() {
                 // the post-restart engine init logs its own completion via
                 // the existing initialize() instrumentation.
                 engineManager.shutdownAndRestart(
-                    reason = "thermal_switch",
+                    reason = if (force) "thermal_switch_forced" else "thermal_switch",
                     targetBackend = target,
                 )
+                // Reaching here means the process killer was a no-op (unit
+                // tests / a future alternative killer). Clear quiescing so the
+                // service doesn't permanently reject inference after a restart
+                // that didn't actually kill the process.
+                synchronized(stateLock) { quiescingForRestart = false }
             } catch (t: Throwable) {
+                // The restart didn't happen — clear quiescing so inference can
+                // resume rather than being permanently rejected.
+                synchronized(stateLock) { quiescingForRestart = false }
                 logRepository.logBackendSwitch(fromBackend, target, "failed")
                 MindlayerLog.e(TAG, "Backend switch failed: ${t.safeLabel()}")
             }
@@ -765,6 +881,18 @@ class MindlayerMlService : Service() {
      */
     fun enterForeground() {
         synchronized(stateLock) {
+            // R-6: refuse to start a new inference once a backend-switch
+            // restart has been decided. This and applyPendingBackendSwitch
+            // both hold stateLock, so the decision can't race a start: a call
+            // arriving here either ran BEFORE the decision (and was counted,
+            // so the switch deferred to it) or AFTER (and is rejected here).
+            // The thrown error is the retryable ENGINE_RESTARTING the SDK
+            // backs off on; the process restarts within seconds.
+            if (quiescingForRestart) {
+                throw com.adsamcik.mindlayer.service.engine.EngineNotReadyException(
+                    retryAfterMs = 2_000L,
+                )
+            }
             activeInferenceCount++
             if (activeInferenceCount == 1) {
                 val notification = buildNotification("Processing inference request...")
