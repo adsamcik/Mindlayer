@@ -347,9 +347,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 val bytes = getApplication<Application>().assets
                     .open("fixtures/$fixtureName").use { it.readBytes() }
+                val mimeType = OcrFixtures.mimeType(fixtureName)
                 val result = client.ocrAsync(
                     bytes = bytes,
-                    mimeType = "image/png",
+                    mimeType = mimeType,
                     options = com.adsamcik.mindlayer.OcrImageOptions(
                         runLlmExtraction = runLlm,
                         emitBoundingBoxes = emitBoundingBoxes,

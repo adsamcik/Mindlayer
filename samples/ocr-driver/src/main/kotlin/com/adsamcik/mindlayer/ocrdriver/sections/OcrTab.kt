@@ -20,8 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.adsamcik.mindlayer.ocrdriver.OcrSlice
-
-private val FIXTURES = listOf("receipt.png", "document.png", "screen_capture.png", "dashboard-fixture.png")
+import com.adsamcik.mindlayer.ocrdriver.OcrFixtures
 
 @Composable
 fun OcrTab(
@@ -29,7 +28,7 @@ fun OcrTab(
     connected: Boolean,
     onRun: (fixture: String, runLlm: Boolean, emitBoundingBoxes: Boolean) -> Unit,
 ) {
-    var fixture by remember { mutableStateOf(FIXTURES[0]) }
+    var fixture by remember { mutableStateOf(OcrFixtures.all[0]) }
     var runLlm by remember { mutableStateOf(false) }
     var emitBbox by remember { mutableStateOf(true) }
 
@@ -37,7 +36,7 @@ fun OcrTab(
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("OCR (single image / async)", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Calls `ocrAsync(bytes, image/png, options)`. Loads bundled PNG fixtures from the sample app's assets.",
+                "Calls `ocrAsync(bytes, fixtureMime, options)`. Loads bundled WebP fixtures from the sample app's assets.",
                 style = MaterialTheme.typography.bodySmall,
             )
             Text(
@@ -53,7 +52,7 @@ fun OcrTab(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                FIXTURES.forEach { name ->
+                OcrFixtures.all.forEach { name ->
                     FilterChip(
                         selected = fixture == name,
                         onClick = { fixture = name },

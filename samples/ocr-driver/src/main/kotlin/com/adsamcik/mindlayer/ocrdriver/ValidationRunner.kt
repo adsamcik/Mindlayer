@@ -73,9 +73,9 @@ data class ValidationReport(
  *
  * # Fixtures
  *
- * Reads PNG fixtures from the sample APK's `assets/fixtures/` — synthetic
- * black-text-on-white images generated procedurally at build time. No
- * user data, no PII.
+ * Reads WebP fixtures from the sample APK's `assets/fixtures/` —
+ * OCR-safe synthetic scenarios with deterministic text. No user data,
+ * no PII.
  *
  * # Privacy
  *
@@ -167,19 +167,22 @@ class ValidationRunner(
         }
 
         results += scenario("single_image_no_llm") {
-            val bytes = readFixture("receipt.png")
-            val result = mindlayer.ocrAsync(bytes = bytes, mimeType = "image/png")
+            val bytes = readFixture(OcrFixtures.RECEIPT)
+            val result = mindlayer.ocrAsync(
+                bytes = bytes,
+                mimeType = OcrFixtures.mimeType(OcrFixtures.RECEIPT),
+            )
             check(result.lines.isNotEmpty()) {
-                "ocrAsync returned 0 lines on receipt.png — recognition failed"
+                "ocrAsync returned 0 lines on ${OcrFixtures.RECEIPT} — recognition failed"
             }
             "lines=${result.lines.size} ocr=${result.ocrDurationMs}ms"
         }
 
         results += scenario("single_image_with_llm") {
-            val bytes = readFixture("receipt.png")
+            val bytes = readFixture(OcrFixtures.RECEIPT)
             val result = mindlayer.ocrAsync(
                 bytes = bytes,
-                mimeType = "image/png",
+                mimeType = OcrFixtures.mimeType(OcrFixtures.RECEIPT),
                 options = OcrImageOptions(
                     runLlmExtraction = true,
                     extractionSchemaJson =
@@ -207,10 +210,10 @@ class ValidationRunner(
         }
 
         results += scenario("single_image_bbox") {
-            val bytes = readFixture("document.png")
+            val bytes = readFixture(OcrFixtures.DOCUMENT)
             val result = mindlayer.ocrAsync(
                 bytes = bytes,
-                mimeType = "image/png",
+                mimeType = OcrFixtures.mimeType(OcrFixtures.DOCUMENT),
                 options = OcrImageOptions(emitBoundingBoxes = true),
             )
             check(result.lines.isNotEmpty()) { "no lines extracted" }
@@ -238,11 +241,11 @@ class ValidationRunner(
                     // Give the service a moment to wire the pipe.
                     delay(200)
 
-                    val bytes = readFixture("document.png")
+                    val bytes = readFixture(OcrFixtures.DOCUMENT)
                     val ack = session.pushEncodedFrame(
                         meta = newMeta(frameId = 1L),
                         bytes = bytes,
-                        mimeType = "image/png",
+                        mimeType = OcrFixtures.mimeType(OcrFixtures.DOCUMENT),
                     )
                     check(ack.status == com.adsamcik.mindlayer.OcrFrameAck.STATUS_ACCEPTED) {
                         "expected STATUS_ACCEPTED, got ${ack.status}"
@@ -272,11 +275,11 @@ class ValidationRunner(
             // STATUS_REJECTED_STREAM_NOT_ATTACHED ack. Without this
             // contract, OCR results could be lost silently.
             mindlayer.ocrRealtime(OcrProfile.GeneralDocument).use { session ->
-                val bytes = readFixture("document.png")
+                val bytes = readFixture(OcrFixtures.DOCUMENT)
                 val ack = session.pushEncodedFrame(
                     meta = newMeta(frameId = 1L),
                     bytes = bytes,
-                    mimeType = "image/png",
+                    mimeType = OcrFixtures.mimeType(OcrFixtures.DOCUMENT),
                 )
                 check(
                     ack.status ==
