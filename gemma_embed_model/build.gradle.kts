@@ -28,8 +28,20 @@ plugins {
 private val modelFileName = "embedding-gemma-300m-v1.tflite"
 private val tokenizerFileName = "embedding-gemma-300m-v1.spm.model"
 
-val embeddingModelSha256 = project.findProperty("embeddingModelSha256")?.toString()?.trim()?.lowercase().orEmpty()
-val embeddingTokenizerSha256 = project.findProperty("embeddingTokenizerSha256")?.toString()?.trim()?.lowercase().orEmpty()
+// SHA precedence: explicit -P props (CI / override) → local-cache-derived digest
+// computed once in the root build → "" (debug advisory). See the "Release model
+// provisioning" block in the root build.gradle.kts.
+@Suppress("UNCHECKED_CAST")
+val releaseModelShas: Map<String, String> =
+    (rootProject.extra["mindlayerModelShas"] as? Map<String, String>).orEmpty()
+val modelCachePath: String = (rootProject.extra["mindlayerModelCachePath"] as? String).orEmpty()
+
+val embeddingModelSha256 = project.findProperty("embeddingModelSha256")?.toString()?.trim()?.lowercase()
+    ?.takeIf { it.isNotEmpty() }
+    ?: releaseModelShas[modelFileName].orEmpty()
+val embeddingTokenizerSha256 = project.findProperty("embeddingTokenizerSha256")?.toString()?.trim()?.lowercase()
+    ?.takeIf { it.isNotEmpty() }
+    ?: releaseModelShas[tokenizerFileName].orEmpty()
 val sha256Pattern = Regex("^[0-9a-f]{64}$")
 val manifestFile = layout.projectDirectory.file("src/main/assets/embedding_model_integrity.json")
 
@@ -73,10 +85,18 @@ val generateEmbeddingModelIntegrityManifest by tasks.registering {
 
         if (releaseReq) {
             if (!sha256Re.matches(modelSha256)) {
-                throw GradleException("Release embedding AI-pack builds require -PembeddingModelSha256=<64 hex>")
+                throw GradleException(
+                    "Release builds need the EmbeddingGemma weights SHA-256. Set MINDLAYER_MODEL_CACHE " +
+                        "(or -Pmindlayer.modelCache=<dir>) holding $modelFn, or pass " +
+                        "-PembeddingModelSha256=<64 hex>. See RELEASE.md.",
+                )
             }
             if (!sha256Re.matches(tokenizerSha256)) {
-                throw GradleException("Release embedding AI-pack builds require -PembeddingTokenizerSha256=<64 hex>")
+                throw GradleException(
+                    "Release builds need the EmbeddingGemma tokenizer SHA-256. Set MINDLAYER_MODEL_CACHE " +
+                        "(or -Pmindlayer.modelCache=<dir>) holding $tokenizerFn, or pass " +
+                        "-PembeddingTokenizerSha256=<64 hex>. See RELEASE.md.",
+                )
             }
         }
         val zero = "0".repeat(64)
@@ -135,9 +155,48 @@ val generateEmbeddingModelIntegrityManifest by tasks.registering {
     }
 }
 
+// Copies the EmbeddingGemma weights + tokenizer from the local cache into
+// src/main/assets so the install-time AI pack can bundle them for a release,
+// keeping the binaries out of git. No-op on debug. Fail-fast on release when a
+// required file is absent from both the asset dir and the cache.
+val provisionReleaseModelAssets by tasks.registering {
+    group = "build"
+    description = "Copies the EmbeddingGemma model + tokenizer from the local model cache into src/main/assets for release packaging."
+    val assetsDir = layout.projectDirectory.dir("src/main/assets").asFile
+    val cachePath = modelCachePath
+    val releaseReq = releaseTaskRequested
+    val requiredFiles = listOf(modelFileName, tokenizerFileName)
+    inputs.property("cachePath", cachePath)
+    inputs.property("releaseReq", releaseReq)
+    inputs.property("requiredFiles", requiredFiles)
+    doLast {
+        if (!releaseReq) return@doLast
+        val cacheDir = cachePath.takeIf { it.isNotEmpty() }?.let { File(it) }
+        requiredFiles.forEach { fileName ->
+            val target = File(assetsDir, fileName)
+            val targetReady = target.isFile && target.length() > 1L
+            val source = cacheDir?.resolve(fileName)?.takeIf { it.isFile && it.length() > 1L }
+            when {
+                source != null && (!targetReady || target.length() != source.length()) -> {
+                    target.parentFile.mkdirs()
+                    source.copyTo(target, overwrite = true)
+                }
+                targetReady -> Unit
+                else -> throw GradleException(
+                    "Release build needs '$fileName'. Set MINDLAYER_MODEL_CACHE (or " +
+                        "-Pmindlayer.modelCache=<dir>) to a directory containing it, or place the " +
+                        "file directly in $assetsDir. See RELEASE.md.",
+                )
+            }
+        }
+    }
+}
+
 tasks.configureEach {
-    if (name == "preBuild" || name == "assemble" || name == "assembleDebug" || name.contains("Release")) {
-        dependsOn(generateEmbeddingModelIntegrityManifest)
+    if ((name == "preBuild" || name == "assemble" || name == "assembleDebug" || name.contains("Release")) &&
+        name != "provisionReleaseModelAssets"
+    ) {
+        dependsOn(generateEmbeddingModelIntegrityManifest, provisionReleaseModelAssets)
     }
 }
 

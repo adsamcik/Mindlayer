@@ -33,10 +33,22 @@ private val recFileName = "paddleocr-ppocrv5-mobile-rec.tflite"
 private val clsFileName = "paddleocr-ppocrv5-mobile-cls.tflite"
 private val dictFileName = "paddleocr-ppocrv5-mobile-dict.txt"
 
-val paddleOcrDetSha256 = project.findProperty("paddleOcrDetSha256")?.toString()?.trim()?.lowercase().orEmpty()
-val paddleOcrRecSha256 = project.findProperty("paddleOcrRecSha256")?.toString()?.trim()?.lowercase().orEmpty()
-val paddleOcrClsSha256 = project.findProperty("paddleOcrClsSha256")?.toString()?.trim()?.lowercase().orEmpty()
-val paddleOcrDictSha256 = project.findProperty("paddleOcrDictSha256")?.toString()?.trim()?.lowercase().orEmpty()
+// SHA precedence: explicit -P props (CI / override) → local-cache-derived digest
+// computed once in the root build → "" (debug advisory). See the "Release model
+// provisioning" block in the root build.gradle.kts.
+@Suppress("UNCHECKED_CAST")
+val releaseModelShas: Map<String, String> =
+    (rootProject.extra["mindlayerModelShas"] as? Map<String, String>).orEmpty()
+val modelCachePath: String = (rootProject.extra["mindlayerModelCachePath"] as? String).orEmpty()
+
+val paddleOcrDetSha256 = project.findProperty("paddleOcrDetSha256")?.toString()?.trim()?.lowercase()
+    ?.takeIf { it.isNotEmpty() } ?: releaseModelShas[detFileName].orEmpty()
+val paddleOcrRecSha256 = project.findProperty("paddleOcrRecSha256")?.toString()?.trim()?.lowercase()
+    ?.takeIf { it.isNotEmpty() } ?: releaseModelShas[recFileName].orEmpty()
+val paddleOcrClsSha256 = project.findProperty("paddleOcrClsSha256")?.toString()?.trim()?.lowercase()
+    ?.takeIf { it.isNotEmpty() } ?: releaseModelShas[clsFileName].orEmpty()
+val paddleOcrDictSha256 = project.findProperty("paddleOcrDictSha256")?.toString()?.trim()?.lowercase()
+    ?.takeIf { it.isNotEmpty() } ?: releaseModelShas[dictFileName].orEmpty()
 
 val sha256Pattern = Regex("^[0-9a-f]{64}$")
 val manifestFile = layout.projectDirectory.file("src/main/assets/paddleocr_model_integrity.json")
@@ -95,7 +107,9 @@ val generatePaddleOcrModelIntegrityManifest by tasks.registering {
             }
             if (missing.isNotEmpty()) {
                 throw GradleException(
-                    "Release paddleocr_model builds require -P${missing.joinToString("=<64 hex> -P")}=<64 hex>",
+                    "Release builds need PaddleOCR SHA-256 digests for: ${missing.joinToString(", ")}. " +
+                        "Set MINDLAYER_MODEL_CACHE (or -Pmindlayer.modelCache=<dir>) holding the PP-OCRv5 " +
+                        "files, or pass the matching -P props. See RELEASE.md.",
                 )
             }
         }
@@ -145,9 +159,48 @@ val generatePaddleOcrModelIntegrityManifest by tasks.registering {
     }
 }
 
+// Copies the four PaddleOCR artifacts from the local cache into src/main/assets
+// so the install-time AI pack can bundle them for a release, keeping the
+// binaries out of git. No-op on debug. Fail-fast on release when a required file
+// is absent from both the asset dir and the cache.
+val provisionReleaseModelAssets by tasks.registering {
+    group = "build"
+    description = "Copies the PaddleOCR PP-OCRv5 mobile artifacts from the local model cache into src/main/assets for release packaging."
+    val assetsDir = layout.projectDirectory.dir("src/main/assets").asFile
+    val cachePath = modelCachePath
+    val releaseReq = releaseTaskRequested
+    val requiredFiles = listOf(detFileName, recFileName, clsFileName, dictFileName)
+    inputs.property("cachePath", cachePath)
+    inputs.property("releaseReq", releaseReq)
+    inputs.property("requiredFiles", requiredFiles)
+    doLast {
+        if (!releaseReq) return@doLast
+        val cacheDir = cachePath.takeIf { it.isNotEmpty() }?.let { File(it) }
+        requiredFiles.forEach { fileName ->
+            val target = File(assetsDir, fileName)
+            val targetReady = target.isFile && target.length() > 1L
+            val source = cacheDir?.resolve(fileName)?.takeIf { it.isFile && it.length() > 1L }
+            when {
+                source != null && (!targetReady || target.length() != source.length()) -> {
+                    target.parentFile.mkdirs()
+                    source.copyTo(target, overwrite = true)
+                }
+                targetReady -> Unit
+                else -> throw GradleException(
+                    "Release build needs '$fileName'. Set MINDLAYER_MODEL_CACHE (or " +
+                        "-Pmindlayer.modelCache=<dir>) to a directory containing it, or place the " +
+                        "file directly in $assetsDir. See RELEASE.md.",
+                )
+            }
+        }
+    }
+}
+
 tasks.configureEach {
-    if (name == "preBuild" || name == "assemble" || name == "assembleDebug" || name.contains("Release")) {
-        dependsOn(generatePaddleOcrModelIntegrityManifest)
+    if ((name == "preBuild" || name == "assemble" || name == "assembleDebug" || name.contains("Release")) &&
+        name != "provisionReleaseModelAssets"
+    ) {
+        dependsOn(generatePaddleOcrModelIntegrityManifest, provisionReleaseModelAssets)
     }
 }
 
