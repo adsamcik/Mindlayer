@@ -220,18 +220,19 @@ class MindlayerMlService : Service() {
         engineManager = EngineManager(this, logRepository)
         memoryBudget = MemoryBudget(this, serviceScope, logRepository)
         thermalMonitor = ThermalMonitor(this, serviceScope, logRepository)
-        sessionManager = SessionManager(this, engineManager, memoryBudget, logRepository)
-        sharedMemoryPool = SharedMemoryPool(cacheDir)
-        sharedMemoryPool.cleanupAll()
-        deferredStore = DeferredStore(DeferredDatabase.getInstance(this).deferredDao())
         // DEBUG-only "CI mock engines" mode. Evaluated ONCE here; null in
         // release and in debug builds without the system property set, so the
         // real engines are wired unconditionally in the common case. When
         // non-null, OCR + embeddings + OCR→LLM extraction are served by
-        // synthetic backends that need no on-disk models — letting a consumer
-        // app's CI verify its Mindlayer integration end-to-end on a model-less
-        // runner. The interactive LLM (chat/vision) path is NOT mocked here.
+        // synthetic backends that need no on-disk models, and the interactive
+        // LLM (chat/vision/audio) path streams synthetic [mock] tokens — letting
+        // a consumer app's CI verify its Mindlayer integration end-to-end on a
+        // model-less runner.
         val mockEngines = mockEnginesOrNull(this)
+        sessionManager = SessionManager(this, engineManager, memoryBudget, logRepository, mockMode = mockEngines != null)
+        sharedMemoryPool = SharedMemoryPool(cacheDir)
+        sharedMemoryPool.cleanupAll()
+        deferredStore = DeferredStore(DeferredDatabase.getInstance(this).deferredDao())
         embeddingEngine = if (mockEngines != null) {
             EmbeddingEngine(this, backendFactory = mockEngines.embeddingBackendFactory, logRepository = logRepository)
         } else {
@@ -245,7 +246,7 @@ class MindlayerMlService : Service() {
         // (one SQL statement, small table), safely runnable on the main
         // thread per the existing pattern.
         runBlocking { deferredStore.failRunningOnInit() }
-        orchestrator = InferenceOrchestrator(this, sessionManager, sharedMemoryPool, logRepository)
+        orchestrator = InferenceOrchestrator(this, sessionManager, sharedMemoryPool, logRepository, llmMockGenerator = mockEngines?.llmMockGenerator)
         val callbackRegistry = EvictionRegistry()
         embeddingCoordinator = EmbeddingCoordinator(embeddingEngine, deferredStore, this, serviceScope, callbackRegistry, sharedMemoryPool, defaultModelOverride = mockEngines?.embeddingDefaultModel)
 
@@ -340,7 +341,7 @@ class MindlayerMlService : Service() {
         val diagnosticExporter = DiagnosticExporter(
             engineManager, thermalMonitor, memoryBudget, sessionManager, logDb.logDao()
         )
-        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, allowlistStore = allowlistStore, consentChallengeStore = com.adsamcik.mindlayer.service.security.ConsentChallengeStore(this), consentAttemptStore = com.adsamcik.mindlayer.service.security.ConsentAttemptStore(this), logRepository = logRepository, mlHealthRecorder = mlHealthRecorder, deferredStore = deferredStore, embeddingCoordinator = embeddingCoordinator, callbackRegistry = callbackRegistry, ocrSessionManager = ocrSessionManager, sharedMemoryPool = sharedMemoryPool, paddleOcrEngine = paddleOcrEngine, ocrLlmExtractor = ocrLlmExtractor, autoAcceptGate = { debugAutoAcceptAllEnabled(this) })
+        binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, allowlistStore = allowlistStore, consentChallengeStore = com.adsamcik.mindlayer.service.security.ConsentChallengeStore(this), consentAttemptStore = com.adsamcik.mindlayer.service.security.ConsentAttemptStore(this), logRepository = logRepository, mlHealthRecorder = mlHealthRecorder, deferredStore = deferredStore, embeddingCoordinator = embeddingCoordinator, callbackRegistry = callbackRegistry, ocrSessionManager = ocrSessionManager, sharedMemoryPool = sharedMemoryPool, paddleOcrEngine = paddleOcrEngine, ocrLlmExtractor = ocrLlmExtractor, autoAcceptGate = { debugAutoAcceptAllEnabled(this) }, mockEngineMode = mockEngines != null)
 
         logRepository.log(LogEntry(
             timestampMs = System.currentTimeMillis(),

@@ -439,7 +439,8 @@ adb shell am force-stop com.adsamcik.mindlayer.service.debug
 With the flag set:
 
 - `getCapabilities()` advertises `FEATURE_EMBEDDINGS`, `FEATURE_OCR_SESSION`,
-  and `FEATURE_OCR_IMAGE_ONESHOT`.
+  and `FEATURE_OCR_IMAGE_ONESHOT` (the LLM streaming features are always
+  advertised).
 - `embed(text)` returns a deterministic 768-d unit vector: the **same** text
   yields the **same** vector (cosine 1.0) and **different** text yields a
   near-orthogonal one (cosine well below 0.99) — so cache/idempotency and
@@ -448,6 +449,13 @@ With the flag set:
 - OCR returns `[mock]`-prefixed lines (honouring `maxLines` and the
   bounding-box capability); the single-image OCR→LLM extraction returns
   `[mock]` fields.
+- **LLM chat / vision / audio** (`createSession` + `infer` / `inferStream`)
+  streams a synthetic `[mock]` reply over the real pipe — header → token
+  deltas → `done(finish=stop)` — that reflects the request modality (e.g.
+  "Received an image request…") and echoes a short prefix of your prompt. No
+  ~2.4 GB Gemma model is loaded, so the turn returns instantly. Image / audio
+  attachments are still staged over real SharedMemory, so the SHM transport is
+  exercised end to end.
 
 Every mock payload is `[mock]`-tagged so your tests can assert they are talking
 to the mock and never mistake synthetic output for a real result.
@@ -463,11 +471,13 @@ adb shell am broadcast \
   -a com.adsamcik.mindlayer.debug.SET_AUTO_ACCEPT --ez enabled true
 ```
 
-### What is NOT mocked
+### Scope
 
-The interactive **LLM chat / vision** streaming path is not mocked in this mode
-(it ships as a focused follow-up). OCR, embeddings, and OCR→LLM structured
-extraction are.
+Mock mode covers every Mindlayer engine — embeddings, OCR, OCR→LLM extraction,
+and the interactive LLM (chat / vision / audio). It verifies the full wire
+contract (bind → consent → capabilities → AIDL → pipe → SharedMemory → typed
+errors); it does **not** assert anything about real model *quality*, since no
+real model runs.
 
 ### Disarm
 

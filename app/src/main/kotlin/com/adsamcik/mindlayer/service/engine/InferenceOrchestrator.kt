@@ -17,6 +17,7 @@ import com.adsamcik.mindlayer.service.MindlayerMlService
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.ipc.StagedMedia
 import com.adsamcik.mindlayer.service.ipc.TokenStreamWriter
+import com.adsamcik.mindlayer.service.engine.mock.LlmMockGenerator
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import com.adsamcik.mindlayer.service.logging.LogCategory
 import com.adsamcik.mindlayer.service.logging.LogEntry
@@ -38,6 +39,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -76,6 +78,15 @@ class InferenceOrchestrator(
         try { service.thermalMonitor.currentPolicy.value ?: COOL_POLICY }
         catch (_: Throwable) { COOL_POLICY }
     },
+    /**
+     * DEBUG-only "CI mock engines" LLM seam. When non-null, [infer] streams a
+     * synthetic `[mock]` reply produced by this generator instead of driving a
+     * native LiteRT-LM `Conversation` — see [runMockInference]. Defaults to
+     * `null` → production behaviour unchanged. Must be paired with
+     * `SessionManager(mockMode = true)` + `ServiceBinder(mockEngineMode = true)`
+     * so cold sessions stay `conversation == null` and no engine warmup runs.
+     */
+    private val llmMockGenerator: LlmMockGenerator? = null,
 ) {
 
     companion object {
@@ -368,7 +379,12 @@ class InferenceOrchestrator(
         // closes that window: the job is discoverable (and cancellable)
         // the instant it can execute.
         val job = scope.launch(start = CoroutineStart.LAZY) {
-            runInference(scopedKey, meta, image, audio, pipeWriteEnd)
+            val mockGen = llmMockGenerator
+            if (mockGen != null) {
+                runMockInference(scopedKey, meta, image, audio, pipeWriteEnd, mockGen)
+            } else {
+                runInference(scopedKey, meta, image, audio, pipeWriteEnd)
+            }
         }
         activeJobs[scopedKey] = job
         job.invokeOnCompletion {
@@ -504,6 +520,162 @@ class InferenceOrchestrator(
     }
 
     // ---- Private -----------------------------------------------------------
+
+    /**
+     * DEBUG-only mock inference path for the "CI mock engines" mode.
+     *
+     * Faithfully reproduces the [runInference] streaming **lifecycle** so a
+     * consumer app's CI exercises the real wire contract — media staged over
+     * real SharedMemory, the per-session mutex held single-writer, foreground
+     * entered for the duration, and a header → token-delta → `done(stop)` frame
+     * sequence over the real pipe — but emits a synthetic [LlmMockGenerator]
+     * reply instead of driving a native LiteRT-LM `Conversation`. It therefore
+     * never calls [SessionManager.withWarmConversation] (the only path that
+     * touches `engineManager.requireEngine()`), so no ~2.4 GB model is needed
+     * and the session's `conversation` stays `null`.
+     *
+     * Cancellation is cooperative (a [yield] between deltas) so
+     * [cancelInference] / binder-death unwinds the coroutine and flushes a
+     * terminal `cancelled` (or typed) frame, mirroring the real path.
+     */
+    private suspend fun runMockInference(
+        scopedKey: String,
+        meta: RequestMeta,
+        image: ImageTransfer?,
+        audio: AudioTransfer?,
+        pipeWriteEnd: ParcelFileDescriptor,
+        mockGenerator: LlmMockGenerator,
+    ) {
+        val handle = sessionManager.getSession(meta.sessionId) ?: run {
+            val writer = writerFactory(pipeWriteEnd)
+            writer.closeWithError(
+                0,
+                "Unknown session: ${meta.sessionId}",
+                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+            )
+            return
+        }
+
+        // Stage media over real SharedMemory so the SHM transport + bounds are
+        // exercised, exactly as in runInference. The bytes are not fed to any
+        // model; staging + cleanup is the integration surface under test.
+        try {
+            if (image != null) {
+                sharedMemoryPool.stageImageWithTimeout(scopedKey, image)
+            }
+            if (audio != null) {
+                sharedMemoryPool.stageAudioWithTimeout(scopedKey, audio)
+            }
+        } catch (t: Throwable) {
+            MindlayerLog.e(
+                TAG,
+                "Mock media staging failed: ${t.safeLabel()}",
+                requestId = meta.requestId,
+                sessionId = meta.sessionId,
+            )
+            sharedMemoryPool.cleanup(scopedKey)
+            writerFactory(pipeWriteEnd).closeWithError(
+                0,
+                "media_staging_failed: ${t.safeLabel()}",
+                MindlayerErrorCode.INVALID_REQUEST,
+            )
+            return
+        }
+
+        handle.mutex.withLock {
+            if (handle.destroyed) {
+                sharedMemoryPool.cleanup(scopedKey)
+                writerFactory(pipeWriteEnd).closeWithError(
+                    0,
+                    "Session destroyed",
+                    MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                )
+                return
+            }
+            handle.activeRequestId = scopedKey
+            handle.isStreaming = true
+            val writer = writerFactory(pipeWriteEnd)
+            if (handle.preferBatchedDeltas) writer.enableBatching()
+            if (handle.preferThinking) writer.enableThinking()
+            var foregroundEntered = false
+            try {
+                service.enterForeground()
+                foregroundEntered = true
+                MindlayerLog.i(
+                    TAG,
+                    "Mock inference streaming (image=${image != null}, audio=${audio != null})",
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                )
+                writer.writeHeader(meta.requestId)
+                var seq = 1L
+                if (handle.preferThinking) {
+                    writer.writeThoughtDelta(seq++, "[mock] considering the request… ")
+                }
+                val reply = mockGenerator.reply(meta.textContent, image != null, audio != null)
+                for (token in mockTokenize(reply)) {
+                    yield() // cooperative cancellation between deltas
+                    writer.writeTokenDelta(seq++, token)
+                }
+                writer.writeDone(seq, "stop")
+            } catch (e: CancellationException) {
+                // No native conversation to cancel in mock mode
+                // (handle.conversation is null); honour a typed cancel reason
+                // primed by cancelInference, else emit the user-cancel frame.
+                val typedReason = typedCancellationReasons.remove(scopedKey)
+                val terminalReason = typedReason
+                    ?.let { (MindlayerErrorCode.nameOf(it) ?: "UNKNOWN").lowercase() }
+                    ?: "cancelled"
+                withContext(NonCancellable) {
+                    try {
+                        if (typedReason != null) {
+                            writer.closeWithError(0, terminalReason, typedReason)
+                        } else {
+                            writer.writeDone(0, "cancelled")
+                        }
+                    } catch (_: Throwable) {
+                        // Best-effort terminal frame; pipe may already be closed.
+                    }
+                }
+                throw e
+            } catch (t: Throwable) {
+                val safe = t.safeLabelWithDetail()
+                MindlayerLog.e(
+                    TAG,
+                    "Mock inference failed: $safe",
+                    requestId = meta.requestId,
+                    sessionId = meta.sessionId,
+                )
+                withContext(NonCancellable) {
+                    try {
+                        writer.closeWithError(0, safe, MindlayerErrorCode.INTERNAL)
+                    } catch (_: Throwable) {
+                        // Best-effort.
+                    }
+                }
+            } finally {
+                typedCancellationReasons.remove(scopedKey)
+                writer.close()
+                handle.activeRequestId = null
+                handle.isStreaming = false
+                if (foregroundEntered) service.exitForeground()
+                sharedMemoryPool.cleanup(scopedKey)
+            }
+        }
+    }
+
+    /**
+     * Split a mock reply into whitespace-delimited token chunks, preserving a
+     * trailing space on every chunk but the last so concatenating the streamed
+     * deltas losslessly reconstructs the original text.
+     */
+    private fun mockTokenize(text: String): List<String> {
+        if (text.isEmpty()) return emptyList()
+        val parts = text.split(" ")
+        return parts.mapIndexed { i, word ->
+            if (i < parts.size - 1) "$word " else word
+        }.filter { it.isNotEmpty() }
+    }
 
     private suspend fun runInference(
         scopedKey: String,

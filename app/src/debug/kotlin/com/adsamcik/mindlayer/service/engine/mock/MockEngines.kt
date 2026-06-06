@@ -44,6 +44,7 @@ internal fun mockEnginesOrNull(@Suppress("UNUSED_PARAMETER") context: Context): 
         embeddingDefaultModel = MockEmbeddingBackend.MODEL,
         paddleOcrBackendFactory = { MockPaddleOcrBackend() },
         ocrLlmExtractor = MockOcrLlmExtractor(),
+        llmMockGenerator = MockLlmGenerator(),
     )
 }
 

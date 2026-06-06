@@ -59,6 +59,17 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     private val memoryBudget: MemoryBudget,
     private val logRepository: com.adsamcik.mindlayer.service.logging.LogRepository? = null,
     initDispatcher: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1),
+    /**
+     * DEBUG-only "CI mock engines" mode. When true, [createSession] skips
+     * engine auto-init + the `requireEngine()` readiness guard and builds the
+     * usual cold [SessionHandle] (`conversation == null`). The interactive LLM
+     * path then runs through [InferenceOrchestrator.runMockInference], which
+     * never calls [withWarmConversation] — so the engine is never required and
+     * `conversation` stays null for the session's whole lifetime (destroy /
+     * evict / hot-swap are all `conversation?.`-null-safe). Defaults to false →
+     * production behaviour unchanged.
+     */
+    private val mockMode: Boolean = false,
 ) {
 
     private val initCoordinator = EngineInitCoordinator(engineManager, initDispatcher)
@@ -304,7 +315,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         val effectiveMaxTokens = config.maxTokens.coerceIn(1, runtimeCeiling)
 
         // Auto-initialize engine if not yet loaded
-        if (!engineManager.isInitialized) {
+        if (!mockMode && !engineManager.isInitialized) {
             // F-071: terminal init failure (today: [LowMemoryException])
             // is cached on the bg job so subsequent createSession calls
             // surface the typed error instead of looping on
@@ -339,7 +350,12 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             }
         }
 
-        val engine = engineManager.requireEngine()
+        // Defensive readiness guard (the block above already awaited Ready).
+        // Skipped in mock mode where there is no native engine; the session is
+        // built cold and the mock inference path never requires the engine.
+        if (!mockMode) {
+            engineManager.requireEngine()
+        }
 
         val samplerConfig = SamplerConfig(
             topK = config.samplerTopK,

@@ -137,6 +137,16 @@ class ServiceBinder(
      * `signature|knownSigner` bind permission is untouched.
      */
     private val autoAcceptGate: () -> Boolean = { false },
+    /**
+     * DEBUG-only "CI mock engines" mode. When true, [createSession] skips the
+     * cold-start engine warmup (`startEngineWarmup` + `awaitReady`) because no
+     * native model is loaded in mock mode; the session is created cold and the
+     * interactive LLM path runs through [InferenceOrchestrator.runMockInference].
+     * Defaults to false → production behaviour unchanged. Must be wired in
+     * lock-step with `SessionManager(mockMode = true)` and the orchestrator's
+     * `llmMockGenerator`.
+     */
+    private val mockEngineMode: Boolean = false,
 ) : IMindlayerService.Stub() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -920,7 +930,7 @@ class ServiceBinder(
             config
         }
         MindlayerLog.d(TAG, "createSession from ${identity.packageName}")
-        if (!engineManager.isInitialized) {
+        if (!mockEngineMode && !engineManager.isInitialized) {
             runBlocking {
                 startEngineWarmup(
                     preferredBackend = safeConfig.backend,
