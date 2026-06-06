@@ -413,6 +413,71 @@ println(diagnostics) // paste into bug reports
 
 ---
 
+## Testing your integration in CI (mock engines)
+
+Your app's CI can verify its Mindlayer integration **end-to-end** — bind →
+consent → `getCapabilities()` → `ocr` / `embed` (and the OCR→LLM extraction
+path) over the real AIDL + pipe + SharedMemory wire — **without** the ~3 GB of
+on-device models. A **debug build of the Mindlayer service** ships a hidden
+"mock engines" mode that serves deterministic, plausible, `[mock]`-tagged data.
+
+> Mock mode is **DEBUG-only**. The mock backends are physically absent from the
+> release classpath and the toggle can never be armed in a production build.
+
+### Arm it
+
+On the emulator/device, with a **debug** build of the Mindlayer service
+installed (no models required):
+
+```bash
+# turn mock engines on
+adb shell setprop debug.mindlayer.mock_engines 1
+# restart the service so it re-reads the flag at onCreate
+adb shell am force-stop com.adsamcik.mindlayer.service.debug
+```
+
+With the flag set:
+
+- `getCapabilities()` advertises `FEATURE_EMBEDDINGS`, `FEATURE_OCR_SESSION`,
+  and `FEATURE_OCR_IMAGE_ONESHOT`.
+- `embed(text)` returns a deterministic 768-d unit vector: the **same** text
+  yields the **same** vector (cosine 1.0) and **different** text yields a
+  near-orthogonal one (cosine well below 0.99) — so cache/idempotency and
+  "distinct inputs → distinct embeddings" assertions hold. Matryoshka
+  `outputDim` (768/512/256/128) is honoured.
+- OCR returns `[mock]`-prefixed lines (honouring `maxLines` and the
+  bounding-box capability); the single-image OCR→LLM extraction returns
+  `[mock]` fields.
+
+Every mock payload is `[mock]`-tagged so your tests can assert they are talking
+to the mock and never mistake synthetic output for a real result.
+
+### Pair with auto-accept so the consent gate doesn't block CI
+
+A headless run can't tap the consent dialog. Combine mock mode with the
+debug-only auto-accept toggle (also DEBUG-only, DUMP-guarded):
+
+```bash
+adb shell am broadcast \
+  -n com.adsamcik.mindlayer.service.debug/com.adsamcik.mindlayer.service.security.DebugAutoAcceptReceiver \
+  -a com.adsamcik.mindlayer.debug.SET_AUTO_ACCEPT --ez enabled true
+```
+
+### What is NOT mocked
+
+The interactive **LLM chat / vision** streaming path is not mocked in this mode
+(it ships as a focused follow-up). OCR, embeddings, and OCR→LLM structured
+extraction are.
+
+### Disarm
+
+```bash
+adb shell setprop debug.mindlayer.mock_engines 0
+adb shell am force-stop com.adsamcik.mindlayer.service.debug
+```
+
+---
+
 ## Publishing (for Mindlayer maintainers)
 
 ```bash

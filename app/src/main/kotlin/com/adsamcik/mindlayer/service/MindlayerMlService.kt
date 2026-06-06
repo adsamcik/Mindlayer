@@ -50,6 +50,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import com.adsamcik.mindlayer.service.ipc.SharedMemoryPool
 import com.adsamcik.mindlayer.service.security.AllowlistStore
 import com.adsamcik.mindlayer.service.security.debugAutoAcceptAllEnabled
+import com.adsamcik.mindlayer.service.engine.mock.mockEnginesOrNull
 import com.adsamcik.mindlayer.service.security.EvictionRegistry
 
 class MindlayerMlService : Service() {
@@ -223,7 +224,19 @@ class MindlayerMlService : Service() {
         sharedMemoryPool = SharedMemoryPool(cacheDir)
         sharedMemoryPool.cleanupAll()
         deferredStore = DeferredStore(DeferredDatabase.getInstance(this).deferredDao())
-        embeddingEngine = EmbeddingEngine(this, logRepository = logRepository)
+        // DEBUG-only "CI mock engines" mode. Evaluated ONCE here; null in
+        // release and in debug builds without the system property set, so the
+        // real engines are wired unconditionally in the common case. When
+        // non-null, OCR + embeddings + OCR→LLM extraction are served by
+        // synthetic backends that need no on-disk models — letting a consumer
+        // app's CI verify its Mindlayer integration end-to-end on a model-less
+        // runner. The interactive LLM (chat/vision) path is NOT mocked here.
+        val mockEngines = mockEnginesOrNull(this)
+        embeddingEngine = if (mockEngines != null) {
+            EmbeddingEngine(this, backendFactory = mockEngines.embeddingBackendFactory, logRepository = logRepository)
+        } else {
+            EmbeddingEngine(this, logRepository = logRepository)
+        }
         // M-D5: synchronously fail any STILL_RUNNING rows left over from a
         // prior process before `binder` is exposed. `serviceScope.launch`
         // returned before the SQL UPDATE ran, so an `onBind` arriving in
@@ -234,7 +247,7 @@ class MindlayerMlService : Service() {
         runBlocking { deferredStore.failRunningOnInit() }
         orchestrator = InferenceOrchestrator(this, sessionManager, sharedMemoryPool, logRepository)
         val callbackRegistry = EvictionRegistry()
-        embeddingCoordinator = EmbeddingCoordinator(embeddingEngine, deferredStore, this, serviceScope, callbackRegistry, sharedMemoryPool)
+        embeddingCoordinator = EmbeddingCoordinator(embeddingEngine, deferredStore, this, serviceScope, callbackRegistry, sharedMemoryPool, defaultModelOverride = mockEngines?.embeddingDefaultModel)
 
         // Sweep orphaned embedding blobs before any client can bind. Two
         // crash windows can leave files in `cacheDir/embedding-blobs/<uid>/`
@@ -269,11 +282,16 @@ class MindlayerMlService : Service() {
         // parses the JSON response. Returns EMPTY when the engine is
         // not yet ready (so the dispatcher's per-line + per-barcode
         // fusion path keeps emitting events).
-        paddleOcrEngine = PaddleOcrEngine(this, logRepository = logRepository)
-        val ocrLlmExtractor = com.adsamcik.mindlayer.service.engine
-            .LiteRtLmGemmaOcrExtractorProduction.create(
-                engineProvider = { engineManager.getEngine() },
-            )
+        paddleOcrEngine = if (mockEngines != null) {
+            PaddleOcrEngine(this, logRepository = logRepository, backendFactory = mockEngines.paddleOcrBackendFactory)
+        } else {
+            PaddleOcrEngine(this, logRepository = logRepository)
+        }
+        val ocrLlmExtractor = mockEngines?.ocrLlmExtractor
+            ?: com.adsamcik.mindlayer.service.engine
+                .LiteRtLmGemmaOcrExtractorProduction.create(
+                    engineProvider = { engineManager.getEngine() },
+                )
         val ocrRecognitionDispatcher = com.adsamcik.mindlayer.service.engine.OcrRecognitionDispatcher(
             engine = paddleOcrEngine,
             llmExtractor = ocrLlmExtractor,
@@ -286,22 +304,36 @@ class MindlayerMlService : Service() {
             engine = paddleOcrEngine,
             recognitionDispatcher = ocrRecognitionDispatcher,
         )
-        // Eager async init — failure-tolerant. If the PaddleOCR bundle
+        // Eager init — failure-tolerant. If the PaddleOCR bundle
         // isn't installed, the engine settles into `Failed(ModelMissing)`
         // and `isEngineReady()` stays false (FEATURE_OCR_SESSION stays
         // unadvertised). Lives on the IO dispatcher so it does NOT block
         // service startup.
-        serviceScope.launch(Dispatchers.IO) {
-            try {
-                paddleOcrEngine.initialize()
-            } catch (t: Throwable) {
-                // Already logged + state==Failed inside PaddleOcrEngine.initialize().
-                // Swallow here — the capability flag stays off and the
-                // service keeps running for other features (LLM, embeddings).
-                MindlayerLog.i(
-                    TAG,
-                    "PaddleOCR eager init did not complete: ${t.safeLabel()}",
-                )
+        //
+        // In mock mode the init is instead run **synchronously** before
+        // `binder` is exposed: the mock backend's `isInitialized` fast-path
+        // makes `initialize()` instant, and getCapabilities must observe
+        // `PaddleOcrEngineState.Ready` on the very first SDK handshake for the
+        // OCR capability flags to be advertised deterministically (no startup
+        // race for the CI client).
+        if (mockEngines != null) {
+            runBlocking {
+                runCatching { paddleOcrEngine.initialize() }
+                    .onFailure { MindlayerLog.i(TAG, "Mock PaddleOCR init did not complete: ${it.safeLabel()}") }
+            }
+        } else {
+            serviceScope.launch(Dispatchers.IO) {
+                try {
+                    paddleOcrEngine.initialize()
+                } catch (t: Throwable) {
+                    // Already logged + state==Failed inside PaddleOcrEngine.initialize().
+                    // Swallow here — the capability flag stays off and the
+                    // service keeps running for other features (LLM, embeddings).
+                    MindlayerLog.i(
+                        TAG,
+                        "PaddleOCR eager init did not complete: ${t.safeLabel()}",
+                    )
+                }
             }
         }
 

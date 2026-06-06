@@ -71,6 +71,17 @@ class EmbeddingCoordinator(
      * compile-time flag.
      */
     val isProductionReady: Boolean = EmbeddingFeatureFlags.IS_PRODUCTION_READY,
+    /**
+     * DEBUG-only "CI mock engines" seam. When non-null, [defaultModelOrNull]
+     * returns this model instead of scanning the on-disk registry, so
+     * `FEATURE_EMBEDDINGS` lights up and the embed-request validators accept
+     * the mock model's `id` / `supportedDims` even though no real model is
+     * installed. Defaults to `null` → zero behaviour change in production. The
+     * value MUST be the same [EmbeddingModelInfo] the mock backend reports as
+     * its `currentModel`, so coordinator-level and engine-level validation
+     * agree. See [com.adsamcik.mindlayer.service.engine.mock.MockEngineBundle].
+     */
+    private val defaultModelOverride: EmbeddingModelInfo? = null,
     private val blobCipher: EmbeddingBlobCipher = object : EmbeddingBlobCipher {
         override fun encrypt(uid: Int, plaintext: ByteArray): ByteArray =
             EmbeddingBlobCrypto.encrypt(context, uid, plaintext)
@@ -85,7 +96,8 @@ class EmbeddingCoordinator(
     val activeEmbeddingBatchCount: Int get() = activeCount.get()
 
     fun installedModels(): List<EmbeddingModelInfo> = EmbeddingModelRegistry.discoverModels(context)
-    fun defaultModelOrNull(): EmbeddingModelInfo? = EmbeddingModelRegistry.getDefaultModel(installedModels())
+    fun defaultModelOrNull(): EmbeddingModelInfo? =
+        defaultModelOverride ?: EmbeddingModelRegistry.getDefaultModel(installedModels())
 
     /**
      * One-shot startup sweep of `cacheDir/embedding-blobs/`. Removes:
