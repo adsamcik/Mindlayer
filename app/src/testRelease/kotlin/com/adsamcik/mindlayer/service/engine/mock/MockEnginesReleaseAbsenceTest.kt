@@ -28,6 +28,10 @@ class MockEnginesReleaseAbsenceTest {
         assertClassAbsent("com.adsamcik.mindlayer.service.engine.mock.MockOcrLlmExtractor")
     }
 
+    @Test fun `mock llm generator class is absent in release`() {
+        assertClassAbsent("com.adsamcik.mindlayer.service.engine.mock.MockLlmGenerator")
+    }
+
     @Test fun `release seam returns null`() {
         assertNull(mockEnginesOrNull(mockk<Context>()))
     }

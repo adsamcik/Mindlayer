@@ -40,14 +40,16 @@ import com.adsamcik.mindlayer.service.engine.PaddleOcrBackend
  *    fast-path flips `FEATURE_OCR_SESSION` / `FEATURE_OCR_IMAGE_ONESHOT`.
  *  - [ocrLlmExtractor] — replaces the production Gemma extractor so the
  *    single-image OCR→LLM extraction path returns plausible fields.
- *
- * The interactive LLM (chat / vision) mock is intentionally **out of scope**
- * here because it requires edits to the security-sensitive `createSession`
- * path; it ships as a focused follow-up.
+ *  - [llmMockGenerator] — drives the interactive LLM (chat / vision / audio)
+ *    streaming path: the orchestrator streams a synthetic `[mock]` reply over
+ *    the real pipe without opening a native LiteRT-LM `Conversation`, and the
+ *    session/binder layers skip engine warmup so no ~2.4 GB Gemma model is
+ *    needed.
  */
 class MockEngineBundle(
     val embeddingBackendFactory: () -> EmbeddingBackend,
     val embeddingDefaultModel: EmbeddingModelInfo,
     val paddleOcrBackendFactory: () -> PaddleOcrBackend,
     val ocrLlmExtractor: OcrLlmExtractor,
+    val llmMockGenerator: LlmMockGenerator,
 )
