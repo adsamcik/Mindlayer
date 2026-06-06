@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — Mindlayer</title>
+  <meta name="description" content="Privacy policy for Mindlayer, an on-device AI inference service for Android. Fully offline, no data collection, no tracking." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="hero">
+    <p class="brand">Mindlayer</p>
+    <h1>Privacy Policy</h1>
+    <p>Mindlayer runs entirely on your device. It has no internet access and sends nothing — about you or your data — anywhere.</p>
+  </header>
+
+  <main>
+    <p class="meta">
+      <strong>Effective date:</strong> 6 June 2026 &nbsp;·&nbsp;
+      <strong>Last updated:</strong> 6 June 2026
+    </p>
+
+    <div class="callout">
+      <strong>The short version.</strong> Mindlayer is a fully on-device,
+      offline AI service. It declares no internet permission, collects no
+      personal data, contains no analytics, advertising, or tracking, and
+      transmits nothing to the developer or any third party. Everything you do
+      with Mindlayer stays on your device.
+    </div>
+
+    <h2>1. Who this policy covers</h2>
+    <p>
+      This Privacy Policy applies to the <strong>Mindlayer</strong> Android
+      application (package <code>com.adsamcik.mindlayer.service</code>),
+      published by <strong>adsamcik</strong> ("we", "us"). Mindlayer is a
+      background service that loads an on-device large language model and lets
+      other apps on the same device run AI inference (text generation, text
+      embeddings, and optical character recognition) locally, without a network
+      connection. It also includes a diagnostics dashboard for you to inspect
+      the service's status.
+    </p>
+
+    <h2>2. No internet access — by design</h2>
+    <p>
+      Mindlayer does <strong>not request the <code>INTERNET</code>
+      permission</strong> (nor <code>ACCESS_NETWORK_STATE</code> or any other
+      network permission) in its Android manifest. The operating system
+      therefore prevents the app from making any network connection. There is no
+      cloud component, no backend server, and no remote API. A continuous
+      integration check fails our build if a network permission is ever
+      introduced.
+    </p>
+
+    <h2>3. Information we collect</h2>
+    <p>
+      <strong>We collect no personal information.</strong> Because the app
+      cannot access the network, no data of any kind — personal or otherwise —
+      is sent to us or to anyone else. Specifically, Mindlayer contains:
+    </p>
+    <ul>
+      <li>no analytics or usage-statistics SDKs;</li>
+      <li>no crash-reporting services;</li>
+      <li>no advertising or advertising identifiers;</li>
+      <li>no third-party tracking or social SDKs;</li>
+      <li>no account system, sign-in, or user profile.</li>
+    </ul>
+
+    <h2>4. How your data is processed (on your device only)</h2>
+    <p>
+      When an app on your device asks Mindlayer to run AI inference, the inputs
+      and outputs are processed entirely in your device's memory and are never
+      transmitted off the device. The table below describes how each kind of
+      data is handled.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Data</th><th>Where it lives</th><th>How long it is kept</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Prompts and other text you (or an app) provide</td>
+          <td>Device memory (RAM) only</td>
+          <td>Released when the request/session ends</td>
+        </tr>
+        <tr>
+          <td>Images and audio sent for analysis</td>
+          <td>Staged <strong>encrypted at rest</strong> (AES-256-GCM with a key
+            that exists only in memory) in the app's private cache, because the
+            on-device model reads media by file path</td>
+          <td>Deleted when the request ends; any leftover ciphertext becomes
+            permanently undecryptable once the process exits and the cache is
+            cleared on the next start</td>
+        </tr>
+        <tr>
+          <td>Model output (generated text, embeddings, recognized text)</td>
+          <td>Returned to the requesting app in memory</td>
+          <td>Not stored by the Mindlayer service</td>
+        </tr>
+        <tr>
+          <td>Diagnostic logs</td>
+          <td>A local, <strong>encrypted</strong> database (SQLCipher) on your
+            device</td>
+          <td>Retained locally until you clear data or uninstall. Logs contain
+            <strong>only metadata</strong> — timing, token counts, request and
+            session identifiers, and error labels. They never contain your
+            prompt text, images, audio, or model output.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      A requesting app may choose to keep its own conversation history in its
+      own encrypted storage on your device (for crash-recovery and continuity).
+      That history belongs to, and is controlled by, that app — not by
+      Mindlayer — and still never leaves the device through Mindlayer.
+    </p>
+
+    <h2>5. Data sharing</h2>
+    <p>
+      <strong>We do not share any data, because no data is collected or
+      transmitted.</strong> Mindlayer has no servers and no third-party
+      integrations that receive data. We do not sell, rent, or disclose personal
+      information to anyone.
+    </p>
+
+    <h2>6. Permissions we request and why</h2>
+    <table>
+      <thead>
+        <tr><th>Permission</th><th>Why it is needed</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>FOREGROUND_SERVICE</code> /
+            <code>FOREGROUND_SERVICE_SPECIAL_USE</code></td>
+          <td>To keep the AI model running while it actively serves a visible
+            request, so inference is not killed mid-response.</td>
+        </tr>
+        <tr>
+          <td><code>POST_NOTIFICATIONS</code></td>
+          <td>To show the required foreground-service notification while
+            inference is running.</td>
+        </tr>
+        <tr>
+          <td><code>USE_BIOMETRIC</code></td>
+          <td>To ask for your fingerprint/face confirmation before granting an
+            app access to the AI service or revoking it — a security check
+            performed entirely on-device.</td>
+        </tr>
+        <tr>
+          <td><code>HIDE_OVERLAY_WINDOWS</code></td>
+          <td>To protect the approval screen from tap-jacking overlays so you
+            always see exactly which app you are granting access to.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      None of these permissions grant access to your contacts, location,
+      messages, files, or any other personal data, and none enable network
+      access.
+    </p>
+
+    <h2>7. Your control: consent, retention, and deletion</h2>
+    <ul>
+      <li>
+        <strong>Consent.</strong> No app can use Mindlayer until you explicitly
+        approve it on a biometric-protected confirmation screen that shows the
+        requesting app's name, signing certificate, and install source. You can
+        deny or block any app.
+      </li>
+      <li>
+        <strong>In-memory data</strong> is released automatically when a request
+        or session ends.
+      </li>
+      <li>
+        <strong>Local logs and any cached files</strong> can be removed at any
+        time from <em>Android Settings → Apps → Mindlayer → Storage → Clear
+        storage</em>.
+      </li>
+      <li>
+        <strong>Full removal.</strong> Uninstalling Mindlayer deletes all of its
+        on-device data, including the encrypted log database and any staged
+        files.
+      </li>
+    </ul>
+
+    <h2>8. Security</h2>
+    <p>
+      Mindlayer is designed to protect your information on the device:
+    </p>
+    <ul>
+      <li>media staged for the model is encrypted at rest with AES-256-GCM using
+        a key that never leaves memory;</li>
+      <li>diagnostic logs are stored in an encrypted (SQLCipher) database;</li>
+      <li>each app must be individually approved by you, gated behind a
+        biometric check, before it can use the service;</li>
+      <li>the approval and dashboard screens block screenshots and screen
+        recording to prevent leaking sensitive context;</li>
+      <li>on-device model files are integrity-checked (SHA-256) before use.</li>
+    </ul>
+    <p>
+      No method of storage is 100% secure, but because nothing is transmitted,
+      your data is never exposed in transit or on any server.
+    </p>
+
+    <h2>9. Children's privacy</h2>
+    <p>
+      Mindlayer does not target children and does not knowingly collect any
+      personal information from anyone, including children under 13 (or the
+      equivalent minimum age in your jurisdiction). Because the app collects and
+      transmits no data, it poses no data-collection risk to users of any age.
+    </p>
+
+    <h2>10. Third-party services</h2>
+    <p>
+      Mindlayer uses only on-device, open-source AI runtimes and models (such as
+      Google's LiteRT and Gemma, and PaddleOCR) that run locally and make no
+      network calls. It integrates no third-party services that receive your
+      data.
+    </p>
+
+    <h2>11. Changes to this policy</h2>
+    <p>
+      If we update this policy, we will change the "Last updated" date above and
+      post the revised version at this URL. Material changes will also be
+      reflected in the app's store listing.
+    </p>
+
+    <h2>12. Contact</h2>
+    <p>
+      If you have questions about this Privacy Policy, contact us at
+      <a href="mailto:play@adsamcik.com">play@adsamcik.com</a>.
+    </p>
+
+    <p style="margin-top:36px"><a href="index.html">&larr; Back to Mindlayer</a></p>
+  </main>
+
+  <footer>
+    <p>Mindlayer — on-device AI for Android · Published by adsamcik ·
+      <a href="https://github.com/adsamcik/Mindlayer">Source on GitHub</a></p>
+  </footer>
+</body>
+</html>
