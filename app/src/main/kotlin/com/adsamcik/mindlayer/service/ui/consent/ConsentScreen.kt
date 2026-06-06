@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -15,9 +16,11 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -32,9 +35,11 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.adsamcik.mindlayer.ConsentIdentity
 import com.adsamcik.mindlayer.service.R
+import com.adsamcik.mindlayer.service.ui.theme.MindlayerTheme
 
 /** Result callbacks fired by the consent UI. */
 class ConsentActions(
@@ -47,7 +52,7 @@ class ConsentActions(
 @Composable
 fun ConsentLoading() {
     Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
+        modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
@@ -58,7 +63,7 @@ fun ConsentLoading() {
 @Composable
 fun ConsentError(expired: Boolean, onDismiss: () -> Unit) {
     Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
+        modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
@@ -94,6 +99,7 @@ fun ConsentScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .safeDrawingPadding()
             .verticalScroll(rememberScrollState())
             .padding(24.dp),
     ) {
@@ -109,7 +115,7 @@ fun ConsentScreen(
         )
         Spacer(Modifier.height(20.dp))
 
-        // App label
+        // App label — the primary identity signal.
         Text(text = label, style = MaterialTheme.typography.titleLarge)
         if (mixedScript) {
             Spacer(Modifier.height(8.dp))
@@ -117,36 +123,51 @@ fun ConsentScreen(
         }
         Spacer(Modifier.height(16.dp))
 
-        LabeledValue(
-            label = stringResource(R.string.consent_package_label),
-            value = identity.packageName,
-            monospace = true,
-        )
-        Spacer(Modifier.height(12.dp))
+        // Verified identity details, grouped into one card for scannability.
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                LabeledValue(
+                    label = stringResource(R.string.consent_package_label),
+                    value = identity.packageName,
+                    monospace = true,
+                )
+                Spacer(Modifier.height(12.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.height(12.dp))
 
-        LabeledValue(
-            label = stringResource(R.string.consent_source_label),
-            value = installSourceText(identity.installSource),
-        )
-        Spacer(Modifier.height(12.dp))
+                LabeledValue(
+                    label = stringResource(R.string.consent_source_label),
+                    value = installSourceText(identity.installSource),
+                )
+                Spacer(Modifier.height(12.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.height(12.dp))
 
-        // Cert fingerprint (truncated, expandable)
-        Text(
-            text = stringResource(R.string.consent_cert_label),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        val certA11y = stringResource(R.string.consent_cert_a11y)
-        Text(
-            text = if (showFullCert) groupHex(identity.signingCertSha256)
-            else identity.signingCertSha256.take(16) + "…",
-            style = MaterialTheme.typography.bodyMedium,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.semantics { contentDescription = certA11y },
-        )
-        if (!showFullCert) {
-            TextButton(onClick = { showFullCert = true }) {
-                Text(stringResource(R.string.consent_cert_show_full))
+                // Cert fingerprint (truncated, expandable)
+                Text(
+                    text = stringResource(R.string.consent_cert_label),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                val certA11y = stringResource(R.string.consent_cert_a11y)
+                Text(
+                    text = if (showFullCert) groupHex(identity.signingCertSha256)
+                    else identity.signingCertSha256.take(16) + "…",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.semantics { contentDescription = certA11y },
+                )
+                if (!showFullCert) {
+                    TextButton(onClick = { showFullCert = true }) {
+                        Text(stringResource(R.string.consent_cert_show_full))
+                    }
+                }
             }
         }
 
@@ -223,6 +244,7 @@ private fun LabeledValue(label: String, value: String, monospace: Boolean = fals
         Text(
             text = value,
             style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
             fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
         )
     }
@@ -281,4 +303,30 @@ private fun installSourceText(installSource: String?): String = when (installSou
 /** Group a 64-char hex string into space-separated quads for readability. */
 private fun groupHex(hex: String): String =
     hex.chunked(4).joinToString(" ")
+
+@Preview(showBackground = true, name = "Consent prompt — sideload")
+@Composable
+private fun ConsentScreenPreview() {
+    MindlayerTheme(dynamicColor = false) {
+        Surface(color = MaterialTheme.colorScheme.background) {
+            ConsentScreen(
+                identity = ConsentIdentity(
+                    packageName = "com.adsamcik.starlitcoffee.debug",
+                    displayName = "Starlit Coffee (Debug)",
+                    signingCertSha256 = "664735c79928241a" + "b".repeat(48),
+                    installSource = null,
+                    previousSigSha256 = null,
+                    expiresAtMs = 0L,
+                ),
+                submitting = false,
+                actions = ConsentActions(
+                    onApprove = {},
+                    onDenyOnce = {},
+                    onDeny24h = {},
+                    onDenyPermanent = {},
+                ),
+            )
+        }
+    }
+}
 
