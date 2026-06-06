@@ -295,6 +295,32 @@ class ConnectionManager {
         )
 
     /**
+     * Report that an in-flight AIDL transaction observed a dead binder
+     * (an [android.os.DeadObjectException] or other [android.os.RemoteException]).
+     *
+     * The async death signals ([ServiceConnection.onServiceDisconnected],
+     * [ServiceConnection.onBindingDied], `linkToDeath`) may not have fired yet
+     * at the moment a transaction throws, so the cached binder can still point
+     * at the just-died process. Calling this from the SDK's AIDL chokepoint
+     * invalidates that stale binder and moves the state machine to
+     * [ConnectionState.RECOVERING], guaranteeing the next [awaitConnected]
+     * blocks for a freshly re-delivered binder instead of handing back the
+     * dead one (which would burn the caller's retry on an instant repeat
+     * failure).
+     *
+     * Race-safe: it only invalidates when [dead] is still the cached binder,
+     * so a concurrent reconnect that already installed a fresh binder is left
+     * untouched. Passing `null` forces invalidation unconditionally.
+     */
+    internal fun reportBinderDeath(dead: IMindlayerService? = null) {
+        if (dead != null && binderRef.get() !== dead) {
+            // A reconnect already swapped in a fresh binder — nothing to do.
+            return
+        }
+        onBinderDied()
+    }
+
+    /**
      * Suspends until the connection reaches [ConnectionState.CONNECTED] and
      * returns a validated binder reference, or throws
      * [kotlinx.coroutines.TimeoutCancellationException] after [timeoutMs].
