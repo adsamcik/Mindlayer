@@ -15,7 +15,7 @@ import java.util.concurrent.ConcurrentHashMap
  * OCR uses the same NPU-on-explicit-request / GPU-default-with-CPU-fallback
  * policy as chat. The historical CPU lock (reason
  * `OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED`) is removed; callers that need a
- * conservative configuration must pass `preferredBackend = "CPU"` explicitly.
+ * conservative configuration must pass `preferredBackend = BACKEND_CPU` explicitly.
  * Heightened LiteRT issue #5264 hazard from three sequential `CompiledModel`
  * instances (det + rec + cls) is still tracked in `docs/LITERT_COEXISTENCE.md`
  * — validate on real devices before relying on GPU/NPU OCR in production.
@@ -106,20 +106,20 @@ internal object LiteRtAcceleratorResolver {
     private fun resolveOcr(requested: String?, nativeLibraryDir: String?): AcceleratorDecision {
         val attempted = mutableListOf<Pair<String, String>>()
         return when (requested.normalizedBackend()) {
-            "CPU" -> decision("CPU", "REQUESTED_CPU", attempted + ("CPU" to "selected"))
-            "GPU" -> decision("GPU", "REQUESTED_GPU", attempted + ("GPU" to "selected"))
-            "NPU" -> {
+            BACKEND_CPU -> decision(BACKEND_CPU, "REQUESTED_CPU", attempted + (BACKEND_CPU to "selected"))
+            BACKEND_GPU -> decision(BACKEND_GPU, "REQUESTED_GPU", attempted + (BACKEND_GPU to "selected"))
+            BACKEND_NPU -> {
                 val probe = probeNpu(nativeLibraryDir)
-                attempted += "NPU" to probe.reason
+                attempted += BACKEND_NPU to probe.reason
                 if (probe.supported) {
-                    decision("NPU", "REQUESTED_NPU_SUPPORTED", attempted)
+                    decision(BACKEND_NPU, "REQUESTED_NPU_SUPPORTED", attempted)
                 } else {
-                    attempted += "GPU" to "selected"
-                    decision("GPU", "REQUESTED_NPU_UNSUPPORTED_GPU_FALLBACK_${probe.reason}", attempted)
+                    attempted += BACKEND_GPU to "selected"
+                    decision(BACKEND_GPU, "REQUESTED_NPU_UNSUPPORTED_GPU_FALLBACK_${probe.reason}", attempted)
                 }
             }
-            null -> decision("GPU", "DEFAULT_GPU_THEN_CPU_CHAIN", attempted + ("GPU" to "selected"))
-            else -> decision("GPU", "UNKNOWN_REQUESTED_BACKEND_GPU_FALLBACK", attempted + ("GPU" to "selected"))
+            null -> decision(BACKEND_GPU, "DEFAULT_GPU_THEN_CPU_CHAIN", attempted + (BACKEND_GPU to "selected"))
+            else -> decision(BACKEND_GPU, "UNKNOWN_REQUESTED_BACKEND_GPU_FALLBACK", attempted + (BACKEND_GPU to "selected"))
         }
     }
 
@@ -128,63 +128,75 @@ internal object LiteRtAcceleratorResolver {
     private fun resolveEmbeddings(requested: String?, nativeLibraryDir: String?): AcceleratorDecision {
         val attempted = mutableListOf<Pair<String, String>>()
         return when (requested.normalizedBackend()) {
-            "CPU" -> decision("CPU", "REQUESTED_CPU", attempted + ("CPU" to "selected"))
-            "GPU" -> decision("GPU", "REQUESTED_GPU", attempted + ("GPU" to "selected"))
-            "NPU" -> {
+            BACKEND_CPU -> decision(BACKEND_CPU, "REQUESTED_CPU", attempted + (BACKEND_CPU to "selected"))
+            BACKEND_GPU -> decision(BACKEND_GPU, "REQUESTED_GPU", attempted + (BACKEND_GPU to "selected"))
+            BACKEND_NPU -> {
                 val probe = probeNpu(nativeLibraryDir)
-                attempted += "NPU" to probe.reason
+                attempted += BACKEND_NPU to probe.reason
                 if (probe.supported) {
-                    decision("NPU", "REQUESTED_NPU_SUPPORTED", attempted)
+                    decision(BACKEND_NPU, "REQUESTED_NPU_SUPPORTED", attempted)
                 } else {
-                    attempted += "GPU" to "selected"
-                    decision("GPU", "REQUESTED_NPU_UNSUPPORTED_GPU_FALLBACK_${probe.reason}", attempted)
+                    attempted += BACKEND_GPU to "selected"
+                    decision(BACKEND_GPU, "REQUESTED_NPU_UNSUPPORTED_GPU_FALLBACK_${probe.reason}", attempted)
                 }
             }
             null -> {
                 val probe = probeNpu(nativeLibraryDir)
-                attempted += "NPU" to probe.reason
+                attempted += BACKEND_NPU to probe.reason
                 if (probe.supported) {
-                    decision("NPU", "DEFAULT_NPU_SUPPORTED", attempted)
+                    decision(BACKEND_NPU, "DEFAULT_NPU_SUPPORTED", attempted)
                 } else {
-                    attempted += "GPU" to "selected"
-                    decision("GPU", "DEFAULT_GPU_NPU_UNSUPPORTED_${probe.reason}", attempted)
+                    attempted += BACKEND_GPU to "selected"
+                    decision(BACKEND_GPU, "DEFAULT_GPU_NPU_UNSUPPORTED_${probe.reason}", attempted)
                 }
             }
-            else -> decision("GPU", "UNKNOWN_REQUESTED_BACKEND_GPU_FALLBACK", attempted + ("GPU" to "selected"))
+            else -> decision(BACKEND_GPU, "UNKNOWN_REQUESTED_BACKEND_GPU_FALLBACK", attempted + (BACKEND_GPU to "selected"))
         }
     }
 
     private fun resolveChat(requested: String?, nativeLibraryDir: String?): AcceleratorDecision {
         val attempted = mutableListOf<Pair<String, String>>()
         return when (requested.normalizedBackend()) {
-            "CPU" -> decision("CPU", "REQUESTED_CPU", attempted + ("CPU" to "selected"))
-            "GPU" -> decision("GPU", "REQUESTED_GPU", attempted + ("GPU" to "selected"))
-            "NPU" -> {
+            BACKEND_CPU -> decision(BACKEND_CPU, "REQUESTED_CPU", attempted + (BACKEND_CPU to "selected"))
+            BACKEND_GPU -> decision(BACKEND_GPU, "REQUESTED_GPU", attempted + (BACKEND_GPU to "selected"))
+            BACKEND_NPU -> {
                 val probe = probeNpu(nativeLibraryDir)
-                attempted += "NPU" to probe.reason
-                if (probe.supported) {
-                    decision("NPU", "REQUESTED_NPU_SUPPORTED", attempted)
-                } else {
-                    attempted += "GPU" to "selected"
-                    decision("GPU", "REQUESTED_NPU_UNSUPPORTED_GPU_FALLBACK_${probe.reason}", attempted)
+                attempted += BACKEND_NPU to probe.reason
+                when {
+                    probe.supported -> decision(BACKEND_NPU, "REQUESTED_NPU_SUPPORTED", attempted)
+                    hasHardwareGpu() -> {
+                        attempted += BACKEND_GPU to "selected"
+                        decision(BACKEND_GPU, "REQUESTED_NPU_UNSUPPORTED_GPU_FALLBACK_${probe.reason}", attempted)
+                    }
+                    else -> {
+                        // No NPU and no hardware GPU (emulator): fall back to CPU,
+                        // never the software GPU that crashes chat engine init.
+                        attempted += BACKEND_GPU to "skipped_no_hardware_gpu"
+                        attempted += BACKEND_CPU to "selected"
+                        decision(
+                            BACKEND_CPU,
+                            "REQUESTED_NPU_UNSUPPORTED_CPU_NO_HARDWARE_GPU_${probe.reason}",
+                            attempted,
+                        )
+                    }
                 }
             }
             null -> if (hasHardwareGpu()) {
-                decision("GPU", "DEFAULT_GPU_THEN_CPU_CHAIN", attempted + ("GPU" to "selected"))
+                decision(BACKEND_GPU, "DEFAULT_GPU_THEN_CPU_CHAIN", attempted + (BACKEND_GPU to "selected"))
             } else {
                 decision(
-                    "CPU",
+                    BACKEND_CPU,
                     "DEFAULT_CPU_NO_HARDWARE_GPU",
-                    attempted + ("GPU" to "skipped_no_hardware_gpu") + ("CPU" to "selected"),
+                    attempted + (BACKEND_GPU to "skipped_no_hardware_gpu") + (BACKEND_CPU to "selected"),
                 )
             }
             else -> if (hasHardwareGpu()) {
-                decision("GPU", "UNKNOWN_REQUESTED_BACKEND_GPU_FALLBACK", attempted + ("GPU" to "selected"))
+                decision(BACKEND_GPU, "UNKNOWN_REQUESTED_BACKEND_GPU_FALLBACK", attempted + (BACKEND_GPU to "selected"))
             } else {
                 decision(
-                    "CPU",
+                    BACKEND_CPU,
                     "UNKNOWN_REQUESTED_BACKEND_CPU_NO_HARDWARE_GPU",
-                    attempted + ("CPU" to "selected"),
+                    attempted + (BACKEND_CPU to "selected"),
                 )
             }
         }
@@ -248,7 +260,7 @@ internal object LiteRtAcceleratorResolver {
      * software-GPU path.
      *
      * Real devices report a vendor GPU and are unaffected. An explicit
-     * `preferredBackend = "GPU"` still forces GPU verbatim (e.g. for on-device
+     * `preferredBackend = BACKEND_GPU` still forces GPU verbatim (e.g. for on-device
      * GPU testing) — this gate only changes the DEFAULT and UNKNOWN cases.
      */
     private fun hasHardwareGpu(): Boolean {
@@ -308,6 +320,16 @@ internal object LiteRtAcceleratorResolver {
     }
 
     private val SUPPORTED_FEATURES = setOf("embeddings", "ocr", "chat")
+
+    /**
+     * Canonical backend labels. These are the strings carried in
+     * [AcceleratorDecision.backend] and matched by `EngineManager`'s
+     * `resolveBackendChain`, so both sides reference the same constants instead
+     * of repeating magic strings.
+     */
+    internal const val BACKEND_CPU = "CPU"
+    internal const val BACKEND_GPU = "GPU"
+    internal const val BACKEND_NPU = "NPU"
 
     private val QUALCOMM_NPU_SOCS = setOf(
         "sm8450", "sm8475", "sm8550", "sm8650", "sm8750", "sm8850",

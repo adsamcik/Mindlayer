@@ -77,4 +77,37 @@ class LiteRtAcceleratorResolverChatGpuProbeTest {
             decision.reason == "DEFAULT_GPU_THEN_CPU_CHAIN",
         )
     }
+
+    @Test fun `chat NPU request without NPU falls back to CPU when no hardware GPU`() {
+        // Allowlisted SoC but no NPU native lib → NPU unsupported. Without a
+        // hardware GPU the fallback must be CPU, not the software GPU that
+        // crashes chat engine init.
+        LiteRtAcceleratorResolver.setHardwareGpuForTesting(present = false)
+        LiteRtAcceleratorResolver.setEnvironmentForTesting(
+            apiLevel = 33,
+            socModel = "sm8550",
+            libs = listOf("libsomething-unrelated.so"),
+        )
+        val decision = LiteRtAcceleratorResolver.resolveBackend("NPU", "chat")
+        assertEquals("CPU", decision.backend)
+        assertTrue(
+            "reason must surface the NPU→CPU no-hardware-GPU downgrade, was ${decision.reason}",
+            decision.reason.startsWith("REQUESTED_NPU_UNSUPPORTED_CPU_NO_HARDWARE_GPU_"),
+        )
+    }
+
+    @Test fun `chat NPU request without NPU still falls back to GPU when hardware GPU present`() {
+        LiteRtAcceleratorResolver.setHardwareGpuForTesting(present = true)
+        LiteRtAcceleratorResolver.setEnvironmentForTesting(
+            apiLevel = 33,
+            socModel = "sm8550",
+            libs = listOf("libsomething-unrelated.so"),
+        )
+        val decision = LiteRtAcceleratorResolver.resolveBackend("NPU", "chat")
+        assertEquals("GPU", decision.backend)
+        assertTrue(
+            "reason must surface the NPU→GPU fallback, was ${decision.reason}",
+            decision.reason.startsWith("REQUESTED_NPU_UNSUPPORTED_GPU_FALLBACK_"),
+        )
+    }
 }
