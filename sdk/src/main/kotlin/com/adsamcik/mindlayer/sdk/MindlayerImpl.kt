@@ -187,6 +187,17 @@ internal class MindlayerImpl(
         private val DEFAULT_CREATE_SESSION_INIT_RETRY_BACKOFF_MS = listOf(50L, 200L, 800L)
 
         /**
+         * Number of transparent retries an *idempotent* AIDL call gets when the
+         * `:ml` process dies mid-transaction ([android.os.DeadObjectException]).
+         * One retry is enough to ride out a single OS low-memory kill followed
+         * by the `BIND_AUTO_CREATE` restart; persistent death surfaces a typed
+         * [MindlayerErrorCode.SERVICE_UNAVAILABLE] so callers can back off.
+         * Non-idempotent calls never retry — they map straight to the typed
+         * error to avoid duplicating a possibly-applied side effect.
+         */
+        private const val MAX_SERVICE_DEATH_RETRIES = 1
+
+        /**
          * Per-instance buffer for [evictionNotices]. 64 entries is enough to
          * absorb a device-wide memory-pressure storm (which evicts every
          * non-streaming session, typically ≤8) plus normal expiration churn
@@ -954,21 +965,91 @@ internal class MindlayerImpl(
      * auth gate (allowlist rejection, registration precondition) propagates
      * unchanged — it remains the canonical "you don't have the right to do
      * this" signal so IDS / Play Protect doesn't lose meaning.
+     *
+     * ### Service-process death
+     *
+     * If the `:ml` process dies mid-transaction the binder throws
+     * [android.os.DeadObjectException] (a subclass of
+     * [android.os.RemoteException]). The async death signals
+     * (`onServiceDisconnected` / `onBindingDied` / `linkToDeath`) may not have
+     * fired yet, so this chokepoint eagerly invalidates the stale binder via
+     * [ConnectionManager.reportBinderDeath] — that guarantees the next
+     * [ConnectionManager.awaitConnected] blocks for a freshly re-delivered
+     * binder instead of handing back the dead one. It then either:
+     *
+     *  - **retries once** when [retryOnServiceDeath] is `true` — reserved for
+     *    *idempotent* operations (embeddings, status / health reads) where a
+     *    repeat after the `BIND_AUTO_CREATE` restart is side-effect-free; or
+     *  - **throws** a typed [MindlayerException] with
+     *    [MindlayerErrorCode.SERVICE_UNAVAILABLE] for non-idempotent calls, so
+     *    a partially-applied side effect is never silently duplicated.
+     *
+     * Any other [android.os.RemoteException] (non-fatal transport failure) maps
+     * to the same typed error without retry. A raw
+     * [android.os.DeadObjectException] therefore never escapes to callers.
+     *
+     * @param retryOnServiceDeath opt-in transparent retry after process death.
+     *   Only pass `true` for operations that are safe to run twice.
      */
     private suspend inline fun <R> withTypedErrors(
         requestId: String? = null,
         sessionId: String? = null,
+        retryOnServiceDeath: Boolean = false,
         crossinline block: suspend (com.adsamcik.mindlayer.IMindlayerService) -> R,
-    ): R = try {
-        block(connection.awaitConnected())
-    } catch (e: SecurityException) {
-        throw MindlayerException.fromAidlSecurityException(e, requestId, sessionId) ?: throw e
+    ): R {
+        var deathRetries = 0
+        while (true) {
+            val service = connection.awaitConnected()
+            try {
+                return block(service)
+            } catch (e: SecurityException) {
+                throw MindlayerException.fromAidlSecurityException(e, requestId, sessionId) ?: throw e
+            } catch (e: android.os.DeadObjectException) {
+                // Invalidate the stale binder so the next awaitConnected()
+                // waits for a fresh one rather than re-failing instantly.
+                connection.reportBinderDeath(service)
+                if (retryOnServiceDeath && deathRetries < MAX_SERVICE_DEATH_RETRIES) {
+                    deathRetries++
+                    continue
+                }
+                throw serviceDied(e, requestId, sessionId)
+            } catch (e: android.os.RemoteException) {
+                // Not a definitive process death — surface a typed transport
+                // error but never auto-retry (the call may have applied).
+                connection.reportBinderDeath(service)
+                throw serviceDied(e, requestId, sessionId)
+            }
+        }
     }
+
+    /**
+     * Map a dead / failed binder transaction to the typed
+     * [MindlayerErrorCode.SERVICE_UNAVAILABLE] error. [cause] is always a
+     * framework transport exception ([android.os.RemoteException] /
+     * [android.os.DeadObjectException]) — never an engine-originated
+     * `Throwable`, so attaching it as the cause cannot leak prompt or
+     * model-output text (see [MindlayerException]'s cause contract).
+     */
+    private fun serviceDied(
+        cause: Throwable,
+        requestId: String?,
+        sessionId: String?,
+    ): MindlayerException = MindlayerException(
+        message = "Mindlayer service connection lost (process died or binder transport failure)",
+        code = MindlayerErrorCode.SERVICE_UNAVAILABLE,
+        requestId = requestId,
+        sessionId = sessionId,
+        cause = cause,
+    )
 
     /**
      * Non-suspend variant for paths that already hold a connected service
      * reference (e.g. [startInference], where the AIDL call kicks off a cold
      * flow and must run synchronously to produce a request handle).
+     *
+     * Cannot reconnect (no suspension point), so a dead binder is mapped
+     * straight to the typed [MindlayerErrorCode.SERVICE_UNAVAILABLE] without
+     * retry; recovery happens on the caller's next suspendable AIDL call.
      */
     private inline fun <R> withTypedErrorsSync(
         service: com.adsamcik.mindlayer.IMindlayerService,
@@ -979,6 +1060,12 @@ internal class MindlayerImpl(
         block(service)
     } catch (e: SecurityException) {
         throw MindlayerException.fromAidlSecurityException(e, requestId, sessionId) ?: throw e
+    } catch (e: android.os.DeadObjectException) {
+        connection.reportBinderDeath(service)
+        throw serviceDied(e, requestId, sessionId)
+    } catch (e: android.os.RemoteException) {
+        connection.reportBinderDeath(service)
+        throw serviceDied(e, requestId, sessionId)
     }
 
     // -- Prewarm --------------------------------------------------------------
@@ -1030,7 +1117,7 @@ internal class MindlayerImpl(
             return backend
         }
         val activeBackend = try {
-            withTypedErrors {
+            withTypedErrors(retryOnServiceDeath = true) {
                 it.prewarmAndAwait(backend.value, timeoutMs)
             }
         } catch (_: NoSuchMethodError) {
@@ -1136,7 +1223,7 @@ internal class MindlayerImpl(
 
     /** Get info for a single session. */
     suspend fun getSessionInfo(sessionId: String): SessionInfo {
-        return withTypedErrors(sessionId = sessionId) { it.getSessionInfo(sessionId) }
+        return withTypedErrors(sessionId = sessionId, retryOnServiceDeath = true) { it.getSessionInfo(sessionId) }
     }
 
     /** List all live server-side sessions owned by this caller.
@@ -1151,7 +1238,7 @@ internal class MindlayerImpl(
      */
     /** List all live server-side sessions owned by this caller. */
     override suspend fun listSessions(): List<SessionInfo> {
-        return withTypedErrors { it.listSessions() }
+        return withTypedErrors(retryOnServiceDeath = true) { it.listSessions() }
     }
 
     // -- Chat (text only) -----------------------------------------------------
@@ -1782,7 +1869,7 @@ internal class MindlayerImpl(
         validateEmbeddingBatchSize(items, caps.maxEmbeddingBatchInline, "inline")
         return try {
             withContext(Dispatchers.IO) {
-                val res = withTypedErrors { it.embedBatch(items.map { config -> config.toAidlRequest() }) }
+                val res = withTypedErrors(retryOnServiceDeath = true) { it.embedBatch(items.map { config -> config.toAidlRequest() }) }
                 EmbeddingBatch(
                     results = res.results,
                     transport = EmbeddingTransport.Inline,
@@ -1804,7 +1891,7 @@ internal class MindlayerImpl(
         validateEmbeddingBatchSize(items, caps.maxEmbeddingBatchShm, "shared-memory")
         return try {
             withContext(Dispatchers.IO) {
-                val transfer = withTypedErrors { it.embedBatchShm(items.map { config -> config.toAidlRequest() }) }
+                val transfer = withTypedErrors(retryOnServiceDeath = true) { it.embedBatchShm(items.map { config -> config.toAidlRequest() }) }
                 // Read the batch-level fields *before* parseEmbeddingTransfer
                 // drains and closes the PFD — the parcelable fields themselves
                 // survive close, but reading them eagerly keeps the surface
@@ -1882,7 +1969,7 @@ internal class MindlayerImpl(
         requireEmbeddingCapability()
         return try {
             withContext(Dispatchers.IO) {
-                withTypedErrors { it.embed(config.toAidlRequest()) }
+                withTypedErrors(retryOnServiceDeath = true) { it.embed(config.toAidlRequest()) }
             }
         } catch (_: NoSuchMethodError) {
             throw embeddingNotSupported()
@@ -1912,7 +1999,7 @@ internal class MindlayerImpl(
         validateEmbeddingBatchSize(configs, caps.maxEmbeddingBatchInline, "inline")
         return try {
             withContext(Dispatchers.IO) {
-                withTypedErrors { it.embedBatch(configs.map { config -> config.toAidlRequest() }).results }
+                withTypedErrors(retryOnServiceDeath = true) { it.embedBatch(configs.map { config -> config.toAidlRequest() }).results }
             }
         } catch (_: NoSuchMethodError) {
             throw embeddingNotSupported()
@@ -1949,7 +2036,7 @@ internal class MindlayerImpl(
         validateEmbeddingBatchSize(configs, caps.maxEmbeddingBatchShm, "shared-memory")
         return try {
             withContext(Dispatchers.IO) {
-                parseEmbeddingTransfer(withTypedErrors { it.embedBatchShm(configs.map { config -> config.toAidlRequest() }) })
+                parseEmbeddingTransfer(withTypedErrors(retryOnServiceDeath = true) { it.embedBatchShm(configs.map { config -> config.toAidlRequest() }) })
             }
         } catch (_: NoSuchMethodError) {
             throw embeddingNotSupported()
@@ -2312,7 +2399,7 @@ internal class MindlayerImpl(
 
     /** Get the current service status (engine loaded, thermals, etc.). */
     override suspend fun getStatus(): ServiceStatus {
-        return withTypedErrors { it.status }
+        return withTypedErrors(retryOnServiceDeath = true) { it.status }
     }
 
     /**
@@ -2345,7 +2432,7 @@ internal class MindlayerImpl(
      */
     override suspend fun ping(): com.adsamcik.mindlayer.HealthCheck {
         return try {
-            withTypedErrors { it.ping() }
+            withTypedErrors(retryOnServiceDeath = true) { it.ping() }
         } catch (_: NoSuchMethodError) {
             synthesiseHealthCheckFallback()
         } catch (_: AbstractMethodError) {
@@ -2380,12 +2467,12 @@ internal class MindlayerImpl(
 
     /** Get engine info (selected model, perf stats, etc.). */
     override suspend fun getEngineInfo(): EngineInfo {
-        return withTypedErrors { it.engineInfo }
+        return withTypedErrors(retryOnServiceDeath = true) { it.engineInfo }
     }
 
     /** Get a diagnostic JSON dump for bug reports and troubleshooting. */
     suspend fun getDiagnostics(): String {
-        return withTypedErrors { it.diagnostics }
+        return withTypedErrors(retryOnServiceDeath = true) { it.diagnostics }
     }
 
     /**
@@ -2402,7 +2489,7 @@ internal class MindlayerImpl(
             return null
         }
         return try {
-            withTypedErrors { it.diagnosticsTyped }
+            withTypedErrors(retryOnServiceDeath = true) { it.diagnosticsTyped }
         } catch (_: NoSuchMethodError) {
             null
         } catch (_: AbstractMethodError) {
@@ -3219,7 +3306,7 @@ internal class MindlayerImpl(
         requireOcrCapability()
         return try {
             withContext(Dispatchers.IO) {
-                withTypedErrors { it.ocrLimits }
+                withTypedErrors(retryOnServiceDeath = true) { it.ocrLimits }
             }
         } catch (_: NoSuchMethodError) {
             com.adsamcik.mindlayer.OcrLimits.zeroBaseline()

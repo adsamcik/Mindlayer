@@ -17,6 +17,7 @@ import com.adsamcik.mindlayer.SessionInfo
 import com.adsamcik.mindlayer.EngineInfo
 import com.adsamcik.mindlayer.ToolResult
 import com.adsamcik.mindlayer.sdk.db.MindlayerDatabase
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -436,9 +437,10 @@ class MindlayerApiTest {
         try {
             try {
                 mindlayer.chatWithMedia("sess-media", "transcribe", part)
-                fail("Expected RemoteException")
-            } catch (_: RemoteException) {
-                // Expected synchronous binder failure from inferMulti.
+                fail("Expected MindlayerException")
+            } catch (_: MindlayerException) {
+                // Synchronous binder failure from inferMulti now surfaces as a
+                // typed SERVICE_UNAVAILABLE; descriptors must still be closed.
             }
 
             assertFalse("media source must be closed after binder failure", mediaPipe[0].fileDescriptor.valid())
@@ -468,13 +470,21 @@ class MindlayerApiTest {
         disconnectedMl.chat("sess-x", "Hello").events.toList()
     }
 
-    @Test(expected = RemoteException::class)
+    @Test
     fun `chat_aidlThrows_propagatesError`() = runTest {
         every {
             mockService.infer(any(), any(), any(), any())
         } throws RemoteException("Service crashed")
 
-        mindlayer.chat("sess-err", "Boom").events.toList()
+        try {
+            mindlayer.chat("sess-err", "Boom").events.toList()
+            fail("expected MindlayerException")
+        } catch (e: MindlayerException) {
+            // Binder transport failures surface as a typed SERVICE_UNAVAILABLE
+            // rather than leaking a raw RemoteException to callers.
+            assertEquals(MindlayerErrorCode.SERVICE_UNAVAILABLE, e.code)
+            assertTrue(e.cause is RemoteException)
+        }
     }
 
     @Test
