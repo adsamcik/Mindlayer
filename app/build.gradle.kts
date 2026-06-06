@@ -36,37 +36,66 @@ val hasCiReleaseKeystore =
     ciReleaseKeystore != null && ciKeystorePassword != null && ciKeyAlias != null && ciKeyPassword != null
 val hasReleaseKeystore = hasLocalReleaseKeystore || hasCiReleaseKeystore
 
-val modelSha256 = project.findProperty("modelSha256")?.toString()?.trim().orEmpty()
-val modelSha256Pattern = Regex("^[0-9a-f]{64}$")
+// SHA precedence for every model digest the release guards + BuildConfig need:
+//   1. explicit -P<name>Sha256 (CI / power-user override), else
+//   2. the digest computed once from the local cache in the root build, else
+//   3. "" (debug advisory; release guards below fail closed).
+// See the "Release model provisioning" block in the root build.gradle.kts.
+@Suppress("UNCHECKED_CAST")
+val releaseModelShas: Map<String, String> =
+    (rootProject.extra["mindlayerModelShas"] as? Map<String, String>).orEmpty()
 
-val paddleOcrDetSha256 = project.findProperty("paddleOcrDetSha256")?.toString()?.trim().orEmpty()
-val paddleOcrRecSha256 = project.findProperty("paddleOcrRecSha256")?.toString()?.trim().orEmpty()
-val paddleOcrClsSha256 = project.findProperty("paddleOcrClsSha256")?.toString()?.trim().orEmpty()
-val paddleOcrDictSha256 = project.findProperty("paddleOcrDictSha256")?.toString()?.trim().orEmpty()
+fun resolveModelSha(propName: String, cacheFileName: String): String =
+    project.findProperty(propName)?.toString()?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+        ?: releaseModelShas[cacheFileName].orEmpty()
 
-val embeddingModelSha256 = project.findProperty("embeddingModelSha256")?.toString()?.trim().orEmpty()
-val embeddingTokenizerSha256 = project.findProperty("embeddingTokenizerSha256")?.toString()?.trim().orEmpty()
+val modelSha256 = resolveModelSha("modelSha256", "gemma-4-E2B-it.litertlm")
+
+val paddleOcrDetSha256 = resolveModelSha("paddleOcrDetSha256", "paddleocr-ppocrv5-mobile-det.tflite")
+val paddleOcrRecSha256 = resolveModelSha("paddleOcrRecSha256", "paddleocr-ppocrv5-mobile-rec.tflite")
+val paddleOcrClsSha256 = resolveModelSha("paddleOcrClsSha256", "paddleocr-ppocrv5-mobile-cls.tflite")
+val paddleOcrDictSha256 = resolveModelSha("paddleOcrDictSha256", "paddleocr-ppocrv5-mobile-dict.txt")
+
+val embeddingModelSha256 = resolveModelSha("embeddingModelSha256", "embedding-gemma-300m-v1.tflite")
+val embeddingTokenizerSha256 = resolveModelSha("embeddingTokenizerSha256", "embedding-gemma-300m-v1.spm.model")
+
+// Resolve the AI-pack integrity-manifest paths at configuration time so the
+// validator doLast actions capture plain Strings (config-cache safe) instead of
+// referencing rootProject at execution time.
+val gemmaIntegrityManifestPath = rootProject.layout.projectDirectory
+    .file("gemma_model/src/main/assets/model_integrity.json").asFile.absolutePath
+val paddleIntegrityManifestPath = rootProject.layout.projectDirectory
+    .file("paddleocr_model/src/main/assets/paddleocr_model_integrity.json").asFile.absolutePath
+val embeddingIntegrityManifestPath = rootProject.layout.projectDirectory
+    .file("gemma_embed_model/src/main/assets/embedding_model_integrity.json").asFile.absolutePath
 
 val validateReleaseModelSha256 by tasks.registering {
     dependsOn(":gemma_model:generateModelIntegrityManifest")
     group = "verification"
-    description = "Fails release builds unless -PmodelSha256 is a lowercase SHA-256 digest."
+    description = "Fails release builds unless the Gemma model SHA-256 (from -PmodelSha256 or the local cache) matches model_integrity.json."
+    inputs.property("modelSha256", modelSha256)
+    inputs.property("manifestPath", gemmaIntegrityManifestPath)
     doLast {
-        if (!modelSha256Pattern.matches(modelSha256)) {
+        val props = inputs.properties
+        val sha = props["modelSha256"] as String
+        val sha256Re = Regex("^[0-9a-f]{64}$")
+        if (!sha256Re.matches(sha)) {
             throw GradleException(
-                "Release builds require -PmodelSha256=<64 lowercase hex SHA-256 of the bundled .litertlm model>.",
+                "Release builds need a Gemma model SHA-256. Set MINDLAYER_MODEL_CACHE (or " +
+                    "-Pmindlayer.modelCache=<dir>) so it can be derived from the cached " +
+                    "gemma-4-E2B-it.litertlm, or pass -PmodelSha256=<64 lowercase hex>.",
             )
         }
-        val manifest = rootProject.file("gemma_model/src/main/assets/model_integrity.json")
+        val manifest = File(props["manifestPath"] as String)
         if (!manifest.isFile) {
-            throw GradleException("Release builds require gemma_model/src/main/assets/model_integrity.json.")
+            throw GradleException("Release builds require ${manifest.path}.")
         }
         val manifestSha = Regex(""""sha256"\s*:\s*"([0-9a-f]{64})"""")
             .find(manifest.readText())
             ?.groupValues
             ?.get(1)
             ?: throw GradleException("model_integrity.json must contain a 64-character lowercase sha256 value.")
-        if (manifestSha != modelSha256) {
+        if (manifestSha != sha) {
             throw GradleException(
                 "BuildConfig.MODEL_SHA256 does not match model_integrity.json sha256.",
             )
@@ -83,30 +112,42 @@ val validateReleaseModelSha256 by tasks.registering {
 val validateReleasePaddleOcrSha256 by tasks.registering {
     dependsOn(":paddleocr_model:generatePaddleOcrModelIntegrityManifest")
     group = "verification"
-    description = "Fails release builds unless all four -PpaddleOcr*Sha256 properties are lowercase SHA-256 digests matching the manifest."
+    description = "Fails release builds unless the four PaddleOCR SHA-256 digests (from -PpaddleOcr*Sha256 or the local cache) match the manifest."
+    inputs.property("detSha256", paddleOcrDetSha256)
+    inputs.property("recSha256", paddleOcrRecSha256)
+    inputs.property("clsSha256", paddleOcrClsSha256)
+    inputs.property("dictSha256", paddleOcrDictSha256)
+    inputs.property("manifestPath", paddleIntegrityManifestPath)
     doLast {
+        val props = inputs.properties
+        val sha256Re = Regex("^[0-9a-f]{64}$")
+        val detSha = props["detSha256"] as String
+        val recSha = props["recSha256"] as String
+        val clsSha = props["clsSha256"] as String
+        val dictSha = props["dictSha256"] as String
         val missing = buildList {
-            if (!modelSha256Pattern.matches(paddleOcrDetSha256)) add("paddleOcrDetSha256")
-            if (!modelSha256Pattern.matches(paddleOcrRecSha256)) add("paddleOcrRecSha256")
-            if (!modelSha256Pattern.matches(paddleOcrClsSha256)) add("paddleOcrClsSha256")
-            if (!modelSha256Pattern.matches(paddleOcrDictSha256)) add("paddleOcrDictSha256")
+            if (!sha256Re.matches(detSha)) add("detection")
+            if (!sha256Re.matches(recSha)) add("recognition")
+            if (!sha256Re.matches(clsSha)) add("orientation")
+            if (!sha256Re.matches(dictSha)) add("dictionary")
         }
         if (missing.isNotEmpty()) {
             throw GradleException(
-                "Release builds require -P${missing.joinToString("=<64 hex> -P")}=<64 hex>",
+                "Release builds need PaddleOCR SHA-256 digests for: ${missing.joinToString(", ")}. " +
+                    "Set MINDLAYER_MODEL_CACHE (or -Pmindlayer.modelCache=<dir>) so they can be " +
+                    "derived from the cached PP-OCRv5 files, or pass the matching -PpaddleOcr*Sha256.",
             )
         }
-        val manifest = rootProject.file("paddleocr_model/src/main/assets/paddleocr_model_integrity.json")
+        val manifest = File(props["manifestPath"] as String)
         if (!manifest.isFile) {
             throw GradleException(
                 "Release builds require paddleocr_model/src/main/assets/paddleocr_model_integrity.json.",
             )
         }
-        val text = manifest.readText()
         val byRole = Regex(
             """"filename"\s*:\s*"([^"]+)"\s*,\s*"sha256"\s*:\s*"([0-9a-f]{64})"\s*,\s*"role"\s*:\s*"([^"]+)"""",
         )
-            .findAll(text)
+            .findAll(manifest.readText())
             .associate { match -> match.groupValues[3] to match.groupValues[2] }
 
         fun assertRole(role: String, expected: String) {
@@ -116,14 +157,14 @@ val validateReleasePaddleOcrSha256 by tasks.registering {
                 )
             if (actual != expected.lowercase()) {
                 throw GradleException(
-                    "paddleocr_model_integrity.json sha256 for '$role' does not match -PpaddleOcr*Sha256.",
+                    "paddleocr_model_integrity.json sha256 for '$role' does not match the expected digest.",
                 )
             }
         }
-        assertRole("detection", paddleOcrDetSha256)
-        assertRole("recognition", paddleOcrRecSha256)
-        assertRole("orientation", paddleOcrClsSha256)
-        assertRole("dictionary", paddleOcrDictSha256)
+        assertRole("detection", detSha)
+        assertRole("recognition", recSha)
+        assertRole("orientation", clsSha)
+        assertRole("dictionary", dictSha)
     }
 }
 
@@ -139,28 +180,36 @@ val validateReleasePaddleOcrSha256 by tasks.registering {
 val validateReleaseEmbeddingSha256 by tasks.registering {
     dependsOn(":gemma_embed_model:generateEmbeddingModelIntegrityManifest")
     group = "verification"
-    description = "Fails release builds unless -PembeddingModelSha256 and -PembeddingTokenizerSha256 are 64-hex SHA-256 digests matching the embedding_model_integrity.json manifest."
+    description = "Fails release builds unless the EmbeddingGemma weights + tokenizer SHA-256 (from -Pembedding*Sha256 or the local cache) match embedding_model_integrity.json."
+    inputs.property("modelSha256", embeddingModelSha256)
+    inputs.property("tokenizerSha256", embeddingTokenizerSha256)
+    inputs.property("manifestPath", embeddingIntegrityManifestPath)
     doLast {
+        val props = inputs.properties
+        val sha256Re = Regex("^[0-9a-f]{64}$")
+        val modelSha = props["modelSha256"] as String
+        val tokenizerSha = props["tokenizerSha256"] as String
         val missing = buildList {
-            if (!modelSha256Pattern.matches(embeddingModelSha256)) add("embeddingModelSha256")
-            if (!modelSha256Pattern.matches(embeddingTokenizerSha256)) add("embeddingTokenizerSha256")
+            if (!sha256Re.matches(modelSha)) add("weights")
+            if (!sha256Re.matches(tokenizerSha)) add("tokenizer")
         }
         if (missing.isNotEmpty()) {
             throw GradleException(
-                "Release builds require -P${missing.joinToString("=<64 hex> -P")}=<64 hex>",
+                "Release builds need EmbeddingGemma SHA-256 digests for: ${missing.joinToString(", ")}. " +
+                    "Set MINDLAYER_MODEL_CACHE (or -Pmindlayer.modelCache=<dir>) so they can be " +
+                    "derived from the cached files, or pass -PembeddingModelSha256 / -PembeddingTokenizerSha256.",
             )
         }
-        val manifest = rootProject.file("gemma_embed_model/src/main/assets/embedding_model_integrity.json")
+        val manifest = File(props["manifestPath"] as String)
         if (!manifest.isFile) {
             throw GradleException(
                 "Release builds require gemma_embed_model/src/main/assets/embedding_model_integrity.json.",
             )
         }
-        val text = manifest.readText()
         val byRole = Regex(
             """"filename"\s*:\s*"([^"]+)"\s*,\s*"sha256"\s*:\s*"([0-9a-f]{64})"\s*,\s*"role"\s*:\s*"([^"]+)"""",
         )
-            .findAll(text)
+            .findAll(manifest.readText())
             .associate { match -> match.groupValues[3] to match.groupValues[2] }
 
         fun assertRole(role: String, expected: String) {
@@ -170,12 +219,12 @@ val validateReleaseEmbeddingSha256 by tasks.registering {
                 )
             if (actual != expected.lowercase()) {
                 throw GradleException(
-                    "embedding_model_integrity.json sha256 for '$role' does not match -PembeddingModelSha256 / -PembeddingTokenizerSha256.",
+                    "embedding_model_integrity.json sha256 for '$role' does not match the expected digest.",
                 )
             }
         }
-        assertRole("weights", embeddingModelSha256)
-        assertRole("tokenizer", embeddingTokenizerSha256)
+        assertRole("weights", modelSha)
+        assertRole("tokenizer", tokenizerSha)
     }
 }
 
@@ -647,6 +696,27 @@ tasks.configureEach {
     // CI invokes; the validator's <200 ms warm cost makes blanket wiring safe.
     if (name == "assembleDebug" || name == "assembleRelease" || name == "bundleRelease") {
         dependsOn(validateLitertlmAbis, validateLitertAbis)
+    }
+
+    // The release AI Asset Pack staging tasks read each pack module's
+    // src/main/assets directly. By AGP's default ordering the per-module model
+    // provisioning + integrity-manifest tasks would otherwise run AFTER staging,
+    // so the cache-derived model bytes and freshly-pinned SHAs would not make it
+    // into THIS build's AAB/APK. Force both to complete before staging.
+    val stagesReleaseAssetPacks =
+        name == "assetPackReleasePreBundleTask" ||
+        name == "processReleaseAssetPackManifests" ||
+        name == "packageReleaseAssetPackManifest" ||
+        name == "assetPackReleaseAssemble"
+    if (stagesReleaseAssetPacks) {
+        dependsOn(
+            ":gemma_model:provisionReleaseModelAssets",
+            ":gemma_model:generateModelIntegrityManifest",
+            ":gemma_embed_model:provisionReleaseModelAssets",
+            ":gemma_embed_model:generateEmbeddingModelIntegrityManifest",
+            ":paddleocr_model:provisionReleaseModelAssets",
+            ":paddleocr_model:generatePaddleOcrModelIntegrityManifest",
+        )
     }
 }
 

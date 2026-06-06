@@ -91,27 +91,32 @@ release: 0.4.0
 
 ### 2.2 Build the signed AAB
 
+Models for a local release live in a flat **cache directory** outside the repo —
+the same one `tools/dev-models/push-models.*` uses. Point the build at it once
+with `MINDLAYER_MODEL_CACHE` (or `-Pmindlayer.modelCache=<dir>`) and the build
+copies the binaries into each AI-pack module and derives their pinned SHA-256
+automatically. No manual copying, no hand-typed `-P*Sha256` flags.
+
 ```powershell
-$modelPath = Get-ChildItem gemma_model -Recurse -Filter *.litertlm | Select-Object -First 1
-if ($null -eq $modelPath) { throw "Place the release .litertlm model under gemma_model before building." }
-$modelSha256 = (Get-FileHash $modelPath.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+# One-time per machine: where your vetted release model binaries live (flat
+# layout — see docs/DEV_MODELS.md § "Recommended cache layout").
+$env:MINDLAYER_MODEL_CACHE = 'G:\mindlayer-models'
 
-$paddleDetSha256 = (Get-FileHash "paddleocr_model\src\main\assets\paddleocr-ppocrv5-mobile-det.tflite" -Algorithm SHA256).Hash.ToLowerInvariant()
-$paddleRecSha256 = (Get-FileHash "paddleocr_model\src\main\assets\paddleocr-ppocrv5-mobile-rec.tflite" -Algorithm SHA256).Hash.ToLowerInvariant()
-$paddleClsSha256 = (Get-FileHash "paddleocr_model\src\main\assets\paddleocr-ppocrv5-mobile-cls.tflite" -Algorithm SHA256).Hash.ToLowerInvariant()
-$paddleDictSha256 = (Get-FileHash "paddleocr_model\src\main\assets\paddleocr-ppocrv5-mobile-dict.txt" -Algorithm SHA256).Hash.ToLowerInvariant()
+./gradlew.bat clean :app:bundleRelease
+```
 
-$embeddingModelSha256 = (Get-FileHash "gemma_embed_model\src\main\assets\embedding-gemma-300m-v1.tflite" -Algorithm SHA256).Hash.ToLowerInvariant()
-$embeddingTokenizerSha256 = (Get-FileHash "gemma_embed_model\src\main\assets\embedding-gemma-300m-v1.spm.model" -Algorithm SHA256).Hash.ToLowerInvariant()
+The cache must contain these seven files (the orientation classifier is the
+only one the OCR engine can run without, but the release guard still expects
+it):
 
-./gradlew.bat clean :app:bundleRelease `
-  -PmodelSha256=$modelSha256 `
-  -PpaddleOcrDetSha256=$paddleDetSha256 `
-  -PpaddleOcrRecSha256=$paddleRecSha256 `
-  -PpaddleOcrClsSha256=$paddleClsSha256 `
-  -PpaddleOcrDictSha256=$paddleDictSha256 `
-  -PembeddingModelSha256=$embeddingModelSha256 `
-  -PembeddingTokenizerSha256=$embeddingTokenizerSha256
+```
+gemma-4-E2B-it.litertlm
+embedding-gemma-300m-v1.tflite
+embedding-gemma-300m-v1.spm.model
+paddleocr-ppocrv5-mobile-det.tflite
+paddleocr-ppocrv5-mobile-rec.tflite
+paddleocr-ppocrv5-mobile-cls.tflite
+paddleocr-ppocrv5-mobile-dict.txt
 ```
 
 Output:
@@ -125,25 +130,34 @@ This is the file you upload to Play. It is:
 * **Signed** with your release key (because `keystore.properties` is present).
 * **Minified and shrunk** via R8 using `app/proguard-rules.pro`.
 * **Packaged with install-time AI packs** declared in `app/build.gradle.kts`:
-  `:gemma_model`, `:gemma_embed_model`, and `:paddleocr_model`.
+  `:gemma_model`, `:gemma_embed_model`, and `:paddleocr_model`, whose bytes were
+  copied from the cache by each module's `provisionReleaseModelAssets` task.
 
 > ⚠️ The Gemma `.litertlm`, PaddleOCR `.tflite`/dictionary files, and
-> EmbeddingGemma artifacts are **not** checked into git. For a Play Store
-> release, place the real model binaries at the paths expected by their AI-pack
-> modules before running `:app:bundleRelease`. Release builds require all seven
-> `-P*Sha256` properties for the exact files being bundled; debug builds keep
-> advisory model-hash behavior for local development.
+> EmbeddingGemma artifacts are **not** checked into git. A release build fails
+> fast with a clear message if `MINDLAYER_MODEL_CACHE` is unset or a required
+> file is missing from both the cache and the AI-pack `src/main/assets/` dir.
+> Debug builds keep advisory model-hash behavior and the sideload path for local
+> development.
+>
+> If you swap a model's bytes **without** changing its filename, run the release
+> with `--no-configuration-cache` so the new digest is recomputed (the digest is
+> captured at configuration time).
 
 ### 2.2.1 Pre-release model artefact storage and SHA variables
 
 Model binaries are stored outside git because they are large release artefacts,
-not source files. Before a local or CI release build, retrieve the vetted
-artefacts from the project's private model artefact store and place them at the
-paths shown in the PowerShell snippet above. Compute SHA-256 over the exact
-bytes being bundled. For PaddleOCR refreshes, the manual
-`build-paddleocr-models.yml` workflow emits an `expected_shas.txt` artifact
-whose values should match the hashes you compute after placing the release
-assets. Set these repository variables for CI release jobs:
+not source files. Before a **local** release build, retrieve the vetted artefacts
+from the project's private model artefact store and drop them flat into your
+`MINDLAYER_MODEL_CACHE` directory; the build derives every SHA-256 from those
+exact bytes, so there is nothing to compute by hand.
+
+For **CI** release jobs the cache is not present, so the seven `-P*Sha256`
+properties (sourced from the repository variables below) remain the way SHAs are
+supplied — they always take precedence over the cache fallback. For PaddleOCR
+refreshes, the manual `build-paddleocr-models.yml` workflow emits an
+`expected_shas.txt` artifact whose values should match the hashes the build
+derives. Set these repository variables for CI release jobs:
 
 * `MODEL_SHA256`
 * `PADDLEOCR_DET_SHA256`
@@ -160,6 +174,7 @@ job. Configure `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
 `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD` as repository secrets only when
 CI should attach a signed AAB; otherwise CI may produce unsigned smoke-test
 artifacts that must not be uploaded to Play.
+
 
 ### 2.3 (Optional) Build a signed universal APK for side-loading
 
