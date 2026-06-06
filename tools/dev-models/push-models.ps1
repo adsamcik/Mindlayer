@@ -360,6 +360,23 @@ function Push-OneFile {
     )
     $remote = "$($script:RemoteDir)/$Filename"
     $localSize = (Get-Item -LiteralPath $LocalPath).Length
+
+    # Guard: refuse a stale / mis-converted PaddleOCR model that carries an
+    # unresolved ONNX_LAYERNORMALIZATION custom op. Mirrors the build-time
+    # guard in scripts/build-paddleocr-models/convert.sh: such a rec model
+    # fails to invoke on every accelerator, so OCR silently returns 0 lines.
+    # PaddleOCR .tflite files are <=16 MB, so a full read is cheap.
+    if ($Filename -like 'paddleocr-*.tflite') {
+        $bytes = [System.IO.File]::ReadAllBytes($LocalPath)
+        if ([System.Text.Encoding]::ASCII.GetString($bytes).Contains('ONNX_LAYERNORMALIZATION')) {
+            throw ("Refusing to push '$Filename': it contains an unresolved " +
+                "ONNX_LAYERNORMALIZATION custom op (stale or mis-converted model that " +
+                "fails to invoke on every accelerator). Rebuild via " +
+                "scripts/build-paddleocr-models (or download the latest CI artifact) and " +
+                "refresh your model cache before pushing.")
+        }
+    }
+
     $argsPush = @('push', $LocalPath, $remote)
     $argsLs   = @('shell', 'ls', '-l', $remote)
     $argsStat = @('shell', 'stat', '-c', '%s', $remote)

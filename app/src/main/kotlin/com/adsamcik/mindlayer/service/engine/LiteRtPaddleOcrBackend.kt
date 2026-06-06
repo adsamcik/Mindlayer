@@ -218,6 +218,7 @@ class LiteRtPaddleOcrBackend internal constructor(
         try {
             val loaded = withContext(Dispatchers.IO) {
                 verifyBundleFilesExist(bundle)
+                verifyRecognitionModelUsable(bundle.recognitionPath)
                 val loadedDictionary = loadDictionary(bundle.dictionaryPath)
                 val newRunner = runnerFactory(bundle, backend)
                 pendingRunner = newRunner
@@ -450,6 +451,82 @@ class LiteRtPaddleOcrBackend internal constructor(
                 "PaddleOCR bundle files missing: ${missing.joinToString(",")}",
             )
         }
+    }
+
+    /**
+     * Fail-fast guard mirroring the
+     * `scripts/build-paddleocr-models/convert.sh` build-time check: a
+     * recognition model converted without LayerNorm decomposition leaves an
+     * unresolved `ONNX_LAYERNORMALIZATION` custom op. The detection model (a
+     * pure CNN) still loads, so the break otherwise surfaces only as a
+     * per-frame `LiteRtException: Failed to invoke the compiled model` at
+     * `recognise()` time — on *every* accelerator (GPU and CPU), because an
+     * unresolved custom op has no kernel regardless of delegate. Reject such a
+     * model at init with an actionable message instead of silently degrading
+     * OCR to 0 recognised lines.
+     *
+     * Best-effort: a read error never blocks a load the LiteRT runtime would
+     * otherwise attempt (it will surface its own error then).
+     */
+    private fun verifyRecognitionModelUsable(recognitionPath: String) {
+        val broken = try {
+            fileContainsAscii(File(recognitionPath), UNRESOLVED_LAYERNORM_MARKER)
+        } catch (t: Throwable) {
+            MindlayerLog.w(
+                TAG,
+                "PaddleOCR rec model scan failed (${t.safeLabel()}); proceeding to load",
+                throwable = null,
+            )
+            false
+        }
+        if (broken) {
+            throw IllegalStateException(
+                "PaddleOCR recognition model is stale or mis-converted: it contains an " +
+                    "unresolved $UNRESOLVED_LAYERNORM_MARKER_STR custom op that LiteRT cannot " +
+                    "invoke on any accelerator. Rebuild the models with " +
+                    "scripts/build-paddleocr-models (onnx2tf -tb tf_converter decomposes " +
+                    "LayerNorm to native ops) and re-deploy / re-push them. See " +
+                    "docs/PADDLEOCR_GPU_INVESTIGATION.md.",
+            )
+        }
+    }
+
+    /**
+     * Streaming substring search so a ~16 MB recognition model is never loaded
+     * into a single String/ByteArray. Carries `marker.size - 1` bytes across
+     * chunk boundaries so a marker split across two reads is still found.
+     */
+    private fun fileContainsAscii(file: File, marker: ByteArray): Boolean {
+        if (marker.isEmpty() || file.length() < marker.size) return false
+        val overlap = marker.size - 1
+        val chunk = 1 shl 16
+        val buffer = ByteArray(chunk + overlap)
+        file.inputStream().buffered().use { input ->
+            var carried = 0
+            while (true) {
+                val read = input.read(buffer, carried, chunk)
+                if (read < 0) break
+                val available = carried + read
+                if (indexOfBytes(buffer, available, marker) >= 0) return true
+                carried = minOf(overlap, available)
+                if (carried > 0) {
+                    System.arraycopy(buffer, available - carried, buffer, 0, carried)
+                }
+            }
+        }
+        return false
+    }
+
+    private fun indexOfBytes(haystack: ByteArray, length: Int, needle: ByteArray): Int {
+        if (needle.isEmpty() || length < needle.size) return -1
+        val last = length - needle.size
+        outer@ for (i in 0..last) {
+            for (j in needle.indices) {
+                if (haystack[i + j] != needle[j]) continue@outer
+            }
+            return i
+        }
+        return -1
     }
 
     private fun loadDictionary(path: String): List<String> {
@@ -819,6 +896,17 @@ class LiteRtPaddleOcrBackend internal constructor(
     companion object {
         private const val TAG = "LiteRtPaddleOcrBackend"
         private const val BYTES_PER_MB = 1024L * 1024L
+
+        /**
+         * Custom-op name left behind when a PP-OCRv5 rec model is converted
+         * without LayerNorm decomposition. LiteRT has no kernel for it, so the
+         * model fails to invoke on every accelerator. Mirrors the guard in
+         * `scripts/build-paddleocr-models/convert.sh`.
+         */
+        private const val UNRESOLVED_LAYERNORM_MARKER_STR = "ONNX_LAYERNORMALIZATION"
+        private val UNRESOLVED_LAYERNORM_MARKER =
+            UNRESOLVED_LAYERNORM_MARKER_STR.toByteArray(Charsets.US_ASCII)
+
         private const val CHANNELS = 3
         private const val DET_INPUT_WIDTH = 640
         private const val DET_INPUT_HEIGHT = 640
