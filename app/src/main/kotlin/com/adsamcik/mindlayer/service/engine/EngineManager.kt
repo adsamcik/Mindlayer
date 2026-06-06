@@ -975,13 +975,13 @@ class EngineManager(
             attempted = decision.attempted,
         )
         return when (decision.backend) {
-            "NPU" -> listOf(
+            LiteRtAcceleratorResolver.BACKEND_NPU -> listOf(
                 Backend.NPU(nativeLibraryDir = context.applicationInfo.nativeLibraryDir),
                 Backend.GPU(),
                 Backend.CPU(),
             )
-            "GPU" -> listOf(Backend.GPU(), Backend.CPU())
-            "CPU" -> listOf(Backend.CPU())
+            LiteRtAcceleratorResolver.BACKEND_GPU -> listOf(Backend.GPU(), Backend.CPU())
+            LiteRtAcceleratorResolver.BACKEND_CPU -> listOf(Backend.CPU())
             else -> listOf(Backend.GPU(), Backend.CPU())
         }
     }
