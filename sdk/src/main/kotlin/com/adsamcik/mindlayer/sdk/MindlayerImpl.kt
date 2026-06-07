@@ -1644,10 +1644,21 @@ internal class MindlayerImpl(
         withTypedErrors(requestId = requestId) { it.acknowledgeDeferredResult(requestId) }
     }
 
+    /**
+     * Awaits a deferred (async) inference result, preferring the push notice
+     * over busy-polling.
+     *
+     * @param timeoutMs upper bound on how long the SDK waits for the deferred
+     *   result. Defaults to 5 minutes to match the service-side per-inference
+     *   wall-clock cap (`InferenceOrchestrator.MAX_INFERENCE_MS`); a shorter
+     *   default would abandon long-but-valid generations that the service is
+     *   still actively producing. Pass a smaller value for latency-sensitive
+     *   callers.
+     */
     suspend fun awaitDeferred(
         requestId: String,
         pollIntervalMs: Long = 250,
-        timeoutMs: Long = 60_000,
+        timeoutMs: Long = 5L * 60L * 1000L,
     ): com.adsamcik.mindlayer.DeferredResult = withTimeout(timeoutMs) {
         // M-D7: prefer the push notice over busy-polling. Subscribe BEFORE
         // the first fetch so a completion landing between fetch and
