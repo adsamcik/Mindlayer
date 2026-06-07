@@ -64,6 +64,16 @@ Mindlayer brings private, capable AI to your phone — and keeps it there.
 
 ---
 
+## Graphics
+
+- **App icon (512×512, mandatory):** `store-assets/icon-512.png` — derived from
+  the app's adaptive launcher icon (foreground over the `#0A0E1F` background),
+  so the store icon matches what installs on the device. Regenerate with
+  `python store-assets/make_graphics.py`.
+- **Feature graphic (1024×500, required to publish):** `store-assets/feature-graphic-1024x500.png`
+  — custom textless hero art (`feature-graphic-source.png`) with the "Mindlayer"
+  wordmark + tagline overlaid crisply (`python store-assets/make_feature_graphic.py`).
+
 ## Screenshots
 
 Play-compliant phone screenshots (1242×2208, 1.78:1) are in
@@ -77,9 +87,7 @@ Raw device captures (1080×2400, 2.22:1 — **too tall for Play's 2:1 limit**, k
 for reference only) are in `store-assets/screenshots/raw/`. Regenerate the
 framed set with `python store-assets/make_screenshots.py`.
 
-> Minimum for Play: 2 phone screenshots. You may also want a 1024×500 feature
-> graphic and a 512×512 app icon (the launcher icon already exists in the repo;
-> export a 512×512 PNG for the listing).
+> Minimum for Play: 2 phone screenshots.
 
 ---
 
