@@ -70,9 +70,9 @@ Mindlayer brings private, capable AI to your phone — and keeps it there.
   the app's adaptive launcher icon (foreground over the `#0A0E1F` background),
   so the store icon matches what installs on the device. Regenerate with
   `python store-assets/make_graphics.py`.
-- **Feature graphic (1024×500, required to publish):** custom hero art, to be
-  added. Generate textless landscape art (indigo brand gradient + the crystal /
-  tech-core motif) and overlay the wordmark separately for crisp text.
+- **Feature graphic (1024×500, required to publish):** `store-assets/feature-graphic-1024x500.png`
+  — custom textless hero art (`feature-graphic-source.png`) with the "Mindlayer"
+  wordmark + tagline overlaid crisply (`python store-assets/make_feature_graphic.py`).
 
 ## Screenshots
 
