@@ -510,8 +510,8 @@ android {
         applicationId = "com.adsamcik.mindlayer.service"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "1.0.0-alpha.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Only bundle resources for the locales we actually ship.
