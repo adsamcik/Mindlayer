@@ -4,9 +4,31 @@ All notable changes to Mindlayer are documented in this file.
 
 The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0-alpha01] - 2026-05
+## [1.0.0-alpha.1] — 2026-06-07
 
-### Changed (breaking)
+First `1.0.0` alpha of the **app** — its `versionName` (previously `0.3.0`,
+`versionCode 3`) is bumped to `1.0.0-alpha.1` / `versionCode 4` to join the
+SDK's already-declared 1.0.0-alpha line below. On-device chat, embeddings, and
+OCR are all production-ready and the service ships its first Play-track build.
+
+### Added
+- **Local model-cache release wiring.** Local release builds source the three
+  on-device AI models from a flat cache (`MINDLAYER_MODEL_CACHE` /
+  `-Pmindlayer.modelCache`) and auto-derive their pinned SHA-256, instead of
+  hand-copied files and seven manual `-P*Sha256` flags. CI's explicit
+  `-P*Sha256` still take precedence. See `RELEASE.md`.
+- **Play store assets** under `store-assets/` (framed screenshots + listing
+  text + Data Safety answers) and a GitHub Pages privacy policy at
+  <https://adsamcik.github.io/Mindlayer/privacy.html>.
+
+### Fixed
+- **Consent screen readability.** `ConsentActivity` wrapped its content with no
+  `Surface`, so text rendered dark-on-dark and unreadable; it now wraps in a
+  `Surface` and applies window insets (`enableEdgeToEdge()` +
+  `safeDrawingPadding()`). Security invariants (opaque, `FLAG_SECURE`,
+  overlay-hiding, no intent-filter) are unchanged.
+
+### Changed (breaking — SDK v1)
 - **SDK v1 API surface finalized.** Canonical builders `infer { }`, `ocr { }`,
   and `openSession { }` are now implemented (previously stubs that threw).
   Terminals `awaitText()` / `awaitJson()` / `awaitToolCalls()` on
