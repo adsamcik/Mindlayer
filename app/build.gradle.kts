@@ -456,49 +456,6 @@ val validateLitertAbis by tasks.registering {
     }
 }
 
-val aidlContractDriftCheck by tasks.registering {
-    group = "verification"
-    // Parcelable declarations live only in :sdk/src/main/aidl; :app's AIDL compiler
-    // imports them transitively via the :sdk implementation dependency. This task
-    // verifies that the two shared interface contracts haven't drifted between the
-    // copies kept in each module's source tree.
-    description = "Fails if :app and :sdk AIDL interface contracts differ byte-for-byte."
-
-    val appAidlDir = rootProject.layout.projectDirectory.dir("app/src/main/aidl/com/adsamcik/mindlayer")
-    val sdkAidlDir = rootProject.layout.projectDirectory.dir("sdk/src/main/aidl/com/adsamcik/mindlayer")
-    val interfaceFiles = listOf("IMindlayerService.aidl", "IClientCallback.aidl")
-
-    inputs.files(interfaceFiles.map { appAidlDir.file(it) })
-        .withPropertyName("appAidlContracts")
-        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
-    inputs.files(interfaceFiles.map { sdkAidlDir.file(it) })
-        .withPropertyName("sdkAidlContracts")
-        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
-    val markerFile = layout.buildDirectory.file("aidl-contract-drift-check/success.txt")
-    outputs.file(markerFile)
-
-    doLast {
-        val appDir = appAidlDir.asFile
-        val sdkDir = sdkAidlDir.asFile
-
-        interfaceFiles.forEach { fileName ->
-            val appFile = appDir.resolve(fileName)
-            val sdkFile = sdkDir.resolve(fileName)
-            val appBytes = appFile.readBytes()
-            val sdkBytes = sdkFile.readBytes()
-            if (!appBytes.contentEquals(sdkBytes)) {
-                throw GradleException(
-                    "AIDL contract drift in $fileName: app/src/main/aidl and sdk/src/main/aidl copies must be byte-identical.",
-                )
-            }
-        }
-
-        markerFile.get().asFile.apply { parentFile.mkdirs() }.writeText(
-            "checked=${interfaceFiles.joinToString(",")}\n",
-        )
-    }
-}
-
 android {
     namespace = "com.adsamcik.mindlayer.service"
     // Compose BOM 2026.05.01 pulls androidx.compose.* 1.12.0-alpha03 and
@@ -589,7 +546,12 @@ android {
     }
 
     buildFeatures {
-        aidl = true
+        // AIDL interfaces + parcelables are defined and compiled ONLY in :sdk;
+        // :app consumes the generated Binder classes (IMindlayerService.Stub,
+        // IClientCallback, parcelables) via implementation(project(":sdk")). The
+        // app must NOT compile its own copy, or R8 fails the release build with
+        // "Type ... is defined multiple times" (the same class would be present
+        // in both the app's javac output and the :sdk runtime jar).
         compose = true
         buildConfig = true
     }
@@ -673,10 +635,6 @@ android {
         // when used as a fallback behind a proper SDK_INT check.
         fatal += setOf("NewApi", "MissingTranslation")
     }
-}
-
-tasks.named("preBuild") {
-    dependsOn(aidlContractDriftCheck)
 }
 
 androidComponents {

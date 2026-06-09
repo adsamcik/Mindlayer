@@ -19,7 +19,7 @@ Every new embedding method must capability-check `FEATURE_EMBEDDINGS`; old servi
 
 ## AIDL discipline
 
-Mirror AIDL byte-identically between `app/` and `sdk/`. Methods are append-only.
+All AIDL (interfaces + parcelables) lives only in `:sdk`; `:app` consumes it via `implementation(project(":sdk"))`. Methods are append-only.
 
 ## SHM transport
 

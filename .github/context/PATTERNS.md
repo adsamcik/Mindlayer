@@ -100,7 +100,7 @@ fun isAllowed(pkg: String, sig: String): Boolean =
 
 | Rule | Why |
 |---|---|
-| AIDL **interface** files live in `app/src/main/aidl/com/adsamcik/mindlayer/` and `sdk/src/main/aidl/com/adsamcik/mindlayer/` and must stay byte-identical (`IMindlayerService.aidl` + `IClientCallback.aidl`). **Parcelable** AIDL files live only in `sdk/src/main/aidl/`; `:app` resolves them via `implementation(project(":sdk"))`. | Both modules generate stubs from the interface files; drift = `BadParcelableException` at runtime. Parcelable de-duplication eliminates an entire class of drift bug. |
+| ALL AIDL files (interfaces `IMindlayerService.aidl` + `IClientCallback.aidl` and parcelables) live ONLY in `sdk/src/main/aidl/com/adsamcik/mindlayer/`; `:app` consumes the generated Binder classes via `implementation(project(":sdk"))` and adds no AIDL of its own (`AidlContractDriftTest` enforces). | `:sdk` is the published library that owns the contract; `:app` re-compiling the same AIDL would duplicate the classes and break the release R8 merge. Single-source = no drift. |
 | AIDL Parcelables (`SessionConfig`, `RequestMeta`, `ImageTransfer`, …) are **Java** files. | AIDL syntax — not Kotlin. |
 | Every AIDL entry point in `ServiceBinder` calls `authorizeCall()` first. | Defense in depth. |
 | Media (`ImageTransfer`, `AudioTransfer`) goes through `SharedMemoryPool`, not as raw bytes in the parcel. | Binder transaction limit is 1 MB. |

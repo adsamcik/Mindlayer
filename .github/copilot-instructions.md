@@ -39,7 +39,7 @@ Android service app (`com.adsamcik.mindlayer.service`) that loads a single LLM (
 | `Conversation.cancelProcess()` (LiteRT-LM) to stop inference | Rely on Flow cancellation alone — native work continues |
 | Cross-process state via `filesDir` + atomic-rename + `FileLock` (see `AllowlistStore.kt`) | `SharedPreferences` for cross-process state |
 | Send media via `SharedMemoryPool` (`ImageTransfer`/`AudioTransfer`) | Pack >~1 MB into AIDL parcels — Binder limit is 1 MB |
-| Mirror AIDL **interface** files (`IMindlayerService.aidl` + `IClientCallback.aidl`) byte-identical between `app/src/main/aidl/` and `sdk/src/main/aidl/` | Edit only one interface side — guaranteed `BadParcelableException`. **Parcelables live in `:sdk` only** — do NOT copy them into `:app`. |
+| Define all AIDL (interfaces **and** parcelables) in `:sdk` only (`sdk/src/main/aidl/`); `:app` consumes generated Binder classes via `implementation(project(":sdk"))` | Add any `.aidl` to `:app` — the duplicated class breaks the **release** R8 merge (`defined multiple times`). `:app` has `aidl = false`. |
 | Promote service to FGS `specialUse` only during active inference | Stay foreground when idle |
 | Use `Throwable.safeLabel()` for inference-path exceptions, pass `throwable = null` | Log full stack traces from native LiteRT-LM errors — they can embed prompt text |
 | Keep `:app` + `:sdk` manifests free of `android.permission.INTERNET` | Add network permissions, Play Services deps, telemetry SDKs, or cloud fallback paths |
@@ -75,7 +75,7 @@ See [`docs/CONSENT_ARCHITECTURE.md`](../docs/CONSENT_ARCHITECTURE.md) for the fu
 
 Whenever you change any of these, update **all** producers, consumers, and tests in the same change:
 
-- AIDL **interface** files (`app/src/main/aidl/com/adsamcik/mindlayer/{IMindlayerService,IClientCallback}.aidl` ↔ `sdk/src/main/aidl/com/adsamcik/mindlayer/{IMindlayerService,IClientCallback}.aidl`). **Parcelable AIDL files live only in `:sdk`** — `:app` pulls them in transitively via `implementation(project(":sdk"))`.
+- AIDL files (`sdk/src/main/aidl/com/adsamcik/mindlayer/{IMindlayerService,IClientCallback}.aidl` and all parcelables). **All AIDL lives only in `:sdk`** — `:app` consumes the generated Binder classes via `implementation(project(":sdk"))` and must not add its own `.aidl` (it would break the release R8 merge).
 - `StreamEvent` / `StreamEventType` / `StreamHeader` (`shared/.../Protocol.kt`) and the writer/reader pair (`TokenStreamWriter` / `TokenStreamReader`)
 - Frame format / `MAX_FRAME_BYTES` (duplicated in writer + reader on purpose)
 - `ConsentChallenge` / `ConsentIdentity` / `ConsentDecision` parcelables in `:sdk` and the matching AIDL method signatures
@@ -227,8 +227,8 @@ Read-only operations (`git status`, `git log`, `git blame`) and zero-file invest
 
 | Task | Where to look |
 |---|---|
-| Add an AIDL method | Edit `IMindlayerService.aidl` in **both** `app/src/main/aidl/.../` AND `sdk/src/main/aidl/.../` (byte-identical interface); implement in `ServiceBinder.kt` (with `authorizeCall()` first); expose in `Mindlayer.kt`. |
-| Add a new AIDL parcelable | Edit ONLY `sdk/src/main/aidl/com/adsamcik/mindlayer/NewType.aidl`; reference it from both interface copies (the imports also need to mirror); add `@Parcelize` companion in `:shared` (or `:sdk` if SDK-only). |
+| Add an AIDL method | Edit `IMindlayerService.aidl` ONLY in `sdk/src/main/aidl/.../` (`:app` has no AIDL); implement in `ServiceBinder.kt` (with `authorizeCall()` first); expose in `Mindlayer.kt`. |
+| Add a new AIDL parcelable | Edit ONLY `sdk/src/main/aidl/com/adsamcik/mindlayer/NewType.aidl`; reference it from the interface (import in `:sdk`); add `@Parcelize` companion in `:shared` (or `:sdk` if SDK-only). |
 | Add a stream event type | `shared/.../Protocol.kt::StreamEventType` constant; emit in `TokenStreamWriter`; handle in `TokenStreamReader`; update tests in both `:app` and `:sdk`. |
 | Add a Room column on the SDK history DB | Bump `MindlayerDatabase.version`, add a `Migration`, update `Entities.kt`. SQLCipher cross-install backup is unreadable by design. |
 | Add a logged event | Add `LogEvent`/`LogCategory` enum value; add a builder on `LogRepository`; never include prompt or output text. |
@@ -240,7 +240,7 @@ Read-only operations (`git status`, `git log`, `git blame`) and zero-file invest
 Loaded automatically by Copilot via `applyTo` frontmatter:
 
 - `.github/instructions/privacy-offline.instructions.md` — privacy, offline-first, no-network, license, data-retention invariants (applies repo-wide)
-- `.github/instructions/aidl.instructions.md` — AIDL drift, mirroring, Java syntax
+- `.github/instructions/aidl.instructions.md` — AIDL ownership (all AIDL in `:sdk`), Java syntax
 - `.github/instructions/security.instructions.md` — auth invariants in `service/` + `security/`
 - `.github/instructions/engine.instructions.md` — LiteRT-LM lifecycle, thermal/memory bands
 - `.github/instructions/embeddings.instructions.md` — EmbeddingGemma, tokenizer, SHM/deferred transport rules

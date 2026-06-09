@@ -22,7 +22,7 @@ Brief description of what this PR does.
 
 - [ ] Code follows project conventions (MindlayerLog, coroutine dispatchers, etc.)
 - [ ] No secrets or model files committed
-- [ ] AIDL **interface** changes (`IMindlayerService.aidl` / `IClientCallback.aidl`) mirrored byte-identical in both `app/src/main/aidl/` and `sdk/src/main/aidl/`. New / changed **parcelables** go only in `sdk/src/main/aidl/`.
+- [ ] AIDL changes (`IMindlayerService.aidl` / `IClientCallback.aidl` / parcelables) made ONLY in `sdk/src/main/aidl/`. `:app` has no AIDL of its own (adding any breaks the release R8 merge).
 
 ## Hardware-sensitive change?
 
