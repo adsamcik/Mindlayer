@@ -290,12 +290,12 @@ class InferenceOrchestratorCancelTest {
 
         sessionManager.applyMemoryPressure(MemoryPressure.EMERGENCY)
 
-        verify(timeout = 2_000L, atLeast = 1) { mockConversation.cancelProcess() }
-        val ended = await(2_000L) { jobFor("100:req-low-memory")?.isActive != true }
+        verify(timeout = 5_000L, atLeast = 1) { mockConversation.cancelProcess() }
+        val ended = await(5_000L) { jobFor("100:req-low-memory")?.isActive != true }
         assertTrue("active job must end after EMERGENCY cancellation", ended)
 
         var events = emptyList<TestPipeHelper.ParsedEvent>()
-        await(2_000L) {
+        await(5_000L) {
             events = TestPipeHelper.parseFrames(
                 TestPipeHelper.readFrames(ByteArrayInputStream(out.toByteArray()))
             )

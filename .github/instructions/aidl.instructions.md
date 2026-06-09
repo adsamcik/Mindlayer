@@ -1,6 +1,6 @@
 ---
 applyTo: "**/aidl/**"
-description: "AIDL contracts — interface files must be byte-identical between :app and :sdk; parcelables live in :sdk only"
+description: "AIDL contracts — interfaces + parcelables are defined ONLY in :sdk; :app consumes them via the :sdk dependency"
 ---
 
 <!-- context-init:managed -->
@@ -9,16 +9,10 @@ description: "AIDL contracts — interface files must be byte-identical between 
 
 ## AIDL invariants
 
-- **Parcelable AIDL files live in ONE place: `sdk/src/main/aidl/com/adsamcik/mindlayer/*.aidl`.** `:app` (the service module) pulls them in transitively via `implementation(project(":sdk"))` and the AIDL compiler resolves them on the import path. Do **not** copy parcelables back into `app/src/main/aidl/`; `AidlContractDriftTest` will fail.
-- **Interface AIDL files live in BOTH places and must be byte-identical:**
-  - `app/src/main/aidl/com/adsamcik/mindlayer/IMindlayerService.aidl`
-  - `app/src/main/aidl/com/adsamcik/mindlayer/IClientCallback.aidl`
-  - `sdk/src/main/aidl/com/adsamcik/mindlayer/IMindlayerService.aidl`
-  - `sdk/src/main/aidl/com/adsamcik/mindlayer/IClientCallback.aidl`
-  
-  Both modules generate `Stub` + `Proxy` from these interface files — the service binds the `Stub`, the client binds the `Proxy`, and the wire signatures must match exactly. Drift causes `BadParcelableException` or method-not-found at runtime, often at the worst possible time (mid-stream).
+- **ALL AIDL files — both the interfaces AND the parcelables — live in ONE place: `sdk/src/main/aidl/com/adsamcik/mindlayer/*.aidl`.** `:app` (the service module) does **not** compile its own AIDL; it consumes the generated Binder classes (`IMindlayerService.Stub`, `IClientCallback`, and every parcelable) via `implementation(project(":sdk"))`. `:app` has `aidl = false` (no `aidl` buildFeature) and no `app/src/main/aidl/` sources.
+- **Do NOT add any `.aidl` file to `:app`.** A duplicated interface or parcelable there is compiled into `:app` AND pulled in from the `:sdk` dependency, which breaks the **release** build: R8's full-program merge fails with `Type com.adsamcik.mindlayer.IClientCallback$Default is defined multiple times`. Debug (non-minified D8) silently tolerates it, and CI does not run a release dex, so the regression hides until a real `bundleRelease`. `AidlContractDriftTest` fails closed if any `.aidl` appears under `app/src/main/aidl/`.
 - AIDL is **Java syntax**, not Kotlin. `package com.adsamcik.mindlayer;` (with semicolon), `interface` not `interface { }`, `in`/`out`/`inout` parameter direction.
-- `IMindlayerService.aidl` lists imports for every Parcelable it references — mirror imports in **both** interface files when adding new Parcelables.
+- `IMindlayerService.aidl` lists imports for every Parcelable it references — all in `:sdk`.
 - New Parcelables: declare in `:sdk` only (one file), add the matching Kotlin/`@Parcelize` companion in `:shared` (or `:sdk` if SDK-only), and a JSON `kotlinx.serialization` representation if it crosses the pipe too. **New Parcelables get `schemaVersion: Int = 1` as their first field** — see `docs/AIDL_STABILITY.md`.
 - **Existing Parcelables are frozen.** Adding a constructor parameter — even with a Kotlin default — changes wire layout and breaks old clients. Carry new data in a new Parcelable + new method instead.
 
@@ -26,8 +20,7 @@ description: "AIDL contracts — interface files must be byte-identical between 
 
 | | |
 |---|---|
-| Parcelables | edit ONLY in `sdk/src/main/aidl/` |
-| Interfaces | edit in BOTH `app/src/main/aidl/` AND `sdk/src/main/aidl/` (byte-identical) |
+| Interfaces + Parcelables | edit ONLY in `sdk/src/main/aidl/` — never add AIDL to `:app` |
 | `ServiceBinder.kt` | implementation, with `authorizeCall()` as first line of every method |
 | `Mindlayer.kt` (SDK facade) | public surface |
 | `ConnectionManager.kt` | only if you change `registerClient` semantics or binder-death contract |

@@ -45,8 +45,8 @@ workflow (not in the repo, by design).
 > labels age.
 
 ### Service architecture
-- Single AIDL surface (`IMindlayerService`), byte-identical mirror between
-  `:app` and `:sdk`. See `docs/AIDL_STABILITY.md`.
+- Single AIDL surface (`IMindlayerService`), defined once in `:sdk` and
+  consumed by `:app` via the `:sdk` dependency. See `docs/AIDL_STABILITY.md`.
 - Four-stage authorization gate on every real entry point: identity →
   consent/allowlist → rate limit → ownership. See `docs/AUTHORIZATION.md`.
 - Open exported service with no custom bind permission; per-app user consent

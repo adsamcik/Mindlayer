@@ -147,7 +147,7 @@ list, and API 26–30 `knownSigner` caveat are gone with the consent model. See
 - Header (first frame): `StreamHeader { protocol = "mindlayer.stream.v1", requestId }` (`shared/.../Protocol.kt`).
 - Event types (`StreamEventType`): `start`, `token_delta`, `tool_call`, `tool_result`, `metrics`, `error`, `done`.
 
-**Cross-module contract invariant:** any change to the AIDL surface, `StreamEvent` shape, frame format, or `StreamEventType` constants must update `:app`, `:sdk`, `:shared`, and the corresponding tests in the same change. The AIDL **interface** files (`IMindlayerService.aidl` + `IClientCallback.aidl`) are duplicated under `app/src/main/aidl/` and `sdk/src/main/aidl/` and must stay byte-identical (`AidlContractDriftTest` enforces). **Parcelable** AIDL files live only in `sdk/src/main/aidl/` — `:app` pulls them in via `implementation(project(":sdk"))` so there is structurally nothing to mirror or drift.
+**Cross-module contract invariant:** any change to the AIDL surface, `StreamEvent` shape, frame format, or `StreamEventType` constants must update `:app`, `:sdk`, `:shared`, and the corresponding tests in the same change. ALL AIDL files (interfaces `IMindlayerService.aidl` + `IClientCallback.aidl` and parcelables) live ONLY in `sdk/src/main/aidl/`; `:app` consumes the generated Binder classes via `implementation(project(":sdk"))` and has no AIDL of its own (`AidlContractDriftTest` enforces — adding AIDL to `:app` duplicates the classes and breaks the release R8 merge).
 
 ## See also
 

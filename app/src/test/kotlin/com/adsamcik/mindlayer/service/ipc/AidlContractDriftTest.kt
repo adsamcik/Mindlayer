@@ -1,6 +1,5 @@
 package com.adsamcik.mindlayer.service.ipc
 
-import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.file.Files
@@ -8,84 +7,75 @@ import java.nio.file.Path
 import java.nio.file.Paths
 
 /**
- * Cross-module contract drift guard.
+ * Cross-module AIDL ownership guard.
  *
- * Parcelable AIDL declarations live ONLY in `:sdk/src/main/aidl/` —
- * `:app` (the service module) pulls them in via the `implementation
- * (project(":sdk"))` dependency and the AIDL compiler resolves them
- * transitively. The two AIDL **interface** files
- * (`IMindlayerService.aidl` + `IClientCallback.aidl`) remain mirrored
- * in both modules because they are the wire contract: the service-
- * generated `Stub` is in `:app`'s `R.aidl` namespace, the client-
- * generated `Proxy` is in `:sdk`'s — both must agree byte-for-byte
- * on method signatures or the Binder transactions silently fail.
+ * The AIDL **interface** files (`IMindlayerService.aidl` +
+ * `IClientCallback.aidl`) and ALL parcelable declarations live ONLY in
+ * `:sdk/src/main/aidl/`. `:app` (the service module) consumes the generated
+ * Binder classes (`IMindlayerService.Stub`, `IClientCallback`, parcelables)
+ * via `implementation(project(":sdk"))` and does NOT compile its own copy.
  *
- * This test verifies:
- *   1. `:app/src/main/aidl/` contains ONLY the two interface files,
- *      not a single stray parcelable copy (catches accidental
- *      re-additions during refactors).
- *   2. Each interface file is byte-identical between the two modules
- *      after CRLF normalisation.
- *   3. `:sdk` contains a superset that includes the two interfaces
- *      (so the interface->parcelable references resolve at AIDL
- *      compile time).
+ * Why: `:app` previously mirrored the interface `.aidl` files. Once `:app`
+ * started depending on `:sdk` (which already compiles the same interfaces),
+ * the duplicated classes broke the **release** build — R8 fails the
+ * full-program merge with "Type com.adsamcik.mindlayer.IClientCallback
+ * `$Default` is defined multiple times" (present in both the app's javac
+ * output and the `:sdk` runtime jar). Debug builds (non-minified D8) tolerated
+ * it, and CI never runs a release dex, so it went undetected.
  *
- * See `.github/instructions/aidl.instructions.md` for the policy.
+ * This test fails closed if anyone re-introduces AIDL sources into `:app`,
+ * which would re-break `:app:minifyReleaseWithR8`. See
+ * `.github/instructions/aidl.instructions.md` for the policy.
  */
 class AidlContractDriftTest {
 
     @Test
-    fun `app and sdk AIDL interface contracts stay in sync`() {
+    fun `app does not compile its own AIDL — interfaces live only in sdk`() {
         val root = repoRoot()
-        val appDir = root.resolve("app/src/main/aidl/com/adsamcik/mindlayer")
+        val appDir = root.resolve("app/src/main/aidl")
         val sdkDir = root.resolve("sdk/src/main/aidl/com/adsamcik/mindlayer")
 
-        val appFiles = aidlFiles(appDir)
+        // (1) :app must not own any AIDL sources. A re-added interface or
+        // parcelable here would be compiled into :app AND pulled in from the
+        // :sdk dependency, breaking the release R8 merge.
+        val appAidl = aidlFilesRecursive(appDir)
+        assertTrue(
+            "Found AIDL sources in :app ($appAidl). AIDL is defined only in " +
+                ":sdk; :app consumes the generated classes via " +
+                "implementation(project(\":sdk\")). Re-adding AIDL to :app breaks " +
+                "the release build — see .github/instructions/aidl.instructions.md.",
+            appAidl.isEmpty(),
+        )
+
+        // (2) :sdk remains the single source of truth: both interface files
+        // plus the parcelable set it references.
         val sdkFiles = aidlFiles(sdkDir)
-
-        // (1) app side must contain ONLY the two interface files. Any
-        // parcelable copy here is a refactor regression.
-        val unexpectedInApp = appFiles - INTERFACE_FILES
-        assertTrue(
-            "Unexpected non-interface AIDL files in :app — parcelables now " +
-                "live only in :sdk (see .github/instructions/aidl.instructions.md): $unexpectedInApp",
-            unexpectedInApp.isEmpty(),
-        )
-        val missingInApp = INTERFACE_FILES - appFiles
-        assertTrue(
-            "Missing required interface AIDL files in :app: $missingInApp",
-            missingInApp.isEmpty(),
-        )
-
-        // (2) sdk side must contain the two interface files too. The
-        // parcelables it ALSO contains are the source-of-truth set.
         val missingInSdk = INTERFACE_FILES - sdkFiles
         assertTrue(
             "Missing required interface AIDL files in :sdk: $missingInSdk",
             missingInSdk.isEmpty(),
         )
-
-        // (3) byte-identical interface contracts after CRLF normalisation.
-        INTERFACE_FILES.forEach { fileName ->
-            val appBytes = readNormalized(appDir.resolve(fileName))
-            val sdkBytes = readNormalized(sdkDir.resolve(fileName))
-            assertArrayEquals("AIDL drift in $fileName", appBytes, sdkBytes)
-        }
     }
 
-    private fun aidlFiles(dir: Path): Set<String> =
-        Files.list(dir).use { stream ->
+    private fun aidlFiles(dir: Path): Set<String> {
+        if (!Files.isDirectory(dir)) return emptySet()
+        return Files.list(dir).use { stream ->
             stream.filter { it.fileName.toString().endsWith(".aidl") }
                 .map { it.fileName.toString() }
                 .toList()
                 .toSet()
         }
+    }
 
-    private fun readNormalized(path: Path): ByteArray =
-        String(Files.readAllBytes(path), Charsets.UTF_8)
-            .replace("\r\n", "\n")
-            .trim()
-            .toByteArray(Charsets.UTF_8)
+    private fun aidlFilesRecursive(dir: Path): Set<String> {
+        if (!Files.exists(dir)) return emptySet()
+        return Files.walk(dir).use { stream ->
+            stream.filter { it.fileName.toString().endsWith(".aidl") }
+                .map { dir.relativize(it).toString() }
+                .toList()
+                .toSet()
+        }
+    }
 
     private fun repoRoot(): Path {
         var current = Paths.get("").toAbsolutePath()
