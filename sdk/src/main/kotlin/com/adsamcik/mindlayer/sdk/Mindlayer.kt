@@ -462,34 +462,6 @@ interface Mindlayer {
         options: com.adsamcik.mindlayer.OcrImageOptions = com.adsamcik.mindlayer.OcrImageOptions(),
     ): com.adsamcik.mindlayer.OcrImageResult
 
-    @Deprecated(
-        message = "Use ocrSession { } (Mindlayer v1)",
-        replaceWith = ReplaceWith("ocrSession { profile(profile) }"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun ocrSession(
-        profile: OcrProfile,
-        configure: OcrSessionConfigBuilder.() -> Unit = {},
-    ): OcrSession
-
-    @Deprecated(
-        message = "Use ocrSession { } (Mindlayer v1)",
-        replaceWith = ReplaceWith("ocrSession { config(config) }"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun ocrSession(config: com.adsamcik.mindlayer.OcrSessionConfig): OcrSession
-
-    @Deprecated(
-        message = "Use ocr { } / readText(...) (Mindlayer v1)",
-        replaceWith = ReplaceWith("ocr { bytes(bytes, mimeType); options(options) }"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun ocrImage(
-        bytes: ByteArray,
-        mimeType: String,
-        options: com.adsamcik.mindlayer.OcrImageOptions = com.adsamcik.mindlayer.OcrImageOptions(),
-    ): com.adsamcik.mindlayer.OcrImageResult
-
     companion object {
         /**
          * Construct a [Mindlayer] client bound to the on-device service and

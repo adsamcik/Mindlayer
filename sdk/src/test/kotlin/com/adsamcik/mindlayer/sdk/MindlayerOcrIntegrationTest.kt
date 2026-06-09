@@ -1,6 +1,6 @@
-@file:Suppress("DEPRECATION") // Existing tests deliberately exercise the
-// ocrSession() deprecated alias to prove the rename hasn't broken pre-v0.10
-// callers. New tests should use ocrRealtime() / ocrAsync() instead.
+@file:Suppress("DEPRECATION") // Tests exercise deprecated ocrRealtime() / ocrAsync() which
+// remain in the interface for consumers that depend on the legacy OcrSession / OcrImageResult types.
+// New tests should use ocrSession { } / ocr { } instead.
 
 package com.adsamcik.mindlayer.sdk
 
@@ -40,7 +40,7 @@ import org.robolectric.annotation.Config
  * full SDK pipeline:
  *
  *  - ``Mindlayer.ocrLimits()`` reads through the cached binder.
- *  - ``Mindlayer.ocrSession(profile, configure) { }`` builds the
+ *  - ``mindlayer.ocrRealtime(profile, configure) { }`` builds the
  *    correct ``OcrSessionConfig`` and calls ``createOcrSession``.
  *  - ``OcrSession.pushFrame(meta)`` round-trips through
  *    ``pushOcrFrame(sessionId, real MediaPart, meta)`` and returns
@@ -167,23 +167,23 @@ class MindlayerOcrIntegrationTest {
         assertEquals(OcrLimits.zeroBaseline(), limits)
     }
 
-    // ── ocrSession DSL ───────────────────────────────────────────────────
+    // ── ocrRealtime DSL ───────────────────────────────────────────────────
 
-    @Test fun `ocrSession builds with profile defaults`() = runBlocking {
+    @Test fun `ocrRealtime builds with profile defaults`() = runBlocking {
         val configSlot = slot<OcrSessionConfig>()
         every { mockService.createOcrSession(capture(configSlot)) } returns "ocr-1-x"
 
-        val session = mindlayer.ocrSession(OcrProfile.Receipt)
+        val session = mindlayer.ocrRealtime(OcrProfile.Receipt)
         assertEquals("ocr-1-x", session.sessionId)
         assertEquals(OcrSessionConfig.MODE_RECEIPT, configSlot.captured.mode)
         assertEquals(OcrProfile.Receipt.defaultSchema, configSlot.captured.outputSchemaJson)
     }
 
-    @Test fun `ocrSession honors builder overrides`() = runBlocking {
+    @Test fun `ocrRealtime honors builder overrides`() = runBlocking {
         val configSlot = slot<OcrSessionConfig>()
         every { mockService.createOcrSession(capture(configSlot)) } returns "ocr-1-y"
 
-        mindlayer.ocrSession(OcrProfile.IdCard) {
+        mindlayer.ocrRealtime(OcrProfile.IdCard) {
             languageHints = listOf("en", "de-DE")
             maxFrames = 15
             frameRateLimitFps = 3
@@ -200,7 +200,7 @@ class MindlayerOcrIntegrationTest {
         for (profile in OcrProfile.all) {
             val slot = slot<OcrSessionConfig>()
             every { mockService.createOcrSession(capture(slot)) } returns "ocr-1-${profile.mode}"
-            mindlayer.ocrSession(profile)
+            mindlayer.ocrRealtime(profile)
             assertEquals(
                 "Profile ${profile.displayName} should map to mode ${profile.mode}",
                 profile.mode,
@@ -212,7 +212,7 @@ class MindlayerOcrIntegrationTest {
     // ── OcrSession lifecycle ─────────────────────────────────────────────
 
     @Test fun `pushFrame round-trips through AIDL`() = runBlocking {
-        val session = mindlayer.ocrSession(OcrProfile.GeneralDocument)
+        val session = mindlayer.ocrRealtime(OcrProfile.GeneralDocument)
         val meta = OcrFrameMeta(frameId = 7L, captureTimeMs = 0L)
         val ack = session.pushFrame(meta, ByteArray(64 * 64) { 127.toByte() }, 64, 64)
         assertEquals(7L, ack.frameId)
@@ -220,7 +220,7 @@ class MindlayerOcrIntegrationTest {
     }
 
     @Test fun `OCR AIDL wire-prefixed errors become MindlayerException`() = runBlocking {
-        val session = mindlayer.ocrSession(OcrProfile.GeneralDocument)
+        val session = mindlayer.ocrRealtime(OcrProfile.GeneralDocument)
         every { mockService.pushOcrFrame(any(), any(), any()) } throws SecurityException(
             MindlayerErrorCode.wireMessage(MindlayerErrorCode.OCR_SESSION_FINALIZED, "finalized"),
         )
@@ -240,20 +240,20 @@ class MindlayerOcrIntegrationTest {
     }
 
     @Test fun `state round-trips through AIDL`() = runBlocking {
-        val session = mindlayer.ocrSession(OcrProfile.GeneralDocument)
+        val session = mindlayer.ocrRealtime(OcrProfile.GeneralDocument)
         val state = session.state()
         assertEquals(OcrSessionState.PHASE_ACTIVE, state.phase)
         assertEquals(3, state.framesAccepted)
     }
 
     @Test fun `finalize round-trips through AIDL`() = runBlocking {
-        val session = mindlayer.ocrSession(OcrProfile.GeneralDocument)
+        val session = mindlayer.ocrRealtime(OcrProfile.GeneralDocument)
         session.finalize()
         verify(exactly = 1) { mockService.finalizeOcrSession(any()) }
     }
 
     @Test fun `close calls closeOcrSession exactly once`() = runBlocking {
-        val session = mindlayer.ocrSession(OcrProfile.GeneralDocument)
+        val session = mindlayer.ocrRealtime(OcrProfile.GeneralDocument)
         session.close()
         session.close()
         verify(exactly = 1) { mockService.closeOcrSession(any()) }
@@ -261,7 +261,7 @@ class MindlayerOcrIntegrationTest {
 
     @Test fun `pushFrame on closed session throws`() {
         runBlocking {
-            val session = mindlayer.ocrSession(OcrProfile.GeneralDocument)
+            val session = mindlayer.ocrRealtime(OcrProfile.GeneralDocument)
             session.close()
             assertThrows(IllegalStateException::class.java) {
                 runBlocking { session.pushFrame(OcrFrameMeta(frameId = 1L, captureTimeMs = 0L), ByteArray(64 * 64) { 127.toByte() }, 64, 64) }
@@ -271,7 +271,7 @@ class MindlayerOcrIntegrationTest {
 
     @Test fun `use closure closes the session even when body throws`() {
         runBlocking {
-            val session = mindlayer.ocrSession(OcrProfile.GeneralDocument)
+            val session = mindlayer.ocrRealtime(OcrProfile.GeneralDocument)
             val ex = assertThrows(RuntimeException::class.java) {
                 session.use {
                     throw RuntimeException("oops")
@@ -285,7 +285,7 @@ class MindlayerOcrIntegrationTest {
     // ── End-to-end happy path ────────────────────────────────────────────
 
     @Test fun `full session lifecycle e2e`() = runBlocking {
-        mindlayer.ocrSession(OcrProfile.Receipt) {
+        mindlayer.ocrRealtime(OcrProfile.Receipt) {
             languageHints = listOf("en")
             maxFrames = 10
         }.use { session ->
