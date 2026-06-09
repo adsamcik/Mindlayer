@@ -36,6 +36,7 @@ import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -569,11 +570,109 @@ internal class MindlayerImpl(
                 "extract" to CallParams.has(request.extractionSchema),
             ),
         ) {
-            throw MindlayerException(
-                message = "Mindlayer v1 — ocrSession behaviour lands in C3",
-                code = MindlayerErrorCode.NOT_SUPPORTED,
-            )
+            val config = OcrSessionConfigBuilder(request.profile).apply {
+                (request.extractionSchema ?: request.schema)?.let {
+                    outputSchemaJson = it.json.toString()
+                }
+                languageHints = request.languageHints
+                request.maxFrames?.let { maxFrames = it }
+                request.frameRateLimit?.let { frameRateLimitFps = it }
+            }.build()
+            val session = ocrRealtime(config)
+            BridgeOcrSession(session, extractionRequested = request.extractionSchema != null)
         }
+    }
+
+    /**
+     * [OcrHandle.MultiFrame] bridging the canonical streaming OCR surface onto
+     * the working multi-frame [OcrSession] plumbing (`createOcrSession` →
+     * push / finalize / stream over AIDL). [events] delegates straight to the
+     * live session stream (same [OcrEvent] type — no remapping); [finalize]
+     * attaches a dedicated event pipe, drains the session, and maps the
+     * terminal [OcrEvent.ResultFinalized] into a typed [OcrResult] reusing the
+     * same lenient JSON mapping the one-shot path uses.
+     */
+    private inner class BridgeOcrSession(
+        private val session: OcrSession,
+        private val extractionRequested: Boolean,
+    ) : OcrHandle.MultiFrame {
+        override val sessionId: String get() = session.sessionId
+
+        override val events: Flow<OcrEvent> get() = session.events
+
+        override suspend fun pushFrame(
+            meta: com.adsamcik.mindlayer.OcrFrameMeta,
+            image: ImageInput,
+        ): com.adsamcik.mindlayer.OcrFrameAck {
+            val (bytes, mimeType) = imageInputToBytes(image)
+            return session.pushEncodedFrame(meta, bytes, mimeType)
+        }
+
+        override suspend fun finalize(): OcrResult {
+            val pipe = ParcelFileDescriptor.createPipe()
+            val readEnd = pipe[0]
+            val writeEnd = pipe[1]
+            try {
+                attachOcrEventStream(session.sessionId, writeEnd)
+            } catch (t: Throwable) {
+                readEnd.closeQuietly()
+                writeEnd.closeQuietly()
+                throw t
+            }
+            // The service has dup'd the write-end via the binder call; drop our
+            // local copy so the reader sees EOF once the service-side writer
+            // closes its dup at session end.
+            writeEnd.closeQuietly()
+            var finalJson: String? = null
+            try {
+                session.finalize()
+                OcrTokenStreamReader.readStream(readEnd).collect { event ->
+                    if (event is OcrEvent.ResultFinalized) finalJson = event.fullJson
+                }
+            } catch (t: Throwable) {
+                readEnd.closeQuietly()
+                throw t
+            }
+            return buildOcrResultFromFinalized(finalJson, extractionRequested)
+        }
+
+        override suspend fun closeAsync() {
+            withContext(Dispatchers.IO) { session.close() }
+        }
+
+        override fun close() {
+            session.close()
+        }
+    }
+
+    /**
+     * Map a terminal OCR-session [OcrEvent.ResultFinalized] JSON payload into a
+     * typed [OcrResult]. Mirrors [mapOcrImageResult]'s lenient parsing:
+     * best-effort `lines[]` extraction, a parsed [JsonObject] for
+     * [OcrResult.fullJson] (falling back to `{"lines":[]}`), and
+     * [OcrResult.extractionJson] only when extraction was requested. Session
+     * event streams carry no timing, so metrics are [Metrics.EMPTY].
+     */
+    private fun buildOcrResultFromFinalized(
+        finalJson: String?,
+        extractionRequested: Boolean,
+    ): OcrResult {
+        val parsed = finalJson?.let {
+            runCatching { lenientJson.parseToJsonElement(it) as? JsonObject }.getOrNull()
+        }
+        val lines = (parsed?.get("lines") as? JsonArray)?.mapNotNull { el ->
+            (el as? JsonPrimitive)?.let { OcrLine(text = it.content) }
+        } ?: emptyList()
+        val fullJson = parsed ?: buildJsonObject {
+            put("lines", buildJsonArray { lines.forEach { add(JsonPrimitive(it.text)) } })
+        }
+        val extractionJson = if (extractionRequested) parsed else null
+        return OcrResult(
+            lines = lines,
+            fullJson = fullJson,
+            extractionJson = extractionJson,
+            metrics = Metrics.EMPTY,
+        )
     }
 
     override suspend fun embed(build: EmbeddingRequest.Builder.() -> Unit): EmbeddingHandle {

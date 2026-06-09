@@ -24,6 +24,7 @@ interface MindlayerObserver {
  * Opaque correlation token handed from [MindlayerObserver.onCallStart] back to
  * [MindlayerObserver.onCallEnd]. The SDK never inspects its contents.
  */
+@ConsistentCopyVisibility
 data class Span internal constructor(val id: String, val startNanos: Long)
 
 /** Terminal outcome of an observed Mindlayer call. */
