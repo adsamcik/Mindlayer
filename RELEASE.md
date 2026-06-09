@@ -246,6 +246,7 @@ bundletool dump manifest --bundle app\build\outputs\bundle\release\app-release.a
 | `:app:bundleRelease` (unsigned) | ✅ on `main` with all model SHA repo variables when CI signing secrets are absent | ✅ with all `-P*Sha256=...` properties |
 | `:app:bundleRelease` (signed)   | ✅ on `main` when all model SHA repo variables and CI signing secrets are configured | ✅ only when `keystore.properties` is set |
 | **`v*` tag → attached AAB on GitHub Release** | ✅ on every release tag — `publish.yml`'s `release-aab` job builds + attaches `app-release.aab` to the GitHub Release alongside the SDK pointer (signed when CI secrets are configured, unsigned otherwise). Gated on the same `gemma-4-E2B-it.litertlm` presence check as the `main`-branch flow. | — |
+| **`v*` tag → attached debug APK on GitHub Release** | ✅ on every release tag — `publish.yml`'s `release-apk` job builds a code-only **debug** APK (AI packs excluded via `-Pmindlayer.bundle*=false`) and attaches `mindlayer-service-debug-<tag>.apk` (~78 MB) to the Release. Debug-signed by the in-repo keystore; needs no model artefacts or signing secrets. Testers sideload it and push models with `tools/dev-models/push-models.*`. A *release* code-only APK is deliberately **not** built: its integrity manifests ship inside the excluded AI-pack modules, so a non-debuggable build rejects sideloaded models. A full APK with models (~2.5 GB) exceeds GitHub's 2 GiB asset cap. | — |
 
 CI can sign the release AAB when `ANDROID_KEYSTORE_BASE64`,
 `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`

@@ -184,15 +184,19 @@ jobs:
             implementation("com.adsamcik.mindlayer:sdk:${{ steps.version.outputs.version }}")
             ```
 
-            ## Service APK / AAB
+            ## Service builds
 
-            The signed `:app` Android App Bundle (and, when CI signing
-            secrets are configured, a signed APK) is attached to this
-            release by the `release-aab` job below — if present, it
-            installs the Mindlayer service that the SDK above talks to.
-            Sideload-friendly users can grab the universal APK; Play
-            Store distribution uses the AAB. See `RELEASE.md` for the
-            full signing flow.
+            - **`mindlayer-service-debug-${{ github.ref_name }}.apk`** — a
+              small, installable **debug** APK (AI model packs excluded)
+              attached by the `release-apk` job. Sideload it and push the
+              models with `tools/dev-models/push-models.*`. It is debug-signed
+              and intended for testing / sideloading, not Play distribution.
+            - **Signed AAB** — attached by the `release-aab` job only when the
+              model artefacts and signing secrets are provisioned in CI. This
+              is the Play Store distribution artifact. A full standalone APK
+              with the bundled models (~2.5 GB) exceeds GitHub's 2 GiB
+              release-asset cap, so it is intentionally not attached here. See
+              `RELEASE.md` for the local signed-build flow.
 
   release-aab:
     # Phase 3 #5 (p3-signed-release): attach the service-side AAB (and
@@ -350,4 +354,68 @@ jobs:
           name: mindlayer-service-${{ github.ref_name }}-aab
           path: app/build/outputs/bundle/release/*.aab
           retention-days: 30
+
+  release-apk:
+    # Attach a small, installable code-only DEBUG APK to the GitHub Release so
+    # testers can sideload the service and push models with
+    # tools/dev-models/push-models.*. Why DEBUG and not a release APK: the
+    # model integrity manifests ship inside the AI-pack modules, which a
+    # code-only build excludes, so a non-debuggable (release) build rejects
+    # every sideloaded model at discovery (requireIntegrity=true, no manifest).
+    # The debug variant scans /data/local/tmp + externalFilesDir with
+    # requireIntegrity=false and is signed by the in-repo knowncerts keystore,
+    # so it needs no model artefacts and no signing secrets. A full standalone
+    # APK with the bundled models (~2.5 GB) exceeds GitHub's 2 GiB
+    # release-asset cap, so it is intentionally not built here; production
+    # distribution is the AAB via Play.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [ publish ]
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up JDK 21 (compile target 17)
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
+
+      - name: Build code-only debug APK (AI packs excluded)
+        run: |
+          ./gradlew :app:assembleDebug --no-daemon \
+            -Pmindlayer.bundleGemma=false \
+            -Pmindlayer.bundleEmbeddings=false \
+            -Pmindlayer.bundlePaddleocr=false
+
+      - name: Locate and name the APK
+        id: locate-apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="$(find app/build/outputs/apk/debug -name '*.apk' -print -quit)"
+          if [[ -z "$src" ]]; then
+            echo "::error::No debug APK found under app/build/outputs/apk/debug/"
+            exit 1
+          fi
+          dest="mindlayer-service-debug-${GITHUB_REF_NAME}.apk"
+          cp "$src" "$dest"
+          echo "apk-path=$dest" >> "$GITHUB_OUTPUT"
+          ls -lh "$dest"
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+
+      - name: Attach debug APK to GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          files: ${{ steps.locate-apk.outputs.apk-path }}
+          fail_on_unmatched_files: true
 
