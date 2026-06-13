@@ -177,6 +177,9 @@ jobs:
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           generate_release_notes: true
+          # Pre-release tags carry a SemVer pre-release identifier (a hyphen),
+          # e.g. v1.0.0-alpha.2 / -beta.1 / -rc.1; stable tags (v1.0.0) do not.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
             ## SDK ${{ steps.version.outputs.version }}
 
@@ -346,6 +349,9 @@ jobs:
         with:
           files: ${{ steps.locate-aab.outputs.aab-path }}
           fail_on_unmatched_files: true
+          # Keep the pre-release flag stable no matter which job updates the
+          # release last (see "Create GitHub Release").
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
       - name: Upload AAB as workflow artifact (30-day retention)
         if: steps.check-bundle.outputs.have-bundle == 'true'
@@ -418,4 +424,7 @@ jobs:
         with:
           files: ${{ steps.locate-apk.outputs.apk-path }}
           fail_on_unmatched_files: true
+          # Keep the pre-release flag stable no matter which job updates the
+          # release last (see "Create GitHub Release").
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
