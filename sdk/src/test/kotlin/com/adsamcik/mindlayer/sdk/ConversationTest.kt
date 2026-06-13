@@ -212,32 +212,8 @@ class ConversationTest {
     }
 
     // ═════════════════════════════════════════════════════════════════════
-    //  Simple chat API
+    //  Protocol violation
     // ═════════════════════════════════════════════════════════════════════
-
-    @Test
-    fun `mindlayer_chat_creates_and_destroys_session`() = runTest {
-        stubInferToClose()
-
-        try { mindlayer.chat("One-shot message") } catch (_: Exception) { }
-
-        // generate() internally creates and destroys a session
-        verify(atLeast = 1) { mockService.createSession(any()) }
-        verify(atLeast = 1) { mockService.destroySession(any()) }
-    }
-
-    @Test
-    fun `one-shot stream without Done throws protocol violation`() = runTest {
-        stubInferToClose()
-
-        val ex = try {
-            mindlayer.chat("empty stream")
-            throw AssertionError("expected MindlayerException")
-        } catch (e: MindlayerException) {
-            e
-        }
-        assertEquals(MindlayerErrorCode.PROTOCOL_VIOLATION, ex.code)
-    }
 
     @Test
     fun `conversation chat without Done throws protocol violation`() = runTest {

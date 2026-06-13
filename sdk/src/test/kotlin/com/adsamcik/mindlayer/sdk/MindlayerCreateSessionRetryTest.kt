@@ -103,7 +103,7 @@ class MindlayerCreateSessionRetryTest {
             }
         }
 
-        val id = mindlayer.createSession { backend("CPU") }
+        val id = mindlayer.createSessionInternal {  backend("CPU")  }
 
         assertEquals("session-ready", id)
         assertEquals("Should retry once after engine_initializing", 2, attempts)
@@ -126,7 +126,7 @@ class MindlayerCreateSessionRetryTest {
             }
         }
 
-        val id = mindlayer.createSession { backend("CPU") }
+        val id = mindlayer.createSessionInternal {  backend("CPU")  }
         assertEquals("session-after-3", id)
         assertEquals(6, attempts)
     }
@@ -144,7 +144,7 @@ class MindlayerCreateSessionRetryTest {
 
         var thrown: Throwable? = null
         try {
-            mindlayer.createSession { }
+            mindlayer.createSessionInternal {   }
         } catch (e: Throwable) {
             thrown = e
         }
@@ -168,7 +168,7 @@ class MindlayerCreateSessionRetryTest {
 
         var thrown: Throwable? = null
         try {
-            mindlayer.createSession { }
+            mindlayer.createSessionInternal {   }
         } catch (e: Throwable) {
             thrown = e
         }
@@ -191,7 +191,7 @@ class MindlayerCreateSessionRetryTest {
         }
         var thrown: Throwable? = null
         try {
-            mindlayer.createSession { backend("CPU") }
+            mindlayer.createSessionInternal {  backend("CPU")  }
         } catch (e: Throwable) {
             thrown = e
         }

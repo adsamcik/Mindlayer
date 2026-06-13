@@ -35,6 +35,18 @@ interface SessionScope {
     var toolsJson: String?
         get() = null
         set(_) {}
+
+    /**
+     * Opaque JSON object passed to the service as `extraContextJson`.
+     * Used for opt-in features such as thinking mode:
+     * ```kotlin
+     * openSession { extraContextJson = """{"thinking":{"enable":true}}""" }
+     * ```
+     * Default: `null` (no extra context).
+     */
+    var extraContextJson: String?
+        get() = null
+        set(_) {}
 }
 
 /**

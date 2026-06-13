@@ -54,25 +54,39 @@ internal class SessionHandle internal constructor(
     suspend fun chatDeferred(text: String): com.adsamcik.mindlayer.DeferredHandle =
         client.chatDeferred(sessionId, text)
 
-    /** @see MindlayerImpl.chatOnce */
+    /** One-shot text inference — returns the complete response. */
     suspend fun chatOnce(text: String): String =
         client.collectStreamingInference(sessionId, text)
 
-    /** @see MindlayerImpl.chatWithImageOnce */
+    /** One-shot image+text inference — returns the complete response. */
     suspend fun chatWithImageOnce(text: String, bitmap: Bitmap): String =
         client.collectStreamingInference(sessionId, text, imageInputs = listOf(ImageInput.Bitmap(bitmap)))
 
-    /** @see MindlayerImpl.chatWithAudioOnce */
+    /** One-shot audio+text inference — returns the complete response. */
     suspend fun chatWithAudioOnce(text: String, audioFile: File): String =
         client.collectStreamingInference(sessionId, text, audioFile = audioFile)
 
-    /** @see MindlayerImpl.chatTextFlow */
+    /** Emits text deltas only. */
     fun chatTextFlow(text: String): kotlinx.coroutines.flow.Flow<String> =
-        client.chatTextFlow(sessionId, text)
+        kotlinx.coroutines.flow.flow {
+            val handle = client.streamInference(sessionId, text)
+            handle.events.collect { event ->
+                if (event is InferenceEvent.TextDelta) emit(event.text)
+            }
+        }
 
-    /** @see MindlayerImpl.chatFullTextFlow */
+    /** Emits cumulative text after each delta. */
     fun chatFullTextFlow(text: String): kotlinx.coroutines.flow.Flow<String> =
-        client.chatFullTextFlow(sessionId, text)
+        kotlinx.coroutines.flow.flow {
+            val acc = StringBuilder()
+            val handle = client.streamInference(sessionId, text)
+            handle.events.collect { event ->
+                if (event is InferenceEvent.TextDelta) {
+                    acc.append(event.text)
+                    emit(acc.toString())
+                }
+            }
+        }
 
     /** Submit a tool result for continued inference using the ToolCall callId. */
     suspend fun submitToolResult(

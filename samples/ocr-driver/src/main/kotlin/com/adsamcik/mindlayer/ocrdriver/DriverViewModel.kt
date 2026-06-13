@@ -218,7 +218,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     // ── Inference (Gemma) ───────────────────────────────────────────────
 
-    @Suppress("DEPRECATION")
     fun runInference(prompt: String, maxTokens: Int, temperature: Float) {
         val client = mindlayer ?: return
         if (prompt.isBlank()) return
@@ -235,41 +234,25 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
             val started = System.nanoTime()
-            val sessionId = try {
-                client.createSession {
-                    systemPrompt("You are a concise tester probe. Answer in <= 60 tokens.")
-                    maxTokens(maxTokens.coerceIn(128, 8192))
-                    temperature(temperature.coerceIn(0f, 2f))
-                }
-            } catch (t: Throwable) {
-                _ui.update {
-                    it.copy(
-                        inference = it.inference.copy(
-                            inProgress = false,
-                            error = "createSession: ${t.javaClass.simpleName}: ${t.message?.take(180)}",
-                        ),
-                    )
-                }
-                return@launch
-            }
             val response = try {
                 withTimeoutOrNull(120_000L) {
-                    client.inferAsync(sessionId, prompt)
+                    client.ask(prompt) {
+                        systemPrompt = "You are a concise tester probe. Answer in <= 60 tokens."
+                        this.maxTokens = maxTokens.coerceIn(128, 8192)
+                    }
                 }
             } catch (t: Throwable) {
-                runCatching { client.destroySession(sessionId) }
                 _ui.update {
                     it.copy(
                         inference = it.inference.copy(
                             inProgress = false,
-                            error = "inferAsync: ${t.javaClass.simpleName}: ${t.message?.take(180)}",
+                            error = "ask: ${t.javaClass.simpleName}: ${t.message?.take(180)}",
                             durationMs = (System.nanoTime() - started) / 1_000_000L,
                         ),
                     )
                 }
                 return@launch
             }
-            runCatching { client.destroySession(sessionId) }
             val durationMs = (System.nanoTime() - started) / 1_000_000L
             _ui.update {
                 it.copy(

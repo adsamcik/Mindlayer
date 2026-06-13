@@ -47,21 +47,22 @@ class Conversation internal constructor(
      * Thread-safe — concurrent calls are serialized.
      */
     suspend fun chat(text: String): String =
-        withSession { sid -> client.chatOnce(sid, text) }
+        withSession { sid -> client.collectStreamingInference(sid, text) }
 
     /**
      * Send a text + image message and get the complete response.
      */
     suspend fun chat(text: String, image: Bitmap): String =
-        withSession { sid -> client.chatWithImageOnce(sid, text, image) }
+        withSession { sid ->
+            client.collectStreamingInference(sid, text, imageInputs = listOf(ImageInput.Bitmap(image)))
+        }
 
     /**
      * Send a text + audio message and get the complete response.
      */
     suspend fun chat(text: String, audio: File): String =
         withSession { sid ->
-            // Audio uses the streaming API, collect to string
-            val handle = client.chatWithAudio(sid, text, audio)
+            val handle = client.streamInference(sid, text, audioFile = audio)
             collectHandle(handle)
         }
 
@@ -77,7 +78,7 @@ class Conversation internal constructor(
      */
     suspend fun chatStream(text: String): InferenceHandle {
         val sid = ensureSession()
-        return client.chat(sid, text).also { synchronized(inFlight) { inFlight.add(it) } }
+        return client.streamInference(sid, text).also { synchronized(inFlight) { inFlight.add(it) } }
     }
 
     /**
@@ -88,7 +89,7 @@ class Conversation internal constructor(
      */
     suspend fun chatStream(text: String, image: Bitmap): InferenceHandle {
         val sid = ensureSession()
-        return client.chatWithImage(sid, text, image).also { synchronized(inFlight) { inFlight.add(it) } }
+        return client.streamInference(sid, text, imageInputs = listOf(ImageInput.Bitmap(image))).also { synchronized(inFlight) { inFlight.add(it) } }
     }
 
     /**
@@ -149,8 +150,8 @@ class Conversation internal constructor(
         check(!closeStarted.get()) { "Conversation is closed" }
         sessionId?.let { return it }
 
-        client.awaitConnected()
-        val sid = client.createSession {
+        client.awaitConnected(kotlin.time.Duration.INFINITE)
+        val sid = client.createSessionInternal {
             config.systemPrompt?.let { systemPrompt(it) }
             maxTokens(config.maxTokens)
             temperature(config.temperature)

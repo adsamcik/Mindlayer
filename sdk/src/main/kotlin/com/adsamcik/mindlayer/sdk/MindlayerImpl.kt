@@ -58,13 +58,12 @@ import java.util.UUID
  * **Quick start:**
  * ```kotlin
  * val mindlayer = Mindlayer.connect(context)
- * mindlayer.awaitConnected()
+ * mindlayer.awaitConnected(30.seconds)
  *
- * val sessionId = mindlayer.createSession {
- *     systemPrompt("You are a helpful assistant.")
- * }
- *
- * mindlayer.inferRealtime(sessionId, "Hello!").events.collect { event ->
+ * mindlayer.infer {
+ *     ephemeralSession { systemPrompt = "You are a helpful assistant." }
+ *     text("Hello!")
+ * }.events.collect { event ->
  *     when (event) {
  *         is InferenceEvent.TextDelta -> print(event.text)
  *         is InferenceEvent.Done -> println()
@@ -322,6 +321,7 @@ internal class MindlayerImpl(
                 scope.systemPrompt?.let { systemPrompt(it) }
                 scope.maxTokens?.let { maxTokens(it) }
                 scope.toolsJson?.let { toolsJsonRaw(it) }
+                scope.extraContextJson?.let { extraContext(it) }
             }
             BridgeSession(SessionHandle(this, sessionId))
         }
@@ -398,6 +398,7 @@ internal class MindlayerImpl(
             // Tools from SessionScope take priority; fall back to OutputMode.Tools
             val effectiveToolsJson = session.toolsJson ?: toolsJsonFromOutput
             effectiveToolsJson?.let { toolsJsonRaw(it) }
+            session.extraContextJson?.let { extraContext(it) }
         }
     }
 
@@ -529,6 +530,7 @@ internal class MindlayerImpl(
         override var maxTokens: Int? = null
         override var historyPolicy: HistoryPolicy = HistoryPolicy.METADATA_ONLY
         override var toolsJson: String? = null
+        override var extraContextJson: String? = null
     }
 
     /** Mutable [SamplerScope] capture used to translate sampling blocks. */
@@ -821,11 +823,6 @@ internal class MindlayerImpl(
         DEFAULT_CREATE_SESSION_INIT_RETRY_BACKOFF_MS
 
     internal var createSessionInitRetryClockMs: () -> Long = { System.currentTimeMillis() }
-
-    /** Suspend until the service binder is available. */
-    override suspend fun awaitConnected() {
-        connection.awaitConnected()
-    }
 
     override suspend fun awaitConnected(timeout: kotlin.time.Duration): Capabilities {
         require(timeout > kotlin.time.Duration.ZERO) {
@@ -1294,24 +1291,11 @@ internal class MindlayerImpl(
     // -- Session management ---------------------------------------------------
 
     /**
-     * Create a new inference session.
-     *
-     * Uses a local-first saga: persist locally as CREATING, then create the
-     * remote session, then confirm locally as READY. If the remote call fails,
-     * the local CREATING record is cleaned up immediately.
-     *
-     * @param configure optional DSL block to customise [SessionConfig].
-     * @return the server-assigned session ID.
-     */
-    override suspend fun createSession(
-        configure: SessionConfigBuilder.() -> Unit,
-    ): String = createSessionInternal(configure)
-
-    /**
      * Internal session creation workhorse: local saga + init retry.
-     * Public [createSession] and [openSession] both delegate here.
+     * [openSession] delegates here; accessible to same-module code
+     * (e.g. [Conversation]) via `internal`.
      */
-    private suspend fun createSessionInternal(
+    internal suspend fun createSessionInternal(
         configure: SessionConfigBuilder.() -> Unit,
     ): String = withContext(Dispatchers.IO) {
         val config = SessionConfigBuilder().apply(configure).build()
@@ -1408,339 +1392,6 @@ internal class MindlayerImpl(
     override suspend fun listSessions(): List<SessionInfo> {
         return withTypedErrors(retryOnServiceDeath = true) { it.listSessions() }
     }
-
-    // -- Chat (text only) -----------------------------------------------------
-
-    /**
-     * Send a text message and stream back inference events.
-     *
-     * Suspends until the service is connected, then issues the inference
-     * request and returns an [InferenceHandle]. The handle's [requestId]
-     * is generated synchronously before the suspend, so callers can wire
-     * up cancel callbacks ahead of time even before this returns.
-     *
-     * Creates a reliable pipe, hands the write end to the service via AIDL,
-     * and returns an [InferenceHandle] that provides the [requestId], event
-     * [Flow], and a [cancel][InferenceHandle.cancel] function that reaches
-     * through to the service's native cancel.
-     *
-     * History persistence: the user turn is saved BEFORE IPC and the
-     * assistant turn is marked COMPLETED only after the [InferenceEvent.Done]
-     * event.
-     *
-     * @deprecated Use [inferRealtime] for the canonical streaming entry
-     *   point. Behavior is identical when no media is supplied — `inferRealtime`
-     *   routes through the same legacy `infer(meta, null, null, pfd)`
-     *   wire path. See `docs/INFERENCE_SDK_POLISH.md`.
-     */
-    @Deprecated(
-        message = "Use inferRealtime(sessionId, text) — same behavior, canonical name.",
-        replaceWith = ReplaceWith("inferRealtime(sessionId, text)"),
-        level = DeprecationLevel.WARNING,
-    )
-    override suspend fun chat(sessionId: String, text: String): InferenceHandle {
-        val requestId = UUID.randomUUID().toString()
-        val flow = startTrackedInference(
-            sessionId = sessionId,
-            userText = text,
-            meta = RequestMeta(
-                requestId = requestId,
-                sessionId = sessionId,
-                textContent = text,
-            ),
-            imageProvider = { null },
-            audioProvider = { null },
-        )
-        return buildHandle(requestId, flow)
-    }
-
-    // -- Chat with image ------------------------------------------------------
-
-    /**
-     * Send a text + Bitmap message and stream back inference events.
-     *
-     * @deprecated Use [inferRealtime] with a [MediaTransfer.imagePart] —
-     *   same behavior, unified parameter shape. See
-     *   `docs/INFERENCE_SDK_POLISH.md`.
-     */
-    @Deprecated(
-        message = "Use inferRealtime(sessionId, text, MediaTransfer.imagePart(bitmap)).",
-        replaceWith = ReplaceWith(
-            "inferRealtime(sessionId, text, MediaTransfer.imagePart(bitmap))",
-            "com.adsamcik.mindlayer.sdk.MediaTransfer",
-        ),
-        level = DeprecationLevel.WARNING,
-    )
-    override suspend fun chatWithImage(
-        sessionId: String,
-        text: String,
-        bitmap: Bitmap,
-    ): InferenceHandle {
-        val requestId = UUID.randomUUID().toString()
-        val flow = startTrackedInference(
-            sessionId = sessionId,
-            userText = text,
-            meta = RequestMeta(
-                requestId = requestId,
-                sessionId = sessionId,
-                textContent = text,
-            ),
-            imageProvider = { MediaTransfer.fromBitmap(requestId, bitmap) },
-            audioProvider = { null },
-        )
-        return buildHandle(requestId, flow)
-    }
-
-    // -- Chat with audio ------------------------------------------------------
-
-    /**
-     * Send a text + audio file message and stream back inference events.
-     *
-     * @deprecated Use [inferRealtime] with a [MediaTransfer.audioPart] —
-     *   same behavior, unified parameter shape. See
-     *   `docs/INFERENCE_SDK_POLISH.md`.
-     */
-    @Deprecated(
-        message = "Use inferRealtime(sessionId, text, MediaTransfer.audioPart(audioFile)).",
-        replaceWith = ReplaceWith(
-            "inferRealtime(sessionId, text, MediaTransfer.audioPart(audioFile))",
-            "com.adsamcik.mindlayer.sdk.MediaTransfer",
-        ),
-        level = DeprecationLevel.WARNING,
-    )
-    override suspend fun chatWithAudio(
-        sessionId: String,
-        text: String,
-        audioFile: File,
-    ): InferenceHandle {
-        val requestId = UUID.randomUUID().toString()
-        val flow = startTrackedInference(
-            sessionId = sessionId,
-            userText = text,
-            meta = RequestMeta(
-                requestId = requestId,
-                sessionId = sessionId,
-                textContent = text,
-            ),
-            imageProvider = { null },
-            audioProvider = { MediaTransfer.fromAudioFile(requestId, audioFile) },
-        )
-        return buildHandle(requestId, flow)
-    }
-
-    /**
-     * Send a text message with an ordered list of media attachments. v0.4
-     * successor to [chatWithImage] / [chatWithAudio] — accepts varargs of
-     * [com.adsamcik.mindlayer.MediaPart] so future engines can consume
-     * multi-image / video / document inputs without another wire-break.
-     *
-     * Build parts via the helpers on [MediaTransfer]:
-     *
-     * ```kotlin
-     * mindlayer.chatWithMedia(
-     *     sessionId,
-     *     "Compare these two coffee bags",
-     *     MediaTransfer.imagePart(bagA),
-     *     MediaTransfer.imagePart(bagB),
-     * ).events.collect { ... }
-     * ```
-     *
-     * **Today's engine constraint** (see `MediaPart` KDoc): at most one
-     * image + one audio per request. The wire allows ordered lists for
-     * forward compatibility but the service rejects multi-image with
-     * `INVALID_REQUEST`. Order between the kinds is wire-stable from day
-     * one — clients should pass parts in their preferred order.
-     *
-     * **Old service compatibility**: if the connected service does not
-     * advertise [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_MEDIA_LIST],
-     * this method delegates to the legacy [chat] / [chatWithImage] /
-     * [chatWithAudio] surface (with the corresponding 1-image / 1-audio
-     * limit). Callers should still build via this entry point — the
-     * fallback is transparent.
-     *
-     * @deprecated Use [inferRealtime] with the same `vararg` parts — same
-     *   behavior, canonical name. See `docs/INFERENCE_SDK_POLISH.md`.
-     */
-    @Deprecated(
-        message = "Use inferRealtime(sessionId, text, *parts) — same behavior, canonical name.",
-        replaceWith = ReplaceWith("inferRealtime(sessionId, text, *parts)"),
-        level = DeprecationLevel.WARNING,
-    )
-    override suspend fun chatWithMedia(
-        sessionId: String,
-        text: String,
-        vararg parts: com.adsamcik.mindlayer.MediaPart,
-    ): InferenceHandle {
-        val requestId = UUID.randomUUID().toString()
-        // Re-tag every part with this requestId so the service's
-        // requestId-cross-check passes — callers built parts via the
-        // MediaTransfer helpers without knowing this requestId yet.
-        val rebound = parts.map { it.copy(requestId = requestId) }
-        val flow = startTrackedInferenceMulti(
-            sessionId = sessionId,
-            userText = text,
-            meta = RequestMeta(
-                requestId = requestId,
-                sessionId = sessionId,
-                textContent = text,
-            ),
-            media = rebound,
-        )
-        return buildHandle(requestId, flow)
-    }
-
-    // ── Polished entry points (feat/inference-sdk-polish) ────────────────────
-    //
-    // Three canonical top-level inference methods, all sharing the same
-    //   (sessionId: String, text: String, vararg media: MediaPart)
-    // shape. See docs/INFERENCE_SDK_POLISH.md for the full contract.
-    //
-    // These are thin facades over the existing (now @Deprecated) chat /
-    // chatWithImage / chatWithAudio / chatWithMedia methods. They do not
-    // change the AIDL wire shape, do not allocate extra structures, and
-    // do not duplicate logic — the delegated methods own behavior; these
-    // own naming + KDoc.
-
-    /**
-     * Stream inference events token-by-token.
-     *
-     * Canonical streaming entry point. Accepts zero or more media parts
-     * (image / audio) built via [MediaTransfer]:
-     *
-     * ```kotlin
-     * // Text-only
-     * mindlayer.inferRealtime(sessionId, "Hello!").events.collect { ... }
-     *
-     * // With an image
-     * mindlayer.inferRealtime(
-     *     sessionId,
-     *     "Describe this image",
-     *     MediaTransfer.imagePart(bitmap),
-     * ).events.collect { ... }
-     *
-     * // With image + audio (subject to the one-image / one-audio engine
-     * // constraint documented on MediaPart)
-     * mindlayer.inferRealtime(
-     *     sessionId,
-     *     "Caption this and transcribe the audio",
-     *     MediaTransfer.imagePart(bitmap),
-     *     MediaTransfer.audioPart(wav),
-     * ).events.collect { ... }
-     * ```
-     *
-     * **Routing:** when `media` is empty, this delegates to the legacy
-     * `infer(meta, null, null, pfd)` AIDL path. When `media` is non-empty,
-     * it routes through `inferMulti` and transparently falls back to the
-     * v0.1 single-image / single-audio surface for services that do not
-     * advertise [ServiceCapabilities.FEATURE_MEDIA_LIST]. Either way, the
-     * returned [InferenceHandle] carries a stable [InferenceHandle.requestId]
-     * generated synchronously before the suspend, so cancel wiring can be
-     * set up before the request even ships.
-     *
-     * @return [InferenceHandle] streaming [InferenceEvent]s. Collect the
-     *   handle's [events][InferenceHandle.events] flow and call
-     *   [cancel][InferenceHandle.cancel] to abort.
-     * @throws MindlayerException for typed service errors (rate limit,
-     *   validation, missing-capability) or stream `ERROR` frames.
-     * @throws SecurityException if the caller is not on the service's
-     *   allowlist or its first-connect approval is still pending.
-     */
-    @Suppress("DEPRECATION")
-    override suspend fun inferRealtime(
-        sessionId: String,
-        text: String,
-        vararg media: com.adsamcik.mindlayer.MediaPart,
-    ): InferenceHandle =
-        if (media.isEmpty()) chat(sessionId, text)
-        else chatWithMedia(sessionId, text, *media)
-
-    /**
-     * Run a single-shot inference and return the complete response text.
-     *
-     * Canonical "I just want the final string" entry point. Collects the
-     * streaming [inferRealtime] flow to completion and returns the
-     * accumulated text. Same media-parts shape as [inferRealtime].
-     *
-     * ```kotlin
-     * val answer = mindlayer.inferAsync(sessionId, "What is the capital of France?")
-     * println(answer)  // "Paris."
-     * ```
-     *
-     * **Note:** This method always uses the streaming wire path under the
-     * hood. A future revision may route through
-     * [ServiceCapabilities.FEATURE_DEFERRED_INFERENCE] when advertised so
-     * the call survives caller process death — see
-     * `docs/INFERENCE_SDK_POLISH.md` follow-up #1. Today, callers that
-     * need deferred semantics should keep using [chatDeferred] /
-     * [awaitDeferred] directly.
-     *
-     * @return the full response text accumulated from
-     *   [InferenceEvent.TextDelta] / [InferenceEvent.Done] events.
-     * @throws MindlayerException if the service reports an error or sends
-     *   an unexpected [InferenceEvent.ToolCall] (tool calling is not
-     *   supported in async / one-shot mode — use [inferTools] instead).
-     * @throws IllegalStateException if the stream ends without a terminal
-     *   [InferenceEvent.Done] event.
-     */
-    override suspend fun inferAsync(
-        sessionId: String,
-        text: String,
-        vararg media: com.adsamcik.mindlayer.MediaPart,
-    ): String = collectHandleToString(
-        inferRealtime(sessionId, text, *media),
-        sessionId,
-    )
-
-    /**
-     * Run an inference loop that may emit tool calls.
-     *
-     * Canonical entry point for tool-calling inference. Use this when the
-     * session was configured with [SessionConfigBuilder.tools] and you
-     * intend to handle [InferenceEvent.ToolCall] events by calling
-     * [submitToolResultDetailed].
-     *
-     * The wire shape is the same as [inferRealtime] — both route through
-     * the same `infer` / `inferMulti` AIDL methods. The distinction is
-     * **intent**: a session opened with tools may interleave
-     * [InferenceEvent.ToolCall] events into its event stream, and the
-     * caller is expected to round-trip those via
-     * [submitToolResultDetailed]. Outside a tools-enabled session this
-     * method behaves identically to [inferRealtime].
-     *
-     * ```kotlin
-     * val sessionId = mindlayer.createSession {
-     *     tools {
-     *         add("get_weather") { /* ... handler ... */ }
-     *     }
-     * }
-     * val handle = mindlayer.inferTools(sessionId, "What's the weather in Prague?")
-     * handle.events.collect { event ->
-     *     when (event) {
-     *         is InferenceEvent.ToolCall -> {
-     *             val result = runMyHandler(event)
-     *             mindlayer.submitToolResultDetailed(
-     *                 sessionId, handle.requestId, event.callId, result,
-     *             )
-     *         }
-     *         is InferenceEvent.TextDelta -> print(event.text)
-     *         is InferenceEvent.Done -> println()
-     *         else -> {}
-     *     }
-     * }
-     * ```
-     *
-     * **Future direction:** a follow-up PR may add a higher-level
-     * `inferTools(...)` overload that accepts a handler map and runs the
-     * tool-call loop automatically. See `docs/INFERENCE_SDK_POLISH.md`
-     * follow-up #2.
-     *
-     * @return [InferenceHandle] — identical contract to [inferRealtime].
-     */
-    override suspend fun inferTools(
-        sessionId: String,
-        text: String,
-        vararg media: com.adsamcik.mindlayer.MediaPart,
-    ): InferenceHandle = inferRealtime(sessionId, text, *media)
 
 
     private suspend fun requireDeferredCapability() {
@@ -2546,42 +2197,6 @@ internal class MindlayerImpl(
         return Conversation(this, config)
     }
 
-    /**
-     * Send a single message and get the response. No session management needed.
-     * Creates a temporary session, sends the message, destroys the session.
-     *
-     * For multi-turn conversations, use [conversation] instead.
-     *
-     * ```kotlin
-     * val answer = mindlayer.chat("What is specialty coffee?")
-     * ```
-     */
-    @Deprecated(
-        message = "Use inferAsync(text) — canonical name that pairs " +
-            "cleanly with inferRealtime() and matches the OCR realtime/" +
-            "async API naming.",
-        replaceWith = ReplaceWith("inferAsync(text)"),
-        level = DeprecationLevel.WARNING,
-    )
-    override suspend fun chat(text: String): String {
-        awaitConnected()
-        return generate(text)
-    }
-
-    /**
-     * Send a message with an image and get the response. No session management needed.
-     */
-    @Deprecated(
-        message = "Use inferAsync(text, MediaTransfer.imagePart(image)) — " +
-            "canonical name + explicit media transport.",
-        replaceWith = ReplaceWith("inferAsync(text, MediaTransfer.imagePart(image))"),
-        level = DeprecationLevel.WARNING,
-    )
-    override suspend fun chat(text: String, image: Bitmap): String {
-        awaitConnected()
-        return generateWithImage(text, image)
-    }
-
     // ── History ─────────────────────────────────────────────
 
     /**
@@ -2687,129 +2302,7 @@ internal class MindlayerImpl(
     fun session(sessionId: String): SessionHandle =
         SessionHandle(this, sessionId)
 
-    // -- One-shot convenience ------------------------------------------------
-
-    /**
-     * Send a text message and return the complete response text.
-     *
-     * Collects the streaming [chat] flow to completion and returns the
-     * accumulated text. Throws [MindlayerException] on service errors.
-     *
-     * @throws MindlayerException if the service reports an error or sends
-     *   an unexpected [InferenceEvent.ToolCall] (tool calling is not
-     *   supported in one-shot mode).
-     * @throws IllegalStateException if the stream ends without a terminal
-     *   [InferenceEvent.Done] event.
-     *
-     * @deprecated Use [inferAsync] — same behavior, canonical name. See
-     *   `docs/INFERENCE_SDK_POLISH.md`.
-     */
-    @Deprecated(
-        message = "Use inferAsync(sessionId, text) — same behavior, canonical name.",
-        replaceWith = ReplaceWith("inferAsync(sessionId, text)"),
-        level = DeprecationLevel.WARNING,
-    )
-    @Suppress("DEPRECATION")
-    override suspend fun chatOnce(sessionId: String, text: String): String =
-        collectHandleToString(runStreamingInference(sessionId, text), sessionId)
-
-    /**
-     * Send a text + image message and return the complete response text.
-     *
-     * @see chatOnce for error semantics.
-     *
-     * @deprecated Use [inferAsync] with [MediaTransfer.imagePart]. See
-     *   `docs/INFERENCE_SDK_POLISH.md`.
-     */
-    @Deprecated(
-        message = "Use inferAsync(sessionId, text, MediaTransfer.imagePart(bitmap)).",
-        replaceWith = ReplaceWith(
-            "inferAsync(sessionId, text, MediaTransfer.imagePart(bitmap))",
-            "com.adsamcik.mindlayer.sdk.MediaTransfer",
-        ),
-        level = DeprecationLevel.WARNING,
-    )
-    @Suppress("DEPRECATION")
-    override suspend fun chatWithImageOnce(
-        sessionId: String,
-        text: String,
-        bitmap: Bitmap,
-    ): String = collectHandleToString(
-        runStreamingInference(sessionId, text, imageInputs = listOf(ImageInput.Bitmap(bitmap))),
-        sessionId,
-    )
-
-    /**
-     * Send a text + audio message and return the complete response text.
-     *
-     * @see chatOnce for error semantics.
-     *
-     * @deprecated Use [inferAsync] with [MediaTransfer.audioPart]. See
-     *   `docs/INFERENCE_SDK_POLISH.md`.
-     */
-    @Deprecated(
-        message = "Use inferAsync(sessionId, text, MediaTransfer.audioPart(audioFile)).",
-        replaceWith = ReplaceWith(
-            "inferAsync(sessionId, text, MediaTransfer.audioPart(audioFile))",
-            "com.adsamcik.mindlayer.sdk.MediaTransfer",
-        ),
-        level = DeprecationLevel.WARNING,
-    )
-    @Suppress("DEPRECATION")
-    override suspend fun chatWithAudioOnce(
-        sessionId: String,
-        text: String,
-        audioFile: File,
-    ): String = collectHandleToString(
-        runStreamingInference(sessionId, text, audioFile = audioFile),
-        sessionId,
-    )
-
-    /**
-     * Stream just the text deltas from [chat] as a [Flow]&lt;String&gt;.
-     *
-     * Filters out non-text events (Started, Metrics) and converts terminal
-     * frames into flow signals: [InferenceEvent.Done] completes the flow,
-     * [InferenceEvent.Error] throws a [MindlayerException], and an
-     * unexpected [InferenceEvent.ToolCall] throws with code
-     * `UNSUPPORTED_TOOL_CALL` (silently dropping it would deadlock the
-     * inference because no [submitToolResult] would follow).
-     *
-     * Useful for streaming text directly into a `TextField` without
-     * writing the event-handling boilerplate by hand.
-     *
-     * ```kotlin
-     * mindlayer.chatTextFlow(sessionId, "Tell me a story").collect { delta ->
-     *     textFieldState.value += delta
-     * }
-     * ```
-     */
-    override fun chatTextFlow(sessionId: String, text: String): kotlinx.coroutines.flow.Flow<String> =
-        kotlinx.coroutines.flow.flow {
-            @Suppress("DEPRECATION")
-            val handle = chat(sessionId, text)
-            textDeltaFlow(handle, sessionId).collect { emit(it) }
-        }
-
-    /**
-     * Like [chatTextFlow] but emits the **cumulative** text after each delta.
-     * Each emission is a complete prefix of the response so far — useful for
-     * UIs that want to display the growing answer with simple "set this whole
-     * string" semantics rather than appending.
-     *
-     * The final emission is the full response text. Errors and tool calls
-     * are surfaced the same way as [chatTextFlow].
-     */
-    override fun chatFullTextFlow(sessionId: String, text: String): kotlinx.coroutines.flow.Flow<String> =
-        kotlinx.coroutines.flow.flow {
-            val acc = StringBuilder()
-            @Suppress("DEPRECATION")
-            val handle = chat(sessionId, text)
-            textDeltaFlow(handle, sessionId).collect { delta ->
-                acc.append(delta)
-                emit(acc.toString())
-            }
-        }
+    // -- One-shot convenience (removed — use collectStreamingInference) --------
 
     /**
      * Internal helper: collect an [InferenceHandle] to a complete response
@@ -2887,85 +2380,6 @@ internal class MindlayerImpl(
                     sessionId = sessionId,
                 )
                 else -> { /* Started, Metrics — silently dropped */ }
-            }
-        }
-    }
-
-    /**
-     * Stateless one-shot generation: creates a temporary session, sends
-     * the prompt, collects the full response, and destroys the session.
-     *
-     * Use this when each inference is independent (no conversation
-     * context needed). Session cleanup is best-effort — a service crash
-     * during cleanup will not mask the successful response.
-     *
-     * @param text the prompt to send.
-     * @param configure optional DSL block to customise session parameters
-     *   (temperature, topK, maxTokens, systemPrompt, etc.).
-     * @return the complete generated text.
-     * @throws MindlayerException on service errors.
-     */
-    override suspend fun generate(
-        text: String,
-        configure: SessionConfigBuilder.() -> Unit,
-    ): String {
-        val sessionId = createSession(configure)
-        return try {
-            @Suppress("DEPRECATION")
-            chatOnce(sessionId, text)
-        } finally {
-            // Best-effort cleanup — don't mask a successful result or
-            // a meaningful exception if the service has disconnected.
-            try {
-                destroySession(sessionId)
-            } catch (_: Exception) {
-                // Session will be cleaned up server-side on timeout
-            }
-        }
-    }
-
-    /**
-     * Stateless one-shot image + text generation.
-     *
-     * @see generate for lifecycle semantics.
-     */
-    override suspend fun generateWithImage(
-        text: String,
-        bitmap: Bitmap,
-        configure: SessionConfigBuilder.() -> Unit,
-    ): String {
-        val sessionId = createSession(configure)
-        return try {
-            @Suppress("DEPRECATION")
-            chatWithImageOnce(sessionId, text, bitmap)
-        } finally {
-            try {
-                destroySession(sessionId)
-            } catch (_: Exception) {
-                // Best-effort cleanup
-            }
-        }
-    }
-
-    /**
-     * Stateless one-shot text + audio generation.
-     *
-     * @see generate for lifecycle semantics.
-     */
-    override suspend fun generateWithAudio(
-        text: String,
-        audioFile: File,
-        configure: SessionConfigBuilder.() -> Unit,
-    ): String {
-        val sessionId = createSession(configure)
-        return try {
-            @Suppress("DEPRECATION")
-            chatWithAudioOnce(sessionId, text, audioFile)
-        } finally {
-            try {
-                destroySession(sessionId)
-            } catch (_: Exception) {
-                // Best-effort cleanup
             }
         }
     }
@@ -3633,10 +3047,9 @@ internal class MindlayerImpl(
  *
  * Example:
  * ```
- * val sessionId = mindlayer.createSession {
- *     systemPrompt("You are a coffee expert.")
- *     maxTokens(2048)
- *     temperature(0.7f)
+ * val session = mindlayer.openSession {
+ *     systemPrompt = "You are a coffee expert."
+ *     maxTokens = 2048
  * }
  * ```
  */
@@ -3720,13 +3133,8 @@ class SessionConfigBuilder {
      * silently dropped at session-create time.
      *
      * ```kotlin
-     * mindlayer.createSession {
-     *     tools {
-     *         tool("get_weather") {
-     *             description("Get current weather for a city")
-     *             parameters("""{"type":"object","required":["city"],"properties":{"city":{"type":"string"}}}""")
-     *         }
-     *     }
+     * mindlayer.openSession {
+     *     toolsJson = """[{"name":"get_weather","description":"Get current weather for a city","parameters":{"type":"object","required":["city"],"properties":{"city":{"type":"string"}}}}]"""
      * }
      * ```
      *

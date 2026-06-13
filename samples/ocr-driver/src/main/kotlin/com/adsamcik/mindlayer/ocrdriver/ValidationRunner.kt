@@ -298,30 +298,23 @@ class ValidationRunner(
         // callable end-to-end.
 
         results += scenario("inference_facade_smoke") {
-            // The inferAsync facade should resolve to a typed MindlayerException
+            // The ask facade should resolve to a typed MindlayerException
             // when the chat engine isn't loaded (Gemma model missing). It
             // must NOT throw an unchecked exception, and it must NOT silently
             // hang the binder transaction.
-            val sessionId = try {
-                mindlayer.createSession {
-                    systemPrompt("validation harness probe")
-                    maxTokens(256)
-                }
-            } catch (t: Throwable) {
-                return@scenario "createSession failed: ${t.javaClass.simpleName}:${(t.message ?: "").take(80)}"
-            }
             val result = try {
                 kotlinx.coroutines.withTimeoutOrNull(15_000L) {
-                    mindlayer.inferAsync(sessionId, "validation probe — engine likely missing")
+                    mindlayer.ask("validation probe — engine likely missing") {
+                        systemPrompt = "validation harness probe"
+                        maxTokens = 256
+                    }
                 }
             } catch (t: Throwable) {
-                "inferAsync error mapped: ${t.javaClass.simpleName}:${(t.message ?: "").take(60)}"
-            } finally {
-                runCatching { mindlayer.destroySession(sessionId) }
+                "ask error mapped: ${t.javaClass.simpleName}:${(t.message ?: "").take(60)}"
             }
             // Either we got a response (engine loaded — great) or a typed
             // failure (engine missing — also a clean signal). Both are pass.
-            "inferAsync surfaced cleanly: result=${result?.toString()?.take(60) ?: "null/timeout"}"
+            "ask surfaced cleanly: result=${result?.toString()?.take(60) ?: "null/timeout"}"
         }
 
         results += scenario("embeddings_capability_accuracy") {
@@ -372,23 +365,15 @@ class ValidationRunner(
             // when the engine is loaded, demand an actual non-empty text
             // response from a short prompt (no tools, no media). When the
             // engine is absent, surface the typed error without failing.
-            val sessionId = try {
-                mindlayer.createSession {
-                    systemPrompt("You answer in five words or less.")
-                    maxTokens(256)
-                }
-            } catch (t: Throwable) {
-                return@scenario "engine missing — createSession failed: ${t.javaClass.simpleName}:${(t.message ?: "").take(80)}"
-            }
             val response = try {
                 kotlinx.coroutines.withTimeoutOrNull(120_000L) {
-                    mindlayer.inferAsync(sessionId, "Say hello.")
+                    mindlayer.ask("Say hello.") {
+                        systemPrompt = "You answer in five words or less."
+                        maxTokens = 256
+                    }
                 }
             } catch (t: Throwable) {
-                runCatching { mindlayer.destroySession(sessionId) }
-                return@scenario "engine missing — inferAsync threw: ${t.javaClass.simpleName}:${(t.message ?: "").take(60)}"
-            } finally {
-                runCatching { mindlayer.destroySession(sessionId) }
+                return@scenario "engine missing — ask threw: ${t.javaClass.simpleName}:${(t.message ?: "").take(60)}"
             }
             check(response != null) { "Gemma inference timed out after 120s" }
             check(response.isNotBlank()) { "Gemma returned blank response" }

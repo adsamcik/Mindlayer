@@ -136,7 +136,7 @@ class MindlayerApiTest {
         val configSlot = slot<SessionConfig>()
         every { mockService.createSession(capture(configSlot)) } returns "session-xyz"
 
-        val result = mindlayer.createSession {
+        val result = mindlayer.createSessionInternal {
             systemPrompt("Be concise.")
             maxTokens(2048)
             backend("CPU")
@@ -161,7 +161,7 @@ class MindlayerApiTest {
         every { mockService.createSession(capture(configSlot)) } returns "session-dsl"
 
         val toolsDef = """[{"name":"search","description":"web search"}]"""
-        mindlayer.createSession {
+        mindlayer.createSessionInternal {
             systemPrompt("You are an assistant")
             maxTokens(8192)
             backend("GPU")
@@ -188,7 +188,7 @@ class MindlayerApiTest {
         val configSlot = slot<SessionConfig>()
         every { mockService.createSession(capture(configSlot)) } returns "session-def"
 
-        mindlayer.createSession()
+        mindlayer.createSessionInternal { }
 
         val cfg = configSlot.captured
         assertEquals(4096, cfg.maxTokens)
@@ -256,7 +256,7 @@ class MindlayerApiTest {
         }
 
         // Calling chat should create a pipe and pass write end to infer()
-        val handle = mindlayer.chat("sess-1", "Hello")
+        val handle = mindlayer.streamInference("sess-1", "Hello")
 
         // Collect — will hit EOF immediately since mock closes write end
         val events = handle.events.toList()
@@ -277,7 +277,7 @@ class MindlayerApiTest {
             pfd.close()
         }
 
-        val handle = mindlayer.chat("sess-meta", "Tell me a joke")
+        val handle = mindlayer.streamInference("sess-meta", "Tell me a joke")
         handle.events.toList()
 
         val meta = metaSlot.captured
@@ -289,7 +289,7 @@ class MindlayerApiTest {
 
     @Test
     fun `chat_awaitsConnectionBeforeReturningHandle`() = runTest {
-        val handle = mindlayer.chat("sess-await", "Hello")
+        val handle = mindlayer.streamInference("sess-await", "Hello")
 
         assertNotNull(handle)
         coVerify(atLeast = 1) { mockConnection.awaitConnected() }
@@ -306,7 +306,7 @@ class MindlayerApiTest {
             arg<ParcelFileDescriptor>(3).close()
         }
 
-        mindlayer.chat("sess-1", "No media").events.toList()
+        mindlayer.streamInference("sess-1", "No media").events.toList()
 
         // infer called with null for image and audio
         verify(exactly = 1) {
@@ -330,7 +330,7 @@ class MindlayerApiTest {
 
         val bitmap = Bitmap.createBitmap(100, 80, Bitmap.Config.ARGB_8888)
         try {
-            mindlayer.chatWithImage("sess-img", "Describe this", bitmap).events.toList()
+            mindlayer.streamInference("sess-img", "Describe this", imageInputs = listOf(ImageInput.Bitmap(bitmap))).events.toList()
 
             assertTrue(imageSlot.isCaptured)
             val img = imageSlot.captured
@@ -354,7 +354,7 @@ class MindlayerApiTest {
 
         val bitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
         try {
-            mindlayer.chatWithImage("sess-img2", "What is this?", bitmap).events.toList()
+            mindlayer.streamInference("sess-img2", "What is this?", imageInputs = listOf(ImageInput.Bitmap(bitmap))).events.toList()
 
             assertEquals("What is this?", metaSlot.captured.textContent)
             assertEquals("sess-img2", metaSlot.captured.sessionId)
@@ -382,7 +382,7 @@ class MindlayerApiTest {
         val tempFile = File.createTempFile("test_audio", ".wav")
         try {
             tempFile.writeBytes(ByteArray(100) { 0x42 })
-            mindlayer.chatWithAudio("sess-aud", "Transcribe this", tempFile).events.toList()
+            mindlayer.streamInference("sess-aud", "Transcribe this", audioFile = tempFile).events.toList()
 
             assertTrue(audioSlot.isCaptured)
             val audio = audioSlot.captured
@@ -407,7 +407,7 @@ class MindlayerApiTest {
         val tempFile = File.createTempFile("test_audio2", ".mp3")
         try {
             tempFile.writeBytes(ByteArray(50))
-            mindlayer.chatWithAudio("sess-aud2", "What was said?", tempFile).events.toList()
+            mindlayer.streamInference("sess-aud2", "What was said?", audioFile = tempFile).events.toList()
 
             assertEquals("What was said?", metaSlot.captured.textContent)
             assertEquals("sess-aud2", metaSlot.captured.sessionId)
@@ -436,7 +436,7 @@ class MindlayerApiTest {
 
         try {
             try {
-                mindlayer.chatWithMedia("sess-media", "transcribe", part)
+                mindlayer.streamInference("sess-media", "transcribe", mediaParts = listOf(part))
                 fail("Expected MindlayerException")
             } catch (_: MindlayerException) {
                 // Synchronous binder failure from inferMulti now surfaces as a
@@ -467,7 +467,7 @@ class MindlayerApiTest {
         }
 
         val disconnectedMl = buildMindlayer(disconnectedConn, null)
-        disconnectedMl.chat("sess-x", "Hello").events.toList()
+        disconnectedMl.streamInference("sess-x", "Hello").events.toList()
     }
 
     @Test
@@ -477,7 +477,7 @@ class MindlayerApiTest {
         } throws RemoteException("Service crashed")
 
         try {
-            mindlayer.chat("sess-err", "Boom").events.toList()
+            mindlayer.streamInference("sess-err", "Boom").events.toList()
             fail("expected MindlayerException")
         } catch (e: MindlayerException) {
             // Binder transport failures surface as a typed SERVICE_UNAVAILABLE
@@ -646,7 +646,7 @@ class MindlayerApiTest {
             arg<ParcelFileDescriptor>(3).close()
         }
 
-        val handle = mindlayer.chat("sess-handle", "Hello")
+        val handle = mindlayer.streamInference("sess-handle", "Hello")
         assertNotNull(handle.requestId)
         assertTrue(handle.requestId.isNotEmpty())
         assertFalse((handle as InferenceHandleImpl).isCancelled)
@@ -682,7 +682,7 @@ class MindlayerApiTest {
             arg<ParcelFileDescriptor>(3).close()
         }
 
-        val handle = mindlayer.chat("sess-cancel", "Cancel me") as InferenceHandleImpl
+        val handle = mindlayer.streamInference("sess-cancel", "Cancel me") as InferenceHandleImpl
         handle.cancelSync()
 
         assertTrue(handle.isCancelled)
@@ -705,14 +705,14 @@ class MindlayerApiTest {
     fun `connect persistHistory true gives live historyStore`() = runTest {
         // buildMindlayer(conn, store) simulates connect(ctx, persistHistory=true)
         val ml = buildMindlayer(mockConnection, store)
-        ml.createSession {}
+        ml.createSessionInternal {}
         assertEquals(1, ml.historyCount())
     }
 
     @Test
     fun `eraseAllHistory clears all conversations`() = runTest {
         val ml = buildMindlayer(mockConnection, store)
-        ml.createSession {}
+        ml.createSessionInternal {}
         assertEquals(1, ml.historyCount())
 
         ml.eraseAllHistory()
