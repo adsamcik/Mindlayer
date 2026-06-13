@@ -12,15 +12,15 @@ import kotlinx.parcelize.Parcelize
  *
  * - [Async] — a single high-quality frame is captured when the user
  *   taps the capture button, then handed to
- *   [com.adsamcik.mindlayer.sdk.Mindlayer.ocrAsync]. Result is an
- *   [OcrCaptureResult.Async] carrying an [com.adsamcik.mindlayer.OcrImageResult].
+ *   [com.adsamcik.mindlayer.sdk.Mindlayer.ocr]. Result is an
+ *   [OcrCaptureResult.Async] carrying JSON payloads + timing metadata.
  *   Use this for "scan this once" flows (receipts, ID cards, business
  *   cards). Lower throughput, higher quality per frame because the
  *   capture pipeline waits for AF lock before snapping.
  *
  * - [Realtime] — the activity opens an
- *   [com.adsamcik.mindlayer.sdk.OcrSession] via
- *   [com.adsamcik.mindlayer.sdk.Mindlayer.ocrRealtime] and streams
+ *   [com.adsamcik.mindlayer.sdk.OcrHandle.MultiFrame] via
+ *   [com.adsamcik.mindlayer.sdk.Mindlayer.ocrSession] and streams
  *   CameraX preview frames through
  *   [com.adsamcik.mindlayer.sdk.camerax.OcrImageAnalyzer]. The
  *   service-side cross-frame fusion accumulates evidence; the
@@ -33,9 +33,9 @@ import kotlinx.parcelize.Parcelize
  * name is, so reordering is safe.
  */
 enum class OcrCaptureMode {
-    /** Single best frame → [com.adsamcik.mindlayer.sdk.Mindlayer.ocrAsync]. */
+    /** Single best frame → [com.adsamcik.mindlayer.sdk.Mindlayer.ocr]. */
     Async,
-    /** Multi-frame streaming → [com.adsamcik.mindlayer.sdk.Mindlayer.ocrRealtime]. */
+    /** Multi-frame streaming → [com.adsamcik.mindlayer.sdk.Mindlayer.ocrSession]. */
     Realtime,
 }
 
@@ -70,8 +70,9 @@ enum class OcrProfileId(internal val profile: OcrProfile) {
  *
  * Crosses an Activity Result bundle so it is [Parcelable]. The
  * activity uses these fields to drive the appropriate Mindlayer OCR
- * surface ([OcrCaptureMode.Async] → ocrAsync; [OcrCaptureMode.Realtime]
- * → ocrRealtime) and to surface a meaningful UI title.
+ * surface ([OcrCaptureMode.Async] → [com.adsamcik.mindlayer.sdk.Mindlayer.ocr];
+ * [OcrCaptureMode.Realtime] →
+ * [com.adsamcik.mindlayer.sdk.Mindlayer.ocrSession]) and to surface a meaningful UI title.
  *
  * # Privacy
  *
@@ -93,12 +94,12 @@ enum class OcrProfileId(internal val profile: OcrProfile) {
  *   [com.adsamcik.mindlayer.OcrLimits.ocrSchemaJsonMaxLen].
  * @property runLlmExtraction async-mode only — when true, run the
  *   Gemma extraction pass and populate
- *   [OcrCaptureResult.Async.result]'s `extractionFields` /
- *   `extractionJson`. Ignored for realtime, which always runs the
- *   schema-driven fusion pass.
+ *   [OcrCaptureResult.Async.extractionJson]. Ignored for realtime,
+ *   which uses the session builder's schema-driven fusion path.
  * @property emitBoundingBoxes async-mode only — when true, each
- *   recognized line in [OcrCaptureResult.Async.result] carries an
- *   8-float bounding-box quadrilateral. Ignored for realtime.
+ *   one-shot OCR call requests quadrilateral metadata from the
+ *   service. Callers that need typed per-line boxes should invoke the
+ *   direct SDK surface instead of this launcher contract. Ignored for realtime.
  * @property maxFrames realtime-mode only — soft cap on the number of
  *   frames the analyzer will push before auto-finalising. `0` means
  *   "use service default" (typically 60). Ignored for async.

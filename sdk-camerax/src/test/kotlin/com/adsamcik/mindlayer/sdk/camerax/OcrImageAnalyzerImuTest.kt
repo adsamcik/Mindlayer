@@ -6,7 +6,7 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import com.adsamcik.mindlayer.OcrFrameAck
 import com.adsamcik.mindlayer.OcrFrameMeta
-import com.adsamcik.mindlayer.sdk.OcrSession
+import com.adsamcik.mindlayer.sdk.OcrHandle
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -42,7 +42,7 @@ class OcrImageAnalyzerImuTest {
 
     @Test fun `default constructor (sensorManager=null) leaves extraJson unchanged`() = runTest {
         val metaSlot = slot<OcrFrameMeta>()
-        val session = mockk<OcrSession>(relaxed = true)
+        val session = mockk<OcrHandle.MultiFrame>(relaxed = true)
         coEvery {
             session.pushFrame(capture(metaSlot), any(), any(), any(), any(), any())
         } returns OcrFrameAck(frameId = 1L, status = OcrFrameAck.STATUS_ACCEPTED)
@@ -66,7 +66,7 @@ class OcrImageAnalyzerImuTest {
         val sensor = mockk<Sensor>(relaxed = true)
         val sensorManager = mockk<SensorManager>(relaxed = true)
         every { sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE) } returns sensor
-        val session = mockk<OcrSession>(relaxed = true)
+        val session = mockk<OcrHandle.MultiFrame>(relaxed = true)
 
         val analyzer = OcrImageAnalyzer(
             session = session,
@@ -87,7 +87,7 @@ class OcrImageAnalyzerImuTest {
     @Test fun `device with no gyro sensor does NOT register a listener (graceful no-op)`() {
         val sensorManager = mockk<SensorManager>(relaxed = true)
         every { sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE) } returns null
-        val session = mockk<OcrSession>(relaxed = true)
+        val session = mockk<OcrHandle.MultiFrame>(relaxed = true)
 
         val analyzer = OcrImageAnalyzer(
             session = session,
@@ -103,7 +103,7 @@ class OcrImageAnalyzerImuTest {
     @Test fun `peak gyro magnitude is forwarded into extraJson imu block`() = runTest {
         val (sensorManager, listenerSlot) = mockSensorManager()
         val metaSlot = slot<OcrFrameMeta>()
-        val session = mockk<OcrSession>(relaxed = true)
+        val session = mockk<OcrHandle.MultiFrame>(relaxed = true)
         coEvery {
             session.pushFrame(capture(metaSlot), any(), any(), any(), any(), any())
         } returns OcrFrameAck(frameId = 2L, status = OcrFrameAck.STATUS_ACCEPTED)
@@ -136,7 +136,7 @@ class OcrImageAnalyzerImuTest {
     @Test fun `peak resets between analyze calls (windowed peak, not running max)`() = runTest {
         val (sensorManager, listenerSlot) = mockSensorManager()
         val capturedMetas = mutableListOf<OcrFrameMeta>()
-        val session = mockk<OcrSession>(relaxed = true)
+        val session = mockk<OcrHandle.MultiFrame>(relaxed = true)
         coEvery {
             session.pushFrame(any(), any(), any(), any(), any(), any())
         } answers {
@@ -171,7 +171,7 @@ class OcrImageAnalyzerImuTest {
 
     @Test fun `close unregisters the sensor listener exactly once`() {
         val (sensorManager, listenerSlot) = mockSensorManager()
-        val session = mockk<OcrSession>(relaxed = true)
+        val session = mockk<OcrHandle.MultiFrame>(relaxed = true)
         val analyzer = OcrImageAnalyzer(
             session = session,
             sensorManager = sensorManager,
@@ -188,7 +188,7 @@ class OcrImageAnalyzerImuTest {
         val (sensorManager, _) = mockSensorManager()
         // unregisterListener is a no-op on Android when the listener was
         // already unregistered, but we still defensively swallow Throwables.
-        val session = mockk<OcrSession>(relaxed = true)
+        val session = mockk<OcrHandle.MultiFrame>(relaxed = true)
         val analyzer = OcrImageAnalyzer(
             session = session,
             sensorManager = sensorManager,
@@ -201,7 +201,7 @@ class OcrImageAnalyzerImuTest {
     @Test fun `frames with no observed gyro samples in the window report 0`() = runTest {
         val (sensorManager, _) = mockSensorManager()
         val metaSlot = slot<OcrFrameMeta>()
-        val session = mockk<OcrSession>(relaxed = true)
+        val session = mockk<OcrHandle.MultiFrame>(relaxed = true)
         coEvery {
             session.pushFrame(capture(metaSlot), any(), any(), any(), any(), any())
         } returns OcrFrameAck(frameId = 1L, status = OcrFrameAck.STATUS_ACCEPTED)
@@ -229,7 +229,7 @@ class OcrImageAnalyzerImuTest {
     @Test fun `gyro events from other sensors are ignored`() = runTest {
         val (sensorManager, listenerSlot) = mockSensorManager()
         val metaSlot = slot<OcrFrameMeta>()
-        val session = mockk<OcrSession>(relaxed = true)
+        val session = mockk<OcrHandle.MultiFrame>(relaxed = true)
         coEvery {
             session.pushFrame(capture(metaSlot), any(), any(), any(), any(), any())
         } returns OcrFrameAck(frameId = 1L, status = OcrFrameAck.STATUS_ACCEPTED)

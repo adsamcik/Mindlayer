@@ -59,6 +59,9 @@ data class Metrics(
     val generatedTokens: Int? = null,
     val totalDurationMs: Long? = null,
     val thermalBand: String? = null,
+    val ocrDurationMs: Long? = null,
+    val llmDurationMs: Long? = null,
+    val backend: String? = null,
 ) {
     companion object {
         /** A metrics object with no fields populated. */

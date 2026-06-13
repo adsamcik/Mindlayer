@@ -48,7 +48,7 @@ import com.adsamcik.mindlayer.ocrdriver.sections.ValidationTab
  *     forceRefresh polling so the UI converges past cold-engine state.
  *  2. **Inference** — Gemma chat (text → text), maxTokens + temperature.
  *  3. **Embeddings** — text → vector (dim, L2, preview).
- *  4. **OCR** — single-image `ocrAsync` with bbox + optional LLM
+ *  4. **OCR** — single-image `ocr { ... }.awaitResult()` with bbox + optional LLM
  *     extraction toggle.
  *  5. **Diagnostics** — `getStatus`, `ping`, `getDiagnosticsTyped`,
  *     `listSessions`.

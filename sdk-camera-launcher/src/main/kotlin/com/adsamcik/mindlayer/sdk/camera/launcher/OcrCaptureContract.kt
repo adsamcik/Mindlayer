@@ -19,7 +19,7 @@ import androidx.core.os.BundleCompat
  *         registerForActivityResult(OcrCaptureContract()) { result ->
  *             when (result) {
  *                 is OcrCaptureResult.Async ->
- *                     handleScannedText(result.result.text)
+ *                     handleStructuredJson(result.fullJson)
  *                 is OcrCaptureResult.Realtime ->
  *                     handleStructuredJson(result.finalJson)
  *                 OcrCaptureResult.Cancelled -> { /* user backed out */ }

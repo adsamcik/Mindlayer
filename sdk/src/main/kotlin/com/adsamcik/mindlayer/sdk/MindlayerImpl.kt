@@ -410,7 +410,7 @@ internal class MindlayerImpl(
 
     /**
      * Behavioural body for [ocr]. Converts the request image to encoded bytes,
-     * runs the legacy one-shot [ocrAsync] bridge, and maps the
+     * runs the shared one-shot OCR helper, and maps the
      * [com.adsamcik.mindlayer.OcrImageResult] onto the canonical [OcrResult].
      */
     private suspend fun runOcrRequest(request: OcrRequest.Builder): OcrHandle.OneShot {
@@ -475,6 +475,8 @@ internal class MindlayerImpl(
                 text = line.text,
                 boundingBox = denormalizeQuad(line.boundingBox, width, height),
                 confidence = confidenceToFloat(line.confidence),
+                boundingBoxQuad = line.boundingBox?.toList(),
+                orientationDegrees = line.orientationDegrees,
             )
         }
         val extractionJson = raw.extractionJson?.let { json ->
@@ -483,8 +485,26 @@ internal class MindlayerImpl(
         val fullJson = extractionJson ?: buildJsonObject {
             put("lines", buildJsonArray { lines.forEach { add(JsonPrimitive(it.text)) } })
         }
-        val metrics = Metrics(totalDurationMs = raw.totalDurationMs.takeIf { it > 0L })
-        return OcrResult(lines = lines, fullJson = fullJson, extractionJson = extractionJson, metrics = metrics)
+        val metrics = Metrics(
+            totalDurationMs = raw.totalDurationMs.takeIf { it > 0L },
+            ocrDurationMs = raw.ocrDurationMs.takeIf { it > 0L },
+            llmDurationMs = raw.llmDurationMs.takeIf { it > 0L },
+            backend = raw.backend.takeIf { it != "NONE" },
+        )
+        val extractionFields = raw.extractionFields.map {
+            OcrExtractedField(
+                name = it.name,
+                value = it.value,
+                confidence = confidenceToFloat(it.confidence),
+            )
+        }
+        return OcrResult(
+            lines = lines,
+            fullJson = fullJson,
+            extractionJson = extractionJson,
+            metrics = metrics,
+            extractionFields = extractionFields,
+        )
     }
 
     /**
@@ -606,6 +626,21 @@ internal class MindlayerImpl(
         ): com.adsamcik.mindlayer.OcrFrameAck {
             val (bytes, mimeType) = imageInputToBytes(image)
             return session.pushEncodedFrame(meta, bytes, mimeType)
+        }
+
+        override suspend fun pushFrame(
+            meta: com.adsamcik.mindlayer.OcrFrameMeta,
+            yPlane: ByteArray,
+            width: Int,
+            height: Int,
+            rowStride: Int,
+            pixelStride: Int,
+        ): com.adsamcik.mindlayer.OcrFrameAck {
+            return session.pushFrame(meta, yPlane, width, height, rowStride, pixelStride)
+        }
+
+        override suspend fun state(): com.adsamcik.mindlayer.OcrSessionState {
+            return session.state()
         }
 
         override suspend fun finalize(): OcrResult {
@@ -3308,51 +3343,6 @@ internal class MindlayerImpl(
         }
     }
 
-    /**
-     * **Realtime OCR** — open a multi-frame OCR session using a
-     * built-in [OcrProfile].
-     *
-     * Use this when you have a live camera feed and want the service
-     * to fuse multiple frames into a single high-confidence result
-     * (cross-frame voting, K-consecutive field locking, optional
-     * barcode anchor, structured schema-shaped output). The session
-     * pipeline also runs the service-side quality presort so blurry
-     * / dark frames are rejected before reaching the engine.
-     *
-     * ```kotlin
-     * mindlayer.ocrRealtime(OcrProfile.Receipt) {
-     *     languageHints = listOf("en", "de-DE")
-     *     maxFrames = 30
-     * }.use { session ->
-     *     // Attach the event stream BEFORE pushing the first frame —
-     *     // otherwise intake is rejected with STATUS_REJECTED_STREAM_NOT_ATTACHED.
-     *     val job = launch {
-     *         session.events.collect { event -> /* ... */ }
-     *     }
-     *     session.pushFrame(meta, yPlane, w, h)
-     *     // ... push more frames as the user re-aims ...
-     *     session.finalize()
-     *     job.join()
-     * }
-     * ```
-     *
-     * # Capability
-     *
-     * Requires [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_SESSION].
-     * Throws [MindlayerException] with
-     * [com.adsamcik.mindlayer.shared.MindlayerErrorCode.FEATURE_NOT_SUPPORTED]
-     * when the connected service does not advertise the flag (e.g. the
-     * production-readiness gate is still off, the OCR model bundle is
-     * missing, or the service binary predates v0.8).
-     *
-     * @param profile the OCR profile preset (GeneralDocument / Receipt
-     *   / IdCard / Whiteboard / ScreenCapture).
-     * @param configure optional builder block to override profile
-     *   defaults (custom schema, language hints, fps cap, etc.).
-     * @throws MindlayerException with a typed error code on service
-     *   rejection (LOW_MEMORY, INVALID_REQUEST, SERVICE_UNAVAILABLE,
-     *   CONCURRENT_LIMIT).
-     */
     // ─────────────────────────────────────────────────────────────────────
     //  Private OCR helpers — hold the real AIDL logic.
     //  Canonical methods (ocrSession{}, runOcrRequest) call these.
@@ -3404,61 +3394,6 @@ internal class MindlayerImpl(
         }
     }
 
-    override suspend fun ocrRealtime(
-        profile: OcrProfile,
-        configure: OcrSessionConfigBuilder.() -> Unit,
-    ): OcrSession {
-        val builder = OcrSessionConfigBuilder(profile)
-        builder.configure()
-        return openOcrSessionInternal(builder.build())
-    }
-
-    override suspend fun ocrRealtime(config: com.adsamcik.mindlayer.OcrSessionConfig): OcrSession =
-        openOcrSessionInternal(config)
-
-    /**
-     * **Async OCR** — recognise text in a single captured image and
-     * return synchronously. The natural shape for callers that have
-     * one final image already (gallery picker, sharesheet target,
-     * screenshot text-extraction, "scan this receipt" one-shot) and
-     * don't want session ceremony.
-     *
-     * Pass [options].`runLlmExtraction = true` (plus
-     * [com.adsamcik.mindlayer.OcrImageOptions.extractionSchemaJson]) to
-     * also run the structured-extraction Gemma pass and receive
-     * [com.adsamcik.mindlayer.OcrImageResult.extractionFields] +
-     * [com.adsamcik.mindlayer.OcrImageResult.extractionJson]. Adds the
-     * LLM decode latency (~2-5s) to the call.
-     *
-     * The bytes path picks SharedMemory or pipe transport automatically
-     * based on size — payloads under
-     * `OCR_INLINE_PIPE_THRESHOLD_BYTES` use a PFD pipe; larger payloads
-     * use SharedMemory on API 27+. Caller does not need to manage the
-     * file descriptor.
-     *
-     * # Capability
-     *
-     * Requires [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT].
-     * Throws [MindlayerException] with
-     * [com.adsamcik.mindlayer.shared.MindlayerErrorCode.FEATURE_NOT_SUPPORTED]
-     * when the connected service does not advertise the flag (e.g. the
-     * production-readiness gate is still off, the model bundle is
-     * missing, or the service is older than v0.9).
-     *
-     * @param bytes encoded image bytes (JPEG / PNG / WEBP). Must be
-     *   non-empty.
-     * @param mimeType the image MIME type — one of `image/jpeg`,
-     *   `image/png`, `image/webp`.
-     * @param options recognition + extraction toggles.
-     * @throws MindlayerException with a typed error code on service
-     *   rejection (LOW_MEMORY, INVALID_REQUEST, SERVICE_UNAVAILABLE).
-     */
-    override suspend fun ocrAsync(
-        bytes: ByteArray,
-        mimeType: String,
-        options: com.adsamcik.mindlayer.OcrImageOptions,
-    ): com.adsamcik.mindlayer.OcrImageResult = ocrImageInternal(bytes, mimeType, options)
-
     private suspend fun requireOcrImageCapability() {
         val caps = getCapabilities()
         if (ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT !in caps.supportedFeatures) {
@@ -3467,7 +3402,7 @@ internal class MindlayerImpl(
     }
 
     private fun ocrImageNotSupported(): MindlayerException = MindlayerException(
-        message = "Connected Mindlayer service does not support single-image OCR (ocrAsync)",
+        message = "Connected Mindlayer service does not support single-image OCR (ocr { image(...) })",
         code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.FEATURE_NOT_SUPPORTED,
     )
 

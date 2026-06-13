@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.adsamcik.mindlayer.ServiceCapabilities
 import com.adsamcik.mindlayer.sdk.ConnectionState
 import com.adsamcik.mindlayer.sdk.ConsentRequestResult
+import com.adsamcik.mindlayer.sdk.JsonSchema
 import com.adsamcik.mindlayer.sdk.Mindlayer
 import com.adsamcik.mindlayer.sdk.MindlayerConsent
 import kotlinx.coroutines.Job
@@ -338,7 +339,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     // ── OCR (single image / async) ──────────────────────────────────────
 
-    @Suppress("DEPRECATION")
     fun runOcrAsync(fixtureName: String, runLlm: Boolean, emitBoundingBoxes: Boolean) {
         val client = mindlayer ?: return
         viewModelScope.launch {
@@ -348,19 +348,17 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 val bytes = getApplication<Application>().assets
                     .open("fixtures/$fixtureName").use { it.readBytes() }
                 val mimeType = OcrFixtures.mimeType(fixtureName)
-                val result = client.ocrAsync(
-                    bytes = bytes,
-                    mimeType = mimeType,
-                    options = com.adsamcik.mindlayer.OcrImageOptions(
-                        runLlmExtraction = runLlm,
-                        emitBoundingBoxes = emitBoundingBoxes,
-                        extractionSchemaJson = if (runLlm) {
-                            """{"type":"object","properties":{"total":{"type":"string"}}}"""
-                        } else {
-                            null
-                        },
-                    ),
-                )
+                val result = client.ocr {
+                    image(bytes, mimeType)
+                    if (emitBoundingBoxes) emitBoundingBoxes()
+                    if (runLlm) {
+                        extractWithLlm(
+                            JsonSchema.parse(
+                                """{"type":"object","properties":{"total":{"type":"string"}}}""",
+                            ),
+                        )
+                    }
+                }.awaitResult()
                 val withBbox = result.lines.count { it.boundingBox != null }
                 val previewLines = result.lines.take(8).joinToString("\n") {
                     "  • ${it.text}"
@@ -373,8 +371,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                             lastFixture = fixtureName,
                             lastLineCount = result.lines.size,
                             lastWithBbox = withBbox,
-                            lastOcrMs = result.ocrDurationMs,
-                            lastLlmMs = result.llmDurationMs,
+                            lastOcrMs = result.metrics.ocrDurationMs ?: 0L,
+                            lastLlmMs = result.metrics.llmDurationMs ?: 0L,
                             lastFields = result.extractionFields.size,
                             lastPreview = previewLines,
                             lastTotalMs = durationMs,
@@ -387,7 +385,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     it.copy(
                         ocr = it.ocr.copy(
                             inProgress = false,
-                            error = "ocrAsync: ${t.javaClass.simpleName}: ${t.message?.take(220)}",
+                            error = "ocr: ${t.javaClass.simpleName}: ${t.message?.take(220)}",
                         ),
                     )
                 }
