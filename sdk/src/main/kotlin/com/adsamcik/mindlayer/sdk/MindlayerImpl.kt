@@ -36,6 +36,7 @@ import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -424,8 +425,7 @@ internal class MindlayerImpl(
             runLlmExtraction = request.extractionSchema != null,
             extractionSchemaJson = request.extractionSchema?.json?.toString(),
         )
-        @Suppress("DEPRECATION")
-        val raw = ocrAsync(bytes, mimeType, options)
+        val raw = ocrImageInternal(bytes, mimeType, options)
         return OneShotOcrHandle(mapOcrImageResult(raw, width, height))
     }
 
@@ -569,11 +569,109 @@ internal class MindlayerImpl(
                 "extract" to CallParams.has(request.extractionSchema),
             ),
         ) {
-            throw MindlayerException(
-                message = "Mindlayer v1 — ocrSession behaviour lands in C3",
-                code = MindlayerErrorCode.NOT_SUPPORTED,
-            )
+            val config = OcrSessionConfigBuilder(request.profile).apply {
+                (request.extractionSchema ?: request.schema)?.let {
+                    outputSchemaJson = it.json.toString()
+                }
+                languageHints = request.languageHints
+                request.maxFrames?.let { maxFrames = it }
+                request.frameRateLimit?.let { frameRateLimitFps = it }
+            }.build()
+            val session = openOcrSessionInternal(config)
+            BridgeOcrSession(session, extractionRequested = request.extractionSchema != null)
         }
+    }
+
+    /**
+     * [OcrHandle.MultiFrame] bridging the canonical streaming OCR surface onto
+     * the working multi-frame [OcrSession] plumbing (`createOcrSession` →
+     * push / finalize / stream over AIDL). [events] delegates straight to the
+     * live session stream (same [OcrEvent] type — no remapping); [finalize]
+     * attaches a dedicated event pipe, drains the session, and maps the
+     * terminal [OcrEvent.ResultFinalized] into a typed [OcrResult] reusing the
+     * same lenient JSON mapping the one-shot path uses.
+     */
+    private inner class BridgeOcrSession(
+        private val session: OcrSession,
+        private val extractionRequested: Boolean,
+    ) : OcrHandle.MultiFrame {
+        override val sessionId: String get() = session.sessionId
+
+        override val events: Flow<OcrEvent> get() = session.events
+
+        override suspend fun pushFrame(
+            meta: com.adsamcik.mindlayer.OcrFrameMeta,
+            image: ImageInput,
+        ): com.adsamcik.mindlayer.OcrFrameAck {
+            val (bytes, mimeType) = imageInputToBytes(image)
+            return session.pushEncodedFrame(meta, bytes, mimeType)
+        }
+
+        override suspend fun finalize(): OcrResult {
+            val pipe = ParcelFileDescriptor.createPipe()
+            val readEnd = pipe[0]
+            val writeEnd = pipe[1]
+            try {
+                attachOcrEventStream(session.sessionId, writeEnd)
+            } catch (t: Throwable) {
+                readEnd.closeQuietly()
+                writeEnd.closeQuietly()
+                throw t
+            }
+            // The service has dup'd the write-end via the binder call; drop our
+            // local copy so the reader sees EOF once the service-side writer
+            // closes its dup at session end.
+            writeEnd.closeQuietly()
+            var finalJson: String? = null
+            try {
+                session.finalize()
+                OcrTokenStreamReader.readStream(readEnd).collect { event ->
+                    if (event is OcrEvent.ResultFinalized) finalJson = event.fullJson
+                }
+            } catch (t: Throwable) {
+                readEnd.closeQuietly()
+                throw t
+            }
+            return buildOcrResultFromFinalized(finalJson, extractionRequested)
+        }
+
+        override suspend fun closeAsync() {
+            withContext(Dispatchers.IO) { session.close() }
+        }
+
+        override fun close() {
+            session.close()
+        }
+    }
+
+    /**
+     * Map a terminal OCR-session [OcrEvent.ResultFinalized] JSON payload into a
+     * typed [OcrResult]. Mirrors [mapOcrImageResult]'s lenient parsing:
+     * best-effort `lines[]` extraction, a parsed [JsonObject] for
+     * [OcrResult.fullJson] (falling back to `{"lines":[]}`), and
+     * [OcrResult.extractionJson] only when extraction was requested. Session
+     * event streams carry no timing, so metrics are [Metrics.EMPTY].
+     */
+    private fun buildOcrResultFromFinalized(
+        finalJson: String?,
+        extractionRequested: Boolean,
+    ): OcrResult {
+        val parsed = finalJson?.let {
+            runCatching { lenientJson.parseToJsonElement(it) as? JsonObject }.getOrNull()
+        }
+        val lines = (parsed?.get("lines") as? JsonArray)?.mapNotNull { el ->
+            (el as? JsonPrimitive)?.let { OcrLine(text = it.content) }
+        } ?: emptyList()
+        val fullJson = parsed ?: buildJsonObject {
+            put("lines", buildJsonArray { lines.forEach { add(JsonPrimitive(it.text)) } })
+        }
+        val extractionJson = if (extractionRequested) parsed else null
+        return OcrResult(
+            lines = lines,
+            fullJson = fullJson,
+            extractionJson = extractionJson,
+            metrics = Metrics.EMPTY,
+        )
     }
 
     override suspend fun embed(build: EmbeddingRequest.Builder.() -> Unit): EmbeddingHandle {
@@ -3299,9 +3397,7 @@ internal class MindlayerImpl(
     //  Wire-stability note: this section is purely an SDK-side rename;
     //  the underlying AIDL methods (createOcrSession / pushOcrFrame /
     //  streamOcrEvents / finalizeOcrSession / closeOcrSession /
-    //  getOcrLimits / ocrImage) are unchanged. Old method names
-    //  ([ocrSession], [ocrImage]) remain as ``@Deprecated`` delegating
-    //  aliases for one minor cycle.
+    //  getOcrLimits / ocrImage) are unchanged.
     // ─────────────────────────────────────────────────────────────────────
 
     /**
@@ -3371,27 +3467,16 @@ internal class MindlayerImpl(
      *   rejection (LOW_MEMORY, INVALID_REQUEST, SERVICE_UNAVAILABLE,
      *   CONCURRENT_LIMIT).
      */
-    override suspend fun ocrRealtime(
-        profile: OcrProfile,
-        configure: OcrSessionConfigBuilder.() -> Unit,
-    ): OcrSession {
-        val builder = OcrSessionConfigBuilder(profile)
-        builder.configure()
-        return ocrRealtime(builder.build())
-    }
+    // ─────────────────────────────────────────────────────────────────────
+    //  Private OCR helpers — hold the real AIDL logic.
+    //  Canonical methods (ocrSession{}, runOcrRequest) call these.
+    // ─────────────────────────────────────────────────────────────────────
 
     /**
-     * **Realtime OCR** — open a multi-frame OCR session with a
-     * pre-built [OcrSessionConfig].
-     *
-     * Use this overload when you have a serialised config (e.g. from
-     * process recovery or persistent settings) and don't want the
-     * builder DSL. See [ocrRealtime] (with profile + DSL block) for
-     * the common case.
-     *
-     * Capability + error semantics match the DSL overload above.
+     * Open a multi-frame OCR session with a pre-built [OcrSessionConfig].
+     * This is the single AIDL call-site for `createOcrSession`.
      */
-    override suspend fun ocrRealtime(config: com.adsamcik.mindlayer.OcrSessionConfig): OcrSession {
+    private suspend fun openOcrSessionInternal(config: com.adsamcik.mindlayer.OcrSessionConfig): OcrSession {
         requireOcrCapability()
         val sessionId = try {
             withContext(Dispatchers.IO) {
@@ -3404,6 +3489,46 @@ internal class MindlayerImpl(
         }
         return OcrSession(sessionId = sessionId, config = config, mindlayer = this)
     }
+
+    /**
+     * Single-image OCR — the single AIDL call-site for `ocrImage`.
+     */
+    private suspend fun ocrImageInternal(
+        bytes: ByteArray,
+        mimeType: String,
+        options: com.adsamcik.mindlayer.OcrImageOptions,
+    ): com.adsamcik.mindlayer.OcrImageResult {
+        requireOcrImageCapability()
+        val part = MediaTransfer.ocrEncodedImagePart(
+            requestId = "ocr-image-${java.util.UUID.randomUUID()}",
+            bytes = bytes,
+            mimeType = mimeType,
+            context = connection.getContext(),
+        )
+        return try {
+            withContext(Dispatchers.IO) {
+                withTypedErrors { it.ocrImage(part, options) }
+            }
+        } catch (_: NoSuchMethodError) {
+            throw ocrImageNotSupported()
+        } catch (_: AbstractMethodError) {
+            throw ocrImageNotSupported()
+        } finally {
+            part.source.closeQuietly()
+        }
+    }
+
+    override suspend fun ocrRealtime(
+        profile: OcrProfile,
+        configure: OcrSessionConfigBuilder.() -> Unit,
+    ): OcrSession {
+        val builder = OcrSessionConfigBuilder(profile)
+        builder.configure()
+        return openOcrSessionInternal(builder.build())
+    }
+
+    override suspend fun ocrRealtime(config: com.adsamcik.mindlayer.OcrSessionConfig): OcrSession =
+        openOcrSessionInternal(config)
 
     /**
      * **Async OCR** — recognise text in a single captured image and
@@ -3446,90 +3571,7 @@ internal class MindlayerImpl(
         bytes: ByteArray,
         mimeType: String,
         options: com.adsamcik.mindlayer.OcrImageOptions,
-    ): com.adsamcik.mindlayer.OcrImageResult {
-        requireOcrImageCapability()
-        val part = MediaTransfer.ocrEncodedImagePart(
-            requestId = "ocr-image-${java.util.UUID.randomUUID()}",
-            bytes = bytes,
-            mimeType = mimeType,
-            // Bug #7: thread the bound application Context through so the
-            // transport selector takes the regular-file PFD path (not the
-            // pipe path that the service rejects with H5's "Unsupported
-            // source PFD type"). Null only on the never-connected fast
-            // path, where the call below would fail anyway.
-            context = connection.getContext(),
-        )
-        return try {
-            withContext(Dispatchers.IO) {
-                withTypedErrors { it.ocrImage(part, options) }
-            }
-        } catch (_: NoSuchMethodError) {
-            throw ocrImageNotSupported()
-        } catch (_: AbstractMethodError) {
-            throw ocrImageNotSupported()
-        } finally {
-            part.source.closeQuietly()
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    //  Deprecated OCR aliases — kept for one minor cycle so existing
-    //  callers don't break on the rename. Delegate to the new names.
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * Open a multi-frame OCR session using a built-in [OcrProfile].
-     *
-     * @deprecated Renamed to [ocrRealtime] in v0.10 — the
-     *   "realtime / async" pair makes the live-camera vs single-image
-     *   decision explicit. Behaviour is unchanged; this overload
-     *   delegates to [ocrRealtime].
-     */
-    @Deprecated(
-        message = "Use ocrRealtime() — the new name pairs with ocrAsync() and " +
-            "makes the live-camera intent explicit. Behaviour is unchanged.",
-        replaceWith = ReplaceWith("ocrRealtime(profile, configure)"),
-        level = DeprecationLevel.WARNING,
-    )
-    override suspend fun ocrSession(
-        profile: OcrProfile,
-        configure: OcrSessionConfigBuilder.() -> Unit,
-    ): OcrSession = ocrRealtime(profile, configure)
-
-    /**
-     * Open a multi-frame OCR session with a pre-built [OcrSessionConfig].
-     *
-     * @deprecated Renamed to [ocrRealtime] in v0.10. Behaviour is
-     *   unchanged; this overload delegates to [ocrRealtime].
-     */
-    @Deprecated(
-        message = "Use ocrRealtime() — the new name pairs with ocrAsync() and " +
-            "makes the live-camera intent explicit. Behaviour is unchanged.",
-        replaceWith = ReplaceWith("ocrRealtime(config)"),
-        level = DeprecationLevel.WARNING,
-    )
-    override suspend fun ocrSession(config: com.adsamcik.mindlayer.OcrSessionConfig): OcrSession =
-        ocrRealtime(config)
-
-    /**
-     * Single-image OCR.
-     *
-     * @deprecated Renamed to [ocrAsync] in v0.10 — the
-     *   "realtime / async" pair makes the live-camera vs single-image
-     *   decision explicit. Behaviour is unchanged; this overload
-     *   delegates to [ocrAsync].
-     */
-    @Deprecated(
-        message = "Use ocrAsync() — the new name pairs with ocrRealtime() and " +
-            "makes the single-image intent explicit. Behaviour is unchanged.",
-        replaceWith = ReplaceWith("ocrAsync(bytes, mimeType, options)"),
-        level = DeprecationLevel.WARNING,
-    )
-    override suspend fun ocrImage(
-        bytes: ByteArray,
-        mimeType: String,
-        options: com.adsamcik.mindlayer.OcrImageOptions,
-    ): com.adsamcik.mindlayer.OcrImageResult = ocrAsync(bytes, mimeType, options)
+    ): com.adsamcik.mindlayer.OcrImageResult = ocrImageInternal(bytes, mimeType, options)
 
     private suspend fun requireOcrImageCapability() {
         val caps = getCapabilities()
