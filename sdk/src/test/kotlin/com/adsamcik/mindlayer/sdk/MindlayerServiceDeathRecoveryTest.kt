@@ -28,8 +28,9 @@ import org.robolectric.annotation.Config
  * Covers the AIDL chokepoint's `:ml`-process-death handling
  * ([MindlayerImpl.withTypedErrors]):
  *
- *  - idempotent calls (e.g. [MindlayerImpl.embed]) transparently reconnect and
- *    retry once after a [DeadObjectException], then succeed;
+ *  - idempotent calls (e.g. the canonical `embed { text(...) }` path)
+ *    transparently reconnect and retry once after a [DeadObjectException],
+ *    then succeed;
  *  - persistent death surfaces a typed [MindlayerErrorCode.SERVICE_UNAVAILABLE]
  *    rather than leaking a raw [DeadObjectException];
  *  - non-idempotent calls (e.g. [MindlayerImpl.destroySession]) map a dead
@@ -44,7 +45,6 @@ import org.robolectric.annotation.Config
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
-@Suppress("DEPRECATION") // exercises legacy embed(text) — replaced by embedOne(text)
 class MindlayerServiceDeathRecoveryTest {
 
     private lateinit var mockService: IMindlayerService
@@ -96,7 +96,8 @@ class MindlayerServiceDeathRecoveryTest {
         every { mockService.embed(any()) } throws DeadObjectException() andThen
             result(floatArrayOf(0.6f, 0.8f), dim = 2)
 
-        val vector = mindlayer.embed("hello")
+        val handle = mindlayer.embed { text("hello") }
+        val vector = (handle as EmbeddingHandle.Single).awaitVector()
 
         assertArrayEquals(floatArrayOf(0.6f, 0.8f), vector, 0f)
         // Stale binder invalidated exactly once (one death observed).
@@ -109,7 +110,7 @@ class MindlayerServiceDeathRecoveryTest {
         every { mockService.embed(any()) } throws DeadObjectException()
 
         try {
-            mindlayer.embed("hello")
+            mindlayer.embed { text("hello") }
             fail("expected MindlayerException")
         } catch (e: MindlayerException) {
             assertEquals(MindlayerErrorCode.SERVICE_UNAVAILABLE, e.code)
@@ -143,7 +144,7 @@ class MindlayerServiceDeathRecoveryTest {
         every { mockService.embed(any()) } throws RemoteException("transport boom")
 
         try {
-            mindlayer.embed("hello")
+            mindlayer.embed { text("hello") }
             fail("expected MindlayerException")
         } catch (e: MindlayerException) {
             assertEquals(MindlayerErrorCode.SERVICE_UNAVAILABLE, e.code)

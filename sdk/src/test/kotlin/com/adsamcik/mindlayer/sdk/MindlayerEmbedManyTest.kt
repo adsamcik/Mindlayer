@@ -5,7 +5,7 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.adsamcik.mindlayer.EmbeddingBatchTransfer
 import com.adsamcik.mindlayer.EmbeddingItemMetadata
-import com.adsamcik.mindlayer.EmbeddingRequest
+import com.adsamcik.mindlayer.EmbeddingRequest as AidlEmbeddingRequest
 import com.adsamcik.mindlayer.EmbeddingResult
 import com.adsamcik.mindlayer.IMindlayerService
 import com.adsamcik.mindlayer.ServiceCapabilities
@@ -23,9 +23,6 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertSame
-import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -33,20 +30,20 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * Pins the v0.7 → polish facade contract:
+ * Pins the canonical `embed { }` builder contract for batch shapes:
  *
- *  - `embedOne` and `embedMany` exist on the public surface.
- *  - The legacy `embed(text)`, `embedBatch`, `embedBatchLarge` are marked
- *    `@Deprecated(level=WARNING)` with `ReplaceWith` pointing at the new
- *    facades.
- *  - `embedMany` picks `Inline` for tiny batches and `SharedMemory` once
- *    the batch crosses the inline cap or the reply-byte budget.
- *  - `embedMany` falls back to `Inline` on API ≤ 26 (no `SharedMemory`),
- *    upgrading to `DeferredFallback` only when the batch is too big to
- *    fit inline at all.
+ *  - `embed { text(...) }` forwards full per-item config (task, modelId,
+ *    outputDim, tag) to the underlying AIDL request.
+ *  - `embed { items(...) }` picks `Inline` for tiny batches and
+ *    `SharedMemory` once the batch crosses the inline cap or the
+ *    reply-byte budget.
+ *  - `embed { items(...) }` falls back to `Inline` on API ≤ 26 (no
+ *    `SharedMemory`), upgrading to `DeferredFallback` only when the
+ *    batch is too big to fit inline at all.
  *
- * Anything more exotic (real-binder SHM smoke test, deferred-fallback
- * full E2E) is covered in MindlayerEmbedTest.
+ * Transport selection itself is unit-tested via the internal
+ * [MindlayerImpl.selectEmbeddingTransport] helper; the routing tests
+ * here additionally pin the binder calls each transport actually makes.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -94,72 +91,22 @@ class MindlayerEmbedManyApi33Test {
 
     @After fun tearDown() = unmockkAll()
 
-    // -- facade existence --------------------------------------------------
+    // -- single-shot text(...) forwards every per-item knob ----------------
 
-    @Test fun `embedOne is declared on Mindlayer`() {
-        val embedOne = Mindlayer::class.java.declaredMethods.firstOrNull { it.name == "embedOne" }
-        assertNotNull("embedOne must exist on the public Mindlayer surface", embedOne)
-    }
-
-    @Test fun `embedMany is declared on Mindlayer in both list and string overloads`() {
-        val embedManyOverloads = Mindlayer::class.java.declaredMethods.filter { it.name == "embedMany" }
-        assertEquals(
-            "Expected exactly two embedMany overloads (List<EmbeddingConfig> + List<String>)",
-            2,
-            embedManyOverloads.size,
-        )
-    }
-
-    // -- deprecation annotations ------------------------------------------
-
-    @Test fun `embed(text) is Deprecated with ReplaceWith embedOne`() {
-        // embed(text, Continuation) — the suspend overload taking a String first
-        val method = Mindlayer::class.java.declaredMethods.first {
-            it.name == "embed" &&
-                it.parameterTypes.size == 2 &&
-                it.parameterTypes[0] == String::class.java
-        }
-        val deprecated = method.getAnnotation(Deprecated::class.java)
-        assertNotNull("embed(text) must carry @Deprecated", deprecated)
-        assertTrue(
-            "ReplaceWith must point at embedOne",
-            deprecated!!.replaceWith.expression.contains("embedOne"),
-        )
-    }
-
-    @Test fun `embedBatch is Deprecated with ReplaceWith embedMany`() {
-        val method = Mindlayer::class.java.declaredMethods.first { it.name == "embedBatch" }
-        val deprecated = method.getAnnotation(Deprecated::class.java)
-        assertNotNull("embedBatch must carry @Deprecated", deprecated)
-        assertTrue(
-            "ReplaceWith must point at embedMany",
-            deprecated!!.replaceWith.expression.contains("embedMany"),
-        )
-    }
-
-    @Test fun `embedBatchLarge is Deprecated with ReplaceWith embedMany`() {
-        val method = Mindlayer::class.java.declaredMethods.first { it.name == "embedBatchLarge" }
-        val deprecated = method.getAnnotation(Deprecated::class.java)
-        assertNotNull("embedBatchLarge must carry @Deprecated", deprecated)
-        assertTrue(
-            "ReplaceWith must point at embedMany",
-            deprecated!!.replaceWith.expression.contains("embedMany"),
-        )
-    }
-
-    // -- embedOne behavior -------------------------------------------------
-
-    @Test fun `embedOne returns FloatArray and forwards task plus modelId`() = runTest {
-        val reqSlot = slot<EmbeddingRequest>()
+    @Test fun `embed text forwards task plus modelId plus outputDim plus tag`() = runTest {
+        val reqSlot = slot<AidlEmbeddingRequest>()
         every { mockService.embed(capture(reqSlot)) } returns result(floatArrayOf(0.5f, 0.5f), dim = 2)
 
-        val vector = mindlayer.embedOne(
-            "hello",
-            task = EmbeddingTask.RetrievalQuery,
-            modelId = "embedding-gemma-300m-v1",
-            outputDim = 256,
-            tag = "row-7",
-        )
+        val handle = mindlayer.embed {
+            text(
+                "hello",
+                tag = "row-7",
+                task = EmbeddingTask.RetrievalQuery,
+                modelId = "embedding-gemma-300m-v1",
+                outputDim = 256,
+            )
+        }
+        val vector = (handle as EmbeddingHandle.Single).awaitVector()
 
         assertArrayEquals(floatArrayOf(0.5f, 0.5f), vector, 0f)
         assertEquals("hello", reqSlot.captured.text)
@@ -169,7 +116,7 @@ class MindlayerEmbedManyApi33Test {
         assertEquals("row-7", reqSlot.captured.tag)
     }
 
-    // -- embedMany transport selection -------------------------------------
+    // -- selectEmbeddingTransport routing ----------------------------------
 
     @Test fun `selectEmbeddingTransport picks Inline for tiny batches`() {
         val items = List(4) { EmbeddingConfig(text = "x$it") }
@@ -198,43 +145,59 @@ class MindlayerEmbedManyApi33Test {
         assertEquals(EmbeddingTransport.DeferredFallback, transport)
     }
 
-    // -- embedMany end-to-end routing --------------------------------------
+    // -- embed { items(...) } end-to-end routing ---------------------------
 
-    @Test fun `embedMany routes small batches through inline embedBatch and returns EmbeddingBatch`() = runTest {
+    @Test fun `embed items routes small batches through inline embedBatch`() = runTest {
         every { mockService.embedBatch(any()) } returns com.adsamcik.mindlayer.EmbeddingBatchResult(
             results = listOf(result(floatArrayOf(1f, 2f), dim = 2)),
             totalDurationMs = 17L,
             backend = "NPU",
         )
 
-        val batch = mindlayer.embedMany(listOf(EmbeddingConfig("hello")))
+        val handle = mindlayer.embed { items(listOf(EmbeddingItem("hello"))) }
+        val results = (handle as EmbeddingHandle.Batch).awaitVectors()
 
-        assertEquals(EmbeddingTransport.Inline, batch.transport)
-        assertEquals(17L, batch.totalDurationMs)
-        assertEquals("NPU", batch.backend)
-        assertEquals(1, batch.results.size)
-        assertArrayEquals(floatArrayOf(1f, 2f), batch.vectors.single(), 0f)
+        assertEquals(1, results.size)
+        assertArrayEquals(floatArrayOf(1f, 2f), results.single().vector.data, 0f)
         verify(exactly = 1) { mockService.embedBatch(any()) }
         verify(exactly = 0) { mockService.embedBatchShm(any()) }
     }
 
-    @Test fun `embedMany routes large batches through SharedMemory embedBatchShm`() = runTest {
+    @Test fun `embed items routes large batches through SharedMemory embedBatchShm`() = runTest {
         every { mockService.embedBatchShm(any()) } returns transfer(
             vectors = List(70) { floatArrayOf(it.toFloat(), it.toFloat()) },
             tags = List(70) { "t$it" },
         )
 
-        val batch = mindlayer.embedMany(List(70) { EmbeddingConfig("x$it") })
+        val handle = mindlayer.embed { items(List(70) { EmbeddingItem("x$it") }) }
+        val results = (handle as EmbeddingHandle.Batch).awaitVectors()
 
-        assertEquals(EmbeddingTransport.SharedMemory, batch.transport)
-        assertEquals(70, batch.size)
-        assertEquals("NPU", batch.backend)
+        assertEquals(70, results.size)
         verify(exactly = 1) { mockService.embedBatchShm(any()) }
         verify(exactly = 0) { mockService.embedBatch(any()) }
     }
 
-    @Test fun `embedMany string overload constructs configs with supplied task and modelId`() = runTest {
-        val reqSlot = slot<List<EmbeddingRequest>>()
+    @Test fun `embed items propagates per-item telemetry to EmbeddingResultItem`() = runTest {
+        every { mockService.embedBatch(any()) } returns com.adsamcik.mindlayer.EmbeddingBatchResult(
+            results = listOf(result(floatArrayOf(1f, 2f), dim = 2, tag = "row-1")),
+            totalDurationMs = 17L,
+            backend = "NPU",
+        )
+
+        val handle = mindlayer.embed { items(listOf(EmbeddingItem("hello", tag = "row-1"))) }
+        val item = (handle as EmbeddingHandle.Batch).awaitVectors().single()
+
+        assertEquals("row-1", item.tag)
+        assertEquals(2, item.dim)
+        assertEquals(EmbeddingModel.Default.id, item.modelId)
+        assertEquals(3, item.tokenCount)
+        assertEquals(false, item.truncated)
+        assertEquals("NPU", item.backend)
+        assertEquals(7L, item.durationMs)
+    }
+
+    @Test fun `embed items forwards per-item modelId and outputDim to the AIDL request`() = runTest {
+        val reqSlot = slot<List<AidlEmbeddingRequest>>()
         every { mockService.embedBatch(capture(reqSlot)) } returns com.adsamcik.mindlayer.EmbeddingBatchResult(
             results = listOf(
                 result(floatArrayOf(1f, 0f), dim = 2),
@@ -244,32 +207,41 @@ class MindlayerEmbedManyApi33Test {
             backend = "NPU",
         )
 
-        mindlayer.embedMany(
-            texts = listOf("hello", "world"),
-            task = EmbeddingTask.RetrievalQuery,
-            modelId = "embedding-gemma-300m-v1",
-        )
+        mindlayer.embed {
+            items(
+                listOf(
+                    EmbeddingItem(
+                        text = "hello",
+                        task = EmbeddingTask.RetrievalQuery,
+                        modelId = "embedding-gemma-300m-v1",
+                        outputDim = 256,
+                    ),
+                    EmbeddingItem(text = "world", task = EmbeddingTask.RetrievalQuery),
+                ),
+            )
+        }
 
         assertEquals(2, reqSlot.captured.size)
         assertEquals(com.adsamcik.mindlayer.EmbeddingTask.RETRIEVAL_QUERY, reqSlot.captured[0].taskType)
         assertEquals("embedding-gemma-300m-v1", reqSlot.captured[0].modelId)
+        assertEquals(256, reqSlot.captured[0].outputDim)
         assertEquals("hello", reqSlot.captured[0].text)
         assertEquals("world", reqSlot.captured[1].text)
     }
 
-    @Test fun `embedMany delegates to existing capability-gating and throws NOT_SUPPORTED on old services`() = runTest {
+    @Test fun `embed items delegates to capability-gating and throws NOT_SUPPORTED on old services`() = runTest {
         every { mockService.capabilities } returns embeddingCaps.copy(supportedFeatures = emptySet())
         try {
-            mindlayer.embedMany(listOf(EmbeddingConfig("hi")))
+            mindlayer.embed { items(listOf(EmbeddingItem("hi"))) }
             org.junit.Assert.fail("expected MindlayerException")
         } catch (e: MindlayerException) {
             assertEquals(com.adsamcik.mindlayer.shared.MindlayerErrorCode.NOT_SUPPORTED, e.code)
         }
     }
 
-    @Test fun `embedMany rejects empty items eagerly without binder hop`() = runTest {
+    @Test fun `embed items rejects empty items eagerly without binder hop`() = runTest {
         try {
-            mindlayer.embedMany(emptyList<EmbeddingConfig>())
+            mindlayer.embed { items(emptyList()) }
             org.junit.Assert.fail("expected IllegalArgumentException")
         } catch (_: IllegalArgumentException) {
             // expected
@@ -278,29 +250,19 @@ class MindlayerEmbedManyApi33Test {
         verify(exactly = 0) { mockService.embedBatchShm(any()) }
     }
 
-    @Test fun `EmbeddingBatch implements List delegation for ergonomic iteration`() = runTest {
-        every { mockService.embedBatch(any()) } returns com.adsamcik.mindlayer.EmbeddingBatchResult(
-            results = listOf(
-                result(floatArrayOf(1f, 2f), dim = 2),
-                result(floatArrayOf(3f, 4f), dim = 2),
-            ),
-            totalDurationMs = 5L,
-            backend = "NPU",
-        )
-
-        val batch = mindlayer.embedMany(listOf(EmbeddingConfig("a"), EmbeddingConfig("b")))
-
-        assertEquals(2, batch.size)
-        assertEquals(2, batch.results.size)
-        assertSame(batch[0], batch.results[0])
-        val collected = batch.map { it.dim }
-        assertEquals(listOf(2, 2), collected)
+    @Test fun `embed with neither text nor items throws INVALID_REQUEST`() = runTest {
+        try {
+            mindlayer.embed { }
+            org.junit.Assert.fail("expected MindlayerException")
+        } catch (e: MindlayerException) {
+            assertEquals(com.adsamcik.mindlayer.shared.MindlayerErrorCode.INVALID_REQUEST, e.code)
+        }
     }
 
     // -- test helpers ------------------------------------------------------
 
-    private fun result(vector: FloatArray, dim: Int = vector.size): EmbeddingResult = EmbeddingResult(
-        tag = null,
+    private fun result(vector: FloatArray, dim: Int = vector.size, tag: String? = null): EmbeddingResult = EmbeddingResult(
+        tag = tag,
         vector = vector,
         dim = dim,
         modelId = EmbeddingModel.Default.id,
@@ -338,7 +300,7 @@ class MindlayerEmbedManyApi33Test {
 }
 
 /**
- * API-26 facet: [Mindlayer.embedMany] must NOT route through SharedMemory
+ * API-26 facet: `embed { items(...) }` must NOT route through SharedMemory
  * even when the service advertises a non-zero `maxEmbeddingBatchShm` cap.
  * `android.os.SharedMemory` is API 27+; routing there on API 26 would
  * blow up at the binder boundary.
@@ -411,16 +373,17 @@ class MindlayerEmbedManyApi26Test {
         )
     }
 
-    @Test fun `embedMany never calls embedBatchShm on API 26`() = runTest {
+    @Test fun `embed items never calls embedBatchShm on API 26`() = runTest {
         every { mockService.embedBatch(any()) } returns com.adsamcik.mindlayer.EmbeddingBatchResult(
             results = listOf(result(floatArrayOf(1f, 2f), dim = 2)),
             totalDurationMs = 1L,
             backend = "CPU",
         )
 
-        val batch = mindlayer.embedMany(listOf(EmbeddingConfig("hi")))
+        val handle = mindlayer.embed { items(listOf(EmbeddingItem("hi"))) }
+        val results = (handle as EmbeddingHandle.Batch).awaitVectors()
 
-        assertEquals(EmbeddingTransport.Inline, batch.transport)
+        assertEquals(1, results.size)
         verify(exactly = 0) { mockService.embedBatchShm(any()) }
     }
 

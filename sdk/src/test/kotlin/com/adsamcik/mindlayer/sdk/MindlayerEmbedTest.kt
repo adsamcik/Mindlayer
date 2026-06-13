@@ -8,7 +8,7 @@ import com.adsamcik.mindlayer.DeferredHandle
 import com.adsamcik.mindlayer.DeferredResult
 import com.adsamcik.mindlayer.EmbeddingBatchTransfer
 import com.adsamcik.mindlayer.EmbeddingItemMetadata
-import com.adsamcik.mindlayer.EmbeddingRequest
+import com.adsamcik.mindlayer.EmbeddingRequest as AidlEmbeddingRequest
 import com.adsamcik.mindlayer.EmbeddingResult
 import com.adsamcik.mindlayer.IClientCallback
 import com.adsamcik.mindlayer.IMindlayerService
@@ -21,25 +21,29 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.slot
 import io.mockk.unmockkAll
-import io.mockk.verify
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.After
-import org.junit.Assert.assertArrayEquals
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
+/**
+ * Covers the canonical `embed { }` builder path (single-shot) and the
+ * deferred-batch + completion / cancel side surfaces that the canonical
+ * facade composes on top of. Transport-selection routing for `embed { items(...) }`
+ * lives in [MindlayerEmbedManyApi33Test] / [MindlayerEmbedManyApi26Test].
+ */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
-@Suppress("DEPRECATION") // pins legacy embed(text) / embedBatch / embedBatchLarge — replaced by embedOne / embedMany facades
 class MindlayerEmbedTest {
     private lateinit var mockService: IMindlayerService
     private lateinit var mockConnection: ConnectionManager
@@ -85,10 +89,11 @@ class MindlayerEmbedTest {
     @After fun tearDown() = unmockkAll()
 
     @Test fun `embed text calls service embed with retrieval document and normalize true`() = runTest {
-        val reqSlot = slot<EmbeddingRequest>()
+        val reqSlot = slot<AidlEmbeddingRequest>()
         every { mockService.embed(capture(reqSlot)) } returns result(floatArrayOf(1f, 0f), dim = 2)
 
-        val vector = mindlayer.embed("hello")
+        val handle = mindlayer.embed { text("hello") }
+        val vector = (handle as EmbeddingHandle.Single).awaitVector()
 
         assertArrayEquals(floatArrayOf(1f, 0f), vector, 0f)
         assertEquals("hello", reqSlot.captured.text)
@@ -96,69 +101,10 @@ class MindlayerEmbedTest {
         assertTrue(reqSlot.captured.normalize)
     }
 
-    @Test fun `embedBatch over inline limit throws before embedding binder hop`() = runTest {
-        try {
-            mindlayer.embedBatch(List(65) { EmbeddingConfig(text = "x$it") })
-            fail("expected IllegalArgumentException")
-        } catch (_: IllegalArgumentException) {
-            // expected
-        }
-        verify(exactly = 0) { mockService.embedBatch(any()) }
-    }
-
-    @Test fun `embedBatchLarge parses shared-memory blob into results`() = runTest {
-        every { mockService.embedBatchShm(any()) } returns transfer(
-            vectors = listOf(floatArrayOf(1f, 2f), floatArrayOf(3f, 4f)),
-            tags = listOf("a", "b"),
-        )
-
-        val results = mindlayer.embedBatchLarge(listOf(EmbeddingConfig("a"), EmbeddingConfig("b")))
-
-        assertEquals(2, results.size)
-        assertEquals("a", results[0].tag)
-        assertArrayEquals(floatArrayOf(1f, 2f), results[0].vector, 0f)
-        assertEquals("b", results[1].tag)
-        assertArrayEquals(floatArrayOf(3f, 4f), results[1].vector, 0f)
-        assertEquals("NPU", results[0].backend)
-    }
-
-    @Test fun `embedBatchLarge falls back to inline when shared memory cap is zero`() = runTest {
-        every { mockService.capabilities } returns embeddingCaps.copy(maxEmbeddingBatchShm = 0)
-        every { mockService.embedBatch(any()) } returns com.adsamcik.mindlayer.EmbeddingBatchResult(
-            results = listOf(result(floatArrayOf(5f, 6f), dim = 2)),
-            totalDurationMs = 8L,
-            backend = "NPU",
-        )
-
-        val results = mindlayer.embedBatchLarge(listOf(EmbeddingConfig("inline")))
-
-        assertArrayEquals(floatArrayOf(5f, 6f), results.single().vector, 0f)
-        verify(exactly = 0) { mockService.embedBatchShm(any()) }
-        verify(exactly = 1) { mockService.embedBatch(any()) }
-    }
-
-    @Test fun `embedBatchLarge falls back to deferred when shared memory cap is zero and batch exceeds inline cap`() = runTest {
-        every {
-            mockService.capabilities
-        } returns embeddingCaps.copy(maxEmbeddingBatchInline = 1, maxEmbeddingBatchShm = 0, maxEmbeddingBatchTotal = 2)
-        every { mockService.embedBatchDeferred(any()) } returns DeferredHandle(requestId = "emb-fallback", expiresAtMs = 1_000L)
-        every { mockService.fetchEmbeddingBatchResult("emb-fallback") } returns VectorBlobHandle(
-            status = DeferredResult.READY,
-            transfer = transfer(listOf(floatArrayOf(7f, 8f), floatArrayOf(9f, 10f))),
-        )
-
-        val results = mindlayer.embedBatchLarge(listOf(EmbeddingConfig("a"), EmbeddingConfig("b")))
-
-        assertEquals(2, results.size)
-        assertArrayEquals(floatArrayOf(7f, 8f), results[0].vector, 0f)
-        verify(exactly = 0) { mockService.embedBatchShm(any()) }
-        verify(exactly = 1) { mockService.embedBatchDeferred(any()) }
-    }
-
     @Test fun `old service without embeddings capability throws NOT_SUPPORTED`() = runTest {
         every { mockService.capabilities } returns embeddingCaps.copy(supportedFeatures = emptySet())
         try {
-            mindlayer.embed("hello")
+            mindlayer.embed { text("hello") }
             fail("expected MindlayerException")
         } catch (e: MindlayerException) {
             assertEquals(MindlayerErrorCode.NOT_SUPPORTED, e.code)
@@ -216,7 +162,7 @@ class MindlayerEmbedTest {
     @Test fun `NoSuchMethodError at embedding binder stub becomes NOT_SUPPORTED`() = runTest {
         every { mockService.embed(any()) } throws NoSuchMethodError("embed")
         try {
-            mindlayer.embed("hello")
+            mindlayer.embed { text("hello") }
             fail("expected MindlayerException")
         } catch (e: MindlayerException) {
             assertEquals(MindlayerErrorCode.NOT_SUPPORTED, e.code)

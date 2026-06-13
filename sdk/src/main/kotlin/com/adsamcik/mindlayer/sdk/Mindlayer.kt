@@ -27,11 +27,19 @@ import kotlin.time.Duration
  *
  * Every method declared via `@Deprecated(level = DeprecationLevel.HIDDEN)` on
  * this interface is a v0.x carry-over (`chat*`, `*Once`, `infer*`, `generate*`,
- * `embed*`, `ocrRealtime`/`ocrAsync`/`ocrImage`/`ocrSession(profile,…)`). They
- * remain implemented by [MindlayerImpl] for binary compatibility with existing
+ * `ocrRealtime`/`ocrAsync`/`ocrImage`/`ocrSession(profile,…)`). They remain
+ * implemented by [MindlayerImpl] for binary compatibility with existing
  * binders and the SDK test suite, but are invisible to new compilations of
  * Mindlayer-typed consumers — the canonical builder methods are the only
  * source-visible inference / OCR / embedding entry points for new code.
+ *
+ * The legacy `embed*` overloads (`embedOne`, `embedMany`, `embedBatch`,
+ * `embedBatchLarge`, `embed(text)`, `embed(config)`) have been fully removed;
+ * the canonical [embed] DSL plus the [vector] / [vectors] helpers are now a
+ * strict superset, carrying per-item `modelId` / `outputDim` / `normalize`
+ * config on [EmbeddingItem] and the full per-item telemetry (`dim`,
+ * `modelId`, `tokenCount`, `truncated`, `backend`, `durationMs`) on
+ * [EmbeddingResultItem].
  *
  * # Construction
  *
@@ -289,66 +297,6 @@ interface Mindlayer {
         text: String,
         vararg media: com.adsamcik.mindlayer.MediaPart,
     ): InferenceHandle
-
-    @Deprecated(
-        message = "Use vector(text) / embed { } (Mindlayer v1)",
-        replaceWith = ReplaceWith("vector(text, task)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun embedOne(
-        text: String,
-        task: EmbeddingTask = EmbeddingTask.RetrievalDocument,
-        modelId: String? = null,
-        outputDim: Int? = null,
-        normalize: Boolean = true,
-        tag: String? = null,
-    ): FloatArray
-
-    @Deprecated(
-        message = "Use embed { } (Mindlayer v1)",
-        replaceWith = ReplaceWith("embed { items.forEach { add(it) } }"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun embedMany(items: List<EmbeddingConfig>): EmbeddingBatch
-
-    @Deprecated(
-        message = "Use embed { } / vectors(...) (Mindlayer v1)",
-        replaceWith = ReplaceWith("embed { texts.forEach { add(it, task) } }"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun embedMany(
-        texts: List<String>,
-        task: EmbeddingTask = EmbeddingTask.RetrievalDocument,
-        modelId: String? = null,
-    ): EmbeddingBatch
-
-    @Deprecated(
-        message = "Use embedOne(text) (Mindlayer v1)",
-        replaceWith = ReplaceWith("embedOne(text)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun embed(text: String): FloatArray
-
-    @Deprecated(
-        message = "Use embed { } (Mindlayer v1)",
-        replaceWith = ReplaceWith("embed { add(config) }"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun embed(config: EmbeddingConfig): com.adsamcik.mindlayer.EmbeddingResult
-
-    @Deprecated(
-        message = "Use embedMany(configs) (Mindlayer v1)",
-        replaceWith = ReplaceWith("embedMany(configs)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun embedBatch(configs: List<EmbeddingConfig>): List<com.adsamcik.mindlayer.EmbeddingResult>
-
-    @Deprecated(
-        message = "Use embedMany(configs) (Mindlayer v1)",
-        replaceWith = ReplaceWith("embedMany(configs)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun embedBatchLarge(configs: List<EmbeddingConfig>): List<com.adsamcik.mindlayer.EmbeddingResult>
 
     @Deprecated(
         message = "Use ask(text) (Mindlayer v1)",

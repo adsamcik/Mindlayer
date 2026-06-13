@@ -3,7 +3,7 @@ package com.adsamcik.mindlayer.sdk
 import com.adsamcik.mindlayer.EmbeddingResult
 
 /**
- * Transport that was actually used for an [Mindlayer.embedMany] call.
+ * Transport that was actually used for a batch embedding call.
  *
  * The SDK picks transport automatically based on batch size, estimated
  * reply bytes, API level, and service-advertised caps — consumers do
@@ -36,13 +36,14 @@ enum class EmbeddingTransport {
 }
 
 /**
- * Result of a synchronous [Mindlayer.embedMany] call.
+ * Result of a synchronous batch embedding call. Internal — exposed via
+ * the canonical `embed { items(...) } → EmbeddingHandle.Batch` path.
  *
  * Wraps the underlying list of per-item [EmbeddingResult] (also
  * exposed via [List] delegation for `for`/`map`/`size` ergonomics),
- * the batch-level telemetry that was previously discarded by
- * `embedBatch` / `embedBatchLarge`, and a record of which
- * [EmbeddingTransport] the SDK chose.
+ * the batch-level telemetry that legacy `embedBatch` / `embedBatchLarge`
+ * paths discarded, and a record of which [EmbeddingTransport] the SDK
+ * chose.
  *
  * **Sensitivity:** vectors are derivable to original text via
  * inversion attacks. Do NOT log this object's contents directly;

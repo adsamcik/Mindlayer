@@ -7,11 +7,18 @@ import kotlinx.coroutines.flow.Flow
  *
  * [tag] is an opaque caller correlation key echoed back on the matching
  * [EmbeddingResultItem]; [task] selects the embedding objective.
+ *
+ * [modelId] / [outputDim] / [normalize] mirror the per-item knobs that
+ * the legacy `EmbeddingConfig` carried, so the canonical builder API is
+ * a strict superset of the deprecated entry points.
  */
 data class EmbeddingItem(
     val text: String,
     val tag: String? = null,
     val task: EmbeddingTask = EmbeddingTask.RetrievalDocument,
+    val modelId: String? = null,
+    val outputDim: Int? = null,
+    val normalize: Boolean = true,
 )
 
 /**
@@ -23,10 +30,24 @@ value class EmbeddingVector(val data: FloatArray)
 
 /**
  * One result in an embedding batch, correlated to its input by [tag].
+ *
+ * Carries the same telemetry as the legacy [com.adsamcik.mindlayer.EmbeddingResult]
+ * parcelable so the canonical `embed { } → EmbeddingHandle.Batch` path is a
+ * strict superset of the deprecated `embedBatch` / `embedBatchLarge` shapes:
+ * [dim], [modelId], [tokenCount], [truncated], [backend], and [durationMs]
+ * are all surfaced for diagnostics. Fields are nullable because some legacy
+ * call sites (e.g. SHM transfer with batch-only metadata) historically did
+ * not carry per-item telemetry.
  */
 data class EmbeddingResultItem(
     val tag: String?,
     val vector: EmbeddingVector,
+    val dim: Int? = null,
+    val modelId: String? = null,
+    val tokenCount: Int? = null,
+    val truncated: Boolean? = null,
+    val backend: String? = null,
+    val durationMs: Long? = null,
 )
 
 /** Caller-facing embedding event stream type. Behaviour lands in C2. */
