@@ -8,7 +8,7 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import com.adsamcik.mindlayer.OcrFrameAck
 import com.adsamcik.mindlayer.OcrFrameMeta
-import com.adsamcik.mindlayer.sdk.OcrSession
+import com.adsamcik.mindlayer.sdk.OcrHandle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -40,14 +40,17 @@ sealed class OcrAnalyzerEvent {
  *     copy, rotation rounded to {0,90,180,270}).
  *  2. Runs client-side [OcrFramePresort] scoring; drops bad-quality
  *     frames before they cross the binder boundary.
- *  3. Pushes the accepted frame's metadata to the active [OcrSession].
+ *  3. Pushes the accepted frame's metadata to the active [OcrHandle.MultiFrame].
  *  4. Closes the [ImageProxy] **immediately** (CameraX requires the
  *     analyzer to dispose its input before the next frame is delivered).
  *
  * # Usage
  *
  * ```kotlin
- * val session = mindlayer.ocrRealtime(OcrProfile.Receipt) { maxFrames = 30 }
+ * val session = mindlayer.ocrSession {
+ *     profile(OcrProfile.Receipt)
+ *     maxFrames(30)
+ * }
  * val analyzer = OcrImageAnalyzer(session) { frame, ack ->
  *     // Optional: observe per-frame ACKs for UI throttling feedback.
  * }
@@ -97,7 +100,7 @@ sealed class OcrAnalyzerEvent {
  * peak magnitude through an [AtomicLong] so the analyze thread sees a
  * consistent value without a lock.
  *
- * @property session the live OCR session frames are pushed to.
+ * @property session the live OCR multi-frame handle frames are pushed to.
  * @property scope coroutine scope for pushing frames; defaults to a
  *   single-threaded supervisor on [Dispatchers.IO]. Cancelling the
  *   scope stops further binder calls.
@@ -113,7 +116,7 @@ sealed class OcrAnalyzerEvent {
  *   thread, **not** the UI thread — dispatch yourself if needed.
  */
 class OcrImageAnalyzer @JvmOverloads constructor(
-    private val session: OcrSession,
+    private val session: OcrHandle.MultiFrame,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val runClientSidePresort: Boolean = true,
     private val onAck: ((OcrFrame, OcrFrameAck) -> Unit)? = null,
@@ -176,7 +179,7 @@ class OcrImageAnalyzer @JvmOverloads constructor(
     val clientDroppedCount: Long get() = droppedCount
 
     /**
-     * Reset the presort state — call after [com.adsamcik.mindlayer.sdk.OcrSession.finalize]
+     * Reset the presort state — call after [com.adsamcik.mindlayer.sdk.OcrHandle.MultiFrame.finalize]
      * when re-opening a new session with the same analyzer instance.
      */
     fun resetPresortState() {
@@ -246,7 +249,7 @@ class OcrImageAnalyzer @JvmOverloads constructor(
      * Unregister the sensor listener (if any) and release any
      * analyzer-side resources tied to the host lifecycle. Idempotent.
      *
-     * Note: this does NOT close the [OcrSession] — the session is
+     * Note: this does NOT close the [OcrHandle.MultiFrame] — the session is
      * owned by the caller and may outlive the analyzer (e.g. callers
      * that want a final manual frame push after stopping CameraX).
      */

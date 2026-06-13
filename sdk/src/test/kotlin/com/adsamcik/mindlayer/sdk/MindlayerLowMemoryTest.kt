@@ -103,7 +103,7 @@ class MindlayerLowMemoryTest {
 
         var thrown: Throwable? = null
         try {
-            mindlayer.createSession { backend("CPU") }
+            mindlayer.createSessionInternal {  backend("CPU")  }
         } catch (e: Throwable) {
             thrown = e
         }
@@ -139,7 +139,7 @@ class MindlayerLowMemoryTest {
 
         var thrown: Throwable? = null
         try {
-            mindlayer.createSession { }
+            mindlayer.createSessionInternal {   }
         } catch (e: Throwable) {
             thrown = e
         }

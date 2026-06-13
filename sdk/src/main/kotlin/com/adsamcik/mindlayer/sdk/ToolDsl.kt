@@ -18,21 +18,22 @@ import kotlinx.serialization.json.put
  * shape is checked at construction time, not at session-create time:
  *
  * ```kotlin
- * mindlayer.createSession {
- *     systemPrompt("You have access to tools")
- *     tools {
- *         tool("get_weather") {
- *             description("Get current weather for a city")
- *             parameters("""{
- *                 "type": "object",
- *                 "required": ["city"],
- *                 "properties": {
- *                     "city": {"type": "string"}
- *                 }
- *             }""")
- *         }
- *     }
+ * mindlayer.openSession {
+ *     systemPrompt = "You have access to tools"
+ *     toolsJson = """[{"name":"get_weather","description":"Get current weather for a city","parameters":{"type":"object","required":["city"],"properties":{"city":{"type":"string"}}}}]"""
  * }
+ * // or using the DSL builder (via SessionConfigBuilder):
+ * val tools = ToolsBuilder().apply {
+ *     tool("get_weather") {
+ *         description("Get current weather for a city")
+ *         parameters("""{
+ *             "type": "object",
+ *             "required": ["city"],
+ *             "properties": { "city": {"type": "string"} }
+ *         }""")
+ *     }
+ * }.buildJson()
+ * mindlayer.openSession { toolsJson = tools }
  * ```
  *
  * Validation at builder time:

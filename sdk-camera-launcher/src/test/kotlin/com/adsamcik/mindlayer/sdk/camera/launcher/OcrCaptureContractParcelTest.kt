@@ -1,7 +1,6 @@
 package com.adsamcik.mindlayer.sdk.camera.launcher
 
 import android.os.Parcel
-import com.adsamcik.mindlayer.OcrImageResult
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -94,19 +93,20 @@ class OcrCaptureContractParcelTest {
     @Test
     fun ocrCaptureResult_async_roundTripsThroughParcel() {
         val original: OcrCaptureResult = OcrCaptureResult.Async(
-            result = OcrImageResult(
-                lines = emptyList(),
-                extractionJson = "{\"hello\":\"world\"}",
-                ocrDurationMs = 42L,
-                totalDurationMs = 50L,
-            ),
+            fullJson = """{"lines":["hello"]}""",
+            extractionJson = """{"hello":"world"}""",
+            ocrDurationMs = 42L,
+            llmDurationMs = 8L,
+            totalDurationMs = 50L,
+            backend = "CPU",
         )
 
         val restored = original.parcelRoundTripSealed()
         assertEquals(original, restored)
         val async = restored as OcrCaptureResult.Async
-        assertEquals("{\"hello\":\"world\"}", async.result.extractionJson)
-        assertEquals(42L, async.result.ocrDurationMs)
+        assertEquals("""{"hello":"world"}""", async.extractionJson)
+        assertEquals(42L, async.ocrDurationMs)
+        assertEquals("CPU", async.backend)
     }
 
     @Test
@@ -169,6 +169,22 @@ class OcrCaptureContractParcelTest {
         val rendered = r.toString()
         assertTrue("toString must not leak finalJson body: $rendered", "secret" !in rendered)
         assertTrue("toString must redact length: $rendered", "<redacted:" in rendered)
+    }
+
+    @Test
+    fun ocrCaptureResult_async_toString_doesNotLeakJson() {
+        val r = OcrCaptureResult.Async(
+            fullJson = """{"secret":"shhhh"}""",
+            extractionJson = """{"total":"12.34"}""",
+            totalDurationMs = 50L,
+            ocrDurationMs = 42L,
+            llmDurationMs = 8L,
+            backend = "CPU",
+        )
+        val rendered = r.toString()
+        assertTrue("toString must not leak fullJson body: $rendered", "secret" !in rendered)
+        assertTrue("toString must not leak extractionJson body: $rendered", "12.34" !in rendered)
+        assertTrue("toString must redact JSON lengths: $rendered", "<redacted:" in rendered)
     }
 
     /** Helper: data-class parcelable round trip via Parcel + writeParcelable / readParcelable. */

@@ -1,7 +1,6 @@
 package com.adsamcik.mindlayer.sdk.camera.launcher
 
 import android.os.Parcelable
-import com.adsamcik.mindlayer.OcrImageResult
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.parcelize.Parcelize
 
@@ -21,22 +20,36 @@ sealed class OcrCaptureResult : Parcelable {
 
     /**
      * Successful single-image capture. The activity ran
-     * [com.adsamcik.mindlayer.sdk.Mindlayer.ocrAsync] on the captured
-     * frame and is returning the verbatim [OcrImageResult].
+     * [com.adsamcik.mindlayer.sdk.Mindlayer.ocr] on the captured frame and is
+     * returning a Parcelable-friendly projection of the canonical [OcrResult].
      *
-     * @property result the underlying [com.adsamcik.mindlayer.OcrImageResult]
-     *   from the AIDL call. Contains the recognised lines, optional
-     *   bounding boxes, optional structured-extraction fields, and
-     *   timing metadata.
+     * @property fullJson canonical OCR JSON payload, redacted by [toString].
+     * @property extractionJson optional LLM extraction JSON payload.
+     * @property totalDurationMs overall OCR wall-clock duration.
+     * @property ocrDurationMs OCR-engine wall-clock duration.
+     * @property llmDurationMs optional LLM extraction duration.
+     * @property backend OCR backend label when the service reported one.
      */
     @Parcelize
-    data class Async(val result: OcrImageResult) : OcrCaptureResult() {
-        override fun toString(): String = "OcrCaptureResult.Async(result=$result)"
+    data class Async(
+        val fullJson: String,
+        val extractionJson: String?,
+        val totalDurationMs: Long,
+        val ocrDurationMs: Long,
+        val llmDurationMs: Long,
+        val backend: String?,
+    ) : OcrCaptureResult() {
+        override fun toString(): String =
+            "OcrCaptureResult.Async(" +
+                "fullJson=<redacted:${fullJson.length}>, " +
+                "extractionJson=${if (extractionJson == null) "null" else "<redacted:${extractionJson.length}>"}, " +
+                "total=${totalDurationMs}ms, ocr=${ocrDurationMs}ms, llm=${llmDurationMs}ms, " +
+                "backend=$backend)"
     }
 
     /**
      * Successful multi-frame capture. The activity ran
-     * [com.adsamcik.mindlayer.sdk.Mindlayer.ocrRealtime] and finalised
+     * [com.adsamcik.mindlayer.sdk.Mindlayer.ocrSession] and finalised
      * the session either on user tap of the "Done" button or on
      * convergence.
      *

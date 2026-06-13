@@ -52,14 +52,18 @@ class MindlayerOcrCapabilityTest {
 
     @After fun tearDown() = unmockkAll()
 
-    @Test fun `ocrRealtime requires advertised OCR feature`() = runTest {
-        assertFeatureNotSupported { mindlayer.ocrRealtime(OcrProfile.Receipt) }
+    @Test fun `ocrSession requires advertised OCR feature`() = runTest {
+        assertFeatureNotSupported {
+            mindlayer.ocrSession { profile(OcrProfile.Receipt) }
+        }
         verify(exactly = 0) { mockService.createOcrSession(any()) }
     }
 
-    @Test fun `ocrAsync requires advertised OCR-image feature`() = runTest {
+    @Test fun `ocr requires advertised OCR-image feature`() = runTest {
         assertFeatureNotSupported {
-            mindlayer.ocrAsync(byteArrayOf(0x01), "image/jpeg")
+            mindlayer.ocr {
+                image(byteArrayOf(0x01), "image/jpeg")
+            }
         }
         verify(exactly = 0) { mockService.ocrImage(any(), any()) }
     }

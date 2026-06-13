@@ -3,15 +3,14 @@ package com.adsamcik.mindlayer.ocrdriver
 import android.content.Context
 import android.os.Build
 import com.adsamcik.mindlayer.OcrFrameMeta
-import com.adsamcik.mindlayer.OcrImageOptions
 import com.adsamcik.mindlayer.ServiceCapabilities
+import com.adsamcik.mindlayer.sdk.ImageInput
+import com.adsamcik.mindlayer.sdk.JsonSchema
 import com.adsamcik.mindlayer.sdk.Mindlayer
-import com.adsamcik.mindlayer.sdk.OcrEvent
 import com.adsamcik.mindlayer.sdk.OcrProfile
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
@@ -54,8 +53,8 @@ data class ValidationReport(
  * # What it exercises
  *
  * Each scenario maps to a documented contract on either the single-image
- * async path (`Mindlayer.ocrImage`) or the multi-frame realtime path
- * (`Mindlayer.ocrRealtime` + frame pushes + event stream). The matrix is
+ * canonical path (`Mindlayer.ocr { ... }.awaitResult()`) or the multi-frame
+ * session path (`Mindlayer.ocrSession { ... }` + frame pushes). The matrix is
  * intentionally narrow — it does NOT measure quality, latency
  * percentiles, or fusion accuracy. It only verifies that the documented
  * happy paths work end-to-end and that two specific failure modes
@@ -96,7 +95,6 @@ class ValidationRunner(
      * fails one scenario but does not short-circuit the rest. Returns the
      * full report regardless of any failures.
      */
-    @Suppress("DEPRECATION")
     suspend fun runAll(): ValidationReport {
         val results = mutableListOf<ValidationScenarioResult>()
 
@@ -168,29 +166,27 @@ class ValidationRunner(
 
         results += scenario("single_image_no_llm") {
             val bytes = readFixture(OcrFixtures.RECEIPT)
-            val result = mindlayer.ocrAsync(
-                bytes = bytes,
-                mimeType = OcrFixtures.mimeType(OcrFixtures.RECEIPT),
-            )
+            val result = mindlayer.ocr {
+                image(bytes, OcrFixtures.mimeType(OcrFixtures.RECEIPT))
+            }.awaitResult()
             check(result.lines.isNotEmpty()) {
-                "ocrAsync returned 0 lines on ${OcrFixtures.RECEIPT} — recognition failed"
+                "ocr{} returned 0 lines on ${OcrFixtures.RECEIPT} — recognition failed"
             }
-            "lines=${result.lines.size} ocr=${result.ocrDurationMs}ms"
+            "lines=${result.lines.size} ocr=${result.metrics.ocrDurationMs ?: 0L}ms"
         }
 
         results += scenario("single_image_with_llm") {
             val bytes = readFixture(OcrFixtures.RECEIPT)
-            val result = mindlayer.ocrAsync(
-                bytes = bytes,
-                mimeType = OcrFixtures.mimeType(OcrFixtures.RECEIPT),
-                options = OcrImageOptions(
-                    runLlmExtraction = true,
-                    extractionSchemaJson =
+            val result = mindlayer.ocr {
+                image(bytes, OcrFixtures.mimeType(OcrFixtures.RECEIPT))
+                extractWithLlm(
+                    JsonSchema.parse(
                         """{"type":"object","properties":{"total":{"type":"string"}}}""",
-                ),
-            )
+                    ),
+                )
+            }.awaitResult()
             check(result.lines.isNotEmpty()) {
-                "ocrAsync(runLlm=true) returned 0 lines — recognition failed"
+                "ocr{} + extractWithLlm returned 0 lines — recognition failed"
             }
             // The production OcrLlmExtractor returns EMPTY in 0ms when:
             //   1. The Gemma engine isn't loaded yet (engineProvider null).
@@ -203,19 +199,19 @@ class ValidationRunner(
             // or extractor skipped (llm == 0 ms, engine likely missing).
             // Both are valid signals on a dev device; we report the actual
             // state instead of asserting one outcome.
-            val ran = result.llmDurationMs > 0L
-            "lines=${result.lines.size} llm=${result.llmDurationMs}ms " +
+            val llmDurationMs = result.metrics.llmDurationMs ?: 0L
+            val ran = llmDurationMs > 0L
+            "lines=${result.lines.size} llm=${llmDurationMs}ms " +
                 "fields=${result.extractionFields.size} " +
                 "ran=${if (ran) "yes" else "skipped (engine not warmed)"}"
         }
 
         results += scenario("single_image_bbox") {
             val bytes = readFixture(OcrFixtures.DOCUMENT)
-            val result = mindlayer.ocrAsync(
-                bytes = bytes,
-                mimeType = OcrFixtures.mimeType(OcrFixtures.DOCUMENT),
-                options = OcrImageOptions(emitBoundingBoxes = true),
-            )
+            val result = mindlayer.ocr {
+                image(bytes, OcrFixtures.mimeType(OcrFixtures.DOCUMENT))
+                emitBoundingBoxes()
+            }.awaitResult()
             check(result.lines.isNotEmpty()) { "no lines extracted" }
             val withBbox = result.lines.count { it.boundingBox != null }
             check(withBbox > 0) {
@@ -225,48 +221,38 @@ class ValidationRunner(
         }
 
         results += scenario("session_lifecycle_basic") {
-            // Open a session, attach event stream, push one encoded frame,
-            // finalize, assert we see a RESULT_FINALIZED event.
-            mindlayer.ocrRealtime(OcrProfile.GeneralDocument).use { session ->
-                val events = mutableListOf<OcrEvent>()
-                // The events Flow is cold + attaches the pipe on first
-                // collect. We need to start collecting BEFORE pushing
-                // any frame (the service rejects with
-                // STATUS_REJECTED_STREAM_NOT_ATTACHED otherwise — see
-                // `session_stream_not_attached_rejects` below).
+            // Open a session, attach the stream, push one encoded frame,
+            // finalize, and assert the canonical finalize path returns JSON.
+            mindlayer.ocrSession {
+                profile(OcrProfile.GeneralDocument)
+            }.use { session ->
                 kotlinx.coroutines.coroutineScope {
                     val collector = launch {
-                        session.events.toList(events)
+                        session.events.collect { }
                     }
                     // Give the service a moment to wire the pipe.
                     delay(200)
 
                     val bytes = readFixture(OcrFixtures.DOCUMENT)
-                    val ack = session.pushEncodedFrame(
+                    val ack = session.pushFrame(
                         meta = newMeta(frameId = 1L),
-                        bytes = bytes,
-                        mimeType = OcrFixtures.mimeType(OcrFixtures.DOCUMENT),
+                        image = ImageInput.Bytes(bytes, OcrFixtures.mimeType(OcrFixtures.DOCUMENT)),
                     )
                     check(ack.status == com.adsamcik.mindlayer.OcrFrameAck.STATUS_ACCEPTED) {
                         "expected STATUS_ACCEPTED, got ${ack.status}"
                     }
 
-                    session.finalize()
-
-                    // Bound the wait — the pipe closes when the service
-                    // emits the terminal event, so the collector finishes.
+                    val result = session.finalize()
+                    check(result.fullJson.isNotEmpty()) {
+                        "finalize() returned empty JSON"
+                    }
                     withTimeoutOrNull(10_000L) { collector.join() }
                         ?: run {
                             collector.cancel()
                             error("event collector did not finish within 10s of finalize()")
                         }
+                    "ack=${ack.status} finalJsonLen=${result.fullJson.toString().length}"
                 }
-
-                val finalized = events.filterIsInstance<OcrEvent.ResultFinalized>().firstOrNull()
-                check(finalized != null) {
-                    "no ResultFinalized in event stream (events=${events.size})"
-                }
-                "events=${events.size} finalJsonLen=${finalized.fullJson.length}"
             }
         }
 
@@ -274,12 +260,13 @@ class ValidationRunner(
             // Pushing before attaching the event pipe must surface a
             // STATUS_REJECTED_STREAM_NOT_ATTACHED ack. Without this
             // contract, OCR results could be lost silently.
-            mindlayer.ocrRealtime(OcrProfile.GeneralDocument).use { session ->
+            mindlayer.ocrSession {
+                profile(OcrProfile.GeneralDocument)
+            }.use { session ->
                 val bytes = readFixture(OcrFixtures.DOCUMENT)
-                val ack = session.pushEncodedFrame(
+                val ack = session.pushFrame(
                     meta = newMeta(frameId = 1L),
-                    bytes = bytes,
-                    mimeType = OcrFixtures.mimeType(OcrFixtures.DOCUMENT),
+                    image = ImageInput.Bytes(bytes, OcrFixtures.mimeType(OcrFixtures.DOCUMENT)),
                 )
                 check(
                     ack.status ==
@@ -292,7 +279,9 @@ class ValidationRunner(
         }
 
         results += scenario("session_close_idempotent") {
-            val session = mindlayer.ocrRealtime(OcrProfile.GeneralDocument)
+            val session = mindlayer.ocrSession {
+                profile(OcrProfile.GeneralDocument)
+            }
             session.close()
             session.close() // second close MUST be a no-op
             "close() twice raised no exception"
@@ -309,30 +298,23 @@ class ValidationRunner(
         // callable end-to-end.
 
         results += scenario("inference_facade_smoke") {
-            // The inferAsync facade should resolve to a typed MindlayerException
+            // The ask facade should resolve to a typed MindlayerException
             // when the chat engine isn't loaded (Gemma model missing). It
             // must NOT throw an unchecked exception, and it must NOT silently
             // hang the binder transaction.
-            val sessionId = try {
-                mindlayer.createSession {
-                    systemPrompt("validation harness probe")
-                    maxTokens(256)
-                }
-            } catch (t: Throwable) {
-                return@scenario "createSession failed: ${t.javaClass.simpleName}:${(t.message ?: "").take(80)}"
-            }
             val result = try {
                 kotlinx.coroutines.withTimeoutOrNull(15_000L) {
-                    mindlayer.inferAsync(sessionId, "validation probe — engine likely missing")
+                    mindlayer.ask("validation probe — engine likely missing") {
+                        systemPrompt = "validation harness probe"
+                        maxTokens = 256
+                    }
                 }
             } catch (t: Throwable) {
-                "inferAsync error mapped: ${t.javaClass.simpleName}:${(t.message ?: "").take(60)}"
-            } finally {
-                runCatching { mindlayer.destroySession(sessionId) }
+                "ask error mapped: ${t.javaClass.simpleName}:${(t.message ?: "").take(60)}"
             }
             // Either we got a response (engine loaded — great) or a typed
             // failure (engine missing — also a clean signal). Both are pass.
-            "inferAsync surfaced cleanly: result=${result?.toString()?.take(60) ?: "null/timeout"}"
+            "ask surfaced cleanly: result=${result?.toString()?.take(60) ?: "null/timeout"}"
         }
 
         results += scenario("embeddings_capability_accuracy") {
@@ -383,23 +365,15 @@ class ValidationRunner(
             // when the engine is loaded, demand an actual non-empty text
             // response from a short prompt (no tools, no media). When the
             // engine is absent, surface the typed error without failing.
-            val sessionId = try {
-                mindlayer.createSession {
-                    systemPrompt("You answer in five words or less.")
-                    maxTokens(256)
-                }
-            } catch (t: Throwable) {
-                return@scenario "engine missing — createSession failed: ${t.javaClass.simpleName}:${(t.message ?: "").take(80)}"
-            }
             val response = try {
                 kotlinx.coroutines.withTimeoutOrNull(120_000L) {
-                    mindlayer.inferAsync(sessionId, "Say hello.")
+                    mindlayer.ask("Say hello.") {
+                        systemPrompt = "You answer in five words or less."
+                        maxTokens = 256
+                    }
                 }
             } catch (t: Throwable) {
-                runCatching { mindlayer.destroySession(sessionId) }
-                return@scenario "engine missing — inferAsync threw: ${t.javaClass.simpleName}:${(t.message ?: "").take(60)}"
-            } finally {
-                runCatching { mindlayer.destroySession(sessionId) }
+                return@scenario "engine missing — ask threw: ${t.javaClass.simpleName}:${(t.message ?: "").take(60)}"
             }
             check(response != null) { "Gemma inference timed out after 120s" }
             check(response.isNotBlank()) { "Gemma returned blank response" }

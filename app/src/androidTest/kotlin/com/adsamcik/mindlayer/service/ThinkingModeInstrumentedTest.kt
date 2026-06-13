@@ -135,13 +135,11 @@ class ThinkingModeInstrumentedTest {
             caps.supports(ServiceCapabilities.FEATURE_THINKING_MODE),
         )
 
-        @Suppress("DEPRECATION")
-        val sid = mindlayer.createSession {
-            systemPrompt("You are a careful assistant.")
-            extraContext("""{"thinking":{"enable":true}}""")
-            maxTokens(2048)
-            temperature(0.7f)
-        }
+        val sid = mindlayer.openSession {
+            systemPrompt = "You are a careful assistant."
+            extraContextJson = """{"thinking":{"enable":true}}"""
+            maxTokens = 2048
+        }.id
 
         try {
             // Drive a tiny inference so the service renders + emits a
@@ -201,13 +199,11 @@ class ThinkingModeInstrumentedTest {
             caps.supports(ServiceCapabilities.FEATURE_THINKING_MODE),
         )
 
-        @Suppress("DEPRECATION")
-        val sid = mindlayer.createSession {
-            systemPrompt("You are a careful assistant. Think step by step.")
-            extraContext("""{"thinking":{"enable":true}}""")
-            maxTokens(2048)
-            temperature(0.7f)
-        }
+        val sid = mindlayer.openSession {
+            systemPrompt = "You are a careful assistant. Think step by step."
+            extraContextJson = """{"thinking":{"enable":true}}"""
+            maxTokens = 2048
+        }.id
 
         try {
             // Match the Gemma 4 thinking docs example prompt
@@ -288,12 +284,10 @@ class ThinkingModeInstrumentedTest {
         // exactly as today (no ThoughtDelta events even if the service is
         // thinking-capable). This is the non-opt-in path every existing
         // caller sees.
-        @Suppress("DEPRECATION")
-        val sid = mindlayer.createSession {
-            systemPrompt("You are a careful assistant.")
-            maxTokens(2048)
-            temperature(0.7f)
-        }
+        val sid = mindlayer.openSession {
+            systemPrompt = "You are a careful assistant."
+            maxTokens = 2048
+        }.id
 
         try {
             val handle = mindlayer.infer {

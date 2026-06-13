@@ -31,7 +31,7 @@ fun EmbeddingsTab(
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Embeddings (EmbeddingGemma)", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Calls `embedOne(text)` and reports vector dim, L2 norm, and the first 8 values.",
+                "Calls `vector(text)` and reports vector dim, L2 norm, and the first 8 values.",
                 style = MaterialTheme.typography.bodySmall,
             )
             Text(

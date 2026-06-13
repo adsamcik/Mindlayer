@@ -9,13 +9,13 @@ import com.adsamcik.mindlayer.OcrSessionConfig
  * ``outputSchemaJson`` so callers can do:
  *
  * ```kotlin
- * val session = mindlayer.ocrRealtime(OcrProfile.Receipt)
+ * val session = mindlayer.ocrSession { profile(OcrProfile.Receipt) }
  * session.use { ... }
  * ```
  *
- * Callers that need a custom schema pass it as ``schemaJson`` to
- * [Mindlayer.ocrRealtime]; this overrides the profile default but
- * keeps the profile-specific ``mode``.
+ * Callers that need a custom schema pass it via
+ * [OcrSessionRequest.Builder.extractWithLlm]; this overrides the
+ * profile default but keeps the profile-specific ``mode``.
  *
  * The 5 profiles match the design lock from Phase 1 scope (final-design
  * § 7 + §11): GeneralDocument, Receipt, IdCard, Whiteboard,

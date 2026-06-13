@@ -16,14 +16,15 @@ import kotlinx.serialization.json.put
 /**
  * Builder-style configuration for an OCR session.
  *
- * Use [Mindlayer.ocrRealtime] for the conventional DSL entry point:
+ * Use [Mindlayer.ocrSession] for the conventional DSL entry point:
  *
  * ```kotlin
- * val session = mindlayer.ocrRealtime(OcrProfile.Receipt) {
+ * val session = mindlayer.ocrSession {
+ *     profile(OcrProfile.Receipt)
  *     // Optional overrides:
  *     languageHints = listOf("en", "de-DE")
  *     maxFrames = 30
- *     frameRateLimitFps = 5
+ *     frameRateLimit = 5
  * }
  * ```
  *

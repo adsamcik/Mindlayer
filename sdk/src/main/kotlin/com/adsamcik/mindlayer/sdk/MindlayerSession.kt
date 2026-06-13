@@ -40,39 +40,53 @@ internal class SessionHandle internal constructor(
 ) {
     /** Send a text message and return an [InferenceHandle]. */
     suspend fun chat(text: String): InferenceHandle =
-        client.chat(sessionId, text)
+        client.streamInference(sessionId, text)
 
     /** Send a text + bitmap message and return an [InferenceHandle]. */
     suspend fun chatWithImage(text: String, bitmap: Bitmap): InferenceHandle =
-        client.chatWithImage(sessionId, text, bitmap)
+        client.streamInference(sessionId, text, imageInputs = listOf(ImageInput.Bitmap(bitmap)))
 
     /** Send a text + audio file message and return an [InferenceHandle]. */
     suspend fun chatWithAudio(text: String, audioFile: File): InferenceHandle =
-        client.chatWithAudio(sessionId, text, audioFile)
+        client.streamInference(sessionId, text, audioFile = audioFile)
 
     /** Submit a deferred text message and fetch the result later. */
     suspend fun chatDeferred(text: String): com.adsamcik.mindlayer.DeferredHandle =
         client.chatDeferred(sessionId, text)
 
-    /** @see MindlayerImpl.chatOnce */
+    /** One-shot text inference — returns the complete response. */
     suspend fun chatOnce(text: String): String =
-        client.chatOnce(sessionId, text)
+        client.collectStreamingInference(sessionId, text)
 
-    /** @see MindlayerImpl.chatWithImageOnce */
+    /** One-shot image+text inference — returns the complete response. */
     suspend fun chatWithImageOnce(text: String, bitmap: Bitmap): String =
-        client.chatWithImageOnce(sessionId, text, bitmap)
+        client.collectStreamingInference(sessionId, text, imageInputs = listOf(ImageInput.Bitmap(bitmap)))
 
-    /** @see MindlayerImpl.chatWithAudioOnce */
+    /** One-shot audio+text inference — returns the complete response. */
     suspend fun chatWithAudioOnce(text: String, audioFile: File): String =
-        client.chatWithAudioOnce(sessionId, text, audioFile)
+        client.collectStreamingInference(sessionId, text, audioFile = audioFile)
 
-    /** @see MindlayerImpl.chatTextFlow */
+    /** Emits text deltas only. */
     fun chatTextFlow(text: String): kotlinx.coroutines.flow.Flow<String> =
-        client.chatTextFlow(sessionId, text)
+        kotlinx.coroutines.flow.flow {
+            val handle = client.streamInference(sessionId, text)
+            handle.events.collect { event ->
+                if (event is InferenceEvent.TextDelta) emit(event.text)
+            }
+        }
 
-    /** @see MindlayerImpl.chatFullTextFlow */
+    /** Emits cumulative text after each delta. */
     fun chatFullTextFlow(text: String): kotlinx.coroutines.flow.Flow<String> =
-        client.chatFullTextFlow(sessionId, text)
+        kotlinx.coroutines.flow.flow {
+            val acc = StringBuilder()
+            val handle = client.streamInference(sessionId, text)
+            handle.events.collect { event ->
+                if (event is InferenceEvent.TextDelta) {
+                    acc.append(event.text)
+                    emit(acc.toString())
+                }
+            }
+        }
 
     /** Submit a tool result for continued inference using the ToolCall callId. */
     suspend fun submitToolResult(

@@ -1,7 +1,7 @@
 package com.adsamcik.mindlayer.sdk.camerax
 
 import androidx.camera.core.ImageProxy
-import com.adsamcik.mindlayer.sdk.OcrSession
+import com.adsamcik.mindlayer.sdk.OcrHandle
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
@@ -19,7 +19,7 @@ class OcrImageAnalyzerErrorPathTest {
         }
         var ackCalled = false
         val analyzer = OcrImageAnalyzer(
-            session = mockk<OcrSession>(relaxed = true),
+            session = mockk<OcrHandle.MultiFrame>(relaxed = true),
             scope = this,
             onAck = { _, _ -> ackCalled = true },
         )

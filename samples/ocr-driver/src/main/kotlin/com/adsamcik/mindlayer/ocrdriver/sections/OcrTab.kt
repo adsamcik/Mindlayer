@@ -36,7 +36,7 @@ fun OcrTab(
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("OCR (single image / async)", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Calls `ocrAsync(bytes, fixtureMime, options)`. Loads bundled WebP fixtures from the sample app's assets.",
+                "Calls `ocr { image(bytes, fixtureMime) }.awaitResult()`. Loads bundled WebP fixtures from the sample app's assets.",
                 style = MaterialTheme.typography.bodySmall,
             )
             Text(

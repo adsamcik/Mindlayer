@@ -14,8 +14,15 @@ class EmbeddingRequest private constructor() {
     @MindlayerDsl
     class Builder {
         /** Single text. Mutually exclusive with [items]. */
-        fun text(text: String, tag: String? = null, task: EmbeddingTask = EmbeddingTask.RetrievalDocument) {
-            singleItem = EmbeddingItem(text, tag, task)
+        fun text(
+            text: String,
+            tag: String? = null,
+            task: EmbeddingTask = EmbeddingTask.RetrievalDocument,
+            modelId: String? = null,
+            outputDim: Int? = null,
+            normalize: Boolean = true,
+        ) {
+            singleItem = EmbeddingItem(text, tag, task, modelId, outputDim, normalize)
             items = null
         }
 

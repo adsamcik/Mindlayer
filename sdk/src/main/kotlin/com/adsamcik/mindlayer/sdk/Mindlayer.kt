@@ -23,15 +23,24 @@ import kotlin.time.Duration
  * [vector], [vectors], [readText], [readStructuredJson], [withSession],
  * [openSession]) wrap the canonical primitives for common 1-liner shapes.
  *
- * # Legacy methods
+ * # No legacy surface
  *
- * Every method declared via `@Deprecated(level = DeprecationLevel.HIDDEN)` on
- * this interface is a v0.x carry-over (`chat*`, `*Once`, `infer*`, `generate*`,
- * `embed*`, `ocrRealtime`/`ocrAsync`/`ocrImage`/`ocrSession(profile,…)`). They
- * remain implemented by [MindlayerImpl] for binary compatibility with existing
- * binders and the SDK test suite, but are invisible to new compilations of
- * Mindlayer-typed consumers — the canonical builder methods are the only
- * source-visible inference / OCR / embedding entry points for new code.
+ * As of Mindlayer v1 (1.0.0-alpha.2) every v0.x `@Deprecated` carry-over has
+ * been removed — the canonical builder methods ([infer], [ocr], [ocrSession],
+ * [embed]) and the high-level helpers are the only inference / OCR / embedding
+ * entry points. The canonical surface is a strict superset of the removed
+ * methods (see `docs/SDK_V1_MIGRATION.md`):
+ *  - [embed] / [vector] / [vectors] carry per-item `modelId` / `outputDim` /
+ *    `normalize` config on [EmbeddingItem] and full per-item telemetry (`dim`,
+ *    `modelId`, `tokenCount`, `truncated`, `backend`, `durationMs`) on
+ *    [EmbeddingResultItem] (replacing `embedOne`/`embedMany`/`embedBatch*`/`embed`).
+ *  - [ocr] / [ocrSession] return an [OcrResult] enriched with per-pass timing
+ *    (`metrics.ocrDurationMs` / `llmDurationMs`), `backend`, `extractionFields`,
+ *    and per-line rotated `boundingBoxQuad` / `orientationDegrees` (replacing
+ *    `ocrRealtime`/`ocrAsync`); [OcrHandle.MultiFrame] takes raw Y-plane frames.
+ *  - [infer] streams token-by-token and accepts tool sessions
+ *    ([SessionScope.toolsJson]) and opaque context ([SessionScope.extraContextJson])
+ *    (replacing `chat*`/`*Once`/`infer*`/`generate*`/`createSession`).
  *
  * # Construction
  *
@@ -54,13 +63,6 @@ interface Mindlayer {
      * overload-ambiguity error against that carrier.
      */
     suspend fun awaitConnected(timeout: Duration): Capabilities
-
-    @Deprecated(
-        "Use awaitConnected(timeout) — defaults to Duration.INFINITE until C2.",
-        ReplaceWith("awaitConnected(kotlin.time.Duration.INFINITE)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun awaitConnected()
 
     /** Unbind from the service and release SDK-side resources. Idempotent. */
     fun disconnect()
@@ -211,256 +213,6 @@ interface Mindlayer {
 
     suspend fun openSession(configure: SessionScope.() -> Unit = {}): MindlayerSession =
         error("Mindlayer v1 — C2 lands behaviour")
-
-    // ── Legacy HIDDEN methods (impl-only; invisible to new source) ─────────
-
-    @Deprecated(
-        message = "Use infer { session(...) } / openSession { } (Mindlayer v1). " +
-            "Kept visible for testers and consumers that need explicit session lifecycle.",
-        replaceWith = ReplaceWith("openSession { /* configure */ }"),
-        level = DeprecationLevel.WARNING,
-    )
-    suspend fun createSession(
-        configure: SessionConfigBuilder.() -> Unit = {},
-    ): String
-
-    @Deprecated(
-        message = "Use inferRealtime(sessionId, text) (Mindlayer v1)",
-        replaceWith = ReplaceWith("inferRealtime(sessionId, text)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun chat(sessionId: String, text: String): InferenceHandle
-
-    @Deprecated(
-        message = "Use inferRealtime(sessionId, text, image) (Mindlayer v1)",
-        replaceWith = ReplaceWith("inferRealtime(sessionId, text, MediaPart.image(bitmap))"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun chatWithImage(sessionId: String, text: String, bitmap: Bitmap): InferenceHandle
-
-    @Deprecated(
-        message = "Use inferRealtime(sessionId, text, audio) (Mindlayer v1)",
-        replaceWith = ReplaceWith("inferRealtime(sessionId, text, MediaPart.audio(audioFile))"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun chatWithAudio(sessionId: String, text: String, audioFile: File): InferenceHandle
-
-    @Deprecated(
-        message = "Use inferRealtime(sessionId, text, *parts) (Mindlayer v1)",
-        replaceWith = ReplaceWith("inferRealtime(sessionId, text, *parts)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun chatWithMedia(
-        sessionId: String,
-        text: String,
-        vararg parts: com.adsamcik.mindlayer.MediaPart,
-    ): InferenceHandle
-
-    @Deprecated(
-        message = "Use infer { } (Mindlayer v1)",
-        replaceWith = ReplaceWith("infer { session(sessionId); prompt(text); media(*media) }"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun inferRealtime(
-        sessionId: String,
-        text: String,
-        vararg media: com.adsamcik.mindlayer.MediaPart,
-    ): InferenceHandle
-
-    @Deprecated(
-        message = "Use ask { } / infer { } (Mindlayer v1). " +
-            "Kept visible for testers and consumers that drive named sessions explicitly.",
-        replaceWith = ReplaceWith("ask(text)"),
-        level = DeprecationLevel.WARNING,
-    )
-    suspend fun inferAsync(
-        sessionId: String,
-        text: String,
-        vararg media: com.adsamcik.mindlayer.MediaPart,
-    ): String
-
-    @Deprecated(
-        message = "Use infer { } with tools(...) (Mindlayer v1)",
-        replaceWith = ReplaceWith("infer { session(sessionId); prompt(text); media(*media) }"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun inferTools(
-        sessionId: String,
-        text: String,
-        vararg media: com.adsamcik.mindlayer.MediaPart,
-    ): InferenceHandle
-
-    @Deprecated(
-        message = "Use vector(text) / embed { } (Mindlayer v1)",
-        replaceWith = ReplaceWith("vector(text, task)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun embedOne(
-        text: String,
-        task: EmbeddingTask = EmbeddingTask.RetrievalDocument,
-        modelId: String? = null,
-        outputDim: Int? = null,
-        normalize: Boolean = true,
-        tag: String? = null,
-    ): FloatArray
-
-    @Deprecated(
-        message = "Use embed { } (Mindlayer v1)",
-        replaceWith = ReplaceWith("embed { items.forEach { add(it) } }"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun embedMany(items: List<EmbeddingConfig>): EmbeddingBatch
-
-    @Deprecated(
-        message = "Use embed { } / vectors(...) (Mindlayer v1)",
-        replaceWith = ReplaceWith("embed { texts.forEach { add(it, task) } }"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun embedMany(
-        texts: List<String>,
-        task: EmbeddingTask = EmbeddingTask.RetrievalDocument,
-        modelId: String? = null,
-    ): EmbeddingBatch
-
-    @Deprecated(
-        message = "Use embedOne(text) (Mindlayer v1)",
-        replaceWith = ReplaceWith("embedOne(text)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun embed(text: String): FloatArray
-
-    @Deprecated(
-        message = "Use embed { } (Mindlayer v1)",
-        replaceWith = ReplaceWith("embed { add(config) }"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun embed(config: EmbeddingConfig): com.adsamcik.mindlayer.EmbeddingResult
-
-    @Deprecated(
-        message = "Use embedMany(configs) (Mindlayer v1)",
-        replaceWith = ReplaceWith("embedMany(configs)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun embedBatch(configs: List<EmbeddingConfig>): List<com.adsamcik.mindlayer.EmbeddingResult>
-
-    @Deprecated(
-        message = "Use embedMany(configs) (Mindlayer v1)",
-        replaceWith = ReplaceWith("embedMany(configs)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun embedBatchLarge(configs: List<EmbeddingConfig>): List<com.adsamcik.mindlayer.EmbeddingResult>
-
-    @Deprecated(
-        message = "Use ask(text) (Mindlayer v1)",
-        replaceWith = ReplaceWith("ask(text)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun chat(text: String): String
-
-    @Deprecated(
-        message = "Use describe(text, image) (Mindlayer v1)",
-        replaceWith = ReplaceWith("describe(text, image)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun chat(text: String, image: Bitmap): String
-
-    @Deprecated(
-        message = "Use inferAsync(sessionId, text) (Mindlayer v1)",
-        replaceWith = ReplaceWith("inferAsync(sessionId, text)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun chatOnce(sessionId: String, text: String): String
-
-    @Deprecated(
-        message = "Use inferAsync(sessionId, text, image) (Mindlayer v1)",
-        replaceWith = ReplaceWith("inferAsync(sessionId, text, MediaPart.image(bitmap))"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun chatWithImageOnce(sessionId: String, text: String, bitmap: Bitmap): String
-
-    @Deprecated(
-        message = "Use inferAsync(sessionId, text, audio) (Mindlayer v1)",
-        replaceWith = ReplaceWith("inferAsync(sessionId, text, MediaPart.audio(audioFile))"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun chatWithAudioOnce(sessionId: String, text: String, audioFile: File): String
-
-    @Deprecated(
-        message = "Use infer { }.events.textDeltas() (Mindlayer v1)",
-        replaceWith = ReplaceWith("infer { session(sessionId); prompt(text) }.events"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    fun chatTextFlow(sessionId: String, text: String): kotlinx.coroutines.flow.Flow<String>
-
-    @Deprecated(
-        message = "Use infer { }.events (Mindlayer v1)",
-        replaceWith = ReplaceWith("infer { session(sessionId); prompt(text) }.events"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    fun chatFullTextFlow(sessionId: String, text: String): kotlinx.coroutines.flow.Flow<String>
-
-    @Deprecated(
-        message = "Use ask(text) (Mindlayer v1)",
-        replaceWith = ReplaceWith("ask(text)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun generate(
-        text: String,
-        configure: SessionConfigBuilder.() -> Unit = {},
-    ): String
-
-    @Deprecated(
-        message = "Use describe(text, bitmap) (Mindlayer v1)",
-        replaceWith = ReplaceWith("describe(text, bitmap)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun generateWithImage(
-        text: String,
-        bitmap: Bitmap,
-        configure: SessionConfigBuilder.() -> Unit = {},
-    ): String
-
-    @Deprecated(
-        message = "Use transcribe(text, audioFile) (Mindlayer v1)",
-        replaceWith = ReplaceWith("transcribe(text, audioFile)"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun generateWithAudio(
-        text: String,
-        audioFile: File,
-        configure: SessionConfigBuilder.() -> Unit = {},
-    ): String
-
-    @Deprecated(
-        message = "Use ocrSession { } (Mindlayer v1). Kept visible for consumers that " +
-            "drive the legacy OcrSession type (e.g. via OcrImageAnalyzer in :sdk-camerax).",
-        replaceWith = ReplaceWith("ocrSession { profile(profile) }"),
-        level = DeprecationLevel.WARNING,
-    )
-    suspend fun ocrRealtime(
-        profile: OcrProfile,
-        configure: OcrSessionConfigBuilder.() -> Unit = {},
-    ): OcrSession
-
-    @Deprecated(
-        message = "Use ocrSession { } (Mindlayer v1)",
-        replaceWith = ReplaceWith("ocrSession { config(config) }"),
-        level = DeprecationLevel.HIDDEN,
-    )
-    suspend fun ocrRealtime(config: com.adsamcik.mindlayer.OcrSessionConfig): OcrSession
-
-    @Deprecated(
-        message = "Use ocr { } / readText(...) (Mindlayer v1). Kept visible for consumers " +
-            "that need the legacy OcrImageResult shape with explicit ocrDurationMs / " +
-            "llmDurationMs / extractionFields fields.",
-        replaceWith = ReplaceWith("ocr { image(bytes, mimeType) }.awaitResult()"),
-        level = DeprecationLevel.WARNING,
-    )
-    suspend fun ocrAsync(
-        bytes: ByteArray,
-        mimeType: String,
-        options: com.adsamcik.mindlayer.OcrImageOptions = com.adsamcik.mindlayer.OcrImageOptions(),
-    ): com.adsamcik.mindlayer.OcrImageResult
 
     companion object {
         /**

@@ -4,6 +4,47 @@ All notable changes to Mindlayer are documented in this file.
 
 The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha.2] — 2026-06-13
+
+Finalizes the v1 SDK surface by removing **every** remaining `@Deprecated`
+carry-over method. The canonical builder API (`infer`/`ocr`/`ocrSession`/`embed`)
+and its helpers are now the *only* inference / OCR / embedding entry points, and
+were first enriched into a strict superset so nothing reachable via the removed
+methods is lost. App `versionName` → `1.0.0-alpha.2` / `versionCode 5`; SDK Maven
+coordinate → `1.0.0-alpha02`. See `docs/SDK_V1_MIGRATION.md` for the full map.
+
+### Removed (breaking)
+- **Embeddings:** `embedOne`, `embedMany(configs)`, `embedMany(texts,…)`,
+  `embed(text)`, `embed(config)`, `embedBatch`, `embedBatchLarge`.
+- **OCR:** `ocrRealtime(profile,…)`, `ocrRealtime(config)`, `ocrAsync`
+  (plus the previously-removed `ocrImage` / `ocrSession(profile/config)` aliases).
+- **Inference / sessions:** `createSession`, `chat(sessionId,text)`,
+  `chatWithImage`, `chatWithAudio`, `chatWithMedia`, `inferRealtime`,
+  `inferAsync`, `inferTools`, `chat(text)`, `chat(text,image)`, `chatOnce`,
+  `chatWithImageOnce`, `chatWithAudioOnce`, `chatTextFlow`, `chatFullTextFlow`,
+  `generate`, `generateWithImage`, `generateWithAudio`, and the no-arg
+  `awaitConnected()` (use `awaitConnected(timeout)`).
+
+### Added (canonical superset — so the removals lose nothing)
+- **Embeddings:** `EmbeddingItem` + `EmbeddingRequest.Builder.text(…)` gain
+  `modelId` / `outputDim` / `normalize`; `EmbeddingResultItem` gains `dim`,
+  `modelId`, `tokenCount`, `truncated`, `backend`, `durationMs`.
+- **OCR:** `Metrics` gains `ocrDurationMs` / `llmDurationMs` / `backend`;
+  `OcrLine` gains `boundingBoxQuad` (rotated quad) + `orientationDegrees`; new
+  `OcrExtractedField` + `OcrResult.extractionFields`; `OcrHandle.MultiFrame`
+  gains a raw Y-plane `pushFrame(…)` overload and `state()`.
+- **Inference / sessions:** canonical `infer { }` now streams token-by-token
+  (ephemeral sessions are created, streamed, and destroyed automatically) and
+  accepts tool sessions; `SessionScope` gains `toolsJson` and `extraContextJson`.
+
+### Changed (breaking — approved)
+- `:sdk-camerax` `OcrImageAnalyzer` constructor now takes
+  `OcrHandle.MultiFrame` (was the concrete `OcrSession`).
+- `:sdk-camera-launcher` `OcrCaptureResult.Async` now carries the canonical
+  result as `fullJson` / `extractionJson` + timing primitives (was a
+  `Parcelable`-bearing `OcrImageResult`), because canonical `OcrResult` holds a
+  non-`Parcelable` `JsonObject`.
+
 ## [1.0.0-alpha.1] — 2026-06-07
 
 First `1.0.0` alpha of the **app** — its `versionName` (previously `0.3.0`,

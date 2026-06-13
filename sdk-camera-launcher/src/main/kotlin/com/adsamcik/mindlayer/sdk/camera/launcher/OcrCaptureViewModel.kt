@@ -18,12 +18,12 @@ import androidx.camera.view.PreviewView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.viewModelScope
-import com.adsamcik.mindlayer.OcrImageOptions
 import com.adsamcik.mindlayer.sdk.ConnectionState
+import com.adsamcik.mindlayer.sdk.JsonSchema
 import com.adsamcik.mindlayer.sdk.Mindlayer
 import com.adsamcik.mindlayer.sdk.MindlayerException
 import com.adsamcik.mindlayer.sdk.OcrEvent
-import com.adsamcik.mindlayer.sdk.OcrSession
+import com.adsamcik.mindlayer.sdk.OcrHandle
 import com.adsamcik.mindlayer.sdk.camerax.OcrImageAnalyzer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -60,7 +60,7 @@ internal enum class CapturePhase {
     /** Camera bound; preview live; ready for capture / streaming. */
     Ready,
 
-    /** Async mode: capture button pressed; encoding + ocrAsync in flight. */
+    /** Async mode: capture button pressed; encoding + ocr { } in flight. */
     AsyncCapturing,
 
     /** Realtime mode: session open, frames being pushed. */
@@ -94,7 +94,7 @@ internal data class OcrCaptureUiState(
  *
  * - Public methods (`onCapture`, `onFinalize`, `bindCamera`) are
  *   expected on the main thread.
- * - Heavy work (Mindlayer.connect, ocrAsync, session interaction)
+ * - Heavy work (Mindlayer.connect, OCR requests, session interaction)
  *   is dispatched on the IO dispatcher via the ViewModel scope.
  * - The CameraX analyzer runs on a dedicated single-threaded
  *   executor — required by `ImageAnalysis.Analyzer` contract.
@@ -112,7 +112,7 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
     @Volatile private var mindlayer: Mindlayer? = null
     @Volatile private var cameraProvider: ProcessCameraProvider? = null
     @Volatile private var imageCapture: ImageCapture? = null
-    @Volatile private var session: OcrSession? = null
+    @Volatile private var session: OcrHandle.MultiFrame? = null
     private var analyzer: OcrImageAnalyzer? = null
     private var realtimeEventJob: Job? = null
     @Volatile private var finalJson: String? = null
@@ -243,16 +243,16 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
 
     private var pendingAnalysisUseCase: ImageAnalysis? = null
 
-    @Suppress("DEPRECATION")
     private suspend fun startRealtimeSession() {
         val request = request ?: return
         val client = mindlayer ?: return
         val analysis = pendingAnalysisUseCase ?: return
         val profile = request.profileId.profile
-        val opened = client.ocrRealtime(profile) {
-            languageHints = request.languageHints
-            if (request.maxFrames > 0) maxFrames = request.maxFrames
-            request.extractionSchemaJson?.let { outputSchemaJson = it }
+        val opened = client.ocrSession {
+            profile(profile)
+            languageHints(request.languageHints)
+            if (request.maxFrames > 0) maxFrames(request.maxFrames)
+            request.extractionSchemaJson?.let { extractWithLlm(JsonSchema.parse(it)) }
         }
         session = opened
         analyzer = OcrImageAnalyzer(opened).also {
@@ -305,7 +305,6 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
     }
 
     @MainThread
-    @Suppress("DEPRECATION")
     fun onCapture() {
         val request = request ?: return
         if (request.mode != OcrCaptureMode.Async) return
@@ -323,18 +322,28 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
                 } finally {
                     proxy.close()
                 }
-                val options = OcrImageOptions(
-                    emitBoundingBoxes = request.emitBoundingBoxes,
-                    languageHints = request.languageHints,
-                    runLlmExtraction = request.runLlmExtraction,
-                    extractionSchemaJson = request.extractionSchemaJson,
+                val result = client.ocr {
+                    image(bytes, "image/jpeg")
+                    if (request.emitBoundingBoxes) emitBoundingBoxes()
+                    if (request.runLlmExtraction) {
+                        request.extractionSchemaJson?.let { extractWithLlm(JsonSchema.parse(it)) }
+                    }
+                    languageHints(request.languageHints)
+                }.awaitResult()
+                complete(
+                    OcrCaptureResult.Async(
+                        fullJson = result.fullJsonString(),
+                        extractionJson = result.extractionJsonString(),
+                        totalDurationMs = result.metrics.totalDurationMs ?: 0L,
+                        ocrDurationMs = result.metrics.ocrDurationMs ?: 0L,
+                        llmDurationMs = result.metrics.llmDurationMs ?: 0L,
+                        backend = result.metrics.backend,
+                    ),
                 )
-                val result = client.ocrAsync(bytes, "image/jpeg", options)
-                complete(OcrCaptureResult.Async(result))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: MindlayerException) {
-                fail(code = e.code, message = e.message ?: "ocrAsync failed")
+                fail(code = e.code, message = e.message ?: "ocr failed")
             } catch (e: ImageCaptureException) {
                 fail(
                     code = OcrCaptureResult.Error.CAMERA_INIT_FAILED,
@@ -374,20 +383,13 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
         _state.update { it.copy(phase = CapturePhase.RealtimeFinalizing) }
         viewModelScope.launch {
             try {
-                session?.finalize()
-                // The event collector will pick up the ResultFinalized
-                // event and call completeRealtime(). Add a safety
-                // timeout so a stuck engine doesn't trap the user
-                // forever.
-                withTimeoutOrNull(FINALIZE_TIMEOUT_MS) {
-                    while (_state.value.phase == CapturePhase.RealtimeFinalizing) {
-                        kotlinx.coroutines.delay(100)
-                    }
+                val result = withTimeoutOrNull(FINALIZE_TIMEOUT_MS) {
+                    session?.finalize()
                 }
                 if (_state.value.phase == CapturePhase.RealtimeFinalizing) {
-                    // Timed out — finish anyway with whatever final
-                    // JSON the stream surfaced. May be null when the
-                    // engine isn't wired (Phase 2 status).
+                    if (result != null) {
+                        finalJson = result.fullJsonString()
+                    }
                     completeRealtime()
                 }
             } catch (e: CancellationException) {

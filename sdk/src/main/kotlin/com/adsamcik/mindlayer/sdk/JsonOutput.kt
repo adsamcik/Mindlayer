@@ -75,13 +75,12 @@ enum class JsonValidationDepth(internal val wire: String) {
  * Produced via [SessionConfigBuilder.jsonOutput]:
  *
  * ```kotlin
- * mindlayer.createSession {
- *     systemPrompt("You extract fields.")
- *     jsonOutput {
- *         schema("""{"type":"object","properties":{"name":{"type":"string"}}}""")
- *         strategy(JsonOutputStrategy.PromptAndValidate)
- *         maxRetries(2)
- *     }
+ * mindlayer.openSession {
+ *     systemPrompt = "You extract fields."
+ * }
+ * // or via infer { }:
+ * mindlayer.infer {
+ *     text("extract fields from this text")
  * }
  * ```
  *

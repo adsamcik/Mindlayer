@@ -1,9 +1,52 @@
-# Mindlayer SDK v1 Migration Guide (`1.0.0-alpha01`)
+# Mindlayer SDK v1 Migration Guide (`1.0.0-alpha02`)
 
 This release finalizes the v1 SDK surface. The canonical builders and terminals
 are now implemented; several legacy types and methods were renamed, hidden, or
 removed. This document lists what changed and the intentional alpha-stage
 deviations consumers should be aware of.
+
+## `1.0.0-alpha.2` — all deprecated methods removed
+
+Every remaining `@Deprecated` carry-over was deleted. The canonical surface was
+first enriched into a **strict superset**, so each removed method has a
+1:1 (or richer) replacement. Map your call sites as follows:
+
+### Embeddings
+
+| Removed | Replacement |
+|---|---|
+| `embedOne(text, task, modelId, outputDim, normalize, tag)` | `vector(text, task)` — for the knobs use `embed { text(text, tag, task, modelId, outputDim, normalize) }.awaitVector()` |
+| `embed(text)` | `vector(text)` |
+| `embed(config): EmbeddingResult` | `embed { text(config.text, …) }` → read the enriched `EmbeddingResultItem` (`dim`/`modelId`/`tokenCount`/`truncated`/`backend`/`durationMs`) |
+| `embedMany(configs)` / `embedMany(texts, …)` / `embedBatch` / `embedBatchLarge` | `embed { items(listOf(EmbeddingItem(...))) }.awaitVectors()` or `vectors(items)` — transport is selected automatically |
+
+### OCR
+
+| Removed | Replacement |
+|---|---|
+| `ocrAsync(bytes, mime, options)` | `ocr { image(bytes, mime); /* emitBoundingBoxes(); languageHints; extractWithLlm(schema) */ }.awaitResult()` → `OcrResult` (timing on `metrics.ocrDurationMs`/`llmDurationMs`, `metrics.backend`, `extractionFields`, per-line `boundingBoxQuad`/`orientationDegrees`) |
+| `ocrRealtime(profile, …)` / `ocrRealtime(config)` | `ocrSession { profile(...); … }` → `OcrHandle.MultiFrame` (`pushFrame(meta, yPlane, w, h, …)` for raw frames, `finalize()` → `OcrResult`, `state()`) |
+
+### Inference & sessions
+
+| Removed | Replacement |
+|---|---|
+| `createSession { … }: String` | `openSession { … }` (`MindlayerSession`, `.id` for the raw id); tool sessions via `openSession { toolsJson = "…" }`, opaque context via `extraContextJson` |
+| `chat(sid, text)` / `inferRealtime(sid, text, *media)` | `infer { session(sid); text(text); image(...)/audio(...)/media(...) }` (streams) |
+| `chatWithImage` / `chatWithAudio` / `chatWithMedia` | `infer { session(sid); text(text); image(bitmap) / audio(file) / media(part) }` |
+| `inferAsync(sid, text, *media)` | `infer { session(sid); text(text); … }.awaitText()` |
+| `inferTools(sid, text, *media)` | `infer { session(toolSessionId); text(text); … }` — `ToolCall` events stream; answer with `submitToolResultDetailed` |
+| `chat(text)` / `generate(text, …)` | `ask(text) { … }` |
+| `chat(text, image)` / `generateWithImage(…)` | `describe(text, image) { … }` |
+| `generateWithAudio(…)` | `transcribe(prompt, audio) { … }` |
+| `chatOnce` / `chatWithImageOnce` / `chatWithAudioOnce` | `infer { session(sid); … }.awaitText()` |
+| `chatTextFlow` / `chatFullTextFlow` | `infer { session(sid); … }.events` (filter `InferenceEvent.TextDelta`) |
+| `awaitConnected()` | `awaitConnected(kotlin.time.Duration.INFINITE)` |
+
+### Module breaking changes
+
+- `:sdk-camerax` `OcrImageAnalyzer(session: OcrSession, …)` → `OcrImageAnalyzer(session: OcrHandle.MultiFrame, …)`. Obtain the session via `ocrSession { profile(...) }`.
+- `:sdk-camera-launcher` `OcrCaptureResult.Async` now exposes `fullJson: String`, `extractionJson: String?`, and timing primitives instead of an `OcrImageResult` (canonical `OcrResult.fullJson` is a non-`Parcelable` `JsonObject`).
 
 ## Breaking changes
 
