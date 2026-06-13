@@ -4,6 +4,18 @@ All notable changes to Mindlayer are documented in this file.
 
 The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Automatic tool-call loop.** `infer { outputTools(...); onToolCall(handler) }`
+  now runs the full tool loop on the SDK side: each streamed
+  `InferenceEvent.ToolCall` is answered by invoking the handler and submitting
+  its result, and the service's continuation tokens are surfaced on the same
+  stream — callers no longer drive `submitToolResult` manually. If the handler
+  throws, the inference is cancelled and the stream terminates with a
+  `TOOL_HANDLER_FAILED` error frame. (Completes the one piece left unwired in
+  `1.0.0-alpha.2`.)
+
 ## [1.0.0-alpha.2] — 2026-06-13
 
 Finalizes the v1 SDK surface by removing **every** remaining `@Deprecated`

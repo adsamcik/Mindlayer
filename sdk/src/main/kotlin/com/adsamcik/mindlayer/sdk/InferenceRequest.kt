@@ -83,9 +83,17 @@ class InferenceRequest private constructor() {
         // ---- Tool follow-ups (only valid after outputTools) -----------------
 
         /**
-         * Caller-supplied tool handler invoked in the collecting coroutine
-         * scope. If [handler] throws, the events flow terminates with an
-         * [InferenceEvent.Error] frame.
+         * Register an automatic tool-call handler. When set, `infer { }` runs the
+         * tool loop for you: every [InferenceEvent.ToolCall] the model emits is
+         * answered by invoking [handler] and submitting its returned JSON string
+         * back to the service, which then resumes generating on the same stream —
+         * so callers just collect text / `awaitText()` without driving
+         * `submitToolResult` manually. The [InferenceEvent.ToolCall] events still
+         * pass through [InferenceHandle.events] for observation.
+         *
+         * [handler] is invoked in the collecting coroutine scope. If it throws,
+         * the in-flight inference is cancelled and the events flow terminates with
+         * an [InferenceEvent.Error] frame (code `TOOL_HANDLER_FAILED`).
          */
         fun onToolCall(handler: suspend (ToolCall) -> String) {
             toolHandler = handler

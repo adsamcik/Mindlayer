@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
@@ -324,8 +325,10 @@ internal class MindlayerImpl(
      * - Named session: streams token-by-token via [runStreamingInference].
      * - Ephemeral session: creates a session (with tools if OutputMode.Tools),
      *   streams via [runStreamingInference], destroys the session on completion.
-     * - OutputMode.Tools: supported — ToolCall events surface to the caller.
-     *   The auto tool-handler loop is not wired (only ToolCall event emission).
+     * - OutputMode.Tools: supported — [InferenceEvent.ToolCall] events surface
+     *   to the caller. When [InferenceRequest.Builder.onToolCall] is set, the
+     *   SDK additionally runs the tool calls automatically (invoke handler →
+     *   [submitToolResultDetailed] → continue) via [wireToolHandler].
      */
     private suspend fun runInferRequest(
         request: InferenceRequest.Builder,
@@ -333,22 +336,26 @@ internal class MindlayerImpl(
     ): InferenceHandle {
         val prompt = request.promptText.orEmpty()
         val sessionId = overrideSessionId ?: request.sessionId
+        val toolHandler = request.toolHandler
+        val requestId = "infer-${UUID.randomUUID()}"
 
         if (sessionId != null) {
             // Named session: stream directly, caller owns session lifecycle
-            return runStreamingInference(
+            val handle = runStreamingInference(
                 sessionId = sessionId,
                 text = prompt,
                 imageInputs = request.imageInputs,
                 audioFile = request.audioFile,
                 mediaParts = request.mediaParts,
+                requestId = requestId,
             )
+            if (toolHandler == null) return handle
+            return buildHandle(requestId, wireToolHandler(handle.events, requestId, toolHandler))
         }
 
         // Ephemeral session: create → stream → destroy on completion
         val configure = sessionConfigureFrom(request)
         val ephemeralId = createSessionInternal(configure)
-        val requestId = "infer-${UUID.randomUUID()}"
 
         val innerHandle = runStreamingInference(
             sessionId = ephemeralId,
@@ -359,12 +366,71 @@ internal class MindlayerImpl(
             requestId = requestId,
         )
 
+        // Run the tool-handler loop (if any) before wrapping with cleanup so the
+        // ephemeral session is destroyed only after the full multi-turn tool
+        // exchange terminates.
+        val streamedEvents = if (toolHandler != null) {
+            wireToolHandler(innerHandle.events, requestId, toolHandler)
+        } else {
+            innerHandle.events
+        }
+
         // Wrap the event flow with ephemeral session cleanup on terminal/error/cancel
-        val cleanupFlow = innerHandle.events.onCompletion {
+        val cleanupFlow = streamedEvents.onCompletion {
             runCatching { destroySession(ephemeralId) }
         }
 
         return buildHandle(requestId, cleanupFlow)
+    }
+
+    /**
+     * Wire the caller's [InferenceRequest.Builder.onToolCall] handler into the
+     * event stream so tool calling runs as an automatic multi-turn loop:
+     * each [InferenceEvent.ToolCall] is passed through to the caller (so they
+     * may still observe it) and then answered by invoking [handler] and
+     * submitting the result via [submitToolResultDetailed]; the service then
+     * continues generating on the same [requestId] stream.
+     *
+     * Per the [InferenceRequest.Builder.onToolCall] contract, if [handler]
+     * throws the stream terminates with a synthetic [InferenceEvent.Error]
+     * frame (code `TOOL_HANDLER_FAILED`) and the underlying inference is
+     * cancelled. Cooperative cancellation ([kotlinx.coroutines.CancellationException])
+     * propagates unchanged.
+     */
+    private fun wireToolHandler(
+        upstream: Flow<InferenceEvent>,
+        requestId: String,
+        handler: suspend (ToolCall) -> String,
+    ): Flow<InferenceEvent> = upstream.transformWhile { event ->
+        emit(event)
+        if (event is InferenceEvent.ToolCall) {
+            val resultJson = try {
+                handler(
+                    ToolCall(
+                        callId = event.callId,
+                        name = event.toolName,
+                        argsJson = event.arguments,
+                    ),
+                )
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                // Stop the service-side inference (it is blocked waiting for a
+                // tool result) BEFORE emitting the terminal Error — a downstream
+                // terminal (e.g. awaitText's throwOnError) turns the Error frame
+                // into a throw during emit, which would otherwise skip cleanup.
+                runCatching { cancelInference(requestId) }
+                emit(
+                    InferenceEvent.Error(
+                        message = t.message ?: "Tool handler for '${event.toolName}' failed",
+                        code = "TOOL_HANDLER_FAILED",
+                    ),
+                )
+                return@transformWhile false
+            }
+            submitToolResultDetailed(requestId, event.callId, event.toolName, resultJson)
+        }
+        true
     }
 
     /**
