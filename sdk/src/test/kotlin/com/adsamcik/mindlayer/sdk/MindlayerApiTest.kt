@@ -201,6 +201,42 @@ class MindlayerApiTest {
     }
 
     @Test
+    fun `openSession threads canonical toolsJson and extraContextJson into config`() = runTest {
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "sess-knobs"
+
+        mindlayer.openSession {
+            systemPrompt = "be brief"
+            maxTokens = 256
+            toolsJson = """[{"name":"search"}]"""
+            extraContextJson = """{"thinking":{"enable":true}}"""
+        }
+
+        val cfg = configSlot.captured
+        assertEquals("be brief", cfg.systemPrompt)
+        assertEquals(256, cfg.maxTokens)
+        assertEquals("""[{"name":"search"}]""", cfg.toolsJson)
+        assertEquals("""{"thinking":{"enable":true}}""", cfg.extraContextJson)
+    }
+
+    @Test
+    fun `infer ephemeral threads extraContextJson into the created session`() = runTest {
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "sess-eph"
+        every { mockService.infer(any(), any(), any(), any()) } answers {
+            arg<ParcelFileDescriptor>(3).close()
+        }
+
+        val handle = mindlayer.infer {
+            ephemeralSession { extraContextJson = """{"k":"v"}""" }
+            text("hi")
+        }
+        handle.events.toList()
+
+        assertEquals("""{"k":"v"}""", configSlot.captured.extraContextJson)
+    }
+
+    @Test
     fun `destroySession_callsAidl`() = runTest {
         mindlayer.destroySession("sess-42")
         verify(exactly = 1) { mockService.destroySession("sess-42") }
