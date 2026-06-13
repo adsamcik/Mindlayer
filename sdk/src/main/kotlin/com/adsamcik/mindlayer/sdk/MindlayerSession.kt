@@ -40,15 +40,15 @@ internal class SessionHandle internal constructor(
 ) {
     /** Send a text message and return an [InferenceHandle]. */
     suspend fun chat(text: String): InferenceHandle =
-        client.chat(sessionId, text)
+        client.streamInference(sessionId, text)
 
     /** Send a text + bitmap message and return an [InferenceHandle]. */
     suspend fun chatWithImage(text: String, bitmap: Bitmap): InferenceHandle =
-        client.chatWithImage(sessionId, text, bitmap)
+        client.streamInference(sessionId, text, imageInputs = listOf(ImageInput.Bitmap(bitmap)))
 
     /** Send a text + audio file message and return an [InferenceHandle]. */
     suspend fun chatWithAudio(text: String, audioFile: File): InferenceHandle =
-        client.chatWithAudio(sessionId, text, audioFile)
+        client.streamInference(sessionId, text, audioFile = audioFile)
 
     /** Submit a deferred text message and fetch the result later. */
     suspend fun chatDeferred(text: String): com.adsamcik.mindlayer.DeferredHandle =
@@ -56,15 +56,15 @@ internal class SessionHandle internal constructor(
 
     /** @see MindlayerImpl.chatOnce */
     suspend fun chatOnce(text: String): String =
-        client.chatOnce(sessionId, text)
+        client.collectStreamingInference(sessionId, text)
 
     /** @see MindlayerImpl.chatWithImageOnce */
     suspend fun chatWithImageOnce(text: String, bitmap: Bitmap): String =
-        client.chatWithImageOnce(sessionId, text, bitmap)
+        client.collectStreamingInference(sessionId, text, imageInputs = listOf(ImageInput.Bitmap(bitmap)))
 
     /** @see MindlayerImpl.chatWithAudioOnce */
     suspend fun chatWithAudioOnce(text: String, audioFile: File): String =
-        client.chatWithAudioOnce(sessionId, text, audioFile)
+        client.collectStreamingInference(sessionId, text, audioFile = audioFile)
 
     /** @see MindlayerImpl.chatTextFlow */
     fun chatTextFlow(text: String): kotlinx.coroutines.flow.Flow<String> =

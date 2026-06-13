@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
@@ -317,78 +318,63 @@ internal class MindlayerImpl(
     override suspend fun openSession(configure: SessionScope.() -> Unit): MindlayerSession {
         return instrument(method = "openSession", params = emptyMap()) {
             val scope = CapturedSessionScope().apply(configure)
-            val sessionId = createSession {
+            val sessionId = createSessionInternal {
                 scope.systemPrompt?.let { systemPrompt(it) }
                 scope.maxTokens?.let { maxTokens(it) }
+                scope.toolsJson?.let { toolsJsonRaw(it) }
             }
             BridgeSession(SessionHandle(this, sessionId))
         }
     }
 
     /**
-     * Behavioural body for [infer] / [MindlayerSession.infer]. Bridges the
-     * canonical request onto the legacy one-shot generation path: an ephemeral
-     * request runs through [generate] / [generateWithImage] / [generateWithAudio]
-     * (create → chat → destroy); a named-session request runs through the
-     * `*Once` chat bridges. The full response text is then replayed as a tiny
-     * cold [InferenceEvent] stream so the terminals (`awaitText`/`awaitJson`)
-     * and `events` collectors behave uniformly.
+     * Behavioural body for [infer] / [MindlayerSession.infer]. Routes the
+     * canonical request onto the real streaming inference path.
      *
-     * C3 deviations (documented in `docs/SDK_V1_MIGRATION.md`):
-     *  - eager, not token-streaming: the suspend returns after the one-shot
-     *    completes; `events` replays a single [InferenceEvent.TextDelta]. Use
-     *    the legacy streaming path for live token deltas.
-     *  - tool-calling via `infer{}` is not wired (throws NOT_SUPPORTED).
-     *  - [SamplerScope.seed] has no [SessionConfigBuilder] equivalent and is
-     *    dropped.
+     * - Named session: streams token-by-token via [runStreamingInference].
+     * - Ephemeral session: creates a session (with tools if OutputMode.Tools),
+     *   streams via [runStreamingInference], destroys the session on completion.
+     * - OutputMode.Tools: supported — ToolCall events surface to the caller.
+     *   The auto tool-handler loop is not wired (only ToolCall event emission).
      */
     private suspend fun runInferRequest(
         request: InferenceRequest.Builder,
         overrideSessionId: String?,
     ): InferenceHandle {
-        if (request.outputMode is InferenceRequest.OutputMode.Tools) {
-            throw MindlayerException(
-                message = "Mindlayer v1 — tool-calling via infer{} is not wired in 1.0.0-alpha01; " +
-                    "create a named session with createSession { tools { } } and collect the " +
-                    "streaming events instead.",
-                code = MindlayerErrorCode.NOT_SUPPORTED,
-            )
-        }
-
         val prompt = request.promptText.orEmpty()
-        val bitmap = request.imageInputs.firstNotNullOfOrNull { (it as? ImageInput.Bitmap)?.bitmap }
-        val audio = request.audioFile
         val sessionId = overrideSessionId ?: request.sessionId
 
         if (sessionId != null) {
-            @Suppress("DEPRECATION")
-            return when {
-                bitmap != null -> chatWithImage(sessionId, prompt, bitmap)
-                audio != null -> chatWithAudio(sessionId, prompt, audio)
-                else -> chat(sessionId, prompt)
-            }
+            // Named session: stream directly, caller owns session lifecycle
+            return runStreamingInference(
+                sessionId = sessionId,
+                text = prompt,
+                imageInputs = request.imageInputs,
+                audioFile = request.audioFile,
+                mediaParts = request.mediaParts,
+            )
         }
 
-        @Suppress("DEPRECATION")
-        val text: String = run {
-            val configure = sessionConfigureFrom(request)
-            when {
-                bitmap != null -> generateWithImage(prompt, bitmap, configure)
-                audio != null -> generateWithAudio(prompt, audio, configure)
-                else -> generate(prompt, configure)
-            }
-        }
-
+        // Ephemeral session: create → stream → destroy on completion
+        val configure = sessionConfigureFrom(request)
+        val ephemeralId = createSessionInternal(configure)
         val requestId = "infer-${UUID.randomUUID()}"
-        return InferenceHandleImpl(
+
+        val innerHandle = runStreamingInference(
+            sessionId = ephemeralId,
+            text = prompt,
+            imageInputs = request.imageInputs,
+            audioFile = request.audioFile,
+            mediaParts = request.mediaParts,
             requestId = requestId,
-            events = flow {
-                emit(InferenceEvent.Started(requestId))
-                if (text.isNotEmpty()) emit(InferenceEvent.TextDelta(text))
-                emit(InferenceEvent.Done(finishReason = "stop", fullText = text))
-            },
-            sessionId = sessionId.orEmpty(),
         )
+
+        // Wrap the event flow with ephemeral session cleanup on terminal/error/cancel
+        val cleanupFlow = innerHandle.events.onCompletion {
+            runCatching { destroySession(ephemeralId) }
+        }
+
+        return buildHandle(requestId, cleanupFlow)
     }
 
     /**
@@ -399,12 +385,19 @@ internal class MindlayerImpl(
     private fun sessionConfigureFrom(request: InferenceRequest.Builder): SessionConfigBuilder.() -> Unit {
         val session = CapturedSessionScope().apply { request.sessionConfigure?.invoke(this) }
         val sampler = CapturedSamplerScope().apply { request.samplerConfigure?.invoke(this) }
+        val toolsJsonFromOutput = when (val mode = request.outputMode) {
+            is InferenceRequest.OutputMode.Tools -> toolSpecListToJson(mode.tools)
+            else -> null
+        }
         return {
             session.systemPrompt?.let { systemPrompt(it) }
             session.maxTokens?.let { maxTokens(it) }
             sampler.topK?.let { topK(it) }
             sampler.topP?.let { topP(it) }
             sampler.temperature?.let { temperature(it) }
+            // Tools from SessionScope take priority; fall back to OutputMode.Tools
+            val effectiveToolsJson = session.toolsJson ?: toolsJsonFromOutput
+            effectiveToolsJson?.let { toolsJsonRaw(it) }
         }
     }
 
@@ -535,6 +528,7 @@ internal class MindlayerImpl(
         override var systemPrompt: String? = null
         override var maxTokens: Int? = null
         override var historyPolicy: HistoryPolicy = HistoryPolicy.METADATA_ONLY
+        override var toolsJson: String? = null
     }
 
     /** Mutable [SamplerScope] capture used to translate sampling blocks. */
@@ -562,12 +556,11 @@ internal class MindlayerImpl(
     private inner class BridgeSession(private val handle: SessionHandle) : MindlayerSession {
         override val id: String get() = handle.sessionId
 
-        @Suppress("DEPRECATION")
-        override suspend fun ask(prompt: String): String = handle.chatOnce(prompt)
+        override suspend fun ask(prompt: String): String =
+            collectStreamingInference(handle.sessionId, prompt)
 
-        @Suppress("DEPRECATION")
         override suspend fun describe(prompt: String, image: Bitmap): String =
-            handle.chatWithImageOnce(prompt, image)
+            collectStreamingInference(handle.sessionId, prompt, imageInputs = listOf(ImageInput.Bitmap(image)))
 
         override suspend fun infer(build: InferenceRequest.Builder.() -> Unit): InferenceHandle =
             runInferRequest(InferenceRequest.Builder().apply(build), overrideSessionId = handle.sessionId)
@@ -1311,6 +1304,14 @@ internal class MindlayerImpl(
      * @return the server-assigned session ID.
      */
     override suspend fun createSession(
+        configure: SessionConfigBuilder.() -> Unit,
+    ): String = createSessionInternal(configure)
+
+    /**
+     * Internal session creation workhorse: local saga + init retry.
+     * Public [createSession] and [openSession] both delegate here.
+     */
+    private suspend fun createSessionInternal(
         configure: SessionConfigBuilder.() -> Unit,
     ): String = withContext(Dispatchers.IO) {
         val config = SessionConfigBuilder().apply(configure).build()
@@ -2710,7 +2711,7 @@ internal class MindlayerImpl(
     )
     @Suppress("DEPRECATION")
     override suspend fun chatOnce(sessionId: String, text: String): String =
-        collectHandleToString(chat(sessionId, text), sessionId)
+        collectHandleToString(runStreamingInference(sessionId, text), sessionId)
 
     /**
      * Send a text + image message and return the complete response text.
@@ -2733,7 +2734,10 @@ internal class MindlayerImpl(
         sessionId: String,
         text: String,
         bitmap: Bitmap,
-    ): String = collectHandleToString(chatWithImage(sessionId, text, bitmap), sessionId)
+    ): String = collectHandleToString(
+        runStreamingInference(sessionId, text, imageInputs = listOf(ImageInput.Bitmap(bitmap))),
+        sessionId,
+    )
 
     /**
      * Send a text + audio message and return the complete response text.
@@ -2756,7 +2760,10 @@ internal class MindlayerImpl(
         sessionId: String,
         text: String,
         audioFile: File,
-    ): String = collectHandleToString(chatWithAudio(sessionId, text, audioFile), sessionId)
+    ): String = collectHandleToString(
+        runStreamingInference(sessionId, text, audioFile = audioFile),
+        sessionId,
+    )
 
     /**
      * Stream just the text deltas from [chat] as a [Flow]&lt;String&gt;.
@@ -2964,6 +2971,130 @@ internal class MindlayerImpl(
     }
 
     // -- Internals ------------------------------------------------------------
+
+    /**
+     * Convert a [List] of [ToolSpec] to the JSON array wire format expected by
+     * [SessionConfigBuilder.tools]. Produces the same shape as [ToolsBuilder.build].
+     */
+    private fun toolSpecListToJson(specs: List<ToolSpec>): String {
+        val array = buildJsonArray {
+            for (spec in specs) {
+                add(buildJsonObject {
+                    put("name", JsonPrimitive(spec.name))
+                    put("description", JsonPrimitive(spec.description))
+                    put("parameters", spec.parametersSchema.json)
+                })
+            }
+        }
+        return Json.encodeToString(JsonArray.serializer(), array)
+    }
+
+    /**
+     * Consolidated streaming dispatch: builds the tracked inference flow with
+     * full history persistence, multi-media support, and requestId re-tagging.
+     *
+     * This is the single internal streaming path that all legacy and canonical
+     * entry points route through for named-session inference.
+     */
+    private suspend fun runStreamingInference(
+        sessionId: String,
+        text: String,
+        imageInputs: List<ImageInput> = emptyList(),
+        audioFile: File? = null,
+        mediaParts: List<com.adsamcik.mindlayer.MediaPart> = emptyList(),
+        requestId: String = UUID.randomUUID().toString(),
+    ): InferenceHandle {
+        val meta = RequestMeta(
+            requestId = requestId,
+            sessionId = sessionId,
+            textContent = text,
+        )
+
+        // Determine if we need the multi-media path
+        val bitmap = imageInputs.firstNotNullOfOrNull { (it as? ImageInput.Bitmap)?.bitmap }
+        val imageFile = imageInputs.firstNotNullOfOrNull { (it as? ImageInput.File)?.file }
+        val hasExplicitMedia = mediaParts.isNotEmpty()
+        val hasMultipleInputs = (imageInputs.size + (if (audioFile != null) 1 else 0) + mediaParts.size) > 1
+
+        val flow: Flow<InferenceEvent> = if (hasExplicitMedia || hasMultipleInputs || imageFile != null) {
+            // Multi-media path: assemble all inputs as MediaParts
+            val allMedia = buildList {
+                for (input in imageInputs) {
+                    when (input) {
+                        is ImageInput.Bitmap -> add(MediaTransfer.imagePart(input.bitmap))
+                        is ImageInput.File -> add(MediaTransfer.imagePart(input.file))
+                        is ImageInput.Uri -> {
+                            // Read URI to bytes, decode to Bitmap for MediaTransfer
+                            val bytes = input.context.contentResolver
+                                .openInputStream(input.uri)?.use { it.readBytes() }
+                                ?: continue
+                            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                ?: continue
+                            add(MediaTransfer.imagePart(bmp))
+                        }
+                        is ImageInput.Bytes -> {
+                            val bmp = BitmapFactory.decodeByteArray(input.bytes, 0, input.bytes.size)
+                                ?: continue
+                            add(MediaTransfer.imagePart(bmp))
+                        }
+                    }
+                }
+                if (audioFile != null) {
+                    add(MediaTransfer.audioPart(audioFile))
+                }
+                addAll(mediaParts)
+            }
+            // Re-tag every part with this requestId (same as chatWithMedia)
+            val rebound = allMedia.map { it.copy(requestId = requestId) }
+            startTrackedInferenceMulti(
+                sessionId = sessionId,
+                userText = text,
+                meta = meta,
+                media = rebound,
+            )
+        } else {
+            // Simple path: at most one bitmap + one audio via legacy providers
+            startTrackedInference(
+                sessionId = sessionId,
+                userText = text,
+                meta = meta,
+                imageProvider = {
+                    bitmap?.let { MediaTransfer.fromBitmap(requestId, it) }
+                },
+                audioProvider = {
+                    audioFile?.let { MediaTransfer.fromAudioFile(requestId, it) }
+                },
+            )
+        }
+
+        return buildHandle(requestId, flow)
+    }
+
+    /**
+     * Internal entry point for [SessionHandle] and [BridgeSession] — streaming
+     * inference that does not go through the deprecated public methods.
+     */
+    internal suspend fun streamInference(
+        sessionId: String,
+        text: String,
+        imageInputs: List<ImageInput> = emptyList(),
+        audioFile: File? = null,
+        mediaParts: List<com.adsamcik.mindlayer.MediaPart> = emptyList(),
+    ): InferenceHandle = runStreamingInference(sessionId, text, imageInputs, audioFile, mediaParts)
+
+    /**
+     * Internal entry point for [SessionHandle] and [BridgeSession] — collect
+     * streaming inference to a single string result.
+     */
+    internal suspend fun collectStreamingInference(
+        sessionId: String,
+        text: String,
+        imageInputs: List<ImageInput> = emptyList(),
+        audioFile: File? = null,
+    ): String = collectHandleToString(
+        runStreamingInference(sessionId, text, imageInputs, audioFile),
+        sessionId,
+    )
 
     /**
      * Creates an [InferenceHandle] with cancel callbacks that reach through

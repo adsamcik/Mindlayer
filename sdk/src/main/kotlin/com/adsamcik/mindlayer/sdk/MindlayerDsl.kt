@@ -22,6 +22,19 @@ interface SessionScope {
     var systemPrompt: String?
     var maxTokens: Int?
     var historyPolicy: HistoryPolicy
+
+    /**
+     * Raw JSON array of tool definitions for a tool-enabled session.
+     * Mirrors [SessionConfigBuilder.tools] (the raw-JSON overload).
+     * Callers serialize their tool specs to the engine's tools JSON
+     * and set this field; it is passed through to [SessionConfigBuilder.toolsJsonRaw]
+     * at session creation time.
+     *
+     * Default: `null` (no tools configured).
+     */
+    var toolsJson: String?
+        get() = null
+        set(_) {}
 }
 
 /**
