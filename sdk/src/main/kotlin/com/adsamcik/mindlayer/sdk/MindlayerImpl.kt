@@ -76,29 +76,19 @@ import java.util.UUID
  *
  * # Inference API — three canonical entry points
  *
- * As of `feat/inference-sdk-polish`, the inference surface consolidates around
- * three top-level methods. All three accept the same
- * `(sessionId, text, vararg media)` shape so consumers can swap shapes
- * without re-learning parameters.
+ * As of Mindlayer v1, the inference surface is the canonical [infer] builder
+ * plus the high-level helpers ([ask], [describe], [transcribe], [extractJson]).
+ * [infer] streams token-by-token, runs in a named session ([InferenceRequest.Builder.session])
+ * or a fresh ephemeral one ([InferenceRequest.Builder.ephemeralSession]),
+ * accepts ordered media via the typed `image(...)` / `audio(...)` / `media(...)`
+ * setters, and selects its output shape with `outputText` / `outputJson` /
+ * `outputTools`. Tool sessions are configured via [SessionScope.toolsJson] and
+ * their [InferenceEvent.ToolCall] events are answered with
+ * [submitToolResultDetailed].
  *
- * | Method | Returns | Use when |
- * |---|---|---|
- * | [inferRealtime] | [InferenceHandle] streaming `Flow<InferenceEvent>` | UI wants token-by-token rendering, or you need fine-grained control over the event stream |
- * | [inferAsync] | `String` (collected to completion) | You want the final response as a single value, no tool-call round-trips |
- * | [inferTools] | [InferenceHandle] | Session was configured with [SessionConfigBuilder.tools]; you intend to handle [InferenceEvent.ToolCall] events and call [submitToolResultDetailed] |
- *
- * Build media attachments via
- * [`MediaTransfer.imagePart(...)`][MediaTransfer.imagePart] /
- * [`MediaTransfer.audioPart(...)`][MediaTransfer.audioPart] and pass them
- * as `vararg media` to any of the three. The SDK handles transparent
- * fallback to the v0.1 single-image / single-audio wire shape when the
- * connected service does not advertise
- * [ServiceCapabilities.FEATURE_MEDIA_LIST].
- *
- * The legacy method families (`chat*`, `*Once`) remain available and
- * carry `@Deprecated(ReplaceWith = …)` annotations so Android Studio's
- * "Replace with new API" intention works in consumer projects. See
- * `docs/INFERENCE_SDK_POLISH.md` for the deprecation timeline.
+ * The v0.x `chat*` / `*Once` / `infer*` / `generate*` / `createSession`
+ * families have been removed in 1.0.0-alpha.2; the canonical surface is a
+ * strict superset (see `docs/SDK_V1_MIGRATION.md`).
  *
  * # Error and capability contract
  *

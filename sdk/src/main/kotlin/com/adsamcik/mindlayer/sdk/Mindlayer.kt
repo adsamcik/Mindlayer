@@ -23,23 +23,24 @@ import kotlin.time.Duration
  * [vector], [vectors], [readText], [readStructuredJson], [withSession],
  * [openSession]) wrap the canonical primitives for common 1-liner shapes.
  *
- * # Legacy methods
+ * # No legacy surface
  *
- * Every method declared via `@Deprecated(level = DeprecationLevel.HIDDEN)` on
- * this interface is a v0.x carry-over (`chat*`, `*Once`, `infer*`, `generate*`,
- * `ocrRealtime`/`ocrAsync`/`ocrImage`/`ocrSession(profile,…)`). They remain
- * implemented by [MindlayerImpl] for binary compatibility with existing
- * binders and the SDK test suite, but are invisible to new compilations of
- * Mindlayer-typed consumers — the canonical builder methods are the only
- * source-visible inference / OCR / embedding entry points for new code.
- *
- * The legacy `embed*` overloads (`embedOne`, `embedMany`, `embedBatch`,
- * `embedBatchLarge`, `embed(text)`, `embed(config)`) have been fully removed;
- * the canonical [embed] DSL plus the [vector] / [vectors] helpers are now a
- * strict superset, carrying per-item `modelId` / `outputDim` / `normalize`
- * config on [EmbeddingItem] and the full per-item telemetry (`dim`,
- * `modelId`, `tokenCount`, `truncated`, `backend`, `durationMs`) on
- * [EmbeddingResultItem].
+ * As of Mindlayer v1 (1.0.0-alpha.2) every v0.x `@Deprecated` carry-over has
+ * been removed — the canonical builder methods ([infer], [ocr], [ocrSession],
+ * [embed]) and the high-level helpers are the only inference / OCR / embedding
+ * entry points. The canonical surface is a strict superset of the removed
+ * methods (see `docs/SDK_V1_MIGRATION.md`):
+ *  - [embed] / [vector] / [vectors] carry per-item `modelId` / `outputDim` /
+ *    `normalize` config on [EmbeddingItem] and full per-item telemetry (`dim`,
+ *    `modelId`, `tokenCount`, `truncated`, `backend`, `durationMs`) on
+ *    [EmbeddingResultItem] (replacing `embedOne`/`embedMany`/`embedBatch*`/`embed`).
+ *  - [ocr] / [ocrSession] return an [OcrResult] enriched with per-pass timing
+ *    (`metrics.ocrDurationMs` / `llmDurationMs`), `backend`, `extractionFields`,
+ *    and per-line rotated `boundingBoxQuad` / `orientationDegrees` (replacing
+ *    `ocrRealtime`/`ocrAsync`); [OcrHandle.MultiFrame] takes raw Y-plane frames.
+ *  - [infer] streams token-by-token and accepts tool sessions
+ *    ([SessionScope.toolsJson]) and opaque context ([SessionScope.extraContextJson])
+ *    (replacing `chat*`/`*Once`/`infer*`/`generate*`/`createSession`).
  *
  * # Construction
  *
