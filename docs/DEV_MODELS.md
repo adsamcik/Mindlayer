@@ -304,6 +304,43 @@ If you need to test integrity-gated behaviour, build the AI Asset
 Pack flavour normally; sideload is for code-iteration ergonomics,
 not for security testing.
 
+## Running instrumented tests without wiping models
+
+`./gradlew :app:connectedDebugAndroidTest` (and Android Studio's "Run"
+gutter) drive AGP's install → test → **uninstall** cycle. That final
+uninstall deletes the service app's `externalFilesDir`, taking the
+~3 GB of pushed models with it — so the next inference fails with
+`MLERR:1003:Model file missing` until you re-push. **CI is the only
+safe place for `connectedAndroidTest`** because CI AVDs are throw-away.
+
+To run the instrumented (`androidTest`) suite on a model-loaded dev
+device, use the model-preserving runner instead. It builds the
+code-only app APK + the test APK, `adb install -r`s both (which
+preserves `externalFilesDir`), and `am instrument`s the test package
+directly — it **never** calls `adb uninstall` / `pm clear`:
+
+```powershell
+# Windows PowerShell — one fast, model-independent class (proves the loop is safe)
+.\scripts\dev-instrument.ps1 -Class com.adsamcik.mindlayer.service.security.DbKeyProviderTest
+
+# Whole app suite against a specific emulator
+.\scripts\dev-instrument.ps1 -Device emulator-5554
+
+# SDK instrumented tests (self-instrumenting — model-safe regardless)
+.\scripts\dev-instrument.ps1 -Module sdk
+```
+
+```bash
+# macOS / Linux
+./scripts/dev-instrument.sh --class com.adsamcik.mindlayer.service.security.DbKeyProviderTest
+./scripts/dev-instrument.sh --device emulator-5554
+./scripts/dev-instrument.sh --module sdk
+```
+
+Model-dependent tests (`assumeTrue`-guarded) run for real when the
+models are present and skip cleanly when they are not. Use
+`-DryRun` / `--dry-run` to print the exact `adb` commands first.
+
 ## Related
 
 - AI Pack bundling toggles (sibling PR): selective
