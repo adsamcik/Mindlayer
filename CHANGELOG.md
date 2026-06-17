@@ -4,6 +4,20 @@ All notable changes to Mindlayer are documented in this file.
 
 The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **`targetSdk` 36 → 37 (Android 17 / API 37).** `:app` and the
+  `samples/ocr-driver` sample now target API 37; `compileSdk` was already 37.
+  Audited against the API-37 behaviour changes with no code impact: the app
+  has no native `System.load()` dynamic-code-loading (only `loadLibrary` of
+  APK-bundled `litert`/`sqlcipher`), no `MessageQueue` reflection, no
+  orientation-locked or non-resizable activities (so the large-screen
+  orientation/resizability restrictions are no-ops), and no
+  network/local-network/SMS/contacts/WebView/background-audio surfaces. The
+  on-device `static final`-via-reflection restriction does not affect the
+  host-JVM unit tests.
+
 ## [1.0.0-alpha.2] — 2026-06-13
 
 Finalizes the v1 SDK surface by removing **every** remaining `@Deprecated`
