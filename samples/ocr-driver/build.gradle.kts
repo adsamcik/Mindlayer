@@ -13,7 +13,7 @@ android {
     defaultConfig {
         applicationId = "com.adsamcik.mindlayer.ocrdriver"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 1
         versionName = "0.9.0"
 

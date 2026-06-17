@@ -460,13 +460,19 @@ android {
     namespace = "com.adsamcik.mindlayer.service"
     // Compose BOM 2026.05.01 pulls androidx.compose.* 1.12.0-alpha03 and
     // material3 1.5.0-alpha20, which require compileSdk 37 via AAR
-    // metadata. minSdk and targetSdk are intentionally unchanged.
+    // metadata. minSdk is intentionally unchanged.
     compileSdk = 37
 
     defaultConfig {
         applicationId = "com.adsamcik.mindlayer.service"
         minSdk = 26
-        targetSdk = 36
+        // targetSdk 37 (Android 17 / API 37). Audited against the API-37
+        // behaviour changes: no native System.load() DCL (only loadLibrary
+        // of bundled libs), no MessageQueue reflection, no orientation lock,
+        // no INTERNET/local-network/SMS/contacts/WebView/background-audio
+        // surfaces. The dashboard activities are fully resizable, so the
+        // large-screen orientation/resizability restrictions are no-ops here.
+        targetSdk = 37
         versionCode = 5
         versionName = "1.0.0-alpha.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
