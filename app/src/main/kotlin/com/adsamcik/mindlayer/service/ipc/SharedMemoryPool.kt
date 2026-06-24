@@ -996,18 +996,6 @@ class SharedMemoryPool(cacheDir: File) {
         }
     }
 
-    /** Stream exactly [size] bytes from [pfd] to [outFile], closing the PFD when done. */
-    private fun writeExactly(pfd: ParcelFileDescriptor, size: Int, outFile: File) {
-        require(size in 1..MAX_MEDIA_BYTES) {
-            "Media payload size out of bounds: $size"
-        }
-        ParcelFileDescriptor.AutoCloseInputStream(pfd).use { input ->
-            FileOutputStream(outFile).use { output ->
-                copyExactly(input, output, size)
-            }
-        }
-    }
-
     /**
      * Copy bytes from [input] to [output], aborting if the total exceeds
      * [maxBytes]. Throws [IllegalArgumentException] on overflow so callers
@@ -1044,31 +1032,6 @@ class SharedMemoryPool(cacheDir: File) {
         if (isCharDevice) return
         require(st.st_size >= expectedBytes) {
             "Media source size (${st.st_size} B) smaller than declared payloadBytes ($expectedBytes B)"
-        }
-    }
-
-    private fun copyExactly(input: java.io.InputStream, output: java.io.OutputStream, expectedBytes: Int) {
-        val buf = ByteArray(COPY_BUFFER_SIZE)
-        var remaining = expectedBytes
-        while (remaining > 0) {
-            val n = input.read(buf, 0, minOf(buf.size, remaining))
-            if (n == -1) {
-                throw EOFException("Expected $expectedBytes bytes, missing $remaining")
-            }
-            output.write(buf, 0, n)
-            remaining -= n
-        }
-    }
-
-    private fun declaredPayloadSize(payloadBytes: Int): Int? {
-        if (payloadBytes == 0) return null
-        requireMediaSize(payloadBytes.toLong())
-        return payloadBytes
-    }
-
-    private fun requireMediaSize(size: Long) {
-        require(size in 1..MAX_MEDIA_BYTES.toLong()) {
-            "Media payload size out of bounds: $size"
         }
     }
 
