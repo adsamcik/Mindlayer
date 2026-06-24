@@ -4,8 +4,8 @@ A connected-test harness that compares Mindlayer's production PaddleOCR
 backend (`LiteRtPaddleOcrBackend`) against Tesseract 4.9 LSTM on a fixture
 set of label photographs.
 
-- **Implementation:** [`OcrEngineBenchmarkInstrumentedTest`](../app/src/androidTest/kotlin/com/adsamcik/mindlayer/service/engine/OcrEngineBenchmarkInstrumentedTest.kt)
-- **Tesseract version:** `cz.adaptech.tesseract4android:tesseract4android:4.9.0` (Apache 2.0). Pulled from JitPack — see the content-scoped repo declaration in [`settings.gradle.kts`](../settings.gradle.kts).
+- **Implementation:** [`OcrEngineBenchmarkInstrumentedTest`](../../app/src/androidTest/kotlin/com/adsamcik/mindlayer/service/engine/OcrEngineBenchmarkInstrumentedTest.kt)
+- **Tesseract version:** `cz.adaptech.tesseract4android:tesseract4android:4.9.0` (Apache 2.0). Pulled from JitPack — see the content-scoped repo declaration in [`settings.gradle.kts`](../../settings.gradle.kts).
 - **Scope:** `androidTestImplementation` only. The Tesseract runtime is never linked into `:app` or `:sdk` release artifacts; the production OCR path remains PaddleOCR-only on top of LiteRT.
 
 ## Why this exists
@@ -63,7 +63,7 @@ dev sideload path:
 .\tools\dev-models\push-models.ps1 -Paddleocr -Cache D:\mindlayer-models
 ```
 
-See [`docs/DEV_MODELS.md`](DEV_MODELS.md) for how to populate the cache
+See [`docs/models/DEV_MODELS.md`](../models/DEV_MODELS.md) for how to populate the cache
 from CI artifacts of `build-paddleocr-models.yml`.
 
 ### 4. Run
@@ -110,7 +110,7 @@ You get:
 
 ## Why Tesseract is androidTest-only
 
-Mindlayer's privacy + offline invariants ([`.github/instructions/privacy-offline.instructions.md`](../.github/instructions/privacy-offline.instructions.md)) constrain release builds to a single on-device inference runtime (LiteRT). Tesseract4Android is genuinely useful for evaluation but is **not** a production runtime in this codebase. Keeping the dependency in `androidTestImplementation` means:
+Mindlayer's privacy + offline invariants ([`.github/instructions/privacy-offline.instructions.md`](../../.github/instructions/privacy-offline.instructions.md)) constrain release builds to a single on-device inference runtime (LiteRT). Tesseract4Android is genuinely useful for evaluation but is **not** a production runtime in this codebase. Keeping the dependency in `androidTestImplementation` means:
 
 - It never touches the release APK / AAB classpath.
 - It never shows up in license aggregation, OSS attribution screens, or the SBOM.

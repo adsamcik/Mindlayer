@@ -112,6 +112,6 @@ runtime. Per `.github/instructions/privacy-offline.instructions.md`:
 
 ## See also
 
-- [`shared/.../GemmaAudioSpec.kt`](../shared/src/main/kotlin/com/adsamcik/mindlayer/GemmaAudioSpec.kt) — single source of truth for the audio constants.
-- [`sdk/.../GemmaAudioPrompts.kt`](../sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/GemmaAudioPrompts.kt) — canonical Gemma ASR prompt template.
-- [`docs/AIDL_STABILITY.md`](AIDL_STABILITY.md) §"Audio surface (v1.0)" — capability flag registry entry.
+- [`shared/.../GemmaAudioSpec.kt`](../../shared/src/main/kotlin/com/adsamcik/mindlayer/GemmaAudioSpec.kt) — single source of truth for the audio constants.
+- [`sdk/.../GemmaAudioPrompts.kt`](../../sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/GemmaAudioPrompts.kt) — canonical Gemma ASR prompt template.
+- [`docs/architecture/AIDL_STABILITY.md`](../architecture/AIDL_STABILITY.md) §"Audio surface (v1.0)" — capability flag registry entry.

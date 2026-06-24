@@ -31,7 +31,7 @@ import org.robolectric.annotation.Config
  * signal is `false`, [ThermalMonitor] must emit a [ThermalPolicy] whose
  * [ThermalPolicy.confidence] is [ThermalConfidence.INFERRED] and whose
  * `burstSeconds` / `restSeconds` / `chunkTokens` come from the conservative
- * variant of the table documented in `docs/THERMAL_POLICY_ON_UNAVAILABLE.md`.
+ * variant of the table documented in `docs/engine/THERMAL_POLICY_ON_UNAVAILABLE.md`.
  *
  * Drives API-level scenarios via the `readThermalStatus` /
  * `readThermalHeadroomRaw` injection seams on [ThermalMonitor], NOT via

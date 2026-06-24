@@ -101,7 +101,7 @@ PY
     # 5D RESHAPE/TRANSPOSE intermediate that the LiteRT 2.1.5 GPU
     # delegate cannot compile. Only the rec model has SVTR attention;
     # det and cls are no-ops (the script self-detects no chains and
-    # passes through unchanged). See docs/PADDLEOCR_GPU_INVESTIGATION.md.
+    # passes through unchanged). See docs/ocr/PADDLEOCR_GPU_INVESTIGATION.md.
     qkv_surgery_py="$(dirname "$0")/onnx_split_qkv.py"
     if [ ! -f "$qkv_surgery_py" ]; then
         qkv_surgery_py="/usr/local/bin/onnx_split_qkv.py"
@@ -113,7 +113,7 @@ PY
     # -ofgd: replace GPU-incompatible ops with supported equivalents
     #        where onnx2tf knows how to (e.g. TRANSPOSE_CONV downgrades).
     #        Currently a no-op for the two known blockers — see
-    #        docs/PADDLEOCR_GPU_INVESTIGATION.md.
+    #        docs/ocr/PADDLEOCR_GPU_INVESTIGATION.md.
     # -cgdc: GPU delegate compatibility check; emits a report at
     #        conversion time so a future onnx2tf bump that regresses
     #        op-level GPU support is loudly visible in the workflow log.
@@ -145,7 +145,7 @@ PY
     # Post-conversion GPU-compat surgery — rewrites RELU_0_TO_1 ops
     # into MAXIMUM(0)+MINIMUM(1) chains and downgrades TRANSPOSE_CONV
     # opcode v4 -> v3 so the LiteRT 2.1.5 on-device GPU delegate can
-    # compile the model. See docs/PADDLEOCR_GPU_INVESTIGATION.md.
+    # compile the model. See docs/ocr/PADDLEOCR_GPU_INVESTIGATION.md.
     #
     # tflite_gpu_fixup.py lives next to this script — both are copied
     # into /usr/local/bin by the Dockerfile, and both are typically

@@ -193,7 +193,7 @@ interface IMindlayerService {
     HealthCheck ping();
 
     // v0.10 consent-Intent flow — replaces the legacy dashboard
-    // "Pending approvals" inbox. See docs/CONSENT_ARCHITECTURE.md.
+    // "Pending approvals" inbox. See docs/architecture/CONSENT_ARCHITECTURE.md.
     //
     // requestConsentChallenge: invoked by an un-approved external caller
     //   to obtain a server-issued PendingIntent that, when fired via

@@ -10,7 +10,7 @@
 # neither is, it falls back to /data/local/tmp/ with a loud warning
 # (apps cannot list /data/local/tmp on Android 12+ even when files
 # inside are world-readable). This script does NOT download anything
-# — see docs/DEV_MODELS.md for sources.
+# — see docs/models/DEV_MODELS.md for sources.
 #
 # Bash 3.2 compatible (default macOS bash). No GNU-only flags.
 
@@ -357,7 +357,7 @@ process_group() {
   for f in "$@"; do
     local local_path="$CACHE/$f"
     if [ ! -f "$local_path" ]; then
-      add_failure "$label: missing '$f' in cache '$CACHE'. See docs/DEV_MODELS.md#sources."
+      add_failure "$label: missing '$f' in cache '$CACHE'. See docs/models/DEV_MODELS.md#sources."
       continue
     fi
     echo "- $f"

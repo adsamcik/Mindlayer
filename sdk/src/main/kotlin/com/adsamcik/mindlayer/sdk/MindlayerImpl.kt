@@ -89,7 +89,7 @@ import java.util.UUID
  *
  * The v0.x `chat*` / `*Once` / `infer*` / `generate*` / `createSession`
  * families have been removed in 1.0.0-alpha.2; the canonical surface is a
- * strict superset (see `docs/SDK_V1_MIGRATION.md`).
+ * strict superset (see `docs/sdk/SDK_V1_MIGRATION.md`).
  *
  * # Error and capability contract
  *
@@ -782,7 +782,7 @@ internal class MindlayerImpl(
      *  - `items(...)` → [embedManyConfigsInternal] (batch; picks the cheapest
      *    viable transport — inline, SharedMemory, or deferred — automatically).
      *
-     * C3 deviations (documented in `docs/SDK_V1_MIGRATION.md`):
+     * C3 deviations (documented in `docs/sdk/SDK_V1_MIGRATION.md`):
      *  - `deferred()` is accepted but currently materialises to an inline batch.
      *    True deferred wiring will land alongside the canonical builder for
      *    [EmbeddingHandle.Deferred].
@@ -905,7 +905,7 @@ internal class MindlayerImpl(
     /**
      * Replay buffer for deferred completions.
      *
-     * `replay = 1` so the documented pattern in `SDK_INTEGRATION.md`
+     * `replay = 1` so the documented pattern in `docs/sdk/SDK_INTEGRATION.md`
      * (`chatDeferred(...)` immediately followed by `deferredCompletions()
      * .collect { ... }`) catches the notice when the inference completes
      * between submit and collect. Multiple concurrent `awaitDeferred`

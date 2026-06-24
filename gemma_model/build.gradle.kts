@@ -51,7 +51,7 @@ val generateModelIntegrityManifest by tasks.registering {
             throw GradleException(
                 "Release builds need the Gemma model SHA-256. Set MINDLAYER_MODEL_CACHE (or " +
                     "-Pmindlayer.modelCache=<dir>) to a directory holding gemma-4-E2B-it.litertlm, " +
-                    "or pass -PmodelSha256=<64 lowercase hex>. See RELEASE.md.",
+                    "or pass -PmodelSha256=<64 lowercase hex>. See docs/project/RELEASE.md.",
             )
         }
 
@@ -59,7 +59,7 @@ val generateModelIntegrityManifest by tasks.registering {
         //   1. -PmodelSha256 — explicit per-build pin (CI, release, dev override)
         //   2. The currently-committed manifest's SHA, IF it's already a real
         //      hex digest (not the all-zeros placeholder). This preserves the
-        //      canonical SHA pinned in source control (see docs/MODEL_SHAS.md)
+        //      canonical SHA pinned in source control (see docs/models/MODEL_SHAS.md)
         //      so debug builds reproduce production integrity behaviour and
         //      casual `./gradlew assembleDebug` runs don't churn the manifest
         //      back to placeholders on every invocation.
@@ -116,7 +116,7 @@ val provisionReleaseModelAssets by tasks.registering {
                 else -> throw GradleException(
                     "Release build needs '$fileName'. Set MINDLAYER_MODEL_CACHE (or " +
                         "-Pmindlayer.modelCache=<dir>) to a directory containing it, or place the " +
-                        "file directly in $assetsDir. See RELEASE.md.",
+                        "file directly in $assetsDir. See docs/project/RELEASE.md.",
                 )
             }
         }

@@ -41,7 +41,7 @@ orchestrator **do** with it?
 - **Must not require model-pack changes.** This decision lives entirely in
   `:app`; the Gemma `:gemma_model` Play AI Pack is not in scope.
 - **Wire stability.** `ServiceStatus` is a frozen Parcelable per
-  `docs/AIDL_STABILITY.md`. We must not add a field to it.
+  `docs/architecture/AIDL_STABILITY.md`. We must not add a field to it.
 - **Coordination.** `kv-budget-orch` (F-072) holds
   `InferenceOrchestrator.kt`. The chosen design must avoid touching that
   file unless strictly necessary.
@@ -129,7 +129,7 @@ halved `chunkTokens` (64). This is the middle of the road.
    which holds that file.)*
 4. **Wire-stable.** No `ServiceStatus` parameter shape change. The
    sentinel `"UNAVAILABLE"` is written into the existing
-   `thermalBand: String` field — `docs/AIDL_STABILITY.md` § "frozen"
+   `thermalBand: String` field — `docs/architecture/AIDL_STABILITY.md` § "frozen"
    permits new opaque values in existing String fields.
 5. **Reversible.** The conservative policy is a pure function of
    `confidence`. A hot rollback is one constant change.
@@ -259,6 +259,6 @@ swaps the headroom bar (which is null anyway) for an explanatory text.
 - `91afbb5` — Phase 1: explicit `telemetryAvailable` signal.
 - `.github/instructions/engine.instructions.md` § Thermal — request-boundary
   rule for policy changes.
-- `docs/AIDL_STABILITY.md` § "frozen" — wire stability for `ServiceStatus`.
+- `docs/architecture/AIDL_STABILITY.md` § "frozen" — wire stability for `ServiceStatus`.
 - `app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/ThermalMonitor.kt`
   — implementation seam.

@@ -11,7 +11,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
-        v0.10 consent architecture (docs/CONSENT_ARCHITECTURE.md):
+        v0.10 consent architecture (docs/architecture/CONSENT_ARCHITECTURE.md):
         Mindlayer no longer declares QUERY_ALL_PACKAGES or a
         signature|knownSigner BIND_ML_SERVICE permission. The trust boundary
         is per-app user consent via ConsentActivity. Any app may bind to
@@ -46,7 +46,7 @@
         </activity>
 
         <!--
-            v0.10 consent-Intent flow (docs/CONSENT_ARCHITECTURE.md).
+            v0.10 consent-Intent flow (docs/architecture/CONSENT_ARCHITECTURE.md).
             Launched only by an explicit, Mindlayer-minted PendingIntent
             (no intent-filter). exported=true is required because the
             PendingIntent is fired by arbitrary client UIDs; the nonce in

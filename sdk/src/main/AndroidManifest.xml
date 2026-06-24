@@ -8,7 +8,7 @@
         longer declares a <uses-permission> for it. Any app may bind; access
         to AIDL methods is gated by per-app user consent (the consent-Intent
         flow), not an OS-level signature permission. See
-        docs/CONSENT_ARCHITECTURE.md and SDK_INTEGRATION.md.
+        docs/architecture/CONSENT_ARCHITECTURE.md and docs/sdk/SDK_INTEGRATION.md.
     -->
 
     <!--
@@ -19,7 +19,7 @@
         its own dataExtractionRules, ours is used. When the host DOES provide
         rules, the host is expected to merge in `databases/mindlayer_history.db`
         and `mindlayer_sdk_db_*` SharedPreferences exclusions itself; see
-        `SDK_INTEGRATION.md`.
+        `docs/sdk/SDK_INTEGRATION.md`.
     -->
     <application
         android:dataExtractionRules="@xml/sdk_data_extraction_rules"

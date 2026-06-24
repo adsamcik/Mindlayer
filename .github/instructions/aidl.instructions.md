@@ -5,7 +5,7 @@ description: "AIDL contracts — interfaces + parcelables are defined ONLY in :s
 
 <!-- context-init:managed -->
 
-> **Read [`docs/AIDL_STABILITY.md`](../../docs/AIDL_STABILITY.md) first** for the full evolution policy: which changes are allowed, the `schemaVersion` convention for new Parcelables, error-code allocation rules, and the `getCapabilities()` feature-flag strategy. Everything below assumes you've read that.
+> **Read [`docs/architecture/AIDL_STABILITY.md`](../../docs/architecture/AIDL_STABILITY.md) first** for the full evolution policy: which changes are allowed, the `schemaVersion` convention for new Parcelables, error-code allocation rules, and the `getCapabilities()` feature-flag strategy. Everything below assumes you've read that.
 
 ## AIDL invariants
 
@@ -13,7 +13,7 @@ description: "AIDL contracts — interfaces + parcelables are defined ONLY in :s
 - **Do NOT add any `.aidl` file to `:app`.** A duplicated interface or parcelable there is compiled into `:app` AND pulled in from the `:sdk` dependency, which breaks the **release** build: R8's full-program merge fails with `Type com.adsamcik.mindlayer.IClientCallback$Default is defined multiple times`. Debug (non-minified D8) silently tolerates it, and CI does not run a release dex, so the regression hides until a real `bundleRelease`. `AidlContractDriftTest` fails closed if any `.aidl` appears under `app/src/main/aidl/`.
 - AIDL is **Java syntax**, not Kotlin. `package com.adsamcik.mindlayer;` (with semicolon), `interface` not `interface { }`, `in`/`out`/`inout` parameter direction.
 - `IMindlayerService.aidl` lists imports for every Parcelable it references — all in `:sdk`.
-- New Parcelables: declare in `:sdk` only (one file), add the matching Kotlin/`@Parcelize` companion in `:shared` (or `:sdk` if SDK-only), and a JSON `kotlinx.serialization` representation if it crosses the pipe too. **New Parcelables get `schemaVersion: Int = 1` as their first field** — see `docs/AIDL_STABILITY.md`.
+- New Parcelables: declare in `:sdk` only (one file), add the matching Kotlin/`@Parcelize` companion in `:shared` (or `:sdk` if SDK-only), and a JSON `kotlinx.serialization` representation if it crosses the pipe too. **New Parcelables get `schemaVersion: Int = 1` as their first field** — see `docs/architecture/AIDL_STABILITY.md`.
 - **Existing Parcelables are frozen.** Adding a constructor parameter — even with a Kotlin default — changes wire layout and breaks old clients. Carry new data in a new Parcelable + new method instead.
 
 ## When changing AIDL, you must also update
@@ -25,8 +25,8 @@ description: "AIDL contracts — interfaces + parcelables are defined ONLY in :s
 | `Mindlayer.kt` (SDK facade) | public surface |
 | `ConnectionManager.kt` | only if you change `registerClient` semantics or binder-death contract |
 | `IMindlayerServiceTest`, `ServiceBinderTest` | call shape, ownership rules |
-| `SDK_INTEGRATION.md` | client integration impact (if user-visible) |
-| `docs/AIDL_STABILITY.md` | feature-flag table, parcelable inventory, error-code allocation if any of those change |
+| `docs/sdk/SDK_INTEGRATION.md` | client integration impact (if user-visible) |
+| `docs/architecture/AIDL_STABILITY.md` | feature-flag table, parcelable inventory, error-code allocation if any of those change |
 
 ## Media
 
@@ -49,7 +49,7 @@ Throws on the AIDL boundary go through one of two paths:
 1. **Auth gate** (`authorizeCall`, `requireRegisteredClient`, `revokeApp` self-UID, `registerClient` footguns): plain `SecurityException` with a free-form message. This stays as `SecurityException` so IDS / Play Protect doesn't lose signal.
 2. **Everything else** (validation, ownership, lifecycle, quota, engine state): wire-prefixed `SecurityException` produced by `MindlayerErrorCode.wireMessage(code, message)`. The SDK chokepoint (`Mindlayer.withTypedErrors`) parses the prefix and surfaces a typed `MindlayerException`.
 
-Adding a new throw point: pick the right code from `MindlayerErrorCode`, build the message via `wireMessage(...)` (don't hand-format the prefix), and add a test in `ServiceBinderTypedErrorsTest`. Allocating a new code? See `docs/AIDL_STABILITY.md` § "Error code allocation".
+Adding a new throw point: pick the right code from `MindlayerErrorCode`, build the message via `wireMessage(...)` (don't hand-format the prefix), and add a test in `ServiceBinderTypedErrorsTest`. Allocating a new code? See `docs/architecture/AIDL_STABILITY.md` § "Error code allocation".
 
 
 
@@ -74,5 +74,5 @@ Throws on the AIDL boundary go through one of two paths:
 1. **Auth gate** (`authorizeCall`, `requireRegisteredClient`, `revokeApp` self-UID, `registerClient` footguns): plain `SecurityException` with a free-form message. This stays as `SecurityException` so IDS / Play Protect doesn't lose signal.
 2. **Everything else** (validation, ownership, lifecycle, quota, engine state): wire-prefixed `SecurityException` produced by `MindlayerErrorCode.wireMessage(code, message)`. The SDK chokepoint (`Mindlayer.withTypedErrors`) parses the prefix and surfaces a typed `MindlayerException`.
 
-Adding a new throw point: pick the right code from `MindlayerErrorCode`, build the message via `wireMessage(...)` (don't hand-format the prefix), and add a test in `ServiceBinderTypedErrorsTest`. Allocating a new code? See `docs/AIDL_STABILITY.md` § "Error code allocation".
+Adding a new throw point: pick the right code from `MindlayerErrorCode`, build the message via `wireMessage(...)` (don't hand-format the prefix), and add a test in `ServiceBinderTypedErrorsTest`. Allocating a new code? See `docs/architecture/AIDL_STABILITY.md` § "Error code allocation".
 

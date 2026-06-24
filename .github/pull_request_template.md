@@ -27,5 +27,5 @@ Brief description of what this PR does.
 ## Hardware-sensitive change?
 
 - [ ] My change touches `app/src/main/kotlin/.../service/engine/`, `MindlayerMlService.kt` FGS code, the NPU SoC list, `AndroidManifest.xml`, or `:gemma_model`.
-- [ ] If yes, I completed the [Hardware-touching PR checklist](../RELEASE.md#7-hardware-touching-pr-checklist).
+- [ ] If yes, I completed the [Hardware-touching PR checklist](../docs/project/RELEASE.md#7-hardware-touching-pr-checklist).
 - [ ] If yes, real-device logs (trimmed, metadata only) are attached to this PR description.

@@ -13,7 +13,7 @@ plugins {
 // If keystore.properties is present at the repo root, wire a release signing
 // config that reads from it. If absent, release builds are produced unsigned —
 // useful for CI (`:app:bundleRelease` artifact) and for developers who haven't
-// set up a key yet. See RELEASE.md for the full signing flow.
+// set up a key yet. See docs/project/RELEASE.md for the full signing flow.
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 val keystoreProperties = Properties().apply {
     if (keystorePropertiesFile.exists()) {
@@ -565,7 +565,7 @@ android {
     // Selective AI Asset Pack bundling for dev iteration.
     // Defaults preserve current release/CI behavior (all packs bundled).
     // Override per-pack to build a small code-only APK and sideload models via
-    // `tools/dev-models/push-models.ps1` (see `docs/DEV_MODELS.md`). Sideloaded
+    // `tools/dev-models/push-models.ps1` (see `docs/models/DEV_MODELS.md`). Sideloaded
     // files are read from `/data/local/tmp/` by the runtime registries on
     // debuggable builds only.
     val bundledAssetPacks = buildList {

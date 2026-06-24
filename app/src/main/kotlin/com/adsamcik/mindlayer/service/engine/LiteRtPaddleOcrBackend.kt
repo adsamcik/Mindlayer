@@ -31,7 +31,7 @@ import kotlin.math.sqrt
  *
  * The native LiteRT surface stays behind [PaddleOcrLiteRtRunner] for
  * Robolectric-friendly unit coverage. Real-device coexistence with Gemma and
- * EmbeddingGemma remains tracked in `docs/LITERT_COEXISTENCE.md`.
+ * EmbeddingGemma remains tracked in `docs/architecture/LITERT_COEXISTENCE.md`.
  */
 class LiteRtPaddleOcrBackend internal constructor(
     private val context: Context,
@@ -429,7 +429,7 @@ class LiteRtPaddleOcrBackend internal constructor(
      * always honored. `RealPaddleOcrLiteRtRunner` creates three sequential
      * `CompiledModel` instances (det + rec + cls), so this site has the
      * highest exposure to LiteRT issue #5264 — see
-     * `docs/LITERT_COEXISTENCE.md`.
+     * `docs/architecture/LITERT_COEXISTENCE.md`.
      */
     private fun resolveBackend(preferred: String?): String =
         LiteRtAcceleratorResolver.resolveBackend(
@@ -486,7 +486,7 @@ class LiteRtPaddleOcrBackend internal constructor(
                     "invoke on any accelerator. Rebuild the models with " +
                     "scripts/build-paddleocr-models (onnx2tf -tb tf_converter decomposes " +
                     "LayerNorm to native ops) and re-deploy / re-push them. See " +
-                    "docs/PADDLEOCR_GPU_INVESTIGATION.md.",
+                    "docs/ocr/PADDLEOCR_GPU_INVESTIGATION.md.",
             )
         }
     }

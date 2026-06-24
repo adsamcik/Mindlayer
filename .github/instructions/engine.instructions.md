@@ -24,7 +24,7 @@ EngineConfig → Engine(config) → engine.initialize()
 - One `SessionHandle` per `IMindlayerService.createSession`. Each holds a `Mutex` — sends are single-writer per session, parallel across sessions.
 - **LiteRT-LM 0.12.0 enforces "at most one Conversation per Engine at a time"** at the JNI layer. The second `engine.createConversation(...)` against the same Engine without an intervening `Conversation.close()` throws `LiteRtLmJniException(Failed to create conversation: FAILED_PRECONDITION: A session already exists. Only one session is supported at a time.)`. This is empirically verified — see the spike in `KvCacheMemoryBenchmarkInstrumentedTest` (phase = `spike_close_create`) and the analysis writeup.
 - `WarmConversationSlot` tracks the engine's single native slot. Wire-level error `MindlayerErrorCode.ENGINE_BUSY` (1007) signals a client tried to take the slot while another session was mid-stream; the client should retry after the `retryAfterMs` hint (~500 ms).
-- Session count and `maxNumTokens` cap come from `MemoryBudget.deviceTier` (see `docs/MEMORY_TIERS_EMPIRICS.md` for the empirical derivation):
+- Session count and `maxNumTokens` cap come from `MemoryBudget.deviceTier` (see `docs/engine/MEMORY_TIERS_EMPIRICS.md` for the empirical derivation):
 
   | totalMem | maxSessions | Default tokens | Max tokens |
   |---|---|---|---|
@@ -99,6 +99,6 @@ Android linker namespaces, and LiteRT symbol/version resolution:
 
 Treat same-process coexistence as a **verify-on-device prototype
 risk**, not as safe-by-construction. The full risk note + a
-validation checklist live in [`docs/LITERT_COEXISTENCE.md`](../../docs/LITERT_COEXISTENCE.md).
+validation checklist live in [`docs/architecture/LITERT_COEXISTENCE.md`](../../docs/architecture/LITERT_COEXISTENCE.md).
 Run that checklist before relying on any path that needs all
 three stacks (Gemma + embedding + OCR) loaded simultaneously.

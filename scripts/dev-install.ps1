@@ -28,7 +28,7 @@
       - JDK 21 on PATH for ``./gradlew`` (see
         ``.github/context/DEVELOPMENT.md`` for the JDK 21 gotcha)
       - A model cache directory either passed via ``-Cache`` or set
-        in ``$env:MINDLAYER_MODEL_CACHE`` (see ``docs/DEV_MODELS.md``
+        in ``$env:MINDLAYER_MODEL_CACHE`` (see ``docs/models/DEV_MODELS.md``
         for what to put in it)
 
 .PARAMETER Cache

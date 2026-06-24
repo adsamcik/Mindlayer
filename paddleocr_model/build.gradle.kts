@@ -109,7 +109,7 @@ val generatePaddleOcrModelIntegrityManifest by tasks.registering {
                 throw GradleException(
                     "Release builds need PaddleOCR SHA-256 digests for: ${missing.joinToString(", ")}. " +
                         "Set MINDLAYER_MODEL_CACHE (or -Pmindlayer.modelCache=<dir>) holding the PP-OCRv5 " +
-                        "files, or pass the matching -P props. See RELEASE.md.",
+                        "files, or pass the matching -P props. See docs/project/RELEASE.md.",
                 )
             }
         }
@@ -189,7 +189,7 @@ val provisionReleaseModelAssets by tasks.registering {
                 else -> throw GradleException(
                     "Release build needs '$fileName'. Set MINDLAYER_MODEL_CACHE (or " +
                         "-Pmindlayer.modelCache=<dir>) to a directory containing it, or place the " +
-                        "file directly in $assetsDir. See RELEASE.md.",
+                        "file directly in $assetsDir. See docs/project/RELEASE.md.",
                 )
             }
         }

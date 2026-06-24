@@ -11,14 +11,14 @@ description: "Authorization invariants — applies to ServiceBinder, MlService, 
 > `authorizeCall()`, and per-app user consent via `ConsentActivity`. The legacy
 > `signature|knownSigner` permission, `QUERY_ALL_PACKAGES`, trusted-cert arrays,
 > first-party seeding, and the `recordPending` approval inbox have been removed.
-> See [`docs/CONSENT_ARCHITECTURE.md`](../../docs/CONSENT_ARCHITECTURE.md) for the
+> See [`docs/architecture/CONSENT_ARCHITECTURE.md`](../../docs/architecture/CONSENT_ARCHITECTURE.md) for the
 > full design and migration notes.
 
 ## Authorization invariants (do not weaken)
 
 Every external AIDL entry point runs `authorizeCall()` before any work. The
 gate is identity → allowlist → rate-limit → ownership. **All four stages run
-for every external caller, every time.** See `docs/CONSENT_ARCHITECTURE.md` for
+for every external caller, every time.** See `docs/architecture/CONSENT_ARCHITECTURE.md` for
 the full data flow and rationale.
 
 > Privacy/offline/security product invariants (no network, no telemetry, RAM-only
@@ -160,7 +160,7 @@ external app. Treat it as a security boundary, not just a screen.
 
 ## Uniform treatment of approved callers
 
-All consenting callers are treated identically. There are **no trust tiers**, no per-app rate-limit classes, no per-app validator budget classes. An earlier draft carried a `TrustTier ∈ {FIRST_PARTY, THIRD_PARTY}` field; it was deliberately removed before any of it shipped. The rationale is documented in `docs/CONSENT_ARCHITECTURE.md § Why no trust tiers`.
+All consenting callers are treated identically. There are **no trust tiers**, no per-app rate-limit classes, no per-app validator budget classes. An earlier draft carried a `TrustTier ∈ {FIRST_PARTY, THIRD_PARTY}` field; it was deliberately removed before any of it shipped. The rationale is documented in `docs/architecture/CONSENT_ARCHITECTURE.md § Why no trust tiers`.
 
 ### Don't
 
@@ -172,7 +172,7 @@ All consenting callers are treated identically. There are **no trust tiers**, no
 ### Do
 
 - Apply the existing uniform budgets (60 RPM / 4 concurrent / 256 KiB tools JSON / 90 day session expiration / etc) to every approved caller.
-- When considering a tighter per-app limit because "this caller looks heavy", prefer the planned **usage-monitoring notification** path (`docs/CONSENT_ARCHITECTURE.md § Usage monitoring`). Surface the behaviour to the user; let them revoke or block. Do not silently throttle.
+- When considering a tighter per-app limit because "this caller looks heavy", prefer the planned **usage-monitoring notification** path (`docs/architecture/CONSENT_ARCHITECTURE.md § Usage monitoring`). Surface the behaviour to the user; let them revoke or block. Do not silently throttle.
 
 ## Denial semantics
 

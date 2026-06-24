@@ -33,7 +33,7 @@ enum class MemoryPressure {
  * Static device tier derived from **total** RAM. Computed once and cached.
  *
  * Tier table revised in this PR based on empirical KV-cache measurements
- * of Gemma 4 E2B on LiteRT-LM 0.12.0 — see `docs/MEMORY_TIERS_EMPIRICS.md`
+ * of Gemma 4 E2B on LiteRT-LM 0.12.0 — see `docs/engine/MEMORY_TIERS_EMPIRICS.md`
  * for the methodology and raw data.
  *
  * Measured cost per configured token: **9 208 bytes** (R²=0.9990, 95% CI

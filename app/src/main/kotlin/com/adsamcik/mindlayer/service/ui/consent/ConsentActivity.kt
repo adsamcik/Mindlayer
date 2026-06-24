@@ -41,7 +41,7 @@ import com.adsamcik.mindlayer.service.ui.theme.MindlayerTheme
  *  - `filterTouchesWhenObscured` so a partially-obscured Approve tap is
  *    dropped.
  *
- * See `docs/CONSENT_ARCHITECTURE.md § ConsentActivity` and
+ * See `docs/architecture/CONSENT_ARCHITECTURE.md § ConsentActivity` and
  * `.github/instructions/security.instructions.md § ConsentActivity
  * invariants`.
  */

@@ -28,7 +28,7 @@ class MediaPartShapeTest {
     @Test
     fun `MediaPart schemaVersion is the first field`() {
         // Mechanical: the primary constructor's first parameter MUST be
-        // schemaVersion per docs/AIDL_STABILITY.md. If this test fails it's
+        // schemaVersion per docs/architecture/AIDL_STABILITY.md. If this test fails it's
         // because someone reordered fields and broke the convention.
         val first = MediaPart::class.java.declaredFields.first { it.name == "schemaVersion" }
         assertNotNull("schemaVersion field exists", first)
@@ -44,7 +44,7 @@ class MediaPartShapeTest {
 
     @Test
     fun `FEATURE_MEDIA_LIST is a stable string`() {
-        // Per docs/AIDL_STABILITY.md the feature-flag strings are wire-stable.
+        // Per docs/architecture/AIDL_STABILITY.md the feature-flag strings are wire-stable.
         // Nailing the literal here so an accidental rename trips a test.
         assertEquals("media_list", ServiceCapabilities.FEATURE_MEDIA_LIST)
     }

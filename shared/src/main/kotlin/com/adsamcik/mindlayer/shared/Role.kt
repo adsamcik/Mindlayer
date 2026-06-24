@@ -29,7 +29,7 @@ package com.adsamcik.mindlayer.shared
  * Adding a new role is a wire-vocabulary change. Update [ALL] here, the
  * service-side `IpcInputValidator.ALLOWED_ROLES`, every `when` over roles
  * in `SessionRecovery`, `SessionManager`, and the SDK history layer.
- * Document the new role in `docs/AIDL_STABILITY.md` § "Error code
+ * Document the new role in `docs/architecture/AIDL_STABILITY.md` § "Error code
  * allocation" (we don't version roles separately — they piggy-back on
  * the AIDL surface).
  */

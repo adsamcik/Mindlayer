@@ -330,7 +330,7 @@ Non-CameraX consumers (MediaProjection, Bitmap pipelines) use
   bad-quality frames are rejected regardless of `qualityHint`.
 - **Bounded JSON.** `outputSchemaJson` / `optionsJson` / `regionJson`
   / `extraJson` are each capped at 16 KiB by `IpcInputValidator`.
-- **Wire-frozen parcelables.** Per `docs/AIDL_STABILITY.md`, the
+- **Wire-frozen parcelables.** Per `docs/architecture/AIDL_STABILITY.md`, the
   five OCR parcelables carry `schemaVersion` first + reserved
   `featureFlags` bitfield. Adding fields requires a new method.
 
@@ -356,7 +356,7 @@ parses them on the SDK side.
 | AIDL + SDK DSL | Implemented: create, push Y-plane / encoded / SHM frames, state, finalize, close, limits. | `FEATURE_OCR_SESSION` remains absent until production-ready. |
 | Event streaming | Implemented: `streamOcrEvents` pipe, SDK `Flow<OcrEvent>`, terminal `OcrEvent.Error`, `FRAME_DROPPED`, and `RESULT_FINALIZED`. | Attach the stream before pushing; otherwise ack `STATUS_REJECTED_STREAM_NOT_ATTACHED`. |
 | Backpressure | Implemented: `MAX_FRAME_BYTES` guard, queue-depth ack, busy/quality/finalized/oversized/stream-not-attached statuses. | Payloads above 1 MiB must use SharedMemory or be downscaled. |
-| Engine + extraction | Implemented behind the service path with GPU-default OCR accelerator selection (CPU and NPU available via explicit caller request). | Same-process LiteRT/LiteRT-LM coexistence remains real-device-gated — see `docs/LITERT_COEXISTENCE.md`. |
+| Engine + extraction | Implemented behind the service path with GPU-default OCR accelerator selection (CPU and NPU available via explicit caller request). | Same-process LiteRT/LiteRT-LM coexistence remains real-device-gated — see `docs/architecture/LITERT_COEXISTENCE.md`. |
 | Public capability | Code exists but is dark. | `OcrFeatureFlags.IS_PRODUCTION_READY = false`; callers must capability-check and degrade. |
 | Real-device validation | Required before production exposure. | Needs signed-off device matrix for model assets, thermal/memory behavior, and LiteRT coexistence. |
 
@@ -390,7 +390,7 @@ library check) and falls back to GPU if unsupported; explicit
 resolver decision via `LogRepository.logBackendDecision`. The
 three sequential `CompiledModel` instances (det + rec + cls) make
 this the highest-exposure site for LiteRT issue #5264 — run the
-`docs/LITERT_COEXISTENCE.md` validation checklist on target
+`docs/architecture/LITERT_COEXISTENCE.md` validation checklist on target
 devices before relying on GPU/NPU OCR in production.
 
 ### Logging contract
@@ -425,7 +425,7 @@ factory — both exercised by the on-device coexistence test.
 - `files/final-design.md` — implementation-locked design notes.
 - `.github/instructions/privacy-offline.instructions.md` — privacy +
   offline + security invariants.
-- `docs/AIDL_STABILITY.md` — wire-stability rules the OCR
+- `docs/architecture/AIDL_STABILITY.md` — wire-stability rules the OCR
   parcelables follow.
 - `.github/workflows/build-paddleocr-models.yml` — manual
   conversion pipeline for the four PaddleOCR PP-OCRv5 mobile

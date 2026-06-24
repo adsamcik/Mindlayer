@@ -15,7 +15,7 @@ import org.robolectric.annotation.Config
  * `Parcel.marshall` / `unmarshall` round-trip tests for the v0.8 multi-frame
  * OCR parcelables.
  *
- * Per `docs/AIDL_STABILITY.md` these parcelables are **wire-frozen** once
+ * Per `docs/architecture/AIDL_STABILITY.md` these parcelables are **wire-frozen** once
  * shipped. If any of these tests fail, the wire format has drifted.
  *
  * Each parcelable also asserts:

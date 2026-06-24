@@ -95,7 +95,7 @@ Actions → Variables tab):
 ## Dev-local override
 
 When iterating locally and you don't want to set repository variables,
-pass the SHAs as Gradle properties (see `RELEASE.md` for the full
+pass the SHAs as Gradle properties (see `docs/project/RELEASE.md` for the full
 PowerShell snippet):
 
 ```bash

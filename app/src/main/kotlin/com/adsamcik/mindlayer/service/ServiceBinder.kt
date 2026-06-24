@@ -264,7 +264,7 @@ class ServiceBinder(
          * and the orchestrator is running on a conservative duty-cycle
          * variant of the policy. Encoded into the existing String field
          * so we do not have to grow [ServiceStatus]'s frozen Parcelable
-         * shape (see `docs/AIDL_STABILITY.md`). Dashboard surfaces the
+         * shape (see `docs/architecture/AIDL_STABILITY.md`). Dashboard surfaces the
          * indicator by recognising this constant.
          */
         const val THERMAL_TELEMETRY_UNAVAILABLE = "UNAVAILABLE"
@@ -330,7 +330,7 @@ class ServiceBinder(
         /**
          * Capability strings the current service implementation supports.
          * Append to this set when a new feature lands; never repurpose
-         * existing strings. Documented in `docs/AIDL_STABILITY.md`.
+         * existing strings. Documented in `docs/architecture/AIDL_STABILITY.md`.
          */
         val SUPPORTED_FEATURES: Set<String> = setOf(
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TYPED_ERRORS,
@@ -379,7 +379,7 @@ class ServiceBinder(
             // and respects the Gemma audio contract (≤30 s per clip,
             // 25 tok/s budget). Multi-audio remains rejected by
             // IpcInputValidator until the engine path lands — see
-            // docs/AUDIO.md for the supported / not-yet-supported split.
+            // docs/engine/AUDIO.md for the supported / not-yet-supported split.
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_AUDIO_INPUT,
         )
 
@@ -2376,7 +2376,7 @@ class ServiceBinder(
 
         // F-073: surface the telemetry-blind state via the existing
         // wire-stable `thermalBand: String` field. `ServiceStatus` is a
-        // frozen Parcelable per `docs/AIDL_STABILITY.md`, so we encode
+        // frozen Parcelable per `docs/architecture/AIDL_STABILITY.md`, so we encode
         // "telemetry unavailable" as a sentinel rather than adding a field.
         // SDK clients that pattern-match "HOT"/"CRITICAL" see an unrecognised
         // value and treat the device as healthy — which is correct, the
@@ -3084,7 +3084,7 @@ class ServiceBinder(
 
     // ─────────────────────────────────────────────────────────────────────
     //  v0.10 consent-Intent flow (Phase 3B of feat/consent-architecture).
-    //  See docs/CONSENT_ARCHITECTURE.md.
+    //  See docs/architecture/CONSENT_ARCHITECTURE.md.
     // ─────────────────────────────────────────────────────────────────────
 
     override fun requestConsentChallenge(): com.adsamcik.mindlayer.ConsentChallenge {

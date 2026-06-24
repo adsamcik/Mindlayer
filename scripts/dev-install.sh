@@ -24,7 +24,7 @@
 # Requires: adb on PATH, JDK 21 on PATH for ./gradlew (see
 # .github/context/DEVELOPMENT.md for the JDK 21 gotcha), and a model
 # cache directory either passed via --cache or set in
-# $MINDLAYER_MODEL_CACHE (see docs/DEV_MODELS.md for what to put in it).
+# $MINDLAYER_MODEL_CACHE (see docs/models/DEV_MODELS.md for what to put in it).
 
 set -euo pipefail
 

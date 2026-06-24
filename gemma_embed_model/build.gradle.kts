@@ -88,14 +88,14 @@ val generateEmbeddingModelIntegrityManifest by tasks.registering {
                 throw GradleException(
                     "Release builds need the EmbeddingGemma weights SHA-256. Set MINDLAYER_MODEL_CACHE " +
                         "(or -Pmindlayer.modelCache=<dir>) holding $modelFn, or pass " +
-                        "-PembeddingModelSha256=<64 hex>. See RELEASE.md.",
+                        "-PembeddingModelSha256=<64 hex>. See docs/project/RELEASE.md.",
                 )
             }
             if (!sha256Re.matches(tokenizerSha256)) {
                 throw GradleException(
                     "Release builds need the EmbeddingGemma tokenizer SHA-256. Set MINDLAYER_MODEL_CACHE " +
                         "(or -Pmindlayer.modelCache=<dir>) holding $tokenizerFn, or pass " +
-                        "-PembeddingTokenizerSha256=<64 hex>. See RELEASE.md.",
+                        "-PembeddingTokenizerSha256=<64 hex>. See docs/project/RELEASE.md.",
                 )
             }
         }
@@ -105,7 +105,7 @@ val generateEmbeddingModelIntegrityManifest by tasks.registering {
         //      per-build pin (CI, release, dev override)
         //   2. The currently-committed manifest's SHA per role, IF it's a real
         //      hex digest (not the all-zeros placeholder). Preserves the
-        //      canonical SHA pinned in source control (see docs/MODEL_SHAS.md)
+        //      canonical SHA pinned in source control (see docs/models/MODEL_SHAS.md)
         //      so debug builds reproduce production integrity behaviour and
         //      `./gradlew assembleDebug` doesn't churn the manifest back to
         //      placeholders on every invocation.
@@ -185,7 +185,7 @@ val provisionReleaseModelAssets by tasks.registering {
                 else -> throw GradleException(
                     "Release build needs '$fileName'. Set MINDLAYER_MODEL_CACHE (or " +
                         "-Pmindlayer.modelCache=<dir>) to a directory containing it, or place the " +
-                        "file directly in $assetsDir. See RELEASE.md.",
+                        "file directly in $assetsDir. See docs/project/RELEASE.md.",
                 )
             }
         }

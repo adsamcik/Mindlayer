@@ -3,7 +3,7 @@
 > Single source of truth for Mindlayer SDK consumers using OCR. For
 > the AIDL surface, wire format, and engine-side details see
 > [`OCR_API.md`](OCR_API.md). For the SDK integration overview see
-> [`../SDK_INTEGRATION.md`](../SDK_INTEGRATION.md).
+> [`../SDK_INTEGRATION.md`](../sdk/SDK_INTEGRATION.md).
 >
 > All examples assume `compileSdk = 36`, Mindlayer SDK `0.10` or
 > later, and that the host app has already been approved via the
@@ -245,7 +245,7 @@ customisable in v1 — file an issue if you need it.
 | Field | Mode | Meaning |
 |---|---|---|
 | `mode` | both | `Async` (one shutter) vs `Realtime` (streaming + Done button). |
-| `profileId` | both | Picks the [`OcrProfile`](../sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/OcrProfile.kt) singleton. Async uses it for the default schema + title only. |
+| `profileId` | both | Picks the [`OcrProfile`](../../sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/OcrProfile.kt) singleton. Async uses it for the default schema + title only. |
 | `extractionSchemaJson` | both | Override the profile's default extraction schema. |
 | `runLlmExtraction` | Async | Whether to run the Gemma extraction pass on the captured frame. Realtime always runs schema-driven fusion. |
 | `emitBoundingBoxes` | Async | Each recognised line carries an 8-float quad in normalised coordinates. |
@@ -256,7 +256,7 @@ customisable in v1 — file an issue if you need it.
 ## Error handling
 
 All three entry points throw / report a uniform error code from
-[`MindlayerErrorCode`](../shared/src/main/kotlin/com/adsamcik/mindlayer/shared/MindlayerErrorCode.kt).
+[`MindlayerErrorCode`](../../shared/src/main/kotlin/com/adsamcik/mindlayer/shared/MindlayerErrorCode.kt).
 For the launcher, errors arrive as `OcrCaptureResult.Error(code, message)`.
 
 | Code | Constant | Typical cause | What to do |
@@ -409,7 +409,7 @@ own only the result handling.
 
 The launcher respects the same product invariants as the rest of
 Mindlayer (see
-[`.github/instructions/privacy-offline.instructions.md`](../.github/instructions/privacy-offline.instructions.md)):
+[`.github/instructions/privacy-offline.instructions.md`](../../.github/instructions/privacy-offline.instructions.md)):
 
 - No `INTERNET` permission is declared in `:sdk-camera-launcher`.
 - Captured frames live in RAM only — never `filesDir`, `cacheDir`, or
@@ -428,9 +428,9 @@ Mindlayer (see
 
 - [`OCR_API.md`](OCR_API.md) — authoritative AIDL / wire / engine
   reference.
-- [`../SDK_INTEGRATION.md`](../SDK_INTEGRATION.md) — SDK setup,
+- [`../SDK_INTEGRATION.md`](../sdk/SDK_INTEGRATION.md) — SDK setup,
   signing, dashboard approval.
-- [`../sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/Mindlayer.kt`](../sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/Mindlayer.kt) —
+- [`../sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/Mindlayer.kt`](../../sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/Mindlayer.kt) —
   KDoc on every method, with deprecated aliases marked.
-- [`../sdk-camera-launcher/src/main/kotlin/com/adsamcik/mindlayer/sdk/camera/launcher/`](../sdk-camera-launcher/src/main/kotlin/com/adsamcik/mindlayer/sdk/camera/launcher/) —
+- [`../sdk-camera-launcher/src/main/kotlin/com/adsamcik/mindlayer/sdk/camera/launcher/`](../../sdk-camera-launcher/src/main/kotlin/com/adsamcik/mindlayer/sdk/camera/launcher) —
   launcher source.

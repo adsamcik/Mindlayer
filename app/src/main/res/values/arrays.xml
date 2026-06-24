@@ -5,6 +5,6 @@
         (mindlayer_trusted_client_certs) was removed along with the
         signature|knownSigner BIND_ML_SERVICE permission. Trust is now
         established per-app via the user-consent flow, not a build-time cert
-        list. See docs/CONSENT_ARCHITECTURE.md.
+        list. See docs/architecture/CONSENT_ARCHITECTURE.md.
     -->
 </resources>

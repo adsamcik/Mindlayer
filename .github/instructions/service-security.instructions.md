@@ -1,5 +1,5 @@
 ---
-applyTo: "app/src/main/kotlin/com/adsamcik/mindlayer/service/**/*.kt,docs/AUTHORIZATION.md"
+applyTo: "app/src/main/kotlin/com/adsamcik/mindlayer/service/**/*.kt,docs/architecture/AUTHORIZATION.md"
 description: "Service authorization, allowlist, and security rules"
 ---
 

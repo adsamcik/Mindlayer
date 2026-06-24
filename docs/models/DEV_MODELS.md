@@ -142,7 +142,7 @@ your cache directory.
   `paddleocr-ppocrv5-mobile-cls.tflite`,
   `paddleocr-ppocrv5-mobile-dict.txt`.
 - Build with the in-repo workflow
-  [`.github/workflows/build-paddleocr-models.yml`](../.github/workflows/build-paddleocr-models.yml).
+  [`.github/workflows/build-paddleocr-models.yml`](../../.github/workflows/build-paddleocr-models.yml).
   It runs PaddleOCR → ONNX → 4× `.tflite` + dict and publishes them
   as workflow artifacts. Download the artifact, unzip into your cache.
 - All four files must coexist; the registry requires the complete set.
@@ -249,9 +249,9 @@ hashes:
 
 | Module | Manifest |
 |---|---|
-| `gemma_model` | [`gemma_model/src/main/assets/model_integrity.json`](../gemma_model/src/main/assets/model_integrity.json) |
-| `gemma_embed_model` | [`gemma_embed_model/src/main/assets/embedding_model_integrity.json`](../gemma_embed_model/src/main/assets/embedding_model_integrity.json) |
-| `paddleocr_model` | [`paddleocr_model/src/main/assets/paddleocr_model_integrity.json`](../paddleocr_model/src/main/assets/paddleocr_model_integrity.json) |
+| `gemma_model` | [`gemma_model/src/main/assets/model_integrity.json`](../../gemma_model/src/main/assets/model_integrity.json) |
+| `gemma_embed_model` | [`gemma_embed_model/src/main/assets/embedding_model_integrity.json`](../../gemma_embed_model/src/main/assets/embedding_model_integrity.json) |
+| `paddleocr_model` | [`paddleocr_model/src/main/assets/paddleocr_model_integrity.json`](../../paddleocr_model/src/main/assets/paddleocr_model_integrity.json) |
 
 The script reads them and applies an advisory check:
 
@@ -349,5 +349,5 @@ models are present and skip cleanly when they are not. Use
   with this script for the full "small APK + fast model push" loop.
 - Engine code: `app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/`.
 - Privacy invariants:
-  [`.github/instructions/privacy-offline.instructions.md`](../.github/instructions/privacy-offline.instructions.md).
+  [`.github/instructions/privacy-offline.instructions.md`](../../.github/instructions/privacy-offline.instructions.md).
 

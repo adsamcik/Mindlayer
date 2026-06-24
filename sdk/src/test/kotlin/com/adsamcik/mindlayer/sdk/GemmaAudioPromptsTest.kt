@@ -11,7 +11,7 @@ import org.junit.Test
  * the model output formatting (no newlines, digits-not-words) depends on
  * it, and downstream parsing depends on the formatting. Changing the
  * prompt is allowed but must be a deliberate decision tracked in
- * `docs/AUDIO.md`, not a drive-by edit.
+ * `docs/engine/AUDIO.md`, not a drive-by edit.
  *
  * Source the text from `:sdk` only — `:shared` deliberately does not
  * carry the prompt to keep the service path "raw text" on the wire.
@@ -63,7 +63,7 @@ class GemmaAudioPromptsTest {
         val prompt = GemmaAudioPrompts.transcriptionPrompt("German")
         // These two bullets are the load-bearing part of the prompt —
         // they shape model output. Don't reword without updating
-        // docs/AUDIO.md and the contract tests that depend on the
+        // docs/engine/AUDIO.md and the contract tests that depend on the
         // model's no-newline behaviour.
         assertTrue(
             "no-newlines bullet present: $prompt",

@@ -58,7 +58,7 @@ adb shell am start -n com.adsamcik.mindlayer.service.debug/com.adsamcik.mindlaye
 
 For Play Store builds the model files are delivered via the `:gemma_model`,
 `:gemma_embed_model`, and `:paddleocr_model` install-time AI packs — see
-`RELEASE.md`.
+`docs/project/RELEASE.md`.
 
 ## Environment / properties
 
@@ -68,7 +68,7 @@ For Play Store builds the model files are delivered via the `:gemma_model`,
 | `GITHUB_TOKEN` | env or gradle property | GitHub Packages auth (needs `read:packages` to consume, `write:packages` to publish) | empty |
 | `GITHUB_REPO` | gradle property | Publish target repo | `Mindlayer` |
 | `publishVersion` | `-PpublishVersion=X.Y.Z` or CI from `v*` tag | SDK/shared artifact version | `0.1.0` |
-| `keystore.properties` | repo root (gitignored) | Local-only release signing — see `RELEASE.md` | absent → unsigned release |
+| `keystore.properties` | repo root (gitignored) | Local-only release signing — see `docs/project/RELEASE.md` | absent → unsigned release |
 
 ## ⚠️ The Java 21 test-runtime gotcha
 
@@ -107,10 +107,10 @@ Dependabot is enabled for Gradle and GitHub Actions; PRs land regularly.
 
 ## Releasing
 
-Production builds can be signed locally or by CI when signing secrets are configured — see `RELEASE.md` for the keystore and model-SHA flow. Quick summary:
+Production builds can be signed locally or by CI when signing secrets are configured — see `docs/project/RELEASE.md` for the keystore and model-SHA flow. Quick summary:
 
 1. Drop `keystore.properties` (with `storeFile`, `storePassword`, `keyAlias`, `keyPassword`) at the repo root.
-2. Compute the Gemma, PaddleOCR, and EmbeddingGemma SHA-256 values and pass the seven `-P*Sha256` properties documented in `RELEASE.md`.
+2. Compute the Gemma, PaddleOCR, and EmbeddingGemma SHA-256 values and pass the seven `-P*Sha256` properties documented in `docs/project/RELEASE.md`.
 3. `./gradlew :app:bundleRelease` produces `app/build/outputs/bundle/release/app-release.aab`.
 4. Upload to Play Console with the `:gemma_model`, `:gemma_embed_model`, and `:paddleocr_model` install-time asset packs.
 5. Tag the commit `vX.Y.Z` to trigger SDK publishing and optional GitHub Release AAB attachment.

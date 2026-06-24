@@ -10,7 +10,7 @@ import com.adsamcik.mindlayer.EmbeddingResult
  * not choose. Surfaced primarily for diagnostics and tests; production
  * code should rarely branch on this.
  *
- * See `docs/EMBEDDINGS_SDK_POLISH.md` § 3.3 for the selection rule.
+ * See `docs/sdk/EMBEDDINGS_SDK_POLISH.md` § 3.3 for the selection rule.
  */
 enum class EmbeddingTransport {
     /**

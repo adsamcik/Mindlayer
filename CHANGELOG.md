@@ -25,7 +25,7 @@ carry-over method. The canonical builder API (`infer`/`ocr`/`ocrSession`/`embed`
 and its helpers are now the *only* inference / OCR / embedding entry points, and
 were first enriched into a strict superset so nothing reachable via the removed
 methods is lost. App `versionName` → `1.0.0-alpha.2` / `versionCode 5`; SDK Maven
-coordinate → `1.0.0-alpha02`. See `docs/SDK_V1_MIGRATION.md` for the full map.
+coordinate → `1.0.0-alpha02`. See `docs/sdk/SDK_V1_MIGRATION.md` for the full map.
 
 ### Removed (breaking)
 - **Embeddings:** `embedOne`, `embedMany(configs)`, `embedMany(texts,…)`,
@@ -77,7 +77,7 @@ OCR are all production-ready and the service ships its first Play-track build.
   on-device AI models from a flat cache (`MINDLAYER_MODEL_CACHE` /
   `-Pmindlayer.modelCache`) and auto-derive their pinned SHA-256, instead of
   hand-copied files and seven manual `-P*Sha256` flags. CI's explicit
-  `-P*Sha256` still take precedence. See `RELEASE.md`.
+  `-P*Sha256` still take precedence. See `docs/project/RELEASE.md`.
 - **Play store assets** under `store-assets/` (framed screenshots + listing
   text + Data Safety answers) and a GitHub Pages privacy policy at
   <https://adsamcik.github.io/Mindlayer/privacy.html>.
@@ -104,7 +104,7 @@ OCR are all production-ready and the service ships its first Play-track build.
   interface** so they are reachable from the value returned by `connect()`.
 
 ### Notes
-- See `docs/SDK_V1_MIGRATION.md` for the full migration guide and the list of
+- See `docs/sdk/SDK_V1_MIGRATION.md` for the full migration guide and the list of
   intentional alpha deviations (eager `infer` bridge, dropped `seed`,
   no tool-calling via `infer { }`, OCR bbox denormalization).
 
@@ -140,15 +140,15 @@ OCR are all production-ready and the service ships its first Play-track build.
 - **`FEATURE_AUDIO_INPUT` capability flag** (`"audio_input"`)
   advertised by `MindlayerMlService`. SDKs can probe it via
   `ServiceCapabilities.supports(FEATURE_AUDIO_INPUT)` before issuing
-  audio inferences. Documented in `docs/AIDL_STABILITY.md` and
-  `docs/AUDIO.md`.
-- **`docs/AUDIO.md`** — single-page reference for the audio surface:
+  audio inferences. Documented in `docs/architecture/AIDL_STABILITY.md` and
+  `docs/engine/AUDIO.md`.
+- **`docs/engine/AUDIO.md`** — single-page reference for the audio surface:
   supported MIME types, limits, quick-start code, and the explicit
   "not yet supported" list (multi-audio prompts, ≥30 s clips,
   specialized translation helper).
 - **Gemma 4 thinking mode** — opt-in surface that exposes the model's
   internal reasoning trace alongside the user-visible answer. See
-  [docs/THINKING.md](docs/THINKING.md) for the full architecture and
+  [docs/engine/THINKING.md](docs/engine/THINKING.md) for the full architecture and
   usage guide.
 
   - **SDK:** new `enableThinking()` builder hook on both
@@ -168,10 +168,10 @@ OCR are all production-ready and the service ships its first Play-track build.
     answer at the LiteRT-LM channel level and never enter the SDK's
     history database. They DO currently remain in the model's KV
     cache across user turns (LiteRT-LM 0.12.0 default) — see the
-    "KV-cache caveat" in [docs/THINKING.md](docs/THINKING.md) for the
+    "KV-cache caveat" in [docs/engine/THINKING.md](docs/engine/THINKING.md) for the
     follow-up plan; callers with long thinking-enabled conversations
     should recycle sessions to keep the working context fresh.
-- **`docs/ROADMAP.md`** — single source of truth for outstanding work
+- **`docs/project/ROADMAP.md`** — single source of truth for outstanding work
   across Phases 6-8 (device-gated `IS_PRODUCTION_READY` flip criteria,
   real model artifact pipeline, ICDAR2015 numeric validation harness,
   Phase 7 product polish backlog, Phase 8 speculative items).
@@ -221,7 +221,7 @@ OCR are all production-ready and the service ships its first Play-track build.
   cloud backup + device transfer.
 - **App theme** — `Theme.Mindlayer` declared in `res/values/themes.xml`,
   replacing the platform theme override on `MainActivity`.
-- `RELEASE.md` — complete local build + sign + upload flow for Play.
+- `docs/project/RELEASE.md` — complete local build + sign + upload flow for Play.
 - `keystore.properties.example` template (gitignored real file).
 
 ### CI

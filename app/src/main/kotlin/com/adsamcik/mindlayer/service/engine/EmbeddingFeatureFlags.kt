@@ -58,7 +58,7 @@ object EmbeddingFeatureFlags {
      *
      * Still requires before shipping a release:
      *   - Real-device coexistence validation per
-     *     `docs/LITERT_COEXISTENCE.md` (LiteRT-LM + LiteRT + LiteRT-OCR
+     *     `docs/architecture/LITERT_COEXISTENCE.md` (LiteRT-LM + LiteRT + LiteRT-OCR
      *     all in the `:ml` process).
      *   - The two `-PembeddingModelSha256` / `-PembeddingTokenizerSha256`
      *     Gradle props plumbed through CI and the release-signing flow.

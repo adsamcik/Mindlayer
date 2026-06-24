@@ -66,7 +66,7 @@ import kotlin.time.Duration.Companion.seconds
  * therefore `assumeTrue`-skip when `gemma-4-E2B-it.litertlm` is absent
  * from the service's `externalFilesDir`. To run them locally, sideload
  * the model via `scripts/dev-install.{ps1,sh}` (see
- * `docs/DEV_MODELS.md`).
+ * `docs/models/DEV_MODELS.md`).
  */
 @RunWith(AndroidJUnit4::class)
 class ThinkingModeInstrumentedTest {
@@ -83,13 +83,13 @@ class ThinkingModeInstrumentedTest {
         // — only PaddleOCR is, via `secrets.PADDLEOCR_MODELS_ARCHIVE_B64`.
         // Skip cleanly so the lane stays green; the test still drives the
         // full path on local emulators that have the model sideloaded via
-        // `scripts/dev-install.{ps1,sh}` (see docs/DEV_MODELS.md). Same
+        // `scripts/dev-install.{ps1,sh}` (see docs/models/DEV_MODELS.md). Same
         // gating pattern as `EmbeddingEndToEndInstrumentedTest`.
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         val gemma = java.io.File(ctx.getExternalFilesDir(null), "gemma-4-E2B-it.litertlm")
         assumeTrue(
             "Gemma 4 E2B `.litertlm` must be present in externalFilesDir. " +
-                "Sideload via `scripts/dev-install.{ps1,sh}` (see docs/DEV_MODELS.md). " +
+                "Sideload via `scripts/dev-install.{ps1,sh}` (see docs/models/DEV_MODELS.md). " +
                 "Got gemma.exists=${gemma.exists()} path=${gemma.absolutePath}.",
             gemma.exists(),
         )

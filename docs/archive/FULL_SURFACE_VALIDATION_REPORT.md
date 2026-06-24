@@ -10,7 +10,7 @@
 > written before the v0.10 consent architecture. Rows and findings that mention
 > cross-app bind, `BIND_ML_SERVICE`, `signature|knownSigner`, known certs, or
 > `knowncerts-owner.jks` describe the pre-consent model and are superseded by the
-> consent-Intent flow in [`CONSENT_ARCHITECTURE.md`](CONSENT_ARCHITECTURE.md).
+> consent-Intent flow in [`CONSENT_ARCHITECTURE.md`](../architecture/CONSENT_ARCHITECTURE.md).
 
 ## TL;DR
 
@@ -78,7 +78,7 @@ has run since the fix landed; the in-flight build run
 `26704498612`. **This is the first run in the project's history that
 exercises the full PP-OCRv5 mobile pipeline end-to-end against the
 production AIDL surface and gets real recognition results back.**
-JSON report: `docs/ocr-validation-report-2026-05-31-final.json`.
+JSON report: `docs/archive/ocr-validation-report-2026-05-31-final.json`.
 
 ### What I assumed vs what I verified
 

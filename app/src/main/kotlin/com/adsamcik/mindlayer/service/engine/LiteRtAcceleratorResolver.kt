@@ -17,7 +17,7 @@ import java.util.concurrent.ConcurrentHashMap
  * `OCR_CPU_LOCK_UNTIL_COEXISTENCE_VALIDATED`) is removed; callers that need a
  * conservative configuration must pass `preferredBackend = BACKEND_CPU` explicitly.
  * Heightened LiteRT issue #5264 hazard from three sequential `CompiledModel`
- * instances (det + rec + cls) is still tracked in `docs/LITERT_COEXISTENCE.md`
+ * instances (det + rec + cls) is still tracked in `docs/architecture/LITERT_COEXISTENCE.md`
  * — validate on real devices before relying on GPU/NPU OCR in production.
  *
  * Chat additionally gates its GPU default on hardware-GPU presence (see

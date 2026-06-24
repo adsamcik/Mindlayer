@@ -72,7 +72,7 @@ internal typealias LiteRtRunnerFactory = (String, String) -> LiteRtRunner
  *
  * The three LiteRT runtimes share a single `:ml` process. As of
  * LiteRT 2.1.5 + LiteRT-LM 0.11.0 the explicit coexistence story is
- * unproven on real devices — see `docs/LITERT_COEXISTENCE.md` for the
+ * unproven on real devices — see `docs/architecture/LITERT_COEXISTENCE.md` for the
  * validation checklist that must be run before this backend is enabled
  * in production. [EmbeddingFeatureFlags.IS_PRODUCTION_READY] gates the
  * AIDL surface on top of the checklist's completion.
