@@ -154,7 +154,7 @@ list, and API 26–30 `knownSigner` caveat are gone with the consent model. See
 - Patterns and conventions: [`PATTERNS.md`](PATTERNS.md)
 - Build, test, release, troubleshooting: [`DEVELOPMENT.md`](DEVELOPMENT.md)
 - Authorization deep-dive: [`../../docs/architecture/AUTHORIZATION.md`](../../docs/architecture/AUTHORIZATION.md)
-- Client integration: [`../../SDK_INTEGRATION.md`](../../docs/sdk/SDK_INTEGRATION.md)
+- Client integration: [`SDK_INTEGRATION.md`](../../docs/sdk/SDK_INTEGRATION.md)
 
 ## Embedding runtime addendum
 

@@ -3,7 +3,7 @@
 > Single source of truth for Mindlayer SDK consumers using OCR. For
 > the AIDL surface, wire format, and engine-side details see
 > [`OCR_API.md`](OCR_API.md). For the SDK integration overview see
-> [`../SDK_INTEGRATION.md`](../sdk/SDK_INTEGRATION.md).
+> [`SDK_INTEGRATION.md`](../sdk/SDK_INTEGRATION.md).
 >
 > All examples assume `compileSdk = 36`, Mindlayer SDK `0.10` or
 > later, and that the host app has already been approved via the
@@ -428,7 +428,7 @@ Mindlayer (see
 
 - [`OCR_API.md`](OCR_API.md) — authoritative AIDL / wire / engine
   reference.
-- [`../SDK_INTEGRATION.md`](../sdk/SDK_INTEGRATION.md) — SDK setup,
+- [`SDK_INTEGRATION.md`](../sdk/SDK_INTEGRATION.md) — SDK setup,
   signing, dashboard approval.
 - [`../sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/Mindlayer.kt`](../../sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/Mindlayer.kt) —
   KDoc on every method, with deprecated aliases marked.
