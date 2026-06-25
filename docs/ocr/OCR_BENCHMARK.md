@@ -84,7 +84,7 @@ an x86_64 API 36 emulator.
 The harness writes to the app's `externalFilesDir`:
 
 ```powershell
-adb pull /sdcard/Android/data/com.adsamcik.mindlayer.service.debug/files/ocr-bench ./bench-results
+adb pull /sdcard/Android/data/com.adsamcik.mindlayer.debug/files/ocr-bench ./bench-results
 ```
 
 You get:

@@ -79,7 +79,7 @@ class ConnectionManagerThrottleTest {
         unmockkAll()
     }
 
-    private fun stubComponent() = ComponentName("com.adsamcik.mindlayer.service", "MlService")
+    private fun stubComponent() = ComponentName("com.adsamcik.mindlayer", "MlService")
 
     /**
      * Build a raw [IBinder] whose `queryLocalInterface` resolves to the

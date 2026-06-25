@@ -50,11 +50,11 @@ The model is ~2.4 GB and is **not** committed. For development push it manually:
 
 ```bash
 adb push gemma-4-E2B-it.litertlm /data/local/tmp/
-adb shell "run-as com.adsamcik.mindlayer.service.debug cp /data/local/tmp/gemma-4-E2B-it.litertlm files/"
-adb shell am start -n com.adsamcik.mindlayer.service.debug/com.adsamcik.mindlayer.service.ui.MainActivity
+adb shell "run-as com.adsamcik.mindlayer.debug cp /data/local/tmp/gemma-4-E2B-it.litertlm files/"
+adb shell am start -n com.adsamcik.mindlayer.debug/com.adsamcik.mindlayer.service.ui.MainActivity
 ```
 
-(Note the `.debug` `applicationIdSuffix` — debug builds end in `…service.debug`.)
+(Note the `.debug` `applicationIdSuffix` — debug builds end in `…mindlayer.debug`.)
 
 For Play Store builds the model files are delivered via the `:gemma_model`,
 `:gemma_embed_model`, and `:paddleocr_model` install-time AI packs — see

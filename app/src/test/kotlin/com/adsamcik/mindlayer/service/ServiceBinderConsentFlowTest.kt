@@ -59,7 +59,7 @@ class ServiceBinderConsentFlowTest {
 
         val service = mockk<MindlayerMlService>(relaxed = true) {
             every { sessionManager } returns mockk<SessionManager>(relaxed = true)
-            every { packageName } returns "com.adsamcik.mindlayer.service"
+            every { packageName } returns "com.adsamcik.mindlayer"
         }
         allowlist = mockk(relaxed = true) {
             every { isDenied(any(), any()) } returns false

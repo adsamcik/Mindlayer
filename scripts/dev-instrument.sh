@@ -69,7 +69,7 @@ cd "$repo_root"
 # Module-specific layout
 # ---------------------------------------------------------------------------
 if [[ "$module" == "app" ]]; then
-    instrumentation_pkg="com.adsamcik.mindlayer.service.debug.test"
+    instrumentation_pkg="com.adsamcik.mindlayer.debug.test"
     apks=(
         "app/build/outputs/apk/debug/app-debug.apk"
         "app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"

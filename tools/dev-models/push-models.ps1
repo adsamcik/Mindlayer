@@ -11,8 +11,8 @@
     scan that directory on debuggable builds and load whatever they
     find, bypassing the multi-GB AI Asset Pack install path.
 
-    The script detects whether ``com.adsamcik.mindlayer.service.debug``
-    or ``com.adsamcik.mindlayer.service`` is installed and uses the
+    The script detects whether ``com.adsamcik.mindlayer.debug``
+    or ``com.adsamcik.mindlayer`` is installed and uses the
     matching externalFilesDir. If neither is installed yet, it falls
     back to ``/data/local/tmp/`` with a loud warning — that path used
     to work historically but apps cannot list it on Android 12+ (API
@@ -89,8 +89,8 @@ $ErrorActionPreference = 'Stop'
 # app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/.
 # ---------------------------------------------------------------------------
 $LegacyRemoteDir = '/data/local/tmp'
-$ServicePkgRelease = 'com.adsamcik.mindlayer.service'
-$ServicePkgDebug = 'com.adsamcik.mindlayer.service.debug'
+$ServicePkgRelease = 'com.adsamcik.mindlayer'
+$ServicePkgDebug = 'com.adsamcik.mindlayer.debug'
 # Resolved at runtime via Resolve-RemoteDir; seeded with the legacy path
 # so $script:RemoteDir always has a value even before resolution runs.
 $script:RemoteDir = $LegacyRemoteDir
@@ -189,7 +189,7 @@ function Assert-DebuggableDevice {
             runtime registries' `BuildConfig.DEBUG` gate would pass.
 
          2. The MINDLAYER SERVICE installed is the debug variant
-            (`com.adsamcik.mindlayer.service.debug`). The `.debug`
+            (`com.adsamcik.mindlayer.debug`). The `.debug`
             package suffix is only produced by Gradle's `debug`
             buildType, which sets `BuildConfig.DEBUG = true`. Whether
             the device itself is a Play Store user-build is

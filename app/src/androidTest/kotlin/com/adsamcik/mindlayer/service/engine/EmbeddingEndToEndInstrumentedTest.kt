@@ -33,8 +33,8 @@ import kotlin.math.sqrt
  *
  * Binds directly to [IMindlayerService] via raw AIDL rather than the
  * public SDK, because the SDK hardcodes the release package name
- * `com.adsamcik.mindlayer.service` and we're targeting the
- * `com.adsamcik.mindlayer.service.debug` variant on the emulator. The
+ * `com.adsamcik.mindlayer` and we're targeting the
+ * `com.adsamcik.mindlayer.debug` variant on the emulator. The
  * test still exercises the full path: real EmbeddingGemma tflite +
  * SentencePiece tokenizer load on disk, then `embed()` round-trip
  * through AIDL into LiteRtEmbeddingBackend.

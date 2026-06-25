@@ -45,7 +45,7 @@ class ServiceBinderAutoAcceptTest {
         every { Binder.getCallingUid() } returns 24_681
         service = mockk(relaxed = true) {
             every { sessionManager } returns mockk<SessionManager>(relaxed = true)
-            every { packageName } returns "com.adsamcik.mindlayer.service"
+            every { packageName } returns "com.adsamcik.mindlayer"
             every { createdAtMs } returns 1_000L
         }
         allowlist = mockk(relaxed = true) {

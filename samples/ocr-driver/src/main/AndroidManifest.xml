@@ -34,8 +34,8 @@
     -->
 
     <queries>
-        <package android:name="com.adsamcik.mindlayer.service" />
-        <package android:name="com.adsamcik.mindlayer.service.debug" />
+        <package android:name="com.adsamcik.mindlayer" />
+        <package android:name="com.adsamcik.mindlayer.debug" />
     </queries>
 
     <application

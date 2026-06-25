@@ -158,7 +158,7 @@ if ($SkipInstall -or $DryRun) {
     # Order of pkg probes mirrors ConnectionManager's debug-suffix fallback.
     Write-Host '== Launching dashboard once so the OS creates externalFilesDir ==' -ForegroundColor Cyan
     $launched = $false
-    foreach ($pkg in @('com.adsamcik.mindlayer.service.debug', 'com.adsamcik.mindlayer.service')) {
+    foreach ($pkg in @('com.adsamcik.mindlayer.debug', 'com.adsamcik.mindlayer')) {
         $check = Invoke-AdbCapture -AdbArgs @('shell', 'pm', 'list', 'packages', $pkg)
         if ($check.ExitCode -eq 0) {
             $lines = $check.Output -split "`r?`n" | ForEach-Object { $_.Trim() }
@@ -210,6 +210,6 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ''
 Write-Host 'Dev install loop complete.' -ForegroundColor Green
-Write-Host 'Reminder: NEVER use ''adb uninstall com.adsamcik.mindlayer.service.debug'' —'
+Write-Host 'Reminder: NEVER use ''adb uninstall com.adsamcik.mindlayer.debug'' —'
 Write-Host '          uninstall wipes externalFilesDir and you will lose ~3 GB of pushed models.'
 Write-Host '          Use ''.\scripts\dev-install.ps1'' or ''adb install -r'' instead.'

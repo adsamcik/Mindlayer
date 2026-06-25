@@ -17,8 +17,8 @@
 set -euo pipefail
 
 LEGACY_REMOTE_DIR='/data/local/tmp'
-SERVICE_PKG_RELEASE='com.adsamcik.mindlayer.service'
-SERVICE_PKG_DEBUG='com.adsamcik.mindlayer.service.debug'
+SERVICE_PKG_RELEASE='com.adsamcik.mindlayer'
+SERVICE_PKG_DEBUG='com.adsamcik.mindlayer.debug'
 # Resolved at runtime via resolve_remote_dir; seeded with the legacy
 # path so REMOTE_DIR is always set.
 REMOTE_DIR="$LEGACY_REMOTE_DIR"

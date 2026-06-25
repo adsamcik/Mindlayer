@@ -184,10 +184,10 @@ not as the fix for this issue.
 ```powershell
 # Clear GPU cooldown so the engine actually tries the GPU delegate
 adb -s emulator-5554 shell `
-  "run-as com.adsamcik.mindlayer.service.debug rm -rf files/ocr_accelerator"
-adb -s emulator-5554 shell am force-stop com.adsamcik.mindlayer.service.debug
+  "run-as com.adsamcik.mindlayer.debug rm -rf files/ocr_accelerator"
+adb -s emulator-5554 shell am force-stop com.adsamcik.mindlayer.debug
 adb -s emulator-5554 logcat -c
-adb -s emulator-5554 shell monkey -p com.adsamcik.mindlayer.service.debug `
+adb -s emulator-5554 shell monkey -p com.adsamcik.mindlayer.debug `
   -c android.intent.category.LAUNCHER 1
 
 # After ~15 seconds, capture the GPU init attempt

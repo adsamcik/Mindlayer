@@ -54,7 +54,7 @@ class ServiceBinderPingTest {
 
         val service = mockk<MindlayerMlService>(relaxed = true)
         every { service.sessionManager } returns mockk<SessionManager>(relaxed = true)
-        every { service.packageName } returns "com.adsamcik.mindlayer.service"
+        every { service.packageName } returns "com.adsamcik.mindlayer"
 
         rateLimiter = mockk(relaxed = true)
         every { rateLimiter.tryAcquire(any(), any()) } returns true

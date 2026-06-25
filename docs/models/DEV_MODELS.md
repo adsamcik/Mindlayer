@@ -38,7 +38,7 @@ any model file that's missing or size-mismatched. Subsequent runs
 skip the multi-GB push when the device is already current. See
 `.github/copilot-instructions.md` § "On-device install + AI Pack
 delivery" for the **forbidden moves** (`adb install -r app-debug.apk`
-without a model push; `adb uninstall com.adsamcik.mindlayer.service.debug`
+without a model push; `adb uninstall com.adsamcik.mindlayer.debug`
 which wipes ~3 GB of pushed models) and why they break dev iteration.
 
 If you want to drive the steps manually:
@@ -59,8 +59,8 @@ $env:MINDLAYER_MODEL_CACHE = 'D:\mindlayer-models'
 ```
 
 That's the loop. The service finds the sideloaded files in
-`/sdcard/Android/data/com.adsamcik.mindlayer.service.debug/files/`
-(or `…/com.adsamcik.mindlayer.service/files/` for a release-flavour
+`/sdcard/Android/data/com.adsamcik.mindlayer.debug/files/`
+(or `…/com.adsamcik.mindlayer/files/` for a release-flavour
 build) at startup, on debuggable builds only, and loads them with
 `Origin.EXTERNAL_FILES`.
 
@@ -94,7 +94,7 @@ directory itself is no longer readable by app UIDs even when
 individual files inside are world-readable. Concretely:
 
 ```text
-$ adb shell run-as com.adsamcik.mindlayer.service.debug \
+$ adb shell run-as com.adsamcik.mindlayer.debug \
     ls -la /data/local/tmp/
 ls: /data/local/tmp/: Permission denied
 ```
@@ -212,7 +212,7 @@ export MINDLAYER_MODEL_CACHE=/data/mindlayer-models
    no device query.
 2. **`-DryRun` / `--dry-run`** without `-PreferLegacyTmp` → assumes the
    debug service variant is installed (most common dev case) and prints
-   `/sdcard/Android/data/com.adsamcik.mindlayer.service.debug/files/…`.
+   `/sdcard/Android/data/com.adsamcik.mindlayer.debug/files/…`.
 3. **Real run**: `adb shell pm list packages` is queried for the debug
    variant first, then the release variant. First match wins; the push
    target is `/sdcard/Android/data/<pkg>/files/` and the script `mkdir
@@ -231,13 +231,13 @@ Mindlayer dev model sideload
   device: (auto)
   dryRun: True
   (skipping adb/device checks in dry-run mode)
-  remote: /sdcard/Android/data/com.adsamcik.mindlayer.service.debug/files  (service pkg: com.adsamcik.mindlayer.service.debug)
+  remote: /sdcard/Android/data/com.adsamcik.mindlayer.debug/files  (service pkg: com.adsamcik.mindlayer.debug)
 
 === Gemma chat ===
 - gemma-4-E2B-it.litertlm
   sha: manifest SHA not populated (dev placeholder), skipping verification.
-  [dry-run] adb push D:\mindlayer-models\gemma-4-E2B-it.litertlm /sdcard/Android/data/com.adsamcik.mindlayer.service.debug/files/gemma-4-E2B-it.litertlm
-  [dry-run] adb shell ls -l /sdcard/Android/data/com.adsamcik.mindlayer.service.debug/files/gemma-4-E2B-it.litertlm
+  [dry-run] adb push D:\mindlayer-models\gemma-4-E2B-it.litertlm /sdcard/Android/data/com.adsamcik.mindlayer.debug/files/gemma-4-E2B-it.litertlm
+  [dry-run] adb shell ls -l /sdcard/Android/data/com.adsamcik.mindlayer.debug/files/gemma-4-E2B-it.litertlm
 
 Done. All requested files processed cleanly (dry-run).
 ```

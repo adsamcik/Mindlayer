@@ -43,7 +43,7 @@ class ServiceBinderLifecycleCleanupTest {
         every { Binder.getCallingUid() } returns UID
         val service = mockk<MindlayerMlService>(relaxed = true)
         every { service.sessionManager } returns mockk<SessionManager>(relaxed = true)
-        every { service.packageName } returns "com.adsamcik.mindlayer.service"
+        every { service.packageName } returns "com.adsamcik.mindlayer"
         val allow = mockk<AllowlistStore>(relaxed = true) {
             every { isDenied(any(), any()) } returns false
             every { isAllowed(any(), any()) } returns true

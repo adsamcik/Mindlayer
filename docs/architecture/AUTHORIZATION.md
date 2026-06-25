@@ -275,7 +275,7 @@ deliberately narrow:
 
     ```
     adb shell am broadcast \
-      -n com.adsamcik.mindlayer.service.debug/com.adsamcik.mindlayer.service.security.DebugAutoAcceptReceiver \
+      -n com.adsamcik.mindlayer.debug/com.adsamcik.mindlayer.service.security.DebugAutoAcceptReceiver \
       -a com.adsamcik.mindlayer.debug.SET_AUTO_ACCEPT --ez enabled true
     # → Broadcast completed: result=1, data="auto_accept=true"
     # disable again with --ez enabled false

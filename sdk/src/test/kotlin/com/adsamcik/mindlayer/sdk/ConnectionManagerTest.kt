@@ -639,7 +639,7 @@ class ConnectionManagerTest {
 
     // -- Helpers --------------------------------------------------------------
 
-    private fun stubComponent() = ComponentName("com.adsamcik.mindlayer.service", "MlService")
+    private fun stubComponent() = ComponentName("com.adsamcik.mindlayer", "MlService")
 
     private fun deliverBinder() {
         val rawBinder = mockk<IBinder>(relaxed = true) {

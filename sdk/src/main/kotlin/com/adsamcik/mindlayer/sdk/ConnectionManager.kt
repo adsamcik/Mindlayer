@@ -87,7 +87,7 @@ class ConnectionManager {
     companion object {
         private const val TAG = "ConnectionManager"
 
-        private const val SERVICE_PKG = "com.adsamcik.mindlayer.service"
+        private const val SERVICE_PKG = "com.adsamcik.mindlayer"
         private const val SERVICE_CLS = "com.adsamcik.mindlayer.service.MindlayerMlService"
 
         /**

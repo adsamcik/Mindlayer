@@ -433,7 +433,7 @@ installed (no models required):
 # turn mock engines on
 adb shell setprop debug.mindlayer.mock_engines 1
 # restart the service so it re-reads the flag at onCreate
-adb shell am force-stop com.adsamcik.mindlayer.service.debug
+adb shell am force-stop com.adsamcik.mindlayer.debug
 ```
 
 With the flag set:
@@ -467,7 +467,7 @@ debug-only auto-accept toggle (also DEBUG-only, DUMP-guarded):
 
 ```bash
 adb shell am broadcast \
-  -n com.adsamcik.mindlayer.service.debug/com.adsamcik.mindlayer.service.security.DebugAutoAcceptReceiver \
+  -n com.adsamcik.mindlayer.debug/com.adsamcik.mindlayer.service.security.DebugAutoAcceptReceiver \
   -a com.adsamcik.mindlayer.debug.SET_AUTO_ACCEPT --ez enabled true
 ```
 
@@ -483,7 +483,7 @@ real model runs.
 
 ```bash
 adb shell setprop debug.mindlayer.mock_engines 0
-adb shell am force-stop com.adsamcik.mindlayer.service.debug
+adb shell am force-stop com.adsamcik.mindlayer.debug
 ```
 
 ---
