@@ -24,7 +24,7 @@ const val MOCK_ENGINES_SYSPROP: String = "debug.mindlayer.mock_engines"
  * ```
  * adb shell setprop debug.mindlayer.mock_engines 1
  * # then restart the service process so MindlayerMlService.onCreate re-reads it
- * adb shell am force-stop com.adsamcik.mindlayer.service.debug
+ * adb shell am force-stop com.adsamcik.mindlayer.debug
  * ```
  *
  * The property is read **once** at `MindlayerMlService.onCreate` and is inert

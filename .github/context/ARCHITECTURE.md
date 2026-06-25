@@ -25,7 +25,7 @@
 └───────────────────────────┼────────────────────────────────────────────────┘
                             │
 ┌───────────────────────────┼────────────────────────────────────────────────┐
-│  MINDLAYER SERVICE  (`com.adsamcik.mindlayer.service`, process `:ml`)      │
+│  MINDLAYER SERVICE  (`com.adsamcik.mindlayer`, process `:ml`)      │
 │                                                                            │
 │  ServiceBinder ──► [authorize: identity → consent → rate → ownership]      │
 │        │                                                                   │
@@ -48,7 +48,7 @@
 
 | Module | GAV | Purpose |
 |---|---|---|
-| `:app` | (application) `com.adsamcik.mindlayer.service` | Service implementation, dashboard UI, engine, security, logging. Hosts the `:ml` process. |
+| `:app` | (application) `com.adsamcik.mindlayer` | Service implementation, dashboard UI, engine, security, logging. Hosts the `:ml` process. |
 | `:sdk` | `com.adsamcik.mindlayer:sdk` | Client-facing SDK: `Mindlayer`, `Conversation`, `ConnectionManager`, `TokenStreamReader`, encrypted history DB, embeddings, OCR sessions. |
 | `:sdk-camerax` | `com.adsamcik.mindlayer:sdk-camerax` | Optional CameraX adapter for OCR (`OcrImageAnalyzer`) with client-side presort. |
 | `:shared` | `com.adsamcik.mindlayer:shared` | Wire types only — `StreamEvent`, `StreamEventType`, `StreamHeader`, AIDL-adjacent Parcelables. Pure Kotlin + `kotlinx.serialization`. |
@@ -62,8 +62,8 @@
 
 | Process | What runs there | Why |
 |---|---|---|
-| `com.adsamcik.mindlayer.service` (main) | Dashboard UI (Compose), the *client side* of the AIDL channel that the dashboard uses to read service state. | UI must be in the main process. |
-| `com.adsamcik.mindlayer.service:ml` | `MindlayerMlService`, `EngineManager`, all native LiteRT-LM allocations, KV caches, thermal/memory monitors. | Isolation: a model crash kills `:ml` only; the main process and dashboard survive. |
+| `com.adsamcik.mindlayer` (main) | Dashboard UI (Compose), the *client side* of the AIDL channel that the dashboard uses to read service state. | UI must be in the main process. |
+| `com.adsamcik.mindlayer:ml` | `MindlayerMlService`, `EngineManager`, all native LiteRT-LM allocations, KV caches, thermal/memory monitors. | Isolation: a model crash kills `:ml` only; the main process and dashboard survive. |
 | Client app processes | `:sdk` only. Bind to `:ml` via the AIDL `IMindlayerService`. | One model loaded once, many callers. |
 
 Cross-process state (allowlist) is a JSON file under the service's `filesDir/mindlayer_allowlist/` with a `FileLock` sidecar — **never** `SharedPreferences`; `MODE_MULTI_PROCESS` is deprecated and racy.

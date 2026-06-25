@@ -57,8 +57,8 @@ sealed interface ConsentRequestResult {
  */
 object MindlayerConsent {
 
-    private const val SERVICE_PKG = "com.adsamcik.mindlayer.service"
-    private const val SERVICE_PKG_DEBUG = "com.adsamcik.mindlayer.service.debug"
+    private const val SERVICE_PKG = "com.adsamcik.mindlayer"
+    private const val SERVICE_PKG_DEBUG = "com.adsamcik.mindlayer.debug"
     private const val SERVICE_CLS = "com.adsamcik.mindlayer.service.MindlayerMlService"
     private const val BIND_TIMEOUT_MS = 5_000L
 

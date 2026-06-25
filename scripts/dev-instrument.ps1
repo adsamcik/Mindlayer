@@ -96,7 +96,7 @@ $repoRoot = (Resolve-Path (Join-Path $scriptDir '..')).Path
 # Module-specific layout
 # ---------------------------------------------------------------------------
 if ($Module -eq 'app') {
-    $instrumentationPkg = 'com.adsamcik.mindlayer.service.debug.test'
+    $instrumentationPkg = 'com.adsamcik.mindlayer.debug.test'
     $appApk = Join-Path $repoRoot 'app\build\outputs\apk\debug\app-debug.apk'
     $testApk = Join-Path $repoRoot 'app\build\outputs\apk\androidTest\debug\app-debug-androidTest.apk'
     $buildTasks = @(

@@ -127,7 +127,7 @@ else
   # ConnectionManager's debug-suffix fallback.
   echo "== Launching dashboard once so the OS creates externalFilesDir =="
   launched=0
-  for pkg in com.adsamcik.mindlayer.service.debug com.adsamcik.mindlayer.service; do
+  for pkg in com.adsamcik.mindlayer.debug com.adsamcik.mindlayer; do
     if run_adb shell pm list packages "$pkg" 2>/dev/null | tr -d '\r' | grep -qx "package:$pkg"; then
       if run_adb shell am start -W -n "$pkg/com.adsamcik.mindlayer.service.ui.MainActivity" >/dev/null; then
         echo "  launched $pkg/.MainActivity (externalFilesDir is now real)"
@@ -173,7 +173,7 @@ fi
 cat <<'EOF'
 
 Dev install loop complete.
-Reminder: NEVER use 'adb uninstall com.adsamcik.mindlayer.service.debug' —
+Reminder: NEVER use 'adb uninstall com.adsamcik.mindlayer.debug' —
           uninstall wipes externalFilesDir and you will lose ~3 GB of pushed models.
           Use './scripts/dev-install.sh' or 'adb install -r' instead.
 EOF

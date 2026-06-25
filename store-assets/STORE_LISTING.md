@@ -95,7 +95,7 @@ framed set with `python store-assets/make_screenshots.py`.
 
 | Field | Value |
 |---|---|
-| Application ID | `com.adsamcik.mindlayer.service` |
+| Application ID | `com.adsamcik.mindlayer` |
 | Developer / publisher | adsamcik |
 | Contact email | play@adsamcik.com |
 | Privacy policy URL | https://adsamcik.github.io/Mindlayer/privacy.html |

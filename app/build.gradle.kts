@@ -464,7 +464,7 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.adsamcik.mindlayer.service"
+        applicationId = "com.adsamcik.mindlayer"
         minSdk = 26
         // targetSdk 37 (Android 17 / API 37). Audited against the API-37
         // behaviour changes: no native System.load() DCL (only loadLibrary

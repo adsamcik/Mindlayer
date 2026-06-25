@@ -51,7 +51,7 @@ import java.util.Locale
  * adb push G:\Github\paddle-models\paddleocr-* /data/local/tmp/
  * .\gradlew.bat :app:connectedDebugAndroidTest `
  *   "-Pandroid.testInstrumentationRunnerArguments.class=com.adsamcik.mindlayer.service.engine.OcrEngineBenchmarkInstrumentedTest"
- * adb pull /sdcard/Android/data/com.adsamcik.mindlayer.service/files/ocr-bench/ ./results
+ * adb pull /sdcard/Android/data/com.adsamcik.mindlayer/files/ocr-bench/ ./results
  * ```
  *
  * # Output
