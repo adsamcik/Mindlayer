@@ -1,6 +1,5 @@
 package com.adsamcik.mindlayer.service.ui
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -24,15 +23,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.adsamcik.mindlayer.service.BuildConfig
@@ -282,58 +276,6 @@ private fun EntryRow(
         }
         TextButton(onClick = { showDialog = true }) { Text(stringResource(R.string.allowlist_revoke)) }
     }
-}
-
-/**
- * F-030: package name as PRIMARY identity (monospace), claimed label as
- * SECONDARY (prefixed `claimed: `), full 64-char SHA-256 in 4-char groups,
- * tap-to-copy via [LocalClipboardManager]. Truncated SHA prefixes (`…`) are
- * a near-miss-detection liability and have been removed.
- */
-@Composable
-private fun CallerIdentityColumn(
-    packageName: String,
-    displayName: String?,
-    signingCertSha256: String,
-    modifier: Modifier = Modifier,
-) {
-    Column(modifier = modifier) {
-        Text(
-            text = packageName,
-            style = MaterialTheme.typography.bodyMedium,
-            fontFamily = FontFamily.Monospace,
-        )
-        displayName?.let { name ->
-            Text(
-                text = stringResource(R.string.allowlist_claimed_label, name),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        SigFingerprintRow(sha = signingCertSha256)
-    }
-}
-
-@Composable
-private fun SigFingerprintRow(sha: String) {
-    val clipboard = LocalClipboardManager.current
-    val grouped = remember(sha) {
-        sha.uppercase().chunked(4).joinToString(" ")
-    }
-    val a11y = stringResource(R.string.allowlist_sig_fingerprint_a11y)
-    Text(
-        text = grouped,
-        style = MaterialTheme.typography.labelSmall,
-        fontFamily = FontFamily.Monospace,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { clipboard.setText(AnnotatedString(sha)) }
-            .semantics { contentDescription = a11y },
-        softWrap = true,
-    )
 }
 
 @Composable

@@ -15,7 +15,6 @@ import com.adsamcik.mindlayer.AudioTransfer
 import com.adsamcik.mindlayer.ImageTransfer
 import java.io.File
 import java.io.OutputStream
-import java.nio.ByteBuffer
 
 /**
  * Client-side helpers for creating [ImageTransfer] and [AudioTransfer]

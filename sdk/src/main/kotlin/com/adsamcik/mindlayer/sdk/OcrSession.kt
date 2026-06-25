@@ -4,7 +4,6 @@ import com.adsamcik.mindlayer.OcrFrameAck
 import com.adsamcik.mindlayer.OcrLimits
 import com.adsamcik.mindlayer.OcrSessionConfig
 import com.adsamcik.mindlayer.OcrSessionState
-import com.adsamcik.mindlayer.MediaPart
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow

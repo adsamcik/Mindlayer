@@ -158,7 +158,6 @@ class TokenStreamWriter private constructor(
      * never accumulate a buffer and emit a single TOKEN_DELTA per call.
      */
     private var batchingEnabled: Boolean = false
-    private val tokenBatch = StringBuilder()
     private val tokenBatchTexts = mutableListOf<String>()
     private var tokenBatchFirstTimestamp: Long = 0L
     private var tokenBatchByteCount: Int = 0
