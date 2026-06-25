@@ -41,7 +41,7 @@ name: Build PaddleOCR PP-OCRv5 mobile .tflite models
 # quant). LiteRT 2.1.5's GPU delegate kernel registry covers neither
 # op — so the whole detection model fails to compile on GPU and the
 # engine takes the CPU fallback path (24h cooldown). See
-# docs/PADDLEOCR_GPU_INVESTIGATION.md for the full investigation
+# docs/ocr/PADDLEOCR_GPU_INVESTIGATION.md for the full investigation
 # trail, the workaround options (LiteRT version bump, onnx2tf
 # downgrade, post-conversion .tflite surgery), and why we currently
 # accept CPU on the runtime side. The conversion still passes the
@@ -282,7 +282,7 @@ jobs:
             # specific ops LiteRT 2.1.5 lacks (`RELU_0_TO_1`,
             # `TRANSPOSE_CONV v4`, `STRIDED_SLICE v4`) happens in the
             # post-conversion ``tflite_gpu_fixup.py`` surgery step
-            # below. See docs/PADDLEOCR_GPU_INVESTIGATION.md.
+            # below. See docs/ocr/PADDLEOCR_GPU_INVESTIGATION.md.
             ../.venv-onnx2tf/bin/onnx2tf \
               -i "$simp_onnx" \
               -o "ppocrv5-${kind}-saved" \
@@ -305,7 +305,7 @@ jobs:
               echo "::error::paddleocr-ppocrv5-mobile-${kind}.tflite contains ONNX_LAYERNORMALIZATION custom op (LiteRT cannot run it). Check that -tb tf_converter and onnxsim ran."
               exit 1
             fi
-            # GPU-compat surgery — see docs/PADDLEOCR_GPU_INVESTIGATION.md
+            # GPU-compat surgery — see docs/ocr/PADDLEOCR_GPU_INVESTIGATION.md
             # and ../../scripts/build-paddleocr-models/tflite_gpu_fixup.py.
             # Rewrites RELU_0_TO_1 -> MAXIMUM(0)+MINIMUM(1), downgrades
             # TRANSPOSE_CONV v4 -> v3 and STRIDED_SLICE v4 -> v2 so the

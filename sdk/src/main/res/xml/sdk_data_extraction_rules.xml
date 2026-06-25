@@ -14,7 +14,7 @@
     Host-app precedence note: when a host app declares its own
     dataExtractionRules in its manifest, the manifest merger uses the
     host's value. Hosts wanting Mindlayer's exclusions must merge these
-    rules into their own file. See SDK_INTEGRATION.md.
+    rules into their own file. See docs/sdk/SDK_INTEGRATION.md.
 -->
 <data-extraction-rules>
     <cloud-backup>

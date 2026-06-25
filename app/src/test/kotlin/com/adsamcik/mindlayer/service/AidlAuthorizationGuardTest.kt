@@ -107,7 +107,7 @@ class AidlAuthorizationGuardTest {
         //  - lookupChallenge() / completeConsent(): self-UID only
         //    (Binder.getCallingUid() == Process.myUid()); ConsentActivity, which
         //    runs in Mindlayer's own process, uses them to render the prompt and
-        //    submit the user's decision. See docs/CONSENT_ARCHITECTURE.md.
+        //    submit the user's decision. See docs/architecture/CONSENT_ARCHITECTURE.md.
         private val EXEMPT = setOf(
             "ping",
             "requestConsentChallenge",

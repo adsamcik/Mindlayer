@@ -24,7 +24,7 @@ import kotlin.coroutines.suspendCoroutine
  * `ActivityResultContracts.StartIntentSenderForResult`. `RESULT_OK` means the
  * user approved and the next bind/call will succeed.
  *
- * See `docs/CONSENT_ARCHITECTURE.md` and `SDK_INTEGRATION.md`.
+ * See `docs/architecture/CONSENT_ARCHITECTURE.md` and `docs/sdk/SDK_INTEGRATION.md`.
  */
 sealed interface ConsentRequestResult {
     /** Launch [intentSender] to show the Mindlayer consent screen. */

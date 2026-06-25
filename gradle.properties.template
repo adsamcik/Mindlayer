@@ -8,7 +8,7 @@
 # the GitHub Packages PAT below is a credential and would be exposed in git
 # history. The user-level file is read by Gradle and never tracked in git.
 #
-# See SDK_INTEGRATION.md for full setup instructions.
+# See docs/sdk/SDK_INTEGRATION.md for full setup instructions.
 
 # Owner of the GitHub Packages repository hosting Mindlayer's published
 # Maven artifacts. Set this to the org/user that owns the Mindlayer repo.

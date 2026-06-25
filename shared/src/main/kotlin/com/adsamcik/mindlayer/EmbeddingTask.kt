@@ -5,7 +5,7 @@ package com.adsamcik.mindlayer
  * task prefixes (see https://huggingface.co/google/embeddinggemma-300m#prompt-instructions).
  * Service uses these to prepend the appropriate task prefix at tokenization.
  *
- * Append-only Int constants per `docs/AIDL_STABILITY.md`. The full
+ * Append-only Int constants per `docs/architecture/AIDL_STABILITY.md`. The full
  * `EmbeddingRequest` parcelable lands in Phase B.
  */
 object EmbeddingTask {

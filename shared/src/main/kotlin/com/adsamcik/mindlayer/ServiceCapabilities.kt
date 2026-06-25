@@ -19,7 +19,7 @@ import kotlinx.parcelize.Parcelize
  * # Forward compatibility
  *
  * - [schemaVersion] is the **first** field as required by the
- *   `docs/AIDL_STABILITY.md` schemaVersion convention. Bumping it lets a
+ *   `docs/architecture/AIDL_STABILITY.md` schemaVersion convention. Bumping it lets a
  *   new SDK soft-degrade against an old service that emits a v0 parcelable.
  * - [supportedFeatures] is a `Set<String>` rather than a bitfield so the
  *   feature space can grow indefinitely; old SDKs ignore unknown strings.
@@ -28,7 +28,7 @@ import kotlinx.parcelize.Parcelize
  * # Per-caller scoping
  *
  * Today every external caller sees the same capability set. Once the
- * third-party caller story (`docs/THIRD_PARTY_FUTURE.md`) lands,
+ * third-party caller story (`docs/project/THIRD_PARTY_FUTURE.md`) lands,
  * [supportedFeatures] and the numeric limits will be filtered by the
  * caller's `AllowlistEntry.trustTier`. Self-UID dashboard always sees
  * effectively-infinite quotas (signalled by [Int.MAX_VALUE] / [Long.MAX_VALUE]).
@@ -40,7 +40,7 @@ import kotlinx.parcelize.Parcelize
  * @property apiVersion Logical API version. Bumped whenever the AIDL
  *   surface gains a method — old SDKs use this to gate optional behavior.
  * @property supportedFeatures Stable string identifiers for available
- *   features. See `docs/AIDL_STABILITY.md` § Capability gating for the
+ *   features. See `docs/architecture/AIDL_STABILITY.md` § Capability gating for the
  *   canonical registry.
  * @property pipeProtocol Pipe-stream protocol identifier (`mindlayer.stream.v1`
  *   today). The SDK validates this in [com.adsamcik.mindlayer.sdk.TokenStreamReader].
@@ -97,13 +97,13 @@ data class ServiceCapabilities(
         /**
          * Current parcelable schema version. Bumped when the parcelable
          * layout itself changes (which is itself a wire-break — see
-         * `docs/AIDL_STABILITY.md`).
+         * `docs/architecture/AIDL_STABILITY.md`).
          */
         const val CURRENT_SCHEMA_VERSION: Int = 2
 
         // ---- Canonical feature flag strings ---------------------------------
         // Append-only registry. Document each new flag in
-        // docs/AIDL_STABILITY.md § Capability gating.
+        // docs/architecture/AIDL_STABILITY.md § Capability gating.
 
         /**
          * Service throws wire-prefixed [SecurityException]s that the SDK
@@ -193,7 +193,7 @@ data class ServiceCapabilities(
          * requires thoughts to stay in context across tool calls within
          * one turn). Callers with long thinking conversations should
          * recycle sessions to keep the working context fresh. See
-         * `docs/THINKING.md` for details.
+         * `docs/engine/THINKING.md` for details.
          *
          * Old SDKs that pre-date this flag can still create sessions:
          * the opt-in JSON is ignored and they see a normal V1/V2
@@ -217,7 +217,7 @@ data class ServiceCapabilities(
         // Numeric caps for OCR are advertised via the separate [OcrLimits]
         // parcelable fetched by [IMindlayerService.getOcrLimits], NOT as new
         // fields on this parcelable (which is wire-frozen per
-        // docs/AIDL_STABILITY.md).
+        // docs/architecture/AIDL_STABILITY.md).
 
         /**
          * v0.8: multi-frame OCR session API (`createOcrSession`, `pushOcrFrame`,
@@ -293,7 +293,7 @@ data class ServiceCapabilities(
          * of kind [com.adsamcik.mindlayer.MediaPart.KIND_AUDIO] (or
          * the legacy `AudioTransfer` shape). Clips are capped at
          * [com.adsamcik.mindlayer.GemmaAudioSpec.MAX_DURATION_MS] and
-         * accept the MIME types listed in `docs/AUDIO.md`.
+         * accept the MIME types listed in `docs/engine/AUDIO.md`.
          *
          * **Single-clip only.** Multi-audio prompts are not advertised;
          * `IpcInputValidator` rejects requests with `audioCount > 1`
@@ -306,7 +306,7 @@ data class ServiceCapabilities(
          * remain orthogonal — `FEATURE_AUDIO_INPUT` specifically tells
          * callers that the engine *consumes* the audio modality and
          * respects the Gemma audio contract documented in
-         * `docs/AUDIO.md`.
+         * `docs/engine/AUDIO.md`.
          */
         const val FEATURE_AUDIO_INPUT: String = "audio_input"
 

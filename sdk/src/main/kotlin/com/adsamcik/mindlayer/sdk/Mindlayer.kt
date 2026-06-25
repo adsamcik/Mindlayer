@@ -29,7 +29,7 @@ import kotlin.time.Duration
  * been removed — the canonical builder methods ([infer], [ocr], [ocrSession],
  * [embed]) and the high-level helpers are the only inference / OCR / embedding
  * entry points. The canonical surface is a strict superset of the removed
- * methods (see `docs/SDK_V1_MIGRATION.md`):
+ * methods (see `docs/sdk/SDK_V1_MIGRATION.md`):
  *  - [embed] / [vector] / [vectors] carry per-item `modelId` / `outputDim` /
  *    `normalize` config on [EmbeddingItem] and full per-item telemetry (`dim`,
  *    `modelId`, `tokenCount`, `truncated`, `backend`, `durationMs`) on
@@ -162,7 +162,7 @@ interface Mindlayer {
      *
      * Audio is capped at
      * [com.adsamcik.mindlayer.GemmaAudioSpec.MAX_DURATION_MS] per clip;
-     * longer recordings must be chunked caller-side. See `docs/AUDIO.md`
+     * longer recordings must be chunked caller-side. See `docs/engine/AUDIO.md`
      * for the full supported/not-yet-supported split.
      *
      * Equivalent to `transcribe(GemmaAudioPrompts.transcriptionPrompt(language), audio, configure)`.

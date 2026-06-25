@@ -296,14 +296,14 @@ The class-level KDoc on `InMemoryVectorIndex` will not change.
 public methods that already wrap existing AIDL calls. The wire surface
 is unchanged. Future work that *would* touch AIDL (e.g. a transport
 hint parameter, or a unified `embedMany` AIDL method) is out of scope
-and would have to follow the rules in `docs/AIDL_STABILITY.md`
+and would have to follow the rules in `docs/architecture/AIDL_STABILITY.md`
 (append-only, capability-gated).
 
 ## 8. What this PR ships vs. what it proposes
 
 ### Ships in this PR
 
-1. This proposal document (`docs/EMBEDDINGS_SDK_POLISH.md`).
+1. This proposal document (`docs/sdk/EMBEDDINGS_SDK_POLISH.md`).
 2. `Mindlayer.embedOne(...)` facade — delegates to `embed(EmbeddingConfig)`.
 3. `Mindlayer.embedMany(items: List<EmbeddingConfig>)` and
    `Mindlayer.embedMany(texts: List<String>, ...)` facades — pick

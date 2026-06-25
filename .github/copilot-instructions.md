@@ -6,7 +6,7 @@
 > **⚠️ Branch notice — `feat/consent-architecture` migration in flight.**
 > The trust-model and AIDL-permission sections below describe the **target consent
 > architecture** that this branch ships. See
-> [`docs/CONSENT_ARCHITECTURE.md`](../docs/CONSENT_ARCHITECTURE.md) for the
+> [`docs/architecture/CONSENT_ARCHITECTURE.md`](../docs/architecture/CONSENT_ARCHITECTURE.md) for the
 > full design and
 > [`.github/instructions/security.instructions.md`](instructions/security.instructions.md)
 > for the in-flight invariants. Legacy invariants that still apply to un-deleted
@@ -14,8 +14,8 @@
 
 > Action-oriented summary. For detail see `.github/context/ARCHITECTURE.md`,
 > `.github/context/PATTERNS.md`, `.github/context/DEVELOPMENT.md`,
-> `docs/CONSENT_ARCHITECTURE.md`, `docs/AUTHORIZATION.md` (legacy reference),
-> and `SDK_INTEGRATION.md`.
+> `docs/architecture/CONSENT_ARCHITECTURE.md`, `docs/architecture/AUTHORIZATION.md` (legacy reference),
+> and `docs/sdk/SDK_INTEGRATION.md`.
 
 ## What this is
 
@@ -67,9 +67,9 @@ Every AIDL entry point runs a 4-stage gate: **identity → allowlist → rate li
 
 The only path to an approval is the **consent-Intent flow**: the SDK calls `MindlayerConsent.requestConsent(ctx)` (the shipped entry point; the fuller `Mindlayer.createConsentIntent`/Result-type surface is deferred) which binds, calls `requestConsentChallenge()` (Binder-side, identity captured via real `Binder.getCallingUid()`), receives a nonce-bearing `PendingIntent`, and the host fires it via `startActivityForResult`. `ConsentActivity` shows the user an opaque biometric-gated screen with the app label, sanitised display name, signing cert SHA-256, install source, and cert-rotation banner (if any). The user picks Approve / Deny-once / Deny-24h / Block-permanently. On Approve, `:ml` calls `AllowlistStore.approve()` under the file lock with F-031 live cert re-verification. A user-denied app cannot re-trigger the prompt until the denial lapses.
 
-All approved entries share the same uniform `RateLimiter` and `IpcInputValidator` budgets — there are no trust tiers (see `docs/CONSENT_ARCHITECTURE.md § Why no trust tiers`). Self-UID bypasses the allowlist gate so the dashboard can poll `:ml` over its own AIDL.
+All approved entries share the same uniform `RateLimiter` and `IpcInputValidator` budgets — there are no trust tiers (see `docs/architecture/CONSENT_ARCHITECTURE.md § Why no trust tiers`). Self-UID bypasses the allowlist gate so the dashboard can poll `:ml` over its own AIDL.
 
-See [`docs/CONSENT_ARCHITECTURE.md`](../docs/CONSENT_ARCHITECTURE.md) for the full data flow, failure modes, threat model, and the consent-attempt escalation policy. Path-specific rules live in `.github/instructions/security.instructions.md`.
+See [`docs/architecture/CONSENT_ARCHITECTURE.md`](../docs/architecture/CONSENT_ARCHITECTURE.md) for the full data flow, failure modes, threat model, and the consent-attempt escalation policy. Path-specific rules live in `.github/instructions/security.instructions.md`.
 
 ## Cross-module contract synchronization
 
@@ -136,7 +136,7 @@ export MINDLAYER_MODEL_CACHE=/data/mindlayer-models
 ./scripts/dev-install.sh --dry-run
 ```
 
-For direct model pushes (skipping the build+install phases), use the underlying `tools/dev-models/push-models.{ps1,sh}` script — see `docs/DEV_MODELS.md` for cache layout, where to source the raw model files, and the `/data/local/tmp/` fallback.
+For direct model pushes (skipping the build+install phases), use the underlying `tools/dev-models/push-models.{ps1,sh}` script — see `docs/models/DEV_MODELS.md` for cache layout, where to source the raw model files, and the `/data/local/tmp/` fallback.
 
 ### Forbidden moves (you will lose model bytes)
 
@@ -232,8 +232,8 @@ Read-only operations (`git status`, `git log`, `git blame`) and zero-file invest
 | Add a stream event type | `shared/.../Protocol.kt::StreamEventType` constant; emit in `TokenStreamWriter`; handle in `TokenStreamReader`; update tests in both `:app` and `:sdk`. |
 | Add a Room column on the SDK history DB | Bump `MindlayerDatabase.version`, add a `Migration`, update `Entities.kt`. SQLCipher cross-install backup is unreadable by design. |
 | Add a logged event | Add `LogEvent`/`LogCategory` enum value; add a builder on `LogRepository`; never include prompt or output text. |
-| Add a security/auth gate | Read `docs/CONSENT_ARCHITECTURE.md` first. Don't bypass `authorizeCall()`. New AIDL methods default to consent-required; only `requestConsentChallenge` and `ping` are reachable pre-consent. |
-| Add to the consent flow | Edit `ConsentActivity` + `ConsentChallengeStore` + `ConsentAttemptStore`. See `docs/CONSENT_ARCHITECTURE.md`. Never call `AllowlistStore.approveDirect()` from production. |
+| Add a security/auth gate | Read `docs/architecture/CONSENT_ARCHITECTURE.md` first. Don't bypass `authorizeCall()`. New AIDL methods default to consent-required; only `requestConsentChallenge` and `ping` are reachable pre-consent. |
+| Add to the consent flow | Edit `ConsentActivity` + `ConsentChallengeStore` + `ConsentAttemptStore`. See `docs/architecture/CONSENT_ARCHITECTURE.md`. Never call `AllowlistStore.approveDirect()` from production. |
 
 ## Path-specific guidance
 

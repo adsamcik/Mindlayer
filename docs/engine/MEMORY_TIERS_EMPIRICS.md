@@ -103,7 +103,7 @@ Where:
 
 `maxSessions` is pinned at 1 across every tier because LiteRT-LM 0.12.0
 enforces "at most one Conversation per Engine at a time". The
-[`WarmConversationSlot`](../app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/WarmConversationSlot.kt)
+[`WarmConversationSlot`](../../app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/WarmConversationSlot.kt)
 infrastructure landed in the same PR is the building block for a
 follow-up that will wire transparent hot-swap and lift this cap.
 

@@ -43,7 +43,7 @@ import org.robolectric.annotation.Config
 /**
  * Phase 7 OCR pipeline stress coverage — complements
  * [OcrSessionLifecycleRaceTest] (lifecycle races) with three orthogonal
- * stress dimensions from `docs/ROADMAP.md` § Phase 7:
+ * stress dimensions from `docs/project/ROADMAP.md` § Phase 7:
  *
  *  - **A. SHM pool exhaustion** — pins
  *    [MediaPartYPlaneExtractor.extractY] propagation of

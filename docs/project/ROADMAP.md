@@ -46,9 +46,9 @@ workflow (not in the repo, by design).
 
 ### Service architecture
 - Single AIDL surface (`IMindlayerService`), defined once in `:sdk` and
-  consumed by `:app` via the `:sdk` dependency. See `docs/AIDL_STABILITY.md`.
+  consumed by `:app` via the `:sdk` dependency. See `docs/architecture/AIDL_STABILITY.md`.
 - Four-stage authorization gate on every real entry point: identity →
-  consent/allowlist → rate limit → ownership. See `docs/AUTHORIZATION.md`.
+  consent/allowlist → rate limit → ownership. See `docs/architecture/AUTHORIZATION.md`.
 - Open exported service with no custom bind permission; per-app user consent
   pins `(packageName, signingCertSha256)` before real AIDL methods run.
 - Foreground-service lifecycle (`specialUse`) promoted only during active
@@ -74,7 +74,7 @@ workflow (not in the repo, by design).
   SoC allowlist, native-library probe, API-level gate. OCR mirrors chat
   (`null` → GPU; explicit `NPU` probed against SoC allowlist + native
   libs with GPU-fallback; explicit `CPU`/`GPU` honored). Same-process
-  coexistence remains real-device-gated — see `docs/LITERT_COEXISTENCE.md`.
+  coexistence remains real-device-gated — see `docs/architecture/LITERT_COEXISTENCE.md`.
 
 ### SDK
 - One front door: `Mindlayer.connect()` + `MindlayerSession` for chat,
@@ -149,7 +149,7 @@ The flag is a one-line atomic commit. The gating criteria are:
   `:app` androidTest APK when the model SHA repo vars are set, so
   `EngineCoexistenceInstrumentedTest.paddleocr_production_backend_loads_real_ai_pack_assets`
   exercises the production `LiteRtPaddleOcrBackend` on the API 33/34
-  emulator matrix. The 8-step checklist in `docs/LITERT_COEXISTENCE.md`
+  emulator matrix. The 8-step checklist in `docs/architecture/LITERT_COEXISTENCE.md`
   remains the canonical reference; emulator (x86_64 + swiftshader) is
   sufficient for CPU verification, while GPU/NPU coexistence (now
   reachable via the resolver's chat-mirror default) remains real-device-
@@ -194,7 +194,7 @@ PR #106) does the same: when the `.tflite` files and integrity manifest
 are present on the runner, the production coexistence + numeric
 validation tests run end-to-end; otherwise both `assumeTrue`-skip.
 
-Release process is documented in `RELEASE.md`. Outstanding work:
+Release process is documented in `docs/project/RELEASE.md`. Outstanding work:
 
 - Set the seven SHA variables in GitHub Actions `vars.*` for the
   `release-aab` job to actually attach a signed AAB on `v*` tags.
@@ -356,11 +356,11 @@ ring buffer with explicit user-initiated export (similar to
 
 | Want to understand … | Read … |
 |---|---|
-| The trust model (who can call what) | `docs/AUTHORIZATION.md` |
-| The three-stack coexistence risk | `docs/LITERT_COEXISTENCE.md` |
-| The OCR SDK surface | `docs/OCR_API.md` and `SDK_INTEGRATION.md` § OCR |
-| The AIDL capability registry | `docs/AIDL_STABILITY.md` |
-| The release process | `RELEASE.md` |
+| The trust model (who can call what) | `docs/architecture/AUTHORIZATION.md` |
+| The three-stack coexistence risk | `docs/architecture/LITERT_COEXISTENCE.md` |
+| The OCR SDK surface | `docs/ocr/OCR_API.md` and `docs/sdk/SDK_INTEGRATION.md` § OCR |
+| The AIDL capability registry | `docs/architecture/AIDL_STABILITY.md` |
+| The release process | `docs/project/RELEASE.md` |
 | The repo conventions (logging, AIDL mirror, native loads) | `.github/copilot-instructions.md` |
 | The architectural rationale per subsystem | `.github/context/ARCHITECTURE.md` |
 | The dev environment + JDK gotcha | `.github/context/DEVELOPMENT.md` |

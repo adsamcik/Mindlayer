@@ -29,7 +29,7 @@ import kotlinx.parcelize.Parcelize
  *
  * # Schema evolution
  *
- * [schemaVersion] is the **first** field per `docs/AIDL_STABILITY.md` —
+ * [schemaVersion] is the **first** field per `docs/architecture/AIDL_STABILITY.md` —
  * adding fields to this Parcelable later breaks wire layout and would
  * require a new `MediaPartV2` + new method, not an in-place extension.
  *

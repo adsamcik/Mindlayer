@@ -156,7 +156,7 @@ class ServiceBinderPingTest {
         val caps = binder.getCapabilities()
         assertTrue(
             "FEATURE_AUDIO_INPUT must be advertised — Gemma 4 audio support " +
-                "is documented in docs/AUDIO.md and gated on this capability flag",
+                "is documented in docs/engine/AUDIO.md and gated on this capability flag",
             caps.supports(ServiceCapabilities.FEATURE_AUDIO_INPUT),
         )
     }

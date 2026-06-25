@@ -60,7 +60,7 @@ fun mindlayerSha256Hex(target: File): String {
 }
 
 // Canonical filenames the three AI-pack modules expect (flat cache layout,
-// matching docs/DEV_MODELS.md). Kept in sync with each module + push-models.*.
+// matching docs/models/DEV_MODELS.md). Kept in sync with each module + push-models.*.
 val mindlayerCanonicalModelFiles = listOf(
     "gemma-4-E2B-it.litertlm",
     "embedding-gemma-300m-v1.tflite",

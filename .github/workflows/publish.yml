@@ -199,7 +199,7 @@ jobs:
               is the Play Store distribution artifact. A full standalone APK
               with the bundled models (~2.5 GB) exceeds GitHub's 2 GiB
               release-asset cap, so it is intentionally not attached here. See
-              `RELEASE.md` for the local signed-build flow.
+              `docs/project/RELEASE.md` for the local signed-build flow.
 
   release-aab:
     # Phase 3 #5 (p3-signed-release): attach the service-side AAB (and

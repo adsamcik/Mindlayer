@@ -24,7 +24,7 @@ This tool walks the flatbuffer in-place and undoes both:
     adds optional per-channel quant fields; float32 models leave
     those zero, so the on-disk bytes stay valid for v3.
 
-See ``docs/PADDLEOCR_GPU_INVESTIGATION.md`` for the full investigation
+See ``docs/ocr/PADDLEOCR_GPU_INVESTIGATION.md`` for the full investigation
 trail. The rewrites are exact (clamp = max+min) so numerical
 equivalence with the original ``RELU_0_TO_1`` graph is guaranteed.
 

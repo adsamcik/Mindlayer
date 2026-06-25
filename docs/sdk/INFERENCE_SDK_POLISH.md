@@ -4,12 +4,12 @@
 > the inference public surface of `:sdk` and the **minimal slice** that lands
 > in PR `feat/inference-sdk-polish`. The wire surface (`IMindlayerService`
 > AIDL, `:shared` parcelables, stream protocol) is **frozen** for this PR per
-> [`docs/AIDL_STABILITY.md`](AIDL_STABILITY.md); any future AIDL change is
+> [`docs/architecture/AIDL_STABILITY.md`](../architecture/AIDL_STABILITY.md); any future AIDL change is
 > a separate, capability-gated proposal.
 
 ## Problem statement
 
-The inference public surface on [`Mindlayer.kt`](../sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/Mindlayer.kt)
+The inference public surface on [`Mindlayer.kt`](../../sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/Mindlayer.kt)
 has grown organically across six wire generations (v0.1 → v0.8.1) and now
 spreads inference across **15+ public methods** with three different naming
 families (`chat*`, `*Once`, `generate*`), two different return shapes
@@ -179,7 +179,7 @@ A consumer wanting to use tool calling reads the `tools { }` DSL in
 `SessionConfigBuilder`, sees no top-level method called anything related
 to tools, and has to grep for `submitToolResult` to discover the round-trip.
 The intended pattern (`chat()` → collect → on `ToolCall` → `submitToolResultDetailed()`)
-is in `SDK_INTEGRATION.md` but invisible at the method-discovery level.
+is in `docs/sdk/SDK_INTEGRATION.md` but invisible at the method-discovery level.
 
 ---
 
@@ -256,7 +256,7 @@ suspend fun inferTools(
 
 The same `(sessionId, text, vararg media)` triple appears on all three. Build
 media via the existing
-[`MediaTransfer.imagePart(...)`](../sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/MediaTransfer.kt)
+[`MediaTransfer.imagePart(...)`](../../sdk/src/main/kotlin/com/adsamcik/mindlayer/sdk/MediaTransfer.kt)
 / `audioPart(...)` helpers — those are unchanged by this PR.
 
 ### What stays the same
@@ -340,7 +340,7 @@ so consumers don't have to grep through method-level KDocs.
 | `prewarmAndAwait` | `FEATURE_PREWARM_AWAIT` (falls back to fire-and-forget) | `MindlayerException` from auth gate | `RemoteException` |
 
 For the full error code vocabulary see
-[`shared/MindlayerErrorCode.kt`](../shared/src/main/kotlin/com/adsamcik/mindlayer/shared/MindlayerErrorCode.kt).
+[`shared/MindlayerErrorCode.kt`](../../shared/src/main/kotlin/com/adsamcik/mindlayer/shared/MindlayerErrorCode.kt).
 "Transparent fallback" means the SDK detects `NoSuchMethodError` /
 `AbstractMethodError` from an older service binary, swaps to a legacy
 implementation, and reports the same outcome shape to the caller.
@@ -403,7 +403,7 @@ can reuse it. No public-API change.
 - Deferred (`chatDeferred`, `fetchDeferredResult`, …): zero diff.
 - `Conversation.kt`, `MindlayerSession.kt`: zero diff (they delegate to the
   not-yet-deprecated streaming `chat` overload internally).
-- `SDK_INTEGRATION.md`: a brief addendum is in scope; full rewrite is a
+- `docs/sdk/SDK_INTEGRATION.md`: a brief addendum is in scope; full rewrite is a
   follow-up doc PR once the deprecated alias methods are scheduled for
   removal.
 
@@ -422,12 +422,12 @@ can reuse it. No public-API change.
 4. **Fold `chat(text)` / `generate(...)` into `inferAsync` overload**:
    add `inferAsync(text, configure: SessionConfigBuilder.() -> Unit)`
    that creates + destroys a temp session.
-5. **`SDK_INTEGRATION.md` rewrite** anchored on the three new top-level
+5. **`docs/sdk/SDK_INTEGRATION.md` rewrite** anchored on the three new top-level
    entry points; should happen once the deprecated aliases enter the
    `ERROR` level.
 6. **`InferenceRequest` envelope parcelable** — *requires AIDL evolution*
    (new method, schema-versioned parcelable per
-   [`docs/AIDL_STABILITY.md`](AIDL_STABILITY.md)). This is the
+   [`docs/architecture/AIDL_STABILITY.md`](../architecture/AIDL_STABILITY.md)). This is the
    long-horizon consolidation; only worth proposing once consumer apps
    actually feel pain from the positional `(meta, image, audio, pfd)`
    shape. Today's positional shape is wire-bound.
@@ -447,4 +447,4 @@ This PR makes **zero** changes to:
 Every behavioral change is contained inside `Mindlayer.kt` and a new test
 file. If any future method shape in this proposal requires a wire change,
 a separate issue will be filed and the design pass restarted from
-[`docs/AIDL_STABILITY.md`](AIDL_STABILITY.md).
+[`docs/architecture/AIDL_STABILITY.md`](../architecture/AIDL_STABILITY.md).

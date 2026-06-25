@@ -361,7 +361,7 @@ class EngineManager(
         // device had to have >= 2.6 GB available — effectively a
         // permanent refusal on 4 GB-class phones, even though the
         // file is mmap'd and only ~175 MiB of pages stay resident
-        // (empirically measured — see docs/MEMORY_TIERS_EMPIRICS.md).
+        // (empirically measured — see docs/engine/MEMORY_TIERS_EMPIRICS.md).
         //
         // The replacement gate uses an empirically-derived peak
         // residency estimate (not the on-disk file size) plus the

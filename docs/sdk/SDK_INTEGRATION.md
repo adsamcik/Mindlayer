@@ -162,8 +162,8 @@ and must be approved again.
 > to show the consent screen — fail loud and defer the work until your app next
 > has UI. Consent is expected to be granted before headless inference runs.
 
-See [`docs/AUTHORIZATION.md`](docs/AUTHORIZATION.md) and
-[`docs/CONSENT_ARCHITECTURE.md`](docs/CONSENT_ARCHITECTURE.md) for the full
+See [`docs/architecture/AUTHORIZATION.md`](../architecture/AUTHORIZATION.md) and
+[`docs/architecture/CONSENT_ARCHITECTURE.md`](../architecture/CONSENT_ARCHITECTURE.md) for the full
 authorization model, including signing-cert rotation semantics, the consent-Intent
 handshake, rate limiting, session ownership, and denial semantics.
 

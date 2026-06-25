@@ -18,7 +18,7 @@ import javax.crypto.spec.SecretKeySpec
 
 /**
  * Disk-backed registry of in-flight consent challenges, owned by the `:ml`
- * process. See `docs/CONSENT_ARCHITECTURE.md § ConsentChallengeStore`.
+ * process. See `docs/architecture/CONSENT_ARCHITECTURE.md § ConsentChallengeStore`.
  *
  * A challenge is the server-side anchor that binds a caller's verified
  * identity (UID + package + signing cert, captured via real

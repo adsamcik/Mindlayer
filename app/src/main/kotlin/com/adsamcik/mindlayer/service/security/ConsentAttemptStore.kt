@@ -35,7 +35,7 @@ sealed interface ConsentGate {
 
 /**
  * Persists per-`(packageName, signingCertSha256)` consent-attempt history and
- * a device-wide prompt throttle. See `docs/CONSENT_ARCHITECTURE.md
+ * a device-wide prompt throttle. See `docs/architecture/CONSENT_ARCHITECTURE.md
  * § ConsentAttemptStore`.
  *
  * Two anti-nag mechanisms:

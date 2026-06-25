@@ -64,7 +64,7 @@ class TokenStreamReaderProtocolTest {
     fun `unexpected pipe protocol yields PROTOCOL_MISMATCH error frame`() = runTest {
         // v4 is not in StreamProtocol.SUPPORTED, so the reader rejects it.
         // (v3 became a supported protocol when Gemma 4 thinking-mode
-        // support landed — see docs/THINKING.md.)
+        // support landed — see docs/engine/THINKING.md.)
         val futureHeader = StreamHeader(protocol = "mindlayer.stream.v4", requestId = "r1")
         val frames = listOf(
             wireFrame(json.encodeToString(StreamHeader.serializer(), futureHeader)),

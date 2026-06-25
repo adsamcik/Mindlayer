@@ -41,7 +41,7 @@ import java.util.Locale
  *    Apache-2.0 LSTM weights from `tessdata_fast` (commit-pinned at
  *    benchmark authoring time).
  *  - PaddleOCR PP-OCRv5 mobile `.tflite` artifacts must be sideloaded to
- *    `/data/local/tmp/` before running (see `docs/DEV_MODELS.md`). The
+ *    `/data/local/tmp/` before running (see `docs/models/DEV_MODELS.md`). The
  *    test skips with [assumeTrue] when the registry can't find them, so
  *    the bench is opt-in even on a fully provisioned emulator.
  *
@@ -100,7 +100,7 @@ class OcrEngineBenchmarkInstrumentedTest {
         val summaryFile = File(outputDir, "summary.txt")
 
         val bundle = discoverPaddleBundleOrSkip()
-        // Bench-only Tesseract trained-data is gitignored (see docs/OCR_BENCHMARK.md
+        // Bench-only Tesseract trained-data is gitignored (see docs/ocr/OCR_BENCHMARK.md
         // for how to stage). Self-skip cleanly when the dev didn't drop the
         // 93 MB tessdata blobs — keeps `./gradlew :app:connectedDebugAndroidTest`
         // green in default checkouts.
@@ -114,7 +114,7 @@ class OcrEngineBenchmarkInstrumentedTest {
         }
         assumeTrue(
             "Tessdata fixtures missing under assets/$BENCH_ASSET_ROOT/tessdata: " +
-                "$missingTessdata — see docs/OCR_BENCHMARK.md to stage them locally.",
+                "$missingTessdata — see docs/ocr/OCR_BENCHMARK.md to stage them locally.",
             missingTessdata.isEmpty(),
         )
 
@@ -180,7 +180,7 @@ class OcrEngineBenchmarkInstrumentedTest {
         val bundle = PaddleOcrModelRegistry.getDefaultBundle(bundles)
         assumeTrue(
             "No PaddleOCR bundle discovered. Sideload PP-OCRv5 mobile .tflite + dict.txt " +
-                "to /data/local/tmp/ (see docs/DEV_MODELS.md) before running this bench.",
+                "to /data/local/tmp/ (see docs/models/DEV_MODELS.md) before running this bench.",
             bundle != null,
         )
         return bundle!!

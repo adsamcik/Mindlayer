@@ -3,7 +3,7 @@ package com.adsamcik.mindlayer.service.security
 /**
  * The user-chosen scope of a [DeniedEntry] decision.
  *
- * See `docs/CONSENT_ARCHITECTURE.md § Denial semantics`.
+ * See `docs/architecture/CONSENT_ARCHITECTURE.md § Denial semantics`.
  *
  * - [CERT_PAIR] — denial applies only to the specific
  *   `(packageName, signingCertSha256)` tuple. A cert rotation creates a

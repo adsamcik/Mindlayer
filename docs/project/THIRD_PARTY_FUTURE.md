@@ -5,7 +5,7 @@
 > The original Phase-0 plan to "open up" Mindlayer has mostly arrived on
 > `feat/consent-architecture`: any installed app can bind, and access is gated
 > by a Mindlayer-owned per-app user-consent flow. The authoritative current
-> design is [`CONSENT_ARCHITECTURE.md`](CONSENT_ARCHITECTURE.md).
+> design is [`CONSENT_ARCHITECTURE.md`](../architecture/CONSENT_ARCHITECTURE.md).
 >
 > This document now tracks what remains future-facing and records which earlier
 > ideas were intentionally retired. Do not use the pre-consent-era plan to revive

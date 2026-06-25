@@ -55,7 +55,7 @@ internal class RealPaddleOcrLiteRtRunner private constructor(
          * the accelerator (default GPU, NPU on explicit opt-in with
          * SoC + native-library probe); coexistence with LiteRT-LM
          * remains real-device-gated. See
-         * docs/LITERT_COEXISTENCE.md for the validation checklist.
+         * docs/architecture/LITERT_COEXISTENCE.md for the validation checklist.
          */
         fun create(bundle: PaddleOcrModelInfo, acceleratorLabel: String): PaddleOcrLiteRtRunner {
             val accel = when (acceleratorLabel) {

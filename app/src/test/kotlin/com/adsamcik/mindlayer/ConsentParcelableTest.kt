@@ -21,7 +21,7 @@ import org.robolectric.annotation.Config
  *
  * These three types are the wire contract of the trust boundary: the SDK uses
  * them to drive `requestConsentChallenge` -> `lookupChallenge` ->
- * `completeConsent`. Per `docs/AIDL_STABILITY.md` they are wire-frozen once
+ * `completeConsent`. Per `docs/architecture/AIDL_STABILITY.md` they are wire-frozen once
  * shipped — a failure here means the consent wire format drifted.
  */
 @RunWith(RobolectricTestRunner::class)

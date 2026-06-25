@@ -2,7 +2,7 @@
 
 Thanks for picking up a piece of the project. The bullets below are the
 not-obvious things that catch first-time contributors; the rest is in
-`README.md` and `RELEASE.md`.
+`README.md` and `docs/project/RELEASE.md`.
 
 ## JDK requirement
 

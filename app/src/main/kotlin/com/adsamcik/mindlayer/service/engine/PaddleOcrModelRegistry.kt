@@ -335,7 +335,7 @@ object PaddleOcrModelRegistry {
      * world-readable — `dir.listFiles()` returns `null`, so
      * [bundleFromDir] returns `null` with no obvious explanation. The
      * existing `getExternalFilesDir(null)` scan IS accessible to the
-     * app's UID; the dev tooling now targets that. See docs/DEV_MODELS.md.
+     * app's UID; the dev tooling now targets that. See docs/models/DEV_MODELS.md.
      */
     private val sideloadInaccessibleWarned = AtomicBoolean(false)
 
@@ -352,7 +352,7 @@ object PaddleOcrModelRegistry {
             "Cannot list ${dir.absolutePath} on API ${Build.VERSION.SDK_INT} (apps lose " +
                 "directory-listing permission from Android 12 onward, even when individual " +
                 "files inside are world-readable). Push dev models to $ext instead — the " +
-                "registry already scans that path. See docs/DEV_MODELS.md.",
+                "registry already scans that path. See docs/models/DEV_MODELS.md.",
         )
     }
 

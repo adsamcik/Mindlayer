@@ -22,7 +22,7 @@ Three problems converge:
 
 1. **Play Store risk.** `QUERY_ALL_PACKAGES` is required today only because the dashboard's "Approve" button needs `pm.getPackageInfo()` for arbitrary client packages after a reboot. Google's policy on this permission is narrow and Mindlayer does not match any approved category. See the rejected hybrid analysis at `docs/research/what-is-the-best-most-reliable-solution-for-our-ne.md` (session artifact) for the full Play policy walk-through.
 2. **`knownSigner` API quirk.** On API 26–30 the platform silently ignores `knownSigner`, so the first-party trust story degrades to "same signing key only" on those devices. The codebase papers over this with `MindlayerErrorCode.UNSUPPORTED_ANDROID_VERSION`.
-3. **Third-party future is blocked by the current model.** `docs/THIRD_PARTY_FUTURE.md` documents a 5-step migration to drop the permission gate. This PR ships all 5 steps at once because we are in the experimental phase and the alternative (incremental shipping) leaves a long window of mixed first/third-party semantics in production.
+3. **Third-party future is blocked by the current model.** `docs/project/THIRD_PARTY_FUTURE.md` documents a 5-step migration to drop the permission gate. This PR ships all 5 steps at once because we are in the experimental phase and the alternative (incremental shipping) leaves a long window of mixed first/third-party semantics in production.
 
 The consent-challenge pattern is the standard Android idiom for this class of problem (see `MediaProjectionManager.createScreenCaptureIntent()`, `BiometricPrompt`, `CompanionDeviceManager`). It correctly identifies the caller via Binder (not Activity-level APIs, which do not carry verifiable caller identity), gives the user opaque visibility on a single decision screen, and produces zero `QUERY_ALL_PACKAGES` requirement.
 
@@ -529,13 +529,13 @@ The PR ships in 8 sequential commits, each independently reviewable. See the PR 
 4. **`ConsentActivity` UI** — Compose screens, biometric gate, three-option deny menu, opaque branded theme, overlay protection.
 5. **Drop legacy permission infrastructure** — manifest cleanup, deletion of seed lists, dashboard pending section, `DebugAllowlistSeeder`.
 6. **SDK Result API** — sealed result types, new `Mindlayer.createConsentIntent` / `connect` / `bindOrRequestConsent`, `ConnectionManager.kt` rewrite.
-7. **Sample + docs** — `samples/ocr-driver` migrated, `SDK_INTEGRATION.md` rewritten, `AUTHORIZATION.md` rewritten to absorb this doc, `THIRD_PARTY_FUTURE.md` archived.
+7. **Sample + docs** — `samples/ocr-driver` migrated, `docs/sdk/SDK_INTEGRATION.md` rewritten, `AUTHORIZATION.md` rewritten to absorb this doc, `THIRD_PARTY_FUTURE.md` archived.
 8. **Test suite** — new tests for every new component, deletion of obsolete tests, instrumented tests for `ConsentActivity`.
 
 ## References
 
 - Existing legacy model: [`AUTHORIZATION.md`](AUTHORIZATION.md) (will be rewritten in Phase 7)
-- Original third-party migration plan (this PR ships steps 1–5 at once): [`THIRD_PARTY_FUTURE.md`](THIRD_PARTY_FUTURE.md) (will be archived in Phase 7)
+- Original third-party migration plan (this PR ships steps 1–5 at once): [`THIRD_PARTY_FUTURE.md`](../project/THIRD_PARTY_FUTURE.md) (will be archived in Phase 7)
 - Adversarial design critique: see commit message of Phase 0 commit for a summary of the rubber-duck pass that informed this design
 - Play policy that motivated the change: `support.google.com/googleplay/android-developer/answer/10158779`
 - Android consent-Intent precedent: `MediaProjectionManager.createScreenCaptureIntent()`, `BiometricPrompt`, `CompanionDeviceManager`

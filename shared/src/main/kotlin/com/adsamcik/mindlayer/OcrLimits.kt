@@ -9,7 +9,7 @@ import kotlinx.parcelize.Parcelize
  *
  * Lives on a **separate parcelable** rather than as new fields on
  * [ServiceCapabilities] because the capability parcelable is wire-frozen per
- * `docs/AIDL_STABILITY.md` — adding fields would break old SDKs that decode
+ * `docs/architecture/AIDL_STABILITY.md` — adding fields would break old SDKs that decode
  * by positional layout.
  *
  * SDKs that pre-date [com.adsamcik.mindlayer.IMindlayerService.getOcrLimits]

@@ -13,7 +13,7 @@ import kotlinx.parcelize.Parcelize
  *
  * # Wire stability
  *
- * Per `docs/AIDL_STABILITY.md`: parcelables are wire-frozen once shipped.
+ * Per `docs/architecture/AIDL_STABILITY.md`: parcelables are wire-frozen once shipped.
  * [schemaVersion] is the **first** field and is currently `1`. Adding
  * fields is a wire break — use [featureFlags] for future single-bit
  * toggles or pack richer extensions into [extractionJson] (already opaque

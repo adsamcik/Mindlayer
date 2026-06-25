@@ -99,7 +99,7 @@ automatically. No manual copying, no hand-typed `-P*Sha256` flags.
 
 ```powershell
 # One-time per machine: where your vetted release model binaries live (flat
-# layout — see docs/DEV_MODELS.md § "Recommended cache layout").
+# layout — see docs/models/DEV_MODELS.md § "Recommended cache layout").
 $env:MINDLAYER_MODEL_CACHE = 'G:\mindlayer-models'
 
 ./gradlew.bat clean :app:bundleRelease

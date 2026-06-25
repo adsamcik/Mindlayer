@@ -452,7 +452,7 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
         // boundaries (the Gemma docs require thoughts to stay in
         // context across tool calls within a single turn, which is the
         // exact behaviour that distinguishes "turn boundary" from
-        // "any sendMessage boundary"). See docs/THINKING.md.
+        // "any sendMessage boundary"). See docs/engine/THINKING.md.
         val preferThinking = SessionConfigValidator.parseThinkingOptIn(config.extraContextJson)
         val effectiveSystemPrompt = effectiveSystemPromptWithoutThink
         val thinkingChannels: List<Channel> = if (preferThinking) {

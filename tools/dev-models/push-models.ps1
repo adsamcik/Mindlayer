@@ -19,7 +19,7 @@
     31+), so push-before-install only works on older devices.
 
     This script does NOT download anything. It is a pure local-file +
-    adb operation. See docs/DEV_MODELS.md for where to source models.
+    adb operation. See docs/models/DEV_MODELS.md for where to source models.
 
 .PARAMETER Gemma
     Push the chat model (Gemma 4 E2B .litertlm).
@@ -460,7 +460,7 @@ function Invoke-Group {
     foreach ($f in $Files) {
         $local = Join-Path $CacheDir $f
         if (-not (Test-Path -LiteralPath $local)) {
-            $msg = "$Label : missing '$f' in cache '$CacheDir'. See docs/DEV_MODELS.md#sources."
+            $msg = "$Label : missing '$f' in cache '$CacheDir'. See docs/models/DEV_MODELS.md#sources."
             Write-Warning $msg
             $Failures.Add($msg) | Out-Null
             continue

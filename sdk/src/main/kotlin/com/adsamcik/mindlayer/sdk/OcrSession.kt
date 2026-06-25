@@ -135,7 +135,7 @@ class OcrSessionConfigBuilder internal constructor(private val profile: OcrProfi
  * | [llmExtractPerPage] | `false` | — defer per-page LLM extraction to session finalize when enabled |
  * | [llmExtractFinal] | `true` | — aggregate-LLM extraction on `OCR_RESULT_FINALIZED.fullJson` |
  *
- * See `docs/OCR_API.md` ("Multi-page realtime (v0.9 — preview)") for
+ * See `docs/ocr/OCR_API.md` ("Multi-page realtime (v0.9 — preview)") for
  * the full boundary-detection rule and event-sequence example.
  */
 class PageBoundariesBuilder {

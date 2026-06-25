@@ -62,7 +62,7 @@ paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-*.txt
 *.onnx
 *.onnx.data
 
-# OCR engine benchmark fixtures — see `docs/OCR_BENCHMARK.md` for
+# OCR engine benchmark fixtures — see `docs/ocr/OCR_BENCHMARK.md` for
 # how to stage these locally. Excluded from git because:
 #   - `coffee-bags/` holds developer-supplied imagery that may carry
 #     PII / private brand context;

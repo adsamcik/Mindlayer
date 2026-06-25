@@ -8,7 +8,7 @@ import kotlinx.parcelize.Parcelize
  * [com.adsamcik.mindlayer.IMindlayerService.pushOcrFrame].
  *
  * Travels alongside the [MediaPart] so that the [MediaPart] contract stays
- * unchanged (per `docs/AIDL_STABILITY.md` parcelables are wire-frozen).
+ * unchanged (per `docs/architecture/AIDL_STABILITY.md` parcelables are wire-frozen).
  *
  * # Wire stability
  *

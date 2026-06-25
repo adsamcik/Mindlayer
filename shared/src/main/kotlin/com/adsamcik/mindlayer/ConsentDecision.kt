@@ -16,7 +16,7 @@ import kotlinx.parcelize.Parcelize
  *
  * # Wire stability
  *
- * Per `docs/AIDL_STABILITY.md`: parcelables are wire-frozen once shipped.
+ * Per `docs/architecture/AIDL_STABILITY.md`: parcelables are wire-frozen once shipped.
  * [schemaVersion] is the first field. The integer [kind] codes are
  * wire-stable and append-only — once allocated, never reuse.
  *

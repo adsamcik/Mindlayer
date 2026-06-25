@@ -60,7 +60,7 @@ handle.events.collect { event ->
 > `MindlayerConsent.requestConsent(context)` to show the consent screen, then
 > retry via `awaitConnected()`. Reuse one client (`Mindlayer.shared(context)`) so
 > every feature shares a single binding + consent flow. Full walkthrough and a
-> copy-paste example: [`SDK_INTEGRATION.md`](SDK_INTEGRATION.md#first-run-user-consent).
+> copy-paste example: [`docs/sdk/SDK_INTEGRATION.md`](docs/sdk/SDK_INTEGRATION.md#first-run-user-consent).
 
 ### Building
 
@@ -117,7 +117,7 @@ adb shell am start -n com.adsamcik.mindlayer.service/.ui.MainActivity
 
 ## Caller Authorization
 
-Every AIDL entry point is gated by a default-deny user-approved allowlist. The first time a client app tries to bind, Mindlayer records it as pending and rejects the call; the user approves the app explicitly from the dashboard, pinning its signing-cert SHA-256 at approval time. See [`docs/AUTHORIZATION.md`](docs/AUTHORIZATION.md) for the full flow, failure modes, and threat model, and [`SDK_INTEGRATION.md`](SDK_INTEGRATION.md#first-run-user-approval) for the client-side API.
+Every AIDL entry point is gated by a default-deny user-approved allowlist. The first time a client app tries to bind, Mindlayer records it as pending and rejects the call; the user approves the app explicitly from the dashboard, pinning its signing-cert SHA-256 at approval time. See [`docs/architecture/AUTHORIZATION.md`](docs/architecture/AUTHORIZATION.md) for the full flow, failure modes, and threat model, and [`docs/sdk/SDK_INTEGRATION.md`](docs/sdk/SDK_INTEGRATION.md#first-run-user-approval) for the client-side API.
 
 ## Model Deployment
 
@@ -125,11 +125,11 @@ The Gemma 4 E2B model (~2.4GB) is delivered via **Play for On-device AI** as an 
 
 ## Releasing
 
-Production builds for the Play Store are **signed locally**. See [`RELEASE.md`](RELEASE.md) for the full keystore setup, `:app:bundleRelease` flow, R8 troubleshooting, and Play Console upload steps.
+Production builds for the Play Store are **signed locally**. See [`docs/project/RELEASE.md`](docs/project/RELEASE.md) for the full keystore setup, `:app:bundleRelease` flow, R8 troubleshooting, and Play Console upload steps.
 
 ## Roadmap
 
-What's done, what's next, and what's gated on device validation lives in [`docs/ROADMAP.md`](docs/ROADMAP.md). It's the single source of truth for outstanding work — OCR `IS_PRODUCTION_READY` flip criteria, model artifact pipeline, the ICDAR2015 numeric validation harness, and the Phase 7/8 polish backlog.
+What's done, what's next, and what's gated on device validation lives in [`docs/project/ROADMAP.md`](docs/project/ROADMAP.md). It's the single source of truth for outstanding work — OCR `IS_PRODUCTION_READY` flip criteria, model artifact pipeline, the ICDAR2015 numeric validation harness, and the Phase 7/8 polish backlog.
 
 ## License
 

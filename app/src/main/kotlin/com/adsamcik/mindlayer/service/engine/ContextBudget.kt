@@ -58,7 +58,7 @@ const val IMAGE_TOKENS_ESTIMATE: Int = 256
  * rate. The audio encoder produces ~25 tokens/second; we round up via ceil
  * seconds so a 100 ms clip still costs at least one second of budget.
  *
- * Source: Gemma audio capabilities page (`docs/AUDIO.md`); the same value
+ * Source: Gemma audio capabilities page (`docs/engine/AUDIO.md`); the same value
  * is re-exported from `:shared` as [GemmaAudioSpec.TOKENS_PER_SECOND] so
  * SDK callers can do client-side budget arithmetic without depending on
  * the service module. Keep the two in sync — this constant intentionally

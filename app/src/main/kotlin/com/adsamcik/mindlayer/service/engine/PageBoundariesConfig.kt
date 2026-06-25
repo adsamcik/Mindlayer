@@ -12,7 +12,7 @@ import kotlinx.serialization.json.intOrNull
  *
  * Rides on [com.adsamcik.mindlayer.OcrSessionConfig.optionsJson] under the
  * `pageBoundaries` key, so the AIDL surface stays wire-frozen. See
- * `docs/OCR_API.md` ("Multi-page realtime (v0.9)") for the JSON schema.
+ * `docs/ocr/OCR_API.md` ("Multi-page realtime (v0.9)") for the JSON schema.
  *
  * # Defaults
  *

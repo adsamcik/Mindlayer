@@ -15,7 +15,7 @@ package com.adsamcik.mindlayer.sdk
  *
  * **Sensitivity:** vectors are derivable to original text via inversion
  * attacks. Do NOT log entries. Do NOT export across UIDs without explicit
- * consent. See docs/AIDL_STABILITY.md § Embeddings privacy.
+ * consent. See docs/architecture/AIDL_STABILITY.md § Embeddings privacy.
  *
  * Thread-safe: searches snapshot entries before scoring so long-running reads
  * don't block writers; writes use a single lock.

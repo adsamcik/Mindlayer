@@ -60,7 +60,7 @@ class PaddleOcrRecogniseDiagnosticInstrumentedTest {
         val assetList = context.assets.list("")?.toList().orEmpty()
         assumeTrue(
             "PaddleOCR AI Pack manifest not mirrored into the test APK; configure " +
-                "PADDLEOCR_* repository variables (see docs/MODEL_SHAS.md) and " +
+                "PADDLEOCR_* repository variables (see docs/models/MODEL_SHAS.md) and " +
                 "provision the bundle to enable this diagnostic in CI.",
             assetList.contains("paddleocr_model_integrity.json"),
         )

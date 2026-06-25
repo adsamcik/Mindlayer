@@ -137,8 +137,8 @@ Cancellation: LiteRT-LM `Conversation.cancelProcess()` is **explicit** — Flow 
 
 The old `signature|knownSigner` permission, trusted-cert array, first-party seed
 list, and API 26–30 `knownSigner` caveat are gone with the consent model. See
-[`../../docs/AUTHORIZATION.md`](../../docs/AUTHORIZATION.md) and
-[`../../docs/CONSENT_ARCHITECTURE.md`](../../docs/CONSENT_ARCHITECTURE.md).
+[`../../docs/architecture/AUTHORIZATION.md`](../../docs/architecture/AUTHORIZATION.md) and
+[`../../docs/architecture/CONSENT_ARCHITECTURE.md`](../../docs/architecture/CONSENT_ARCHITECTURE.md).
 
 ## Wire Protocol (v1)
 
@@ -153,8 +153,8 @@ list, and API 26–30 `knownSigner` caveat are gone with the consent model. See
 
 - Patterns and conventions: [`PATTERNS.md`](PATTERNS.md)
 - Build, test, release, troubleshooting: [`DEVELOPMENT.md`](DEVELOPMENT.md)
-- Authorization deep-dive: [`../../docs/AUTHORIZATION.md`](../../docs/AUTHORIZATION.md)
-- Client integration: [`../../SDK_INTEGRATION.md`](../../SDK_INTEGRATION.md)
+- Authorization deep-dive: [`../../docs/architecture/AUTHORIZATION.md`](../../docs/architecture/AUTHORIZATION.md)
+- Client integration: [`SDK_INTEGRATION.md`](../../docs/sdk/SDK_INTEGRATION.md)
 
 ## Embedding runtime addendum
 

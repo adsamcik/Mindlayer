@@ -263,7 +263,7 @@ class MindlayerMlService : Service() {
         // Phase 2 #3: PaddleOCR engine + recognition dispatcher + OCR
         // session manager — all wired here so they share the same process
         // lifecycle as the LiteRT-LM Gemma engine and the LiteRT
-        // EmbeddingGemma backend. See docs/LITERT_COEXISTENCE.md for the
+        // EmbeddingGemma backend. See docs/architecture/LITERT_COEXISTENCE.md for the
         // 8-step validation checklist that must be run on a real device
         // when GPU/NPU delegates are flipped on; the
         // `EngineCoexistenceInstrumentedTest` runs an in-process

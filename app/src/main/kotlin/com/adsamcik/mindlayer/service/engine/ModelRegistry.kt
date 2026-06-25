@@ -352,7 +352,7 @@ object ModelRegistry {
             "Cannot list ${dir.absolutePath} on API ${Build.VERSION.SDK_INT} (apps lose " +
                 "directory-listing permission from Android 12 onward, even when individual " +
                 "files inside are world-readable). Push dev models to $ext instead — the " +
-                "registry already scans that path. See docs/DEV_MODELS.md.",
+                "registry already scans that path. See docs/models/DEV_MODELS.md.",
         )
     }
 
