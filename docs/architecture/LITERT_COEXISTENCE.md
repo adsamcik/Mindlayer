@@ -1,16 +1,73 @@
 # LiteRT + LiteRT-LM same-process coexistence risk
 
-> **Status: unverified prototype risk.** Last updated: 2026-05-18.
+# LiteRT + LiteRT-LM same-process coexistence risk
+
+> **Status: real packaging collision confirmed; CPU-path crash NOT reproduced.**
+> Last updated: 2026-06-30.
 >
 > The Mindlayer service loads **two distinct LiteRT-family runtimes**
-> in the same Android process: ``com.google.ai.edge.litertlm:litertlm-android:0.12.0``
+> in the same Android process: ``com.google.ai.edge.litertlm:litertlm-android``
 > for the Gemma chat path, and ``com.google.ai.edge.litert:litert:2.1.5``
 > for the embedding (EmbeddingGemma) and OCR (PaddleOCR PP-OCRv5
-> mobile) paths. No confirmed incompatibility is known, but
-> **public LiteRT/LiteRT-LM issues show real failure modes around
-> accelerator resources, native library loading, Android linker
-> namespaces, and LiteRT symbol/version resolution** that make the
-> coexistence claim untested rather than safe-by-construction.
+> mobile) paths. Both AARs ship `libLiteRt.so` (and
+> `libLiteRtClGlAccelerator.so`) under the same SONAME at **different
+> builds**; the APK can keep only one, so one stack runs against a
+> foreign core. See **"Empirical findings (2026-06-30)"** below — on the
+> CPU/x86_64 emulator this collision is real but does **not** crash, even
+> with both runtimes active and across engine close/recreate cycles.
+
+## Empirical findings (2026-06-30)
+
+Verified directly against the built debug APK and on the emulator
+(`DualLiteRtVisionCrashInstrumentedTest`, `@Ignore`d diagnostic harness):
+
+- **The collision is real.** `litertlm-android:0.13.1` bundles
+  `libLiteRt.so` = 5,064,144 B; `litert:2.1.5` bundles
+  `libLiteRt.so` = 5,328,296 B. `app/build.gradle.kts` resolves the
+  duplicate with `packaging { jniLibs { pickFirsts += "lib/<abi>/libLiteRt*.so" } }`.
+  APK inspection shows the **kept** copy is **litert 2.1.5's** (5,328,296 B),
+  NOT litertlm's — i.e. the opposite of the in-code comment's stated intent
+  ("keep the LiteRT-LM copy"). So `liblitertlm_jni.so` dlopen()s a FOREIGN
+  `libLiteRt.so`. This is exactly checklist item #7's "loser stack" hazard.
+  (Note: litertlm 0.13.1's bundled core matches **no** published standalone
+  `litert` release — 2.1.5 is the latest — so the two cannot be version-aligned
+  off the shelf today.)
+
+- **But it does NOT crash on CPU.** Three controlled experiments inside the
+  Mindlayer APK (so `liblitertlm_jni.so` uses the mismatched core), Gemma 4 E2B,
+  `Backend.CPU()`, x86_64 Android-36 emulator — all SURVIVED, no SIGSEGV/tombstone:
+  1. two Gemma vision inferences on one engine;
+  2. base litert (`CompiledModel` EmbeddingGemma, XNNPACK) held **active** while
+     Gemma ran two vision inferences (both runtimes initialised in one process);
+  3. base litert active + **5× Gemma `Engine.close()` → new `Engine()` cycles**
+     (the documented #2028 trigger) each with a vision inference.
+
+- **The standalone single-litert harness** (`litertlm-android` only, matching
+  core) also survives the same operations — consistent: a matching core is fine.
+
+**Interpretation.** The static two-`libLiteRt.so` packaging collision is a real
+latent defect, but it is **not the proximate cause** of the observed crash on the
+CPU path. The original service-side SIGSEGV must depend on a condition this
+harness can't exercise on a SwiftShader emulator: the **GPU/NPU accelerator route**
+— where every cited upstream issue lives (#5264 multi-GPU-model coexistence,
+#2211 GPU sampler `dlopen`/linker namespace, #2292 Adreno OpenCL) and where two
+LiteRT runtimes genuinely contend for OpenCL/delegate/environment state — or a
+service-orchestration path (warm conversation slots, structured output) not
+replicated by the raw-API harness. **Next validation must run on real GPU/NPU
+hardware** (checklist below), not the emulator.
+
+### litertlm version-bump note (0.12.0 → 0.13.1)
+
+The bump builds and runs cleanly on the CPU/emulator path. It does NOT fix the
+collision — it **widens** the `libLiteRt.so` divergence (0.12.0's bundled core was
+closer to 2.1.5's). Because the conflict only plausibly bites on GPU/NPU, **0.13.1
+must be validated on real accelerator hardware before release**; on CPU it is
+no worse than 0.12.0. Proper fixes, in preference order: (a) ship a litertlm +
+litert pair built against the same LiteRT core; (b) drop the standalone `litert`
+dep and drive Embedding/PaddleOCR through litertlm's bundled core if its
+`CompiledModel` surface is exposed; (c) if keeping `pickFirst`, make it
+deterministically keep **litertlm's** copy and re-validate the base-litert
+(Embedding/OCR) paths against it.
 
 ## What we actually know
 
@@ -18,7 +75,7 @@
 - **LiteRT 2.1.5** (`com.google.ai.edge.litert:litert:2.1.5`,
   published 2026-05-15) — Maven dependencies: Android lifecycle,
   AI delivery, Guava, coroutines-guava.
-- **LiteRT-LM 0.12.0** (`com.google.ai.edge.litertlm:litertlm-android:0.12.0`)
+- **LiteRT-LM 0.13.1** (`com.google.ai.edge.litertlm:litertlm-android:0.13.1`)
   — Maven dependencies: Gson, Kotlin
   reflection, coroutines-android.
 
@@ -37,7 +94,7 @@ loading still works, but GPU/NPU acceleration runs through
 both use `CompiledModel` for accelerated inference.
 
 ### LiteRT-LM has its own backend surface
-`LiteRT-LM` 0.12.0 exposes `Backend.CPU()`, `Backend.GPU()`,
+`LiteRT-LM` 0.13.1 exposes `Backend.CPU()`, `Backend.GPU()`,
 `Backend.NPU(...)` in its Kotlin API. It also requires Android
 manifest entries declaring native libraries such as
 `libvndksupport.so` and `libOpenCL.so`, and may require passing
