@@ -214,6 +214,24 @@ interface Mindlayer {
     suspend fun openSession(configure: SessionScope.() -> Unit = {}): MindlayerSession =
         error("Mindlayer v1 — C2 lands behaviour")
 
+    /**
+     * Start a genuine multi-turn conversation: the server-side session is
+     * created lazily on the first [Conversation.chat] call and reused across
+     * every subsequent call (text-only or image-bearing), so the model sees
+     * its own prior turns as real conversational history rather than a fresh
+     * one-shot prompt each time.
+     *
+     * ```kotlin
+     * val conv = mindlayer.conversation {
+     *     systemPrompt("You are a helpful barista.")
+     * }
+     * val response = conv.chat("What's a cortado?")
+     * conv.close()
+     * ```
+     */
+    fun conversation(configure: ConversationBuilder.() -> Unit = {}): Conversation =
+        error("Mindlayer v1 — C2 lands behaviour")
+
     companion object {
         /**
          * Construct a [Mindlayer] client bound to the on-device service and
