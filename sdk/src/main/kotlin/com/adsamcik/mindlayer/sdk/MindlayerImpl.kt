@@ -2248,7 +2248,7 @@ internal class MindlayerImpl(
      * conv.close()
      * ```
      */
-    fun conversation(configure: ConversationBuilder.() -> Unit = {}): Conversation {
+    override fun conversation(configure: ConversationBuilder.() -> Unit): Conversation {
         val config = ConversationBuilder().apply(configure).build()
         return Conversation(this, config)
     }
