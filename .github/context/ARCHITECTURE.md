@@ -74,7 +74,7 @@ Cross-process state (allowlist) is a JSON file under the service's `filesDir/min
 |---|---|---|
 | `MindlayerMlService` | `app/.../service/MindlayerMlService.kt` | Hosts the binder; promotes to FGS `specialUse` only during active inference; routes `onTrimMemory` to `MemoryBudget`. `START_NOT_STICKY`. |
 | `ServiceBinder` | `app/.../service/ServiceBinder.kt` | AIDL stub. Every real entry point starts with `authorizeCall()` (4-stage gate). Binder-death linkage tears down a UID's sessions when its process dies. |
-| `EngineManager` | `app/.../engine/EngineManager.kt` | LiteRT-LM `Engine` lifecycle. Backend chain: NPU (when supported SoC) → GPU → CPU. Init can take ~10 s — never block the main thread. Mutex-serialized. |
+| `EngineManager` | `app/.../engine/EngineManager.kt` | LiteRT-LM `Engine` lifecycle. Backend chain: NPU (when supported SoC) → GPU → CPU. Init can take up to ~15 s (observed ~14 s on a Gemma 4 E2B model) — never block the main thread. Mutex-serialized. |
 | `SessionManager` | `app/.../engine/SessionManager.kt` | Per-session `Conversation` instances. Memory-pressure eviction by priority (streaming +1000, pinned +400, recent +300/150, hint 0–100). Per-session `Mutex`. |
 | `InferenceOrchestrator` | `app/.../engine/InferenceOrchestrator.kt` | Streams tokens to a PFD pipe; cancellation via `cancelInference(requestId)`; bridges tool calls to the client and awaits results. `MAX_TOOL_ROUNDS = 25`. |
 | `ThermalMonitor` | `app/.../engine/ThermalMonitor.kt` | Samples `getCurrentThermalStatus` + `getThermalHeadroom` at 1 Hz. Emits `ThermalPolicy` via `StateFlow`. Backend switches happen at request boundaries only. |
