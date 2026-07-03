@@ -176,7 +176,14 @@ internal class MindlayerImpl(
             "Tool calls are not supported in one-shot mode. " +
             "Use the streaming chat() API with a ToolCall handler instead."
 
-        private const val DEFAULT_CREATE_SESSION_INIT_RETRY_TIMEOUT_MS = 10_000L
+        // F-018 follow-up: the original 10s budget assumed a "~5-10s"
+        // cold-start init, but real-device measurement on a Gemma 4 E2B
+        // (~2.5GB) model logged "Engine initialized: ... time=14.100324s" —
+        // already past the old deadline before accounting for slower devices
+        // or larger models. Raised to 60s so createSession() callers who
+        // don't prewarm() aren't handed a hard ENGINE_INITIALIZING failure
+        // mid-init on realistic hardware/model sizes.
+        private const val DEFAULT_CREATE_SESSION_INIT_RETRY_TIMEOUT_MS = 60_000L
         private val DEFAULT_CREATE_SESSION_INIT_RETRY_BACKOFF_MS = listOf(50L, 200L, 800L)
 
         /**
@@ -1286,7 +1293,9 @@ internal class MindlayerImpl(
     /**
      * Pre-warm the LLM engine in the background (fire-and-forget). Call this
      * early (e.g. when an inference-bound screen opens) so the first
-     * [createSession] doesn't pay the ~5-10 s cold-start cost. Safe to call
+     * [createSession] doesn't pay the cold-start cost (measured up to ~14s on
+     * a Gemma 4 E2B / ~2.5GB model on real hardware — see
+     * [DEFAULT_CREATE_SESSION_INIT_RETRY_TIMEOUT_MS]). Safe to call
      * multiple times — subsequent calls are no-ops if the engine is already
      * loaded.
      *
@@ -1366,11 +1375,13 @@ internal class MindlayerImpl(
         historyStore?.prepareConversation(tentativeId, configWithId)
 
         // 2. Create remote session.
-        // F-018: if the service responds with `engine_initializing`, the
-        // engine is doing its (~5–10 s) cold-start init on a dedicated
-        // background slot. Retry with exponential backoff up to ~10 s
-        // total before giving up so first-launch UX matches the
-        // documented "5–10 s cold-start wait" contract.
+        // F-018 (extended): if the service responds with `engine_initializing`,
+        // the engine is doing its cold-start init on a dedicated background
+        // slot — measured up to ~14s on a Gemma 4 E2B (~2.5GB) model on real
+        // hardware. Retry with exponential backoff up to
+        // DEFAULT_CREATE_SESSION_INIT_RETRY_TIMEOUT_MS (60s) total before
+        // giving up, so callers who skip prewarm() aren't handed a spurious
+        // failure while the engine is still legitimately loading.
         val sessionId = try {
             createSessionWithInitRetry(configWithId)
         } catch (e: Exception) {

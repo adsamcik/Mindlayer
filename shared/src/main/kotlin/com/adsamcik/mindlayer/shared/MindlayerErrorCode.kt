@@ -40,7 +40,7 @@ object MindlayerErrorCode {
 
     // ---- 1xxx engine lifecycle ---------------------------------------------
 
-    /** Engine is performing cold-start init (~5–10 s). Caller should retry with backoff. */
+    /** Engine is performing cold-start init (up to ~60 s budget on the SDK retry path; observed up to ~14 s on real hardware). Caller should retry with backoff. */
     const val ENGINE_INITIALIZING = 1001
 
     /** Engine load failed (model missing, integrity check failed, OOM during load). */
