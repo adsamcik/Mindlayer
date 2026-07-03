@@ -56,7 +56,7 @@ log(LogEntry(extraJson = """{"prompt":"$userText"}"""))   // NEVER persist conte
 |---|---|---|
 | Service / orchestrator scopes | `CoroutineScope(SupervisorJob() + Dispatchers.Default)` | Failure of one job must not cancel siblings. |
 | `LogRepository`, disk/Room, file I/O | `Dispatchers.IO` (or `withContext(Dispatchers.IO)`) | Blocking work off CPU dispatcher. |
-| Engine init | `withContext(Dispatchers.IO)` inside a global `Mutex` | Native init can take ~10 s and must not run twice. |
+| Engine init | `withContext(Dispatchers.IO)` inside a global `Mutex` | Native init can take up to ~15 s (observed ~14 s on a Gemma 4 E2B model) and must not run twice. |
 | Per-session sends | `Mutex` per `SessionHandle` (`SessionManager.kt`) | Single-writer per session; concurrent sessions OK. |
 | State exposure | `private val _x = MutableStateFlow(...)` + `val x: StateFlow<...> = _x.asStateFlow()` | UI/observers consume immutable view. |
 | Cancellation | LiteRT-LM `Conversation.cancelProcess()` is **explicit** — Flow cancellation alone does NOT stop native work | See `InferenceOrchestrator.cancelInference` (`handle.conversation.cancelProcess()`). |

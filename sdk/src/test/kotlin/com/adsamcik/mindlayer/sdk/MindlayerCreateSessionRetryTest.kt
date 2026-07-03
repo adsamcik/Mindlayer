@@ -91,6 +91,19 @@ class MindlayerCreateSessionRetryTest {
     // ---- Tests --------------------------------------------------------------
 
     @Test
+    fun `default createSessionInitRetryTimeoutMs is 60 seconds`() {
+        // setUp() overrides the shared `mindlayer` instance's timeout for
+        // every other test in this class, so build a SEPARATE fresh instance
+        // here to pin the actual production default
+        // (DEFAULT_CREATE_SESSION_INIT_RETRY_TIMEOUT_MS) against accidental
+        // future changes — this constant was silently untested before (it
+        // was raised from 10s to 60s because a real cold-start init measured
+        // ~14s, past the old 10s budget).
+        val freshMindlayer = buildMindlayer(mockConnection, null)
+        assertEquals(60_000L, freshMindlayer.createSessionInitRetryTimeoutMs)
+    }
+
+    @Test
     fun `retries on engine_initializing then succeeds`() = runTest {
         var attempts = 0
         every { mockService.createSession(any()) } answers {

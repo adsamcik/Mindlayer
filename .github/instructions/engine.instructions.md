@@ -14,7 +14,7 @@ EngineConfig → Engine(config) → engine.initialize()
     → conversation.cancelProcess()        // EXPLICIT cancellation (Flow cancel ≠ stop)
 ```
 
-- `Engine` init can take **up to ~10 s**. Never block the main thread; `EngineManager` runs init under a global `Mutex` on `Dispatchers.IO`.
+- `Engine` init can take **up to ~15 s** (observed ~14 s on a Gemma 4 E2B model). Never block the main thread; `EngineManager` runs init under a global `Mutex` on `Dispatchers.IO`.
 - Backend chain: NPU (only on known SoC families — see `EngineManager.QUALCOMM_NPU_SOCS`/`MEDIATEK_NPU_SOCS`) → GPU → CPU. Switch at request boundaries only, never mid-stream.
 - `lastGpuFailureReason` and `currentBackend` are observable for the dashboard.
 - A backend fallback recreates the `Engine`. Existing `Conversation` instances are invalidated — `SessionManager` recreates them lazily on next use.
