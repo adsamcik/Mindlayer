@@ -30,10 +30,12 @@ import org.robolectric.annotation.Config
  * path.
  *
  * As of v02-error-codes the service throws Binder-safe runtime exceptions with
- * a prefixed [MindlayerErrorCode] while LiteRT-LM is doing its (~5–10 s)
- * cold-start init. The SDK must not surface this to user code on first launch
- * — instead retry with exponential backoff up to 10 s total. Other typed errors
- * propagate immediately wrapped as [MindlayerException].
+ * a prefixed [MindlayerErrorCode] while LiteRT-LM is doing its cold-start init
+ * — measured up to ~14s on a Gemma 4 E2B (~2.5GB) model on real hardware. The
+ * SDK must not surface this to user code on first launch — instead retry with
+ * exponential backoff up to `DEFAULT_CREATE_SESSION_INIT_RETRY_TIMEOUT_MS`
+ * (60s) total. Other typed errors propagate immediately wrapped as
+ * [MindlayerException].
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
