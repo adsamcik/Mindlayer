@@ -71,14 +71,21 @@ enum class JsonValidationDepth(internal val wire: String) {
 /**
  * DSL builder for requesting structured JSON output from the model.
  *
- * Produced via [SessionConfigBuilder.jsonOutput]:
+ * Configured via the public [SessionScope.jsonOutput] (inside `openSession { }`
+ * or `infer { ephemeralSession { } }`) or the internal
+ * [SessionConfigBuilder.jsonOutput]:
  *
  * ```kotlin
  * mindlayer.openSession {
  *     systemPrompt = "You extract fields."
+ *     jsonOutput {
+ *         schema("""{"type":"object","properties":{"name":{"type":"string"}}}""")
+ *         strategy(JsonOutputStrategy.PromptAndValidate)
+ *     }
  * }
- * // or via infer { }:
+ * // or per-inference on an ephemeral session:
  * mindlayer.infer {
+ *     ephemeralSession { jsonOutput { schema(mySchema) } }
  *     text("extract fields from this text")
  * }
  * ```
@@ -145,7 +152,7 @@ class JsonOutputBuilder internal constructor() {
      * intend to validate the response with your own full-schema validator
      * client-side and want the service to skip retries on shape errors.
      */
-    fun validation(depth: JsonValidationDepth) {
+    fun validationDepth(depth: JsonValidationDepth) {
         validationDepth = depth
     }
 

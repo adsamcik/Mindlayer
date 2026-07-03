@@ -33,8 +33,6 @@ interface SessionScope {
      * Default: `null` (no tools configured).
      */
     var toolsJson: String?
-        get() = null
-        set(_) {}
 
     /**
      * Opaque JSON object passed to the service as `extraContextJson`.
@@ -42,11 +40,47 @@ interface SessionScope {
      * ```kotlin
      * openSession { extraContextJson = """{"thinking":{"enable":true}}""" }
      * ```
+     * Prefer the typed [jsonOutput] helper over hand-building a
+     * `structured_output` envelope string here.
+     *
      * Default: `null` (no extra context).
      */
     var extraContextJson: String?
-        get() = null
-        set(_) {}
+
+    /**
+     * Request schema-constrained structured JSON output for this session.
+     *
+     * Configure the [JsonOutputBuilder] and this merges the resulting
+     * `{"structured_output":{schema,strategy,max_retries,validation_depth}}`
+     * envelope into [extraContextJson] — the exact wire contract the Mindlayer
+     * service's structured-output engine consumes (single-sourced through
+     * [JsonOutputBuilder.build], the same one the internal
+     * [SessionConfigBuilder.jsonOutput] emits). Other keys already present on
+     * [extraContextJson] are preserved; only a `structured_output` key is
+     * replaced. This lets apps enum-constrain a session without hand-building
+     * the envelope string.
+     *
+     * ```kotlin
+     * mindlayer.openSession {
+     *     systemPrompt = "You classify support tickets."
+     *     jsonOutput {
+     *         schema("""{"type":"object","properties":{"severity":{"enum":["low","high"]}},"required":["severity"]}""")
+     *         strategy(JsonOutputStrategy.PromptAndValidate)
+     *         maxRetries(3)
+     *         validationDepth(JsonValidationDepth.SHALLOW)
+     *     }
+     * }
+     * ```
+     *
+     * Works the same inside `infer { ephemeralSession { jsonOutput { … } } }`.
+     * If the connected service predates structured output the envelope is a
+     * graceful no-op. For security-critical schemas, re-validate the response
+     * locally — see [JsonValidationDepth].
+     */
+    fun jsonOutput(block: JsonOutputBuilder.() -> Unit) {
+        val envelope = JsonOutputBuilder().apply(block).build()
+        extraContextJson = mergeExtraContext(extraContextJson, envelope)
+    }
 }
 
 /**

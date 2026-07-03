@@ -8,6 +8,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.adsamcik.mindlayer.IMindlayerService
 import com.adsamcik.mindlayer.RequestMeta
 import com.adsamcik.mindlayer.ServiceStatus
+import com.adsamcik.mindlayer.SessionConfig
 import com.adsamcik.mindlayer.sdk.db.MindlayerDatabase
 import io.mockk.coEvery
 import io.mockk.every
@@ -19,6 +20,12 @@ import io.mockk.verify
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -274,5 +281,208 @@ class MindlayerInferStreamingTest {
         verify(exactly = 1) { mockService.createSession(any()) }
         // Session must still be destroyed for cleanup
         verify(exactly = 1) { mockService.destroySession("ephemeral-session-1") }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Test: outputJson(schema) actually reaches the service as the
+    //  `structured_output` envelope (regression: the schema used to be
+    //  silently dropped, so enum/type validation never ran server-side).
+    // ═══════════════════════════════════════════════════════════════════
+
+    private val enumSchema = JsonSchema.parse(
+        """
+        {"type":"object","properties":{"status":{"type":"string","enum":["active","inactive"]}},"required":["status"]}
+        """.trimIndent(),
+    )
+
+    @Test
+    fun `infer ephemeral with outputJson emits structured_output envelope`() = runTest {
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "ephemeral-session-1"
+
+        val pfdSlot = slot<ParcelFileDescriptor>()
+        every {
+            mockService.infer(any(), any(), any(), capture(pfdSlot))
+        } answers {
+            pfdSlot.captured.close()
+        }
+
+        val handle = mindlayer.infer {
+            ephemeralSession {}
+            text("Classify this")
+            outputJson(enumSchema)
+        }
+        handle.events.toList()
+
+        assertTrue("createSession must receive a config", configSlot.isCaptured)
+        val extra = configSlot.captured.extraContextJson
+        assertNotNull("outputJson must populate extraContextJson", extra)
+
+        val env = Json.parseToJsonElement(extra!!).jsonObject
+        val so = env["structured_output"]!!.jsonObject
+        // Strategy + retries come from JsonOutputBuilder defaults.
+        assertEquals("prompt_and_validate", so["strategy"]!!.jsonPrimitive.content)
+        assertEquals(3, so["max_retries"]!!.jsonPrimitive.int)
+        // The enum schema must survive verbatim so server-side validation runs.
+        val statusEnum = so["schema"]!!.jsonObject["properties"]!!
+            .jsonObject["status"]!!.jsonObject["enum"]!!.jsonArray
+        assertEquals("active", statusEnum[0].jsonPrimitive.content)
+        assertEquals("inactive", statusEnum[1].jsonPrimitive.content)
+    }
+
+    @Test
+    fun `extractJson emits structured_output envelope with the schema`() = runTest {
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "ephemeral-session-1"
+
+        val pfdSlot = slot<ParcelFileDescriptor>()
+        every {
+            mockService.infer(any(), any(), any(), capture(pfdSlot))
+        } answers {
+            pfdSlot.captured.close()
+        }
+
+        // extractJson awaits JSON at the end; the empty EOF stream makes
+        // awaitJson throw, but the session is created (with the schema) first,
+        // which is exactly what we assert on.
+        runCatching {
+            mindlayer.extractJson(prompt = "Classify this", schema = enumSchema)
+        }
+
+        assertTrue("createSession must receive a config", configSlot.isCaptured)
+        val env = Json.parseToJsonElement(configSlot.captured.extraContextJson!!).jsonObject
+        val so = env["structured_output"]!!.jsonObject
+        assertNotNull("extractJson must carry the schema", so["schema"])
+        assertEquals("prompt_and_validate", so["strategy"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `infer outputJson merges with caller extraContextJson without clobbering`() = runTest {
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "ephemeral-session-1"
+
+        val pfdSlot = slot<ParcelFileDescriptor>()
+        every {
+            mockService.infer(any(), any(), any(), capture(pfdSlot))
+        } answers {
+            pfdSlot.captured.close()
+        }
+
+        val handle = mindlayer.infer {
+            ephemeralSession {
+                extraContextJson = """{"grounding":"foo"}"""
+            }
+            text("Classify this")
+            outputJson(enumSchema)
+        }
+        handle.events.toList()
+
+        val env = Json.parseToJsonElement(configSlot.captured.extraContextJson!!).jsonObject
+        assertEquals(
+            "caller extraContextJson keys must survive the structured_output merge",
+            "foo",
+            env["grounding"]!!.jsonPrimitive.content,
+        )
+        assertNotNull("structured_output must be merged in", env["structured_output"])
+    }
+
+    @Test
+    fun `infer outputJson tool_routing strategy propagates`() = runTest {
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "ephemeral-session-1"
+
+        val pfdSlot = slot<ParcelFileDescriptor>()
+        every {
+            mockService.infer(any(), any(), any(), capture(pfdSlot))
+        } answers {
+            pfdSlot.captured.close()
+        }
+
+        val handle = mindlayer.infer {
+            ephemeralSession {}
+            text("Classify this")
+            outputJson(enumSchema, JsonOutputStrategy.ToolRouting)
+        }
+        handle.events.toList()
+
+        val env = Json.parseToJsonElement(configSlot.captured.extraContextJson!!).jsonObject
+        assertEquals(
+            "tool_routing",
+            env["structured_output"]!!.jsonObject["strategy"]!!.jsonPrimitive.content,
+        )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Test: the public SessionScope.jsonOutput { } DSL reaches the
+    //  service as the structured_output envelope, from both entry points.
+    // ═══════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `openSession with jsonOutput DSL emits structured_output envelope`() = runTest {
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "ephemeral-session-1"
+
+        mindlayer.openSession {
+            systemPrompt = "You classify tickets."
+            jsonOutput {
+                schema(enumSchema.json)
+                strategy(JsonOutputStrategy.PromptAndValidate)
+            }
+        }
+
+        assertTrue("openSession must create a session", configSlot.isCaptured)
+        val so = Json.parseToJsonElement(configSlot.captured.extraContextJson!!)
+            .jsonObject["structured_output"]!!.jsonObject
+        assertEquals("prompt_and_validate", so["strategy"]!!.jsonPrimitive.content)
+        assertEquals(3, so["max_retries"]!!.jsonPrimitive.int)
+        val statusEnum = so["schema"]!!.jsonObject["properties"]!!
+            .jsonObject["status"]!!.jsonObject["enum"]!!.jsonArray
+        assertEquals("active", statusEnum[0].jsonPrimitive.content)
+        assertEquals("inactive", statusEnum[1].jsonPrimitive.content)
+    }
+
+    @Test
+    fun `infer ephemeralSession jsonOutput DSL emits structured_output envelope`() = runTest {
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "ephemeral-session-1"
+
+        val pfdSlot = slot<ParcelFileDescriptor>()
+        every {
+            mockService.infer(any(), any(), any(), capture(pfdSlot))
+        } answers {
+            pfdSlot.captured.close()
+        }
+
+        val handle = mindlayer.infer {
+            ephemeralSession {
+                jsonOutput { schema(enumSchema.json) }
+            }
+            text("Classify this")
+        }
+        handle.events.toList()
+
+        val so = Json.parseToJsonElement(configSlot.captured.extraContextJson!!)
+            .jsonObject["structured_output"]!!.jsonObject
+        assertNotNull("ephemeralSession jsonOutput must carry the schema", so["schema"])
+        assertEquals("prompt_and_validate", so["strategy"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `openSession jsonOutput DSL merges with manual extraContextJson`() = runTest {
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "ephemeral-session-1"
+
+        mindlayer.openSession {
+            extraContextJson = """{"thinking":{"enable":true}}"""
+            jsonOutput { schema(enumSchema.json) }
+        }
+
+        val env = Json.parseToJsonElement(configSlot.captured.extraContextJson!!).jsonObject
+        assertEquals(
+            "manual extraContextJson keys must survive the jsonOutput merge",
+            true,
+            env["thinking"]!!.jsonObject["enable"]!!.jsonPrimitive.boolean,
+        )
+        assertNotNull("structured_output must be merged in", env["structured_output"])
     }
 }

@@ -71,7 +71,21 @@ return working handles. Terminals:
 
 - `InferenceHandle.Text.awaitText(): String`
 - `InferenceHandle.Structured.awaitJson(): JsonObject` (lenient parse — strips
-  ```` ```json ```` fences and isolates the outermost JSON object)
+  ```` ```json ```` fences and isolates the outermost JSON object). As of the
+  current `[Unreleased]` line, `infer { outputJson(schema) }` and the
+  `extractJson(...)` helper now **enforce** the schema: the ephemeral session is
+  created with the `{"structured_output":{schema,strategy,max_retries,validation_depth}}`
+  envelope (the same one `SessionConfigBuilder.jsonOutput { }` emits), so the
+  service validates `enum`/`type`/`required`/… and retries or fails closed.
+  Strategy defaults to `PromptAndValidate` (pass
+  `outputJson(schema, JsonOutputStrategy.ToolRouting)` to switch);
+  `max_retries`/`validation_depth` use the `JsonOutputBuilder` defaults (`3` /
+  `shallow`). `awaitJson()` itself still does the lenient client-side extraction —
+  enforcement is server-side. Note: this wiring applies to ephemeral sessions
+  (`infer { outputJson(...) }` / `extractJson(...)`); for a **named** session,
+  configure the schema up-front via `openSession { jsonOutput { … } }` (or
+  `extraContextJson`), because a per-`infer` `outputJson` cannot re-configure an
+  already-created session.
 - `InferenceHandle.Tools.awaitToolCalls(): List<ToolCall>`
 
 ### 3. Cancellation API removed
@@ -83,6 +97,44 @@ consumer-facing replacement in alpha.
 `connect()` returns the `Mindlayer` interface. `prewarm(backend)` and
 `getEngineInfo()` are now declared on that interface (previously only on the
 implementation), so consumers can call them on the connected handle.
+
+### 5. Public `SessionScope.jsonOutput { }` DSL (+ `SessionScope` breaking change)
+Structured JSON output is now a first-class, typed session knob — apps no longer
+hand-build the `extraContextJson` `structured_output` envelope string:
+
+```kotlin
+// before — hand-built envelope string, easy to get the wire shape wrong:
+mindlayer.openSession {
+    extraContextJson =
+        """{"structured_output":{"schema":{"type":"object","properties":{"severity":{"enum":["low","high"]}}},"strategy":"prompt_and_validate","max_retries":3,"validation_depth":"shallow"}}"""
+}
+
+// after — typed DSL, single-sourced through JsonOutputBuilder:
+mindlayer.openSession {
+    systemPrompt = "You classify support tickets."
+    jsonOutput {
+        schema("""{"type":"object","properties":{"severity":{"enum":["low","high"]}},"required":["severity"]}""")
+        strategy(JsonOutputStrategy.PromptAndValidate)
+        maxRetries(3)
+        validationDepth(JsonValidationDepth.SHALLOW)
+    }
+}
+```
+
+The same `jsonOutput { }` works inside `infer { ephemeralSession { … } }`. It
+merges the envelope into `extraContextJson` (preserving other keys; replacing an
+existing `structured_output`).
+
+Two **breaking** knock-on changes:
+
+- `SessionScope.toolsJson` and `SessionScope.extraContextJson` changed from `var`s
+  with no-op default getters/setters to **abstract** interface members. Callers of
+  `openSession { }` / `infer { ephemeralSession { } }` are unaffected (the
+  first-party implementer already backed them with real fields). Only code that
+  *directly implements* `SessionScope` (e.g. an `object : SessionScope { }`) must
+  now provide both properties.
+- `JsonOutputBuilder.validation(depth)` was renamed to `validationDepth(depth)`
+  (matches the DSL example above and the internal field). Update any call sites.
 
 ## Intentional alpha deviations
 

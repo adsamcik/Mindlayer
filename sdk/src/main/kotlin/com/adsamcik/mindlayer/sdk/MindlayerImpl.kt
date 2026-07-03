@@ -330,8 +330,12 @@ internal class MindlayerImpl(
      * canonical request onto the real streaming inference path.
      *
      * - Named session: streams token-by-token via [runStreamingInference].
-     * - Ephemeral session: creates a session (with tools if OutputMode.Tools),
-     *   streams via [runStreamingInference], destroys the session on completion.
+     * - Ephemeral session: creates a session (with tools if OutputMode.Tools,
+     *   with the `structured_output` envelope if OutputMode.Json), streams via
+     *   [runStreamingInference], destroys the session on completion.
+     * - OutputMode.Json: supported — the schema is emitted into the ephemeral
+     *   session's `extraContextJson` so the service validates (and retries) the
+     *   response against it. See [sessionConfigureFrom].
      * - OutputMode.Tools: supported — [InferenceEvent.ToolCall] events surface
      *   to the caller. When [InferenceRequest.Builder.onToolCall] is set, the
      *   SDK additionally runs the tool calls automatically (invoke handler →
@@ -444,11 +448,19 @@ internal class MindlayerImpl(
      * Translate the [SessionScope] / [SamplerScope] captured by an inference
      * request into a [SessionConfigBuilder] configure block for the ephemeral
      * one-shot session. [SamplerScope.seed] is dropped (no builder field).
+     *
+     * [InferenceRequest.OutputMode.Json] is materialised here into the
+     * `structured_output` envelope on the session's `extraContextJson` so the
+     * service actually validates the response against the schema — without this
+     * the `outputJson(...)` / `extractJson(...)` request would silently drop the
+     * schema. [InferenceRequest.OutputMode.Tools] is materialised into the
+     * session's tools JSON.
      */
     private fun sessionConfigureFrom(request: InferenceRequest.Builder): SessionConfigBuilder.() -> Unit {
         val session = CapturedSessionScope().apply { request.sessionConfigure?.invoke(this) }
         val sampler = CapturedSamplerScope().apply { request.samplerConfigure?.invoke(this) }
-        val toolsJsonFromOutput = when (val mode = request.outputMode) {
+        val mode = request.outputMode
+        val toolsJsonFromOutput = when (mode) {
             is InferenceRequest.OutputMode.Tools -> toolSpecListToJson(mode.tools)
             else -> null
         }
@@ -461,7 +473,19 @@ internal class MindlayerImpl(
             // Tools from SessionScope take priority; fall back to OutputMode.Tools
             val effectiveToolsJson = session.toolsJson ?: toolsJsonFromOutput
             effectiveToolsJson?.let { toolsJsonRaw(it) }
+            // Apply any caller-provided extra context first so the structured
+            // output envelope below merges into it instead of clobbering it.
             session.extraContextJson?.let { extraContext(it) }
+            // OutputMode.Json: emit the `structured_output` envelope the service
+            // consumes so the response is validated against the schema (with the
+            // generate → validate → retry semantics). Reuses the single-sourced
+            // wire shape from JsonOutputBuilder via SessionConfigBuilder.jsonOutput.
+            if (mode is InferenceRequest.OutputMode.Json) {
+                jsonOutput {
+                    schema(mode.schema.json)
+                    strategy(mode.strategy)
+                }
+            }
         }
     }
 

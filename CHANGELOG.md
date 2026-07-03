@@ -6,6 +6,53 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+SDK Maven coordinate → `1.0.0-alpha.3` (`com.adsamcik.mindlayer:sdk:1.0.0-alpha.3`).
+
+### Added
+- **Public structured-output DSL: `SessionScope.jsonOutput { }`.** Apps can now
+  enum-/type-constrain a session without hand-building the
+  `extraContextJson` `structured_output` envelope string. Usable from both
+  `openSession { jsonOutput { schema(...) } }` and
+  `infer { ephemeralSession { jsonOutput { schema(...) } } }`. It configures the
+  same public `JsonOutputBuilder` the internal `SessionConfigBuilder.jsonOutput { }`
+  uses (single-sourced wire shape via `JsonOutputBuilder.build()`) and merges the
+  `{"structured_output":{schema,strategy,max_retries,validation_depth}}` envelope
+  into `extraContextJson` without clobbering other keys.
+
+### Changed (breaking — SDK v1, approved)
+- **`SessionScope.toolsJson` / `SessionScope.extraContextJson` are now abstract**
+  interface members (previously `var`s with no-op default getters/setters). This
+  makes the contract honest and lets the new default `jsonOutput { }` reliably
+  capture into `extraContextJson`. The only in-tree implementer
+  (`CapturedSessionScope`) already backed both with real fields, so no behaviour
+  changed for `openSession { }` / `infer { ephemeralSession { } }` callers. Any
+  external type that *implements* `SessionScope` directly must now provide both
+  properties. Before/after:
+  ```kotlin
+  // before — no-op defaults, an external `object : SessionScope { }` compiled
+  //          without implementing these (and silently dropped writes):
+  interface SessionScope { var extraContextJson: String? get() = null; set(_) {} }
+  // after — abstract; implementers must back it (all first-party ones already do):
+  interface SessionScope { var extraContextJson: String? }
+  ```
+- **`JsonOutputBuilder.validation(depth)` renamed to `validationDepth(depth)`** to
+  match the field name and read cleanly in the DSL
+  (`jsonOutput { … validationDepth(JsonValidationDepth.SHALLOW) }`). No in-tree
+  call sites existed.
+
+### Fixed
+- **`infer { outputJson(schema) }` / `extractJson(...)` now enforce the schema.**
+  The public structured-output path built an `OutputMode.Json` that was never
+  consumed, so the schema was silently dropped and the service never ran
+  `enum`/`type`/`required` validation. The ephemeral-session builder now
+  materialises `OutputMode.Json` into the same `{"structured_output":{…}}`
+  envelope that `SessionConfigBuilder.jsonOutput { }` already emits (reusing
+  `JsonOutputBuilder` so the wire shape stays single-sourced), merged into
+  `extraContextJson` without clobbering caller-supplied keys. The service's
+  generate → validate → retry → fail-closed path now runs for these entry
+  points. `awaitJson()`'s lenient client-side parse is unchanged; schema
+  enforcement is server-side.
+
 ### Changed
 - **`targetSdk` 36 → 37 (Android 17 / API 37).** `:app` and the
   `samples/ocr-driver` sample now target API 37; `compileSdk` was already 37.
@@ -17,6 +64,19 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   network/local-network/SMS/contacts/WebView/background-audio surfaces. The
   on-device `static final`-via-reflection restriction does not affect the
   host-JVM unit tests.
+
+### Fixed
+- **`infer { outputJson(schema) }` / `extractJson(...)` now enforce the schema.**
+  The public structured-output path built an `OutputMode.Json` that was never
+  consumed, so the schema was silently dropped and the service never ran
+  `enum`/`type`/`required` validation. The ephemeral-session builder now
+  materialises `OutputMode.Json` into the same `{"structured_output":{…}}`
+  envelope that `SessionConfigBuilder.jsonOutput { }` already emits (reusing
+  `JsonOutputBuilder` so the wire shape stays single-sourced), merged into
+  `extraContextJson` without clobbering caller-supplied keys. The service's
+  generate → validate → retry → fail-closed path now runs for these entry
+  points. `awaitJson()`'s lenient client-side parse is unchanged; schema
+  enforcement is server-side.
 
 ## [1.0.0-alpha.2] — 2026-06-13
 
