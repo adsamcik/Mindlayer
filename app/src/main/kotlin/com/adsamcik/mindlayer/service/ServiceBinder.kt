@@ -2192,9 +2192,31 @@ class ServiceBinder(
         MindlayerLog.d(TAG, "prewarm: backend=$safeBackend")
         startEngineWarmup(
             preferredBackend = safeBackend,
-            maxTokens = 4096,
+            maxTokens = runtimeMaxTokensCeiling(),
         )
     }
+
+    /**
+     * The same `maxTokens` ceiling [SessionManager.createSession] would
+     * compute for a brand-new session under current memory conditions
+     * (`recommendedMaxTokens` clamped to the device tier's `maxMaxTokens`).
+     *
+     * `prewarm()`/`prewarmAndAwait()` used to hardcode `maxTokens = 4096`
+     * for the FIRST cold engine init. `EngineManager.initializeLocked` has
+     * a fast path that returns an already-initialized [Engine] unchanged —
+     * so once prewarm locked the native KV-cache ceiling at 4096, any
+     * later session's real (larger) `maxTokens` request was silently
+     * discarded; the engine kept running at the smaller ceiling for its
+     * entire lifetime. That mismatch was root-caused as the trigger for a
+     * `liblitertlm_jni.so` SIGSEGV (`memmove` `SEGV_ACCERR`) reproducing
+     * reliably in a genuine multi-turn, multi-image conversation once
+     * cumulative context approached the too-small 4096 ceiling (see
+     * StarlitCoffee's `.incomplete.md`, "ROOT CAUSE FOUND" section).
+     * Computing the same ceiling here means prewarm's warm-up almost never
+     * under-provisions relative to what a real session will actually need.
+     */
+    private fun runtimeMaxTokensCeiling(): Int =
+        memoryBudget.currentSnapshot().recommendedMaxTokens.coerceAtMost(memoryBudget.deviceTier.maxMaxTokens)
 
     private fun startEngineWarmup(preferredBackend: String, maxTokens: Int) {
         if (engineManager.isInitialized) return
@@ -2301,7 +2323,7 @@ class ServiceBinder(
                     val intent = engineManager.consumePendingRestartIntent()
                         ?.takeIf { it.attemptCount > 0 }
                     val backend = intent?.targetBackend ?: safeBackend
-                    val tokens = intent?.maxTokens ?: 4096
+                    val tokens = intent?.maxTokens ?: runtimeMaxTokensCeiling()
                     if (intent != null) {
                         MindlayerLog.i(
                             TAG,

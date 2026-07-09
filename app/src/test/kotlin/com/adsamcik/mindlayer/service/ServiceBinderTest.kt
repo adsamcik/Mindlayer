@@ -285,6 +285,35 @@ class ServiceBinderTest {
     }
 
     @Test
+    fun `prewarm initializes engine with the memory-derived maxTokens ceiling, not a hardcoded value`() {
+        // Regression test for the root cause of a multi-turn liblitertlm_jni.so
+        // SIGSEGV: prewarm() used to hardcode maxTokens=4096 regardless of what
+        // a real session actually needed, and EngineManager.initialize's
+        // fast-path silently discards a later session's larger request once
+        // the engine is already loaded — so the native KV-cache ceiling stayed
+        // wrong for the engine's entire lifetime. prewarm must derive the same
+        // ceiling SessionManager.createSession would use
+        // (defaultMemSnapshot.recommendedMaxTokens=16384, coerced at most to
+        // defaultTier.maxMaxTokens=32768 -> 16384).
+        every { engineManager.isInitialized } returns false
+        coEvery {
+            engineManager.initialize(
+                preferredBackend = "CPU",
+                maxTokens = 16384,
+            )
+        } returns mockk(relaxed = true)
+
+        binder.prewarm("CPU")
+
+        coVerify(timeout = 1_000) {
+            engineManager.initialize(
+                preferredBackend = "CPU",
+                maxTokens = 16384,
+            )
+        }
+    }
+
+    @Test
     fun `same uid registrations retain independent death cleanup`() {
         val uid = 12_345
         mockkStatic(Binder::class)
