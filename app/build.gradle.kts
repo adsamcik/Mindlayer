@@ -619,9 +619,18 @@ android {
             )
         }
         jniLibs {
-            // Base LiteRT and LiteRT-LM both ship the core runtime SONAME.
-            // Keep the existing LiteRT-LM packaged copy until Phase A's
-            // coexistence validation determines whether versions can diverge.
+            // Base LiteRT and LiteRT-LM both bundle a native `libLiteRt*.so`
+            // under the same SONAME, but from different, mismatched builds
+            // (see docs/architecture/LITERT_COEXISTENCE.md). `pickFirsts` is
+            // NOT reliable for resolving this: AGP's resolution order across
+            // AARs is not driven by dependency declaration order, and in
+            // practice it kept the foreign `litert` copy instead of the
+            // matching LiteRT-LM one. The actual, deterministic fix is
+            // `app/src/main/jniLibs/<abi>/libLiteRt*.so` (extracted straight
+            // from the litertlm-android AAR) — project-local jniLibs always
+            // take precedence over AAR-provided native libs of the same name,
+            // independent of `pickFirsts`. This rule is kept only as a
+            // fallback for any other same-named collision AGP might surface.
             pickFirsts += setOf("lib/*/libLiteRt*.so")
         }
     }
