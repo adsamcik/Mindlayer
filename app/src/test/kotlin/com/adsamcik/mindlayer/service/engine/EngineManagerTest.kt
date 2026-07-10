@@ -485,6 +485,39 @@ class EngineManagerTest {
     }
 
     @Test
+    fun `initialize - fast path on an already-loaded engine warns when a caller requests a larger maxTokens ceiling`() = runTest {
+        // Regression test for the root cause of a multi-turn liblitertlm_jni.so
+        // SIGSEGV: the fast path silently discarded a later caller's maxTokens
+        // request once an Engine instance already existed, so a caller warmed
+        // with a small ceiling (e.g. prewarm's old hardcoded 4096) kept that
+        // ceiling for the engine's entire lifetime even though a real session
+        // asked for more (8192). This test locks in that the mismatch is at
+        // least now surfaced via a log warning.
+        File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME).writeText("fake-model")
+        stubActivityManager()
+
+        val mgr = EngineManager(context, logRepository)
+        val mockEngine = mockk<Engine>(relaxed = true) {
+            every { initialize() } returns Unit
+        }
+        mgr.engineFactory = { _ -> mockEngine }
+
+        val first = mgr.initialize(preferredBackend = "CPU", maxTokens = 4096)
+        val second = mgr.initialize(preferredBackend = "CPU", maxTokens = 8192)
+
+        assertSame(first, second)
+        verify {
+            MindlayerLog.w(
+                any(),
+                match { it.contains("maxTokens=8192") && it.contains("maxTokens=4096") },
+                any(),
+                any(),
+                any(),
+            )
+        }
+    }
+
+    @Test
     fun `initialize - engine factory throwing is treated as init failure (no close to call)`() = runTest {
         File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME).writeText("fake-model")
         stubActivityManager()

@@ -94,6 +94,21 @@ entirely LLM-chat-oriented — no generic `CompiledModel`/tensor-runner
 equivalent exists, so it cannot host Embedding/PaddleOCR. (a) remains blocked
 on upstream shipping a version-aligned pair; litertlm 0.13.1/0.14.0's bundled
 core still matches no published standalone `litert` release.
+### litertlm version-bump note (0.13.1 → 0.14.0)
+
+Bumped again; builds and passes the full `:app`/`:sdk` unit test suite on
+CPU. Investigated as part of root-causing a separate multi-turn native
+SIGSEGV (see StarlitCoffee's `.incomplete.md`) — that crash reproduces
+identically on 0.14.0 (confirmed via a minimal standalone repro depending
+only on `litertlm-android`, no Mindlayer code), so this bump does not fix
+or worsen that issue either way; it's a routine dependency update, not a
+crash fix. The same GPU/NPU validation caveat as the 0.12.0→0.13.1 bump
+still applies — this has only been exercised on the CPU/emulator path.
+**Important:** if PR #216 (the `jniLibs` override that pins litertlm's own
+`libLiteRt.so`/`libLiteRtClGlAccelerator.so`) merges around the same time
+as this bump, those override files were extracted from **0.13.1's** AAR —
+re-extract them from **0.14.0's** AAR before both land together, or the
+override will pin a stale, mismatched native library version.
 
 ## What we actually know
 
