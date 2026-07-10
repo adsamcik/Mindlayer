@@ -619,9 +619,8 @@ android {
             )
         }
         jniLibs {
-            // Base LiteRT and LiteRT-LM both ship the core runtime SONAME.
-            // Keep the existing LiteRT-LM packaged copy until Phase A's
-            // coexistence validation determines whether versions can diverge.
+            // Deterministic fix lives in app/src/main/jniLibs/<abi>/libLiteRt*.so
+            // (see docs/architecture/LITERT_COEXISTENCE.md); this is just a fallback.
             pickFirsts += setOf("lib/*/libLiteRt*.so")
         }
     }

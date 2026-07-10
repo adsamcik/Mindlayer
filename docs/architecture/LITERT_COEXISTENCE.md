@@ -2,8 +2,9 @@
 
 # LiteRT + LiteRT-LM same-process coexistence risk
 
-> **Status: real packaging collision confirmed; CPU-path crash NOT reproduced.**
-> Last updated: 2026-06-30.
+> **Status: real packaging collision confirmed; deterministic fix (c) landed
+> 2026-07-09; CPU-path crash still NOT reproduced by the collision itself.**
+> Last updated: 2026-07-09.
 >
 > The Mindlayer service loads **two distinct LiteRT-family runtimes**
 > in the same Android process: ``com.google.ai.edge.litertlm:litertlm-android``
@@ -15,6 +16,23 @@
 > foreign core. See **"Empirical findings (2026-06-30)"** below — on the
 > CPU/x86_64 emulator this collision is real but does **not** crash, even
 > with both runtimes active and across engine close/recreate cycles.
+>
+> **2026-07-09 update:** option (c) from the fix ordering below —
+> deterministically keeping litertlm's own `libLiteRt*.so` — is now landed.
+> `app/src/main/jniLibs/<abi>/libLiteRt.so` and
+> `libLiteRtClGlAccelerator.so` are committed straight from the
+> `litertlm-android` AAR; project-local `jniLibs` always take precedence
+> over AAR-provided native libs of the same name, so the packaged APK now
+> reliably contains litertlm's matching core instead of `litert`'s foreign
+> one (verified via APK inspection: x86_64 `libLiteRt.so` = 6,997,656 B,
+> matching litertlm 0.13.1's own copy, not litert 2.1.5's 7,272,904 B).
+> `pickFirsts` is kept only as a fallback for other same-named collisions.
+> This closes the packaging half of the risk; it does **not** replace the
+> real-device GPU/NPU validation in the checklist below, and it was
+> separately verified (via a StarlitCoffee-side long multi-turn native
+> crash investigation) to have **no effect** on an unrelated
+> `liblitertlm_jni.so` `memmove` SIGSEGV — that crash reproduces
+> identically with or without this fix, so it is not a collision symptom.
 
 ## Empirical findings (2026-06-30)
 
@@ -69,6 +87,13 @@ dep and drive Embedding/PaddleOCR through litertlm's bundled core if its
 deterministically keep **litertlm's** copy and re-validate the base-litert
 (Embedding/OCR) paths against it.
 
+**(c) is now landed (2026-07-09).** (b) was investigated and ruled out:
+litertlm-android 0.14.0's public API surface (`Engine`, `Conversation`,
+`Session`, `Message`, `Tool`, `Backend`, ...) is decompiled-confirmed to be
+entirely LLM-chat-oriented — no generic `CompiledModel`/tensor-runner
+equivalent exists, so it cannot host Embedding/PaddleOCR. (a) remains blocked
+on upstream shipping a version-aligned pair; litertlm 0.13.1/0.14.0's bundled
+core still matches no published standalone `litert` release.
 ### litertlm version-bump note (0.13.1 → 0.14.0)
 
 Bumped again; builds and passes the full `:app`/`:sdk` unit test suite on
