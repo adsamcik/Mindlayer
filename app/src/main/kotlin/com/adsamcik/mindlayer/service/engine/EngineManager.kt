@@ -149,6 +149,17 @@ class EngineManager(
     var currentBackend: String = "NONE"
         private set
 
+    /**
+     * The `maxNumTokens` ceiling the currently-loaded [engine] was actually
+     * initialized with. Compared against later callers' requests in the
+     * [initializeLocked] fast path so a caller silently getting a SMALLER
+     * ceiling than it asked for is at least visible in logs (see the
+     * `ServiceBinder.prewarm` KV-cache-ceiling mismatch root-caused in
+     * StarlitCoffee's `.incomplete.md`).
+     */
+    @Volatile
+    private var currentMaxTokens: Int? = null
+
     @Volatile
     var initTimeSeconds: Float = 0f
         private set
@@ -281,6 +292,22 @@ class EngineManager(
         // Fast-path: the selected device model is already loaded.
         engine?.let { eng ->
             MindlayerLog.i(TAG, "Engine already initialized with model=${target.id}, backend=$currentBackend")
+            // F-{prewarm-ceiling}: the requested maxTokens is silently
+            // discarded here — the engine keeps running at whatever
+            // ceiling it was FIRST initialized with. Surface it loudly if
+            // a caller ever asks for more than that, so a future caller
+            // hitting the same class of bug that root-caused the
+            // multi-turn SIGSEGV (see .incomplete.md) shows up in logs
+            // instead of silently corrupting state under KV-cache pressure.
+            val loadedCeiling = currentMaxTokens
+            if (loadedCeiling != null && maxTokens > loadedCeiling) {
+                MindlayerLog.w(
+                    TAG,
+                    "initialize() requested maxTokens=$maxTokens but the already-loaded engine " +
+                        "was initialized with maxTokens=$loadedCeiling; the smaller ceiling stays " +
+                        "in effect for this engine's lifetime (re-init required to change it).",
+                )
+            }
             _state.value = EngineState.Ready
             return eng
         }
@@ -506,6 +533,7 @@ class EngineManager(
                 engine = eng
                 currentBackend = name
                 currentModel = target
+                currentMaxTokens = maxTokens
                 initTimeSeconds = elapsed
                 isInitialized = true
                 logRepository?.logEngineInit(name, durationMs, path)
@@ -930,6 +958,7 @@ class EngineManager(
             _state.value = EngineState.Idle
             currentBackend = "NONE"
             currentModel = null
+            currentMaxTokens = null
             isInitialized = false
             initTimeSeconds = 0f
             // F-077: clear typed failure state on explicit shutdown.
