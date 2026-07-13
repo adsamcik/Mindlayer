@@ -1,38 +1,67 @@
 # LiteRT + LiteRT-LM same-process coexistence risk
 
-# LiteRT + LiteRT-LM same-process coexistence risk
-
-> **Status: real packaging collision confirmed; deterministic fix (c) landed
-> 2026-07-09; CPU-path crash still NOT reproduced by the collision itself.**
-> Last updated: 2026-07-09.
+> **Status: the 2026-07-09 packaging-collision fix was superseded and REMOVED
+> on 2026-07-13 — litertlm 0.14.0 no longer bundles either colliding library.**
+> Last updated: 2026-07-13.
 >
 > The Mindlayer service loads **two distinct LiteRT-family runtimes**
 > in the same Android process: ``com.google.ai.edge.litertlm:litertlm-android``
 > for the Gemma chat path, and ``com.google.ai.edge.litert:litert:2.1.5``
 > for the embedding (EmbeddingGemma) and OCR (PaddleOCR PP-OCRv5
-> mobile) paths. Both AARs ship `libLiteRt.so` (and
-> `libLiteRtClGlAccelerator.so`) under the same SONAME at **different
-> builds**; the APK can keep only one, so one stack runs against a
-> foreign core. See **"Empirical findings (2026-06-30)"** below — on the
-> CPU/x86_64 emulator this collision is real but does **not** crash, even
-> with both runtimes active and across engine close/recreate cycles.
+> mobile) paths.
 >
-> **2026-07-09 update:** option (c) from the fix ordering below —
-> deterministically keeping litertlm's own `libLiteRt*.so` — is now landed.
-> `app/src/main/jniLibs/<abi>/libLiteRt.so` and
-> `libLiteRtClGlAccelerator.so` are committed straight from the
-> `litertlm-android` AAR; project-local `jniLibs` always take precedence
-> over AAR-provided native libs of the same name, so the packaged APK now
-> reliably contains litertlm's matching core instead of `litert`'s foreign
-> one (verified via APK inspection: x86_64 `libLiteRt.so` = 6,997,656 B,
-> matching litertlm 0.13.1's own copy, not litert 2.1.5's 7,272,904 B).
-> `pickFirsts` is kept only as a fallback for other same-named collisions.
-> This closes the packaging half of the risk; it does **not** replace the
-> real-device GPU/NPU validation in the checklist below, and it was
-> separately verified (via a StarlitCoffee-side long multi-turn native
-> crash investigation) to have **no effect** on an unrelated
-> `liblitertlm_jni.so` `memmove` SIGSEGV — that crash reproduces
-> identically with or without this fix, so it is not a collision symptom.
+> **2026-07-09 update (now superseded, see below):** litertlm 0.13.1 bundled
+> its own `libLiteRt.so` + `libLiteRtClGlAccelerator.so` under the same
+> SONAME as `litert:2.1.5`'s copies, at different builds. The fix committed
+> `app/src/main/jniLibs/<abi>/libLiteRt.so` / `libLiteRtClGlAccelerator.so`,
+> extracted from litertlm 0.13.1's AAR, so project-local `jniLibs`
+> (which always win over AAR-provided libs of the same name) would
+> deterministically keep litertlm's matching core.
+>
+> **2026-07-13 finding: that override went stale and became harmful once
+> #218 bumped litertlm to 0.14.0, and has now been removed.** Binary
+> inspection of litertlm 0.14.0's AAR shows:
+> - `liblitertlm_jni.so` grew from ~18.0 MB to ~24.6 MB (x86_64) and **no
+>   longer contains the string `libLiteRt.so` at all** — the library appears
+>   to be statically linked in (or otherwise no longer dynamically loaded);
+>   this was confirmed by string-scanning the raw binary for the literal
+>   dependency name (zero occurrences, vs. one occurrence in 0.13.1's copy),
+>   not by inspecting ELF symbol tables or `DT_NEEDED` entries directly.
+> - The 0.14.0 AAR **no longer ships `libLiteRt.so` or
+>   `libLiteRtClGlAccelerator.so` at all** — only `liblitertlm_jni.so` per ABI.
+>   (It still references the `libLiteRtClGlAccelerator.so` string once, i.e.
+>   it may still `dlopen` it for GPU, but doesn't bundle its own copy anymore.)
+>
+> Meanwhile the *committed override* still contained 0.13.1-vintage bytes
+> (nobody re-extracted them from 0.14.0's AAR — an oversight the original PR
+> body explicitly warned about, except the warned-about remediation turned
+> out to be impossible: 0.14.0 has nothing to re-extract). Since project
+> jniLibs always win over AAR-provided libs of the same name, that stale
+> `libLiteRt.so` was **silently shadowing `litert:2.1.5`'s own matching
+> copy for every other consumer in the process** — most importantly
+> `liblitert_jni.so` (from the `litert-api` artifact litert:2.1.5 transitively
+> pulls in), which is confirmed via binary inspection to genuinely `dlopen`
+> `libLiteRt.so` and is what backs **Mindlayer's own OCR (PaddleOCR) and
+> embedding backends** (`LiteRtPaddleOcrBackend`, `LiteRtEmbeddingBackend`) —
+> the features StarlitCoffee's OCR integration ultimately depends on over
+> IPC. In other words: the fix for litertlm's dlopen (no longer even needed
+> on 0.14.0) had started silently breaking Mindlayer's own OCR/embeddings by
+> feeding them a mismatched-build `libLiteRt.so` instead of `litert:2.1.5`'s
+> own.
+>
+> **Fix:** the override files are deleted outright. Since litertlm 0.14.0
+> bundles neither `libLiteRt.so` nor `libLiteRtClGlAccelerator.so`, there is
+> no more AAR-vs-AAR collision at all — `litert:2.1.5` is now the sole
+> provider of both files, and normal packaging resolves them with no
+> ambiguity. **`pickFirsts` was removed rather than kept as a fallback** —
+> a new `validateNoLiteRtNativeLibCollision` Gradle task (in `app/build.gradle.kts`,
+> reusing the F-079 AAR-inspection configurations) now fails the build loudly
+> and early if the two AARs ever bundle a same-named native library again,
+> instead of relying on `pickFirsts`'s non-deterministic, silent resolution —
+> the exact behavior that caused this incident in the first place. Re-verify
+> this analysis (`litertlm-android` AAR contents + binary string scan) on
+> every future litertlm version bump — see the version-bump notes below for
+> the pattern.
 
 ## Empirical findings (2026-06-30)
 
@@ -87,7 +116,11 @@ dep and drive Embedding/PaddleOCR through litertlm's bundled core if its
 deterministically keep **litertlm's** copy and re-validate the base-litert
 (Embedding/OCR) paths against it.
 
-**(c) is now landed (2026-07-09).** (b) was investigated and ruled out:
+**(c) was landed 2026-07-09, then removed 2026-07-13 (see the status banner
+at the top of this doc) once 0.14.0 made it unnecessary** — litertlm no
+longer bundles `libLiteRt.so` at all, so there's nothing left to "keep
+litertlm's copy" of; `litert:2.1.5` is now the sole provider. (b) was
+investigated and ruled out:
 litertlm-android 0.14.0's public API surface (`Engine`, `Conversation`,
 `Session`, `Message`, `Tool`, `Backend`, ...) is decompiled-confirmed to be
 entirely LLM-chat-oriented — no generic `CompiledModel`/tensor-runner
@@ -110,7 +143,21 @@ as this bump, those override files were extracted from **0.13.1's** AAR —
 re-extract them from **0.14.0's** AAR before both land together, or the
 override will pin a stale, mismatched native library version.
 
+**Update (2026-07-13): this is exactly what happened, and the "re-extract"
+remediation turned out to be impossible.** #216 merged after this bump
+without re-extracting, and 0.14.0's AAR has nothing to re-extract — see the
+status banner at the top of this doc for the full analysis and fix (the
+override was deleted, not refreshed).
+
 ## What we actually know
+
+> The three subsections below reflect a point-in-time analysis done against
+> litertlm-android **0.13.1** and have not been individually re-verified
+> against 0.14.0 (only the specific claims re-checked in the status banner
+> and version-bump notes above have been). The API surfaces described
+> (Maven deps, `CompiledModel` vs. `Interpreter`, `Backend.CPU()/GPU()/NPU()`)
+> are not expected to have changed across this bump, but treat them as
+> historical unless re-confirmed.
 
 ### Two distinct Android artifacts
 - **LiteRT 2.1.5** (`com.google.ai.edge.litert:litert:2.1.5`,
@@ -166,10 +213,10 @@ strictly more complex.
 
 | Component | Runtime | Backend usage | Status |
 |---|---|---|---|
-| Gemma chat | LiteRT-LM 0.12.0 | NPU → GPU → CPU chain in `EngineManager` | Production |
+| Gemma chat | LiteRT-LM 0.14.0 | NPU → GPU → CPU chain in `EngineManager` | Production |
 | EmbeddingGemma | Base LiteRT 2.1.5 | GPU/CPU via `CompiledModel` (`LiteRtEmbeddingBackend`) | Scaffold — verify-on-device markers |
 | PaddleOCR PP-OCRv5 | Base LiteRT 2.1.5 | GPU default via `LiteRtAcceleratorResolver` (mirrors chat: `null` → GPU; explicit `NPU` probed + GPU-fallback; explicit `CPU`/`GPU` honored); three sequential `CompiledModel`s (det + rec + cls) | Prototype — same-process coexistence unverified |
-| Chat + embeddings + OCR together | LiteRT-LM 0.12.0 + base LiteRT 2.1.5 (embeddings) + base LiteRT 2.1.5 (OCR) | Chat owns LiteRT-LM backend chain; embeddings and OCR resolve through the shared `LiteRtAcceleratorResolver` | Three-stack Phase 4 validation matrix |
+| Chat + embeddings + OCR together | LiteRT-LM 0.14.0 + base LiteRT 2.1.5 (embeddings) + base LiteRT 2.1.5 (OCR) | Chat owns LiteRT-LM backend chain; embeddings and OCR resolve through the shared `LiteRtAcceleratorResolver` | Three-stack Phase 4 validation matrix |
 
 All three stacks share the service process. The OCR path is the
 **newest** and so the highest-risk for surfacing coexistence
@@ -182,7 +229,7 @@ active simultaneously.
 Copy this into PR bodies + ADRs that touch the inline LiteRT path:
 
 > **Unverified same-process coexistence risk:** Base LiteRT 2.1.5
-> using GPU/NPU acceleration and LiteRT-LM 0.12.0 have not yet
+> using GPU/NPU acceleration and LiteRT-LM 0.14.0 have not yet
 > been validated together in one Android process. No confirmed
 > incompatibility is known, but both stacks may interact through
 > shared LiteRT runtime components, accelerator delegates, native
