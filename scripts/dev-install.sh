@@ -59,7 +59,9 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --cache)        shift; CACHE="${1:-}" ;;
+    # Blank/empty --cache is treated as "not supplied" (see push-models.sh
+    # for the matching semantics) rather than shadowing an env-var default.
+    --cache)        shift; if [ -n "${1:-}" ]; then CACHE="$1"; fi ;;
     --device)       shift; DEVICE="${1:-}" ;;
     --skip-build)   SKIP_BUILD=1 ;;
     --skip-install) SKIP_INSTALL=1 ;;

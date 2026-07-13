@@ -85,7 +85,11 @@ while [ $# -gt 0 ]; do
     --embeddings)         EMBEDDINGS=1 ;;
     --paddleocr)          PADDLEOCR=1 ;;
     --all)                ALL=1 ;;
-    --cache)              shift; CACHE="${1:-}" ;;
+    # An empty/blank --cache value (e.g. --cache "") is treated as "not
+    # supplied" rather than overwriting an env-var-seeded CACHE, so the
+    # fallback cascade (env var -> <repo-root>/.models) still applies —
+    # mirrors push-models.ps1's IsNullOrWhiteSpace($Cache) semantics.
+    --cache)              shift; if [ -n "${1:-}" ]; then CACHE="$1"; fi ;;
     --device)             shift; DEVICE="${1:-}" ;;
     --dry-run)            DRY_RUN=1 ;;
     --prefer-legacy-tmp)  PREFER_LEGACY_TMP=1 ;;

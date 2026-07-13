@@ -328,9 +328,12 @@ The actual production gate is `BuildConfig.DEBUG`. On a non-debuggable
 `user` build, even if you push files into the service's externalFilesDir
 (or `/data/local/tmp/`), the runtime registries will not load them —
 the developer-tier `Origin` branches are compiled-out at the
-predicate level. The script enforces the same constraint client-side
-by refusing to push unless the target device reports `ro.debuggable=1`
-or `ro.build.type` ∈ {`userdebug`, `eng`}.
+predicate level. The script enforces the same constraint client-side:
+it refuses to push unless the target device reports `ro.debuggable=1`
+or `ro.build.type` ∈ {`userdebug`, `eng`} **or** the debug service
+variant (`com.adsamcik.mindlayer.debug`) is already installed — either
+condition is sufficient, since the debug package's own
+`BuildConfig.DEBUG=true` is what the runtime actually checks.
 
 If you need to test integrity-gated behaviour, build the AI Asset
 Pack flavour normally; sideload is for code-iteration ergonomics,
