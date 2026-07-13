@@ -62,7 +62,8 @@ Usage: push-models.sh [--gemma] [--embeddings] [--paddleocr] [--all]
   --embeddings         Push EmbeddingGemma weights + tokenizer.
   --paddleocr          Push the four PaddleOCR PP-OCRv5 mobile files.
   --all                Equivalent to --gemma --embeddings --paddleocr.
-  --cache <dir>        Local cache directory (default: $MINDLAYER_MODEL_CACHE).
+  --cache <dir>        Local cache directory (default: $MINDLAYER_MODEL_CACHE,
+                       else <repo-root>/.models if it exists).
   --device <id>        adb device serial when multiple devices are connected.
   --dry-run            Print actions without invoking 'adb push'. Assumes
                        the debug service variant is installed so the dry-run
@@ -101,8 +102,22 @@ if [ "$GEMMA" -eq 0 ] && [ "$EMBEDDINGS" -eq 0 ] && [ "$PADDLEOCR" -eq 0 ]; then
   usage
   exit 2
 fi
+
+# Resolve repo root: this script lives at tools/dev-models/.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
 if [ -z "$CACHE" ]; then
-  echo "error: no cache directory. Pass --cache <path> or set MINDLAYER_MODEL_CACHE." >&2
+  # Standardized, gitignored default: <repo-root>/.models. Only used when
+  # neither --cache nor $MINDLAYER_MODEL_CACHE is set, so existing external
+  # cache directories keep working unchanged.
+  default_cache="$REPO_ROOT/.models"
+  if [ -d "$default_cache" ]; then
+    CACHE="$default_cache"
+  fi
+fi
+if [ -z "$CACHE" ]; then
+  echo "error: no cache directory. Pass --cache <path>, set MINDLAYER_MODEL_CACHE, or populate the default $REPO_ROOT/.models (gitignored). See docs/models/DEV_MODELS.md." >&2
   exit 2
 fi
 if [ ! -d "$CACHE" ]; then
@@ -110,9 +125,6 @@ if [ ! -d "$CACHE" ]; then
   exit 2
 fi
 
-# Resolve repo root: this script lives at tools/dev-models/.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CACHE="$(cd "$CACHE" && pwd)"
 
 adb_args() {

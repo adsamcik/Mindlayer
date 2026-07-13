@@ -17,16 +17,34 @@ iterate normally.
 
 ## TL;DR
 
+The standard, gitignored cache location is **`<repo-root>/.models`**
+(flat layout, see [Recommended cache layout](#recommended-cache-layout)).
+Drop your model files there once and every script below picks it up
+automatically — no environment variable required.
+
 If you don't want to think about it, use the wrapper:
 
 ```powershell
 # Windows PowerShell — full loop in one command
-$env:MINDLAYER_MODEL_CACHE = 'D:\mindlayer-models'
+# (assumes .models/ at the repo root is already populated)
 .\scripts\dev-install.ps1
 ```
 
 ```bash
 # macOS / Linux
+./scripts/dev-install.sh
+```
+
+If your cache lives elsewhere (e.g. shared across multiple repo
+checkouts), point `$env:MINDLAYER_MODEL_CACHE` / `MINDLAYER_MODEL_CACHE`
+at it instead — it always takes priority over `.models`:
+
+```powershell
+$env:MINDLAYER_MODEL_CACHE = 'D:\mindlayer-models'
+.\scripts\dev-install.ps1
+```
+
+```bash
 export MINDLAYER_MODEL_CACHE=/data/mindlayer-models
 ./scripts/dev-install.sh
 ```
@@ -44,7 +62,8 @@ which wipes ~3 GB of pushed models) and why they break dev iteration.
 If you want to drive the steps manually:
 
 ```powershell
-# One-time per machine: where your model cache lives.
+# One-time per machine, only if you're NOT using the default
+# <repo-root>\.models cache location:
 $env:MINDLAYER_MODEL_CACHE = 'D:\mindlayer-models'
 
 # Install a code-only debug APK FIRST so the script can detect the
@@ -149,10 +168,11 @@ your cache directory.
 
 ## Recommended cache layout
 
-The script does **not** recurse. Drop everything flat:
+The script does **not** recurse. Drop everything flat, at the
+standardized (gitignored) `.models` directory at the repo root:
 
 ```
-$env:MINDLAYER_MODEL_CACHE\
+<repo-root>\.models\        # or wherever $env:MINDLAYER_MODEL_CACHE points
   gemma-4-E2B-it.litertlm
   embedding-gemma-300m-v1.tflite
   embedding-gemma-300m-v1.spm.model
@@ -162,12 +182,20 @@ $env:MINDLAYER_MODEL_CACHE\
   paddleocr-ppocrv5-mobile-dict.txt
 ```
 
+`.models/` is gitignored — never commit these files. If you already
+have a cache at a different path, either move it to `.models` or keep
+using `$env:MINDLAYER_MODEL_CACHE`/`MINDLAYER_MODEL_CACHE`, which
+always overrides the `.models` default.
+
 ## Usage
 
 ### Windows PowerShell
 
 ```powershell
-# Push everything.
+# Push everything (uses <repo-root>\.models if $env:MINDLAYER_MODEL_CACHE unset).
+.\tools\dev-models\push-models.ps1 -All
+
+# Explicit cache path override.
 .\tools\dev-models\push-models.ps1 -All -Cache D:\mindlayer-models
 
 # Just the chat model.
@@ -185,9 +213,13 @@ $env:MINDLAYER_MODEL_CACHE\
 ### macOS / Linux
 
 ```bash
-export MINDLAYER_MODEL_CACHE=/data/mindlayer-models
-
+# Push everything (uses <repo-root>/.models if MINDLAYER_MODEL_CACHE unset).
 ./tools/dev-models/push-models.sh --all
+
+# Explicit cache path override.
+export MINDLAYER_MODEL_CACHE=/data/mindlayer-models
+./tools/dev-models/push-models.sh --all
+
 ./tools/dev-models/push-models.sh --gemma --embeddings --dry-run
 ./tools/dev-models/push-models.sh --paddleocr --device emulator-5554
 ./tools/dev-models/push-models.sh --paddleocr --prefer-legacy-tmp
@@ -201,7 +233,7 @@ export MINDLAYER_MODEL_CACHE=/data/mindlayer-models
 | `-Embeddings` | `--embeddings` | push embedding weights + tokenizer |
 | `-Paddleocr` | `--paddleocr` | push the 4 OCR files |
 | `-All` | `--all` | all three groups |
-| `-Cache <path>` | `--cache <path>` | override `$MINDLAYER_MODEL_CACHE` |
+| `-Cache <path>` | `--cache <path>` | override `$MINDLAYER_MODEL_CACHE` / the `.models` default |
 | `-Device <serial>` | `--device <serial>` | pick a target when multiple devices attach |
 | `-DryRun` | `--dry-run` | print actions without pushing |
 | `-PreferLegacyTmp` | `--prefer-legacy-tmp` | force legacy `/data/local/tmp/` target |
@@ -227,7 +259,7 @@ export MINDLAYER_MODEL_CACHE=/data/mindlayer-models
 ```text
 Mindlayer dev model sideload
   repo:   G:\Github\Mindlayer
-  cache:  D:\mindlayer-models
+  cache:  G:\Github\Mindlayer\.models
   device: (auto)
   dryRun: True
   (skipping adb/device checks in dry-run mode)
@@ -236,7 +268,7 @@ Mindlayer dev model sideload
 === Gemma chat ===
 - gemma-4-E2B-it.litertlm
   sha: manifest SHA not populated (dev placeholder), skipping verification.
-  [dry-run] adb push D:\mindlayer-models\gemma-4-E2B-it.litertlm /sdcard/Android/data/com.adsamcik.mindlayer.debug/files/gemma-4-E2B-it.litertlm
+  [dry-run] adb push G:\Github\Mindlayer\.models\gemma-4-E2B-it.litertlm /sdcard/Android/data/com.adsamcik.mindlayer.debug/files/gemma-4-E2B-it.litertlm
   [dry-run] adb shell ls -l /sdcard/Android/data/com.adsamcik.mindlayer.debug/files/gemma-4-E2B-it.litertlm
 
 Done. All requested files processed cleanly (dry-run).

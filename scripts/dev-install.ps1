@@ -27,13 +27,15 @@
       - ``adb`` on PATH (Android platform-tools)
       - JDK 21 on PATH for ``./gradlew`` (see
         ``.github/context/DEVELOPMENT.md`` for the JDK 21 gotcha)
-      - A model cache directory either passed via ``-Cache`` or set
-        in ``$env:MINDLAYER_MODEL_CACHE`` (see ``docs/models/DEV_MODELS.md``
-        for what to put in it)
+      - A populated model cache: the standardized ``<repo-root>\.models``
+        directory (gitignored), or an explicit ``-Cache``/
+        ``$env:MINDLAYER_MODEL_CACHE`` override (see
+        ``docs/models/DEV_MODELS.md`` for what to put in it)
 
 .PARAMETER Cache
     Local cache directory holding the model files. Forwarded to
-    ``push-models.ps1``. Defaults to ``$env:MINDLAYER_MODEL_CACHE``.
+    ``push-models.ps1``. Defaults to ``$env:MINDLAYER_MODEL_CACHE``,
+    then to ``<repo-root>\.models`` if that directory exists.
 
 .PARAMETER Device
     Optional adb device serial when multiple devices are connected.

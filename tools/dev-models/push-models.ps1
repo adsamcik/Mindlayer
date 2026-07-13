@@ -35,7 +35,8 @@
 
 .PARAMETER Cache
     Local cache directory holding the model files (flat layout).
-    Defaults to $env:MINDLAYER_MODEL_CACHE if set.
+    Defaults to $env:MINDLAYER_MODEL_CACHE if set, otherwise the
+    standardized, gitignored <repo-root>/.models directory if it exists.
 
 .PARAMETER Device
     Optional adb device serial (passed as 'adb -s <serial>') when
@@ -64,6 +65,9 @@
 
 .EXAMPLE
     .\push-models.ps1 -All -Cache D:\mindlayer-models
+
+.EXAMPLE
+    .\push-models.ps1 -All   # uses <repo-root>\.models if populated
 
 .EXAMPLE
     .\push-models.ps1 -Gemma -Embeddings -DryRun
@@ -485,18 +489,28 @@ if (-not ($Gemma -or $Embeddings -or $Paddleocr)) {
     throw 'Specify at least one of -Gemma, -Embeddings, -Paddleocr, or -All.'
 }
 
+$repoRoot = Resolve-RepoRoot
+
 if ([string]::IsNullOrWhiteSpace($Cache)) {
     $Cache = $env:MINDLAYER_MODEL_CACHE
 }
 if ([string]::IsNullOrWhiteSpace($Cache)) {
-    throw 'No cache directory. Pass -Cache <path> or set $env:MINDLAYER_MODEL_CACHE.'
+    # Standardized, gitignored default: <repo-root>/.models. Falls back here
+    # only when neither -Cache nor $env:MINDLAYER_MODEL_CACHE is set, so
+    # existing external cache directories keep working unchanged.
+    $defaultCache = Join-Path $repoRoot '.models'
+    if (Test-Path -LiteralPath $defaultCache -PathType Container) {
+        $Cache = $defaultCache
+    }
+}
+if ([string]::IsNullOrWhiteSpace($Cache)) {
+    throw "No cache directory. Pass -Cache <path>, set `$env:MINDLAYER_MODEL_CACHE, or populate the default $repoRoot\.models (gitignored) — see docs/models/DEV_MODELS.md."
 }
 if (-not (Test-Path -LiteralPath $Cache -PathType Container)) {
     throw "Cache directory does not exist: $Cache"
 }
 $Cache = (Resolve-Path -LiteralPath $Cache).Path
 
-$repoRoot = Resolve-RepoRoot
 Write-Host "Mindlayer dev model sideload"
 Write-Host "  repo:   $repoRoot"
 Write-Host "  cache:  $Cache"
