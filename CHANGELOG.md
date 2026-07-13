@@ -6,6 +6,46 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [1.0.0-alpha.4] — 2026-07-13
+
+SDK Maven coordinate → `1.0.0-alpha.4` (`com.adsamcik.mindlayer:sdk:1.0.0-alpha.4`).
+
+No SDK API changes in this release — engine-reliability and native
+packaging fixes only.
+
+### Fixed
+- **Multi-turn native crash (`liblitertlm_jni.so` SIGSEGV) root-caused and
+  fixed.** `ServiceBinder.prewarm(backend)` hardcoded `maxTokens=4096` when
+  triggering the first engine init; `EngineManager.initializeLocked` has a
+  fast path that returns an already-initialized `Engine` unchanged, silently
+  discarding any later session's real `maxTokens` request. `prewarm()` /
+  `prewarmAndAwait()` now compute the same memory-derived ceiling
+  `SessionManager.createSession` already uses, instead of a hardcoded value,
+  plus a defense-in-depth warning log if this class of mismatch recurs.
+- **Stale `libLiteRt.so` / `libLiteRtClGlAccelerator.so` jniLibs override
+  removed.** The override (committed to deterministically resolve a
+  packaging collision between litertlm 0.13.1's bundled native libs and
+  base `litert:2.1.5`'s own copies) went stale and became actively harmful
+  once litertlm was bumped to 0.14.0: 0.14.0 no longer bundles either file
+  at all, so the stale 0.13.1-vintage override was silently shadowing
+  `litert:2.1.5`'s own genuine `libLiteRt.so` for its real consumer
+  (`liblitert_jni.so`, backing Mindlayer's own PaddleOCR/embedding
+  backends) — meaning OCR/embeddings were being served a mismatched-build
+  native library. The override files are deleted; a new
+  `validateNoLiteRtNativeLibCollision` Gradle task now fails the build
+  loudly and early if the two AARs ever bundle a same-named native library
+  again, replacing the previous silent `pickFirsts` resolution. See
+  `docs/architecture/LITERT_COEXISTENCE.md`.
+
+### Changed
+- **`litertlm-android` 0.13.1 → 0.14.0.** Builds and passes the full
+  `:app`/`:sdk` unit test suite; no API changes on our side.
+- Routine dependency bumps: `io.netty` (`netty-buffer`, `netty-transport`,
+  `netty-resolver`, `netty-transport-native-unix-common`,
+  `netty-codec-http`) and GitHub Actions.
+
+## [1.0.0-alpha.3] — 2026-07-06
+
 SDK Maven coordinate → `1.0.0-alpha.3` (`com.adsamcik.mindlayer:sdk:1.0.0-alpha.3`).
 
 ### Added
@@ -39,19 +79,6 @@ SDK Maven coordinate → `1.0.0-alpha.3` (`com.adsamcik.mindlayer:sdk:1.0.0-alph
   match the field name and read cleanly in the DSL
   (`jsonOutput { … validationDepth(JsonValidationDepth.SHALLOW) }`). No in-tree
   call sites existed.
-
-### Fixed
-- **`infer { outputJson(schema) }` / `extractJson(...)` now enforce the schema.**
-  The public structured-output path built an `OutputMode.Json` that was never
-  consumed, so the schema was silently dropped and the service never ran
-  `enum`/`type`/`required` validation. The ephemeral-session builder now
-  materialises `OutputMode.Json` into the same `{"structured_output":{…}}`
-  envelope that `SessionConfigBuilder.jsonOutput { }` already emits (reusing
-  `JsonOutputBuilder` so the wire shape stays single-sourced), merged into
-  `extraContextJson` without clobbering caller-supplied keys. The service's
-  generate → validate → retry → fail-closed path now runs for these entry
-  points. `awaitJson()`'s lenient client-side parse is unchanged; schema
-  enforcement is server-side.
 
 ### Changed
 - **`targetSdk` 36 → 37 (Android 17 / API 37).** `:app` and the
