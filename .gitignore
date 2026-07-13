@@ -62,6 +62,11 @@ paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-*.txt
 *.onnx
 *.onnx.data
 
+# Standardized local dev-model cache for tools/dev-models/push-models.*
+# (flat layout: gemma-4-E2B-it.litertlm, embedding-gemma-300m-v1.*,
+# paddleocr-ppocrv5-mobile-*). Never committed — see docs/models/DEV_MODELS.md.
+/.models/
+
 # OCR engine benchmark fixtures — see `docs/ocr/OCR_BENCHMARK.md` for
 # how to stage these locally. Excluded from git because:
 #   - `coffee-bags/` holds developer-supplied imagery that may carry

@@ -22,9 +22,10 @@
 # externalFilesDir).
 #
 # Requires: adb on PATH, JDK 21 on PATH for ./gradlew (see
-# .github/context/DEVELOPMENT.md for the JDK 21 gotcha), and a model
-# cache directory either passed via --cache or set in
-# $MINDLAYER_MODEL_CACHE (see docs/models/DEV_MODELS.md for what to put in it).
+# .github/context/DEVELOPMENT.md for the JDK 21 gotcha), and a populated
+# model cache: the standardized <repo-root>/.models directory (gitignored),
+# or an explicit --cache/$MINDLAYER_MODEL_CACHE override (see
+# docs/models/DEV_MODELS.md for what to put in it).
 
 set -euo pipefail
 
@@ -40,7 +41,8 @@ usage() {
 Usage: dev-install.sh [--cache <dir>] [--device <serial>]
                       [--skip-build] [--skip-install] [--force] [--dry-run]
 
-  --cache <dir>     Local model cache (default: $MINDLAYER_MODEL_CACHE).
+  --cache <dir>     Local model cache (default: $MINDLAYER_MODEL_CACHE,
+                    else <repo-root>/.models if it exists).
                     Forwarded to push-models.sh.
   --device <id>     adb device serial when multiple devices attach.
   --skip-build      Reuse the existing app/build/outputs/apk/debug/app-debug.apk
@@ -57,7 +59,9 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --cache)        shift; CACHE="${1:-}" ;;
+    # Blank/empty --cache is treated as "not supplied" (see push-models.sh
+    # for the matching semantics) rather than shadowing an env-var default.
+    --cache)        shift; if [ -n "${1:-}" ]; then CACHE="$1"; fi ;;
     --device)       shift; DEVICE="${1:-}" ;;
     --skip-build)   SKIP_BUILD=1 ;;
     --skip-install) SKIP_INSTALL=1 ;;
