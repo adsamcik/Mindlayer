@@ -456,6 +456,98 @@ val validateLitertAbis by tasks.registering {
     }
 }
 
+// ── Fail-closed check: litertlm-android / litert same-named native lib collision ──
+// See docs/architecture/LITERT_COEXISTENCE.md. litertlm-android 0.13.1 and litert
+// 2.1.5 used to both bundle libLiteRt.so / libLiteRtClGlAccelerator.so under the
+// same SONAME but from different, mismatched builds -- `pickFirsts` silently
+// resolved the packaging conflict but non-deterministically kept the WRONG copy
+// for a long time before that was caught. litertlm 0.14.0 no longer bundles
+// either file, so there is currently no collision and `pickFirsts` has been
+// removed from the packaging block below. This task re-checks that on every
+// build so a future dependency bump that reintroduces the collision fails loud
+// and early -- with an actionable message -- instead of resolving silently again.
+val validateNoLiteRtNativeLibCollision by tasks.registering {
+    group = "verification"
+    description = "Fails the build if litertlm-android and litert bundle a same-named " +
+        "native library again (see docs/architecture/LITERT_COEXISTENCE.md)."
+
+    val litertlmAarFiles: FileCollection = litertlmAarInspection
+    val litertAarFiles: FileCollection = litertAarInspection
+    inputs.files(litertlmAarFiles)
+        .withPropertyName("litertlmAar")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.files(litertAarFiles)
+        .withPropertyName("litertAar")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    val markerFile = layout.buildDirectory.file("litert-collision-check/result.txt")
+    outputs.file(markerFile)
+
+    doLast {
+        fun nativeLibNames(aar: File): Set<String> {
+            val names = sortedSetOf<String>()
+            val entryRegex = Regex("^jni/[^/]+/(lib[^/]+\\.so)$")
+            ZipFile(aar).use { zip ->
+                zip.entries().asSequence().forEach { entry ->
+                    entryRegex.matchEntire(entry.name)?.let { names.add(it.groupValues[1]) }
+                }
+            }
+            return names
+        }
+
+        val litertlmAar = litertlmAarFiles.files.singleOrNull {
+            it.name.startsWith("litertlm-android") && it.name.endsWith(".aar")
+        } ?: throw GradleException(
+            "validateNoLiteRtNativeLibCollision: expected exactly one LiteRT-LM AAR; got " +
+                litertlmAarFiles.files.map { it.name },
+        )
+        val litertAar = litertAarFiles.files.singleOrNull {
+            it.name.startsWith("litert-") && it.name.endsWith(".aar")
+        } ?: throw GradleException(
+            "validateNoLiteRtNativeLibCollision: expected exactly one base LiteRT AAR; got " +
+                litertAarFiles.files.map { it.name },
+        )
+
+        val litertlmLibs = nativeLibNames(litertlmAar)
+        val litertLibs = nativeLibNames(litertAar)
+        val collisions = (litertlmLibs intersect litertLibs).toSortedSet()
+
+        logger.lifecycle("validateNoLiteRtNativeLibCollision: litertlm-android ships $litertlmLibs")
+        logger.lifecycle("validateNoLiteRtNativeLibCollision: litert ships $litertLibs")
+
+        if (collisions.isNotEmpty()) {
+            throw GradleException(
+                buildString {
+                    appendLine(
+                        "litertlm-android and litert both bundle the same native " +
+                            "librar${if (collisions.size == 1) "y" else "ies"}: $collisions",
+                    )
+                    appendLine(
+                        "AAR-vs-AAR packaging resolution order is not guaranteed and has " +
+                            "silently kept the WRONG copy before -- see " +
+                            "docs/architecture/LITERT_COEXISTENCE.md. Resolve this deliberately: " +
+                            "commit a verified app/src/main/jniLibs/<abi>/ override of the " +
+                            "known-correct copy (checked via APK inspection, not assumption), " +
+                            "reinstate a jniLibs { pickFirsts } rule pointed at it, and update " +
+                            "this task's expectations once the collision is intentionally handled.",
+                    )
+                    append(
+                        "Do not silently re-add pickFirsts alone -- that is what caused the " +
+                            "original incident this check exists to prevent.",
+                    )
+                },
+            )
+        }
+
+        markerFile.get().asFile.apply { parentFile.mkdirs() }.writeText(
+            buildString {
+                appendLine("litertlmLibs=${litertlmLibs.joinToString(",")}")
+                appendLine("litertLibs=${litertLibs.joinToString(",")}")
+                appendLine("collisions=none")
+            },
+        )
+    }
+}
+
 android {
     namespace = "com.adsamcik.mindlayer.service"
     // Compose BOM 2026.05.01 pulls androidx.compose.* 1.12.0-alpha03 and
@@ -618,11 +710,15 @@ android {
                 "META-INF/LGPL2.1",
             )
         }
-        jniLibs {
-            // Deterministic fix lives in app/src/main/jniLibs/<abi>/libLiteRt*.so
-            // (see docs/architecture/LITERT_COEXISTENCE.md); this is just a fallback.
-            pickFirsts += setOf("lib/*/libLiteRt*.so")
-        }
+        // No jniLibs { pickFirsts } rule here on purpose: litertlm 0.14.0 no
+        // longer bundles libLiteRt*.so at all, so litert:2.1.5 is the sole
+        // provider and there's no AAR-vs-AAR collision to silence. If a future
+        // dependency bump reintroduces one, AGP's native packaging merge fails
+        // loudly on its own (duplicate same-path entries with no merge rule),
+        // and validateNoLiteRtNativeLibCollision (below) fails earlier still,
+        // with an actionable message. Do not blanket-readd pickFirsts -- that
+        // silently kept the WRONG copy for a long time before this was caught.
+        // See docs/architecture/LITERT_COEXISTENCE.md.
     }
 
     testOptions {
@@ -658,7 +754,7 @@ tasks.configureEach {
     // assembleDebug + assembleRelease + bundleRelease are the lifecycle tasks
     // CI invokes; the validator's <200 ms warm cost makes blanket wiring safe.
     if (name == "assembleDebug" || name == "assembleRelease" || name == "bundleRelease") {
-        dependsOn(validateLitertlmAbis, validateLitertAbis)
+        dependsOn(validateLitertlmAbis, validateLitertAbis, validateNoLiteRtNativeLibCollision)
     }
 
     // The release AI Asset Pack staging tasks read each pack module's
