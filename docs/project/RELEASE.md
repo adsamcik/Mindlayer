@@ -153,15 +153,18 @@ This is the file you upload to Play. It is:
 >
 > If you swap a model's bytes **without** changing its filename, run the release
 > with `--no-configuration-cache` so the new digest is recomputed (the digest is
-> captured at configuration time).
+> captured at configuration time). The selected cache always overwrites an
+> existing staged asset, so the bundle's model bytes match its new digest even
+> when the old and new files have the same length.
 
 ### 2.2.1 Pre-release model artefact storage and SHA variables
 
 Model binaries are stored outside git because they are large release artefacts,
 not source files. Before a **local** release build, retrieve the vetted artefacts
-from the project's private model artefact store and drop them flat into your
-`MINDLAYER_MODEL_CACHE` directory; the build derives every SHA-256 from those
-exact bytes, so there is nothing to compute by hand.
+from the project's private model artefact store and drop them flat into
+`<repo-root>\.models` by default, or the directory selected through
+`MINDLAYER_MODEL_CACHE` / `-Pmindlayer.modelCache`; the build derives every
+SHA-256 from those exact bytes, so there is nothing to compute by hand.
 
 For **CI** release jobs the cache is not present, so the seven `-P*Sha256`
 properties (sourced from the repository variables below) remain the way SHAs are
