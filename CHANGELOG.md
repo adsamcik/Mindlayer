@@ -6,6 +6,22 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [1.0.0-alpha.5] — 2026-07-14
+
+SDK Maven coordinate → `1.0.0-alpha.5` (`com.adsamcik.mindlayer:sdk:1.0.0-alpha.5`).
+
+### Fixed
+- **SDK encrypted-history recovery after Keystore key loss.** When a debug
+  install retains its wrapped history-key file but Android has removed the
+  corresponding Keystore alias, the SDK now removes only the unrecoverable
+  encrypted history database and regenerates a fresh key instead of crashing
+  the host application. Authentication failures of a present wrapped key remain
+  fail-closed and are not reset.
+
+### Changed
+- Contract version `1.1.0` → `1.1.1` for the wire-invisible SDK persistence
+  fix.
+
 ## [1.0.0-alpha.4] — 2026-07-13
 
 SDK Maven coordinate → `1.0.0-alpha.4` (`com.adsamcik.mindlayer:sdk:1.0.0-alpha.4`).

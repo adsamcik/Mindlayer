@@ -6,7 +6,7 @@ package com.adsamcik.mindlayer.shared
  *
  * This is deliberately a **separate number** from the product/SDK version
  * (`publishVersion` in the repo root `build.gradle.kts`, e.g.
- * `"1.0.0-alpha.4"`). The product version tracks releases; this version
+ * `"1.0.0-alpha.5"`). The product version tracks releases; this version
  * tracks the shape of the wire itself. They evolve at different rates —
  * most product releases ship zero AIDL changes — but are kept linked at
  * the MAJOR level:
@@ -69,8 +69,8 @@ object ContractVersion {
     const val MINOR: Int = 1
 
     /** Bumped for wire-invisible fixes. Independent of the product's patch. */
-    const val PATCH: Int = 0
+    const val PATCH: Int = 1
 
-    /** `"$MAJOR.$MINOR.$PATCH"`, e.g. `"1.1.0"`. */
+    /** `"$MAJOR.$MINOR.$PATCH"`, e.g. `"1.1.1"`. */
     const val VERSION: String = "$MAJOR.$MINOR.$PATCH"
 }

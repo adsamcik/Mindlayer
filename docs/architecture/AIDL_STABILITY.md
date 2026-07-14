@@ -166,9 +166,9 @@ Real failure modes observed when AIDL discipline lapses:
 
 ## Contract version and compatibility policy
 
-`com.adsamcik.mindlayer.shared.ContractVersion` (`shared/src/main/kotlin/com/adsamcik/mindlayer/shared/ContractVersion.kt`) is the formal, semver-numbered successor to the informal "(vX.Y)" labels used throughout this document and the codebase's comments (§ "Deferred inference surface (v0.6)" below, `"v1.1: ..."` comments in `SessionManager.kt`, etc.). Those labels tracked the same thing this object now tracks explicitly — the shape of the AIDL/wire contract — just without a single source of truth. Current value: `1.1.0`.
+`com.adsamcik.mindlayer.shared.ContractVersion` (`shared/src/main/kotlin/com/adsamcik/mindlayer/shared/ContractVersion.kt`) is the formal, semver-numbered successor to the informal "(vX.Y)" labels used throughout this document and the codebase's comments (§ "Deferred inference surface (v0.6)" below, `"v1.1: ..."` comments in `SessionManager.kt`, etc.). Those labels tracked the same thing this object now tracks explicitly — the shape of the AIDL/wire contract — just without a single source of truth. Current value: `1.1.1`.
 
-**Relationship to the product version.** `ContractVersion` is a deliberately separate number from the product/SDK version (`publishVersion` in the root `build.gradle.kts`, e.g. `"1.0.0-alpha.4"`) — most product releases ship zero AIDL changes, so forcing them to share a full version would be misleading. They are linked at exactly one level:
+**Relationship to the product version.** `ContractVersion` is a deliberately separate number from the product/SDK version (`publishVersion` in the root `build.gradle.kts`, e.g. `"1.0.0-alpha.5"`) — most product releases ship zero AIDL changes, so forcing them to share a full version would be misleading. They are linked at exactly one level:
 
 - **MAJOR is shared.** The root `build.gradle.kts` declares `contractMajorVersion` next to `publishVersion` and `require()`s they match at configuration time — any Gradle invocation fails immediately if one is bumped without the other. Neither is derived from the other; both are hand-maintained and kept in sync deliberately. A shared major is where either side may break compatibility outright.
 - **MINOR and PATCH are independent.** The contract's minor/patch move on their own cadence, tied to real wire changes (see the Process list below), completely decoupled from the product's own release cadence.
@@ -260,4 +260,3 @@ Multi-audio prompts (the upstream Google docs page demonstrates them
 for the journal1…5 example) remain rejected by the validator
 (`audioCount > 1`). The capability flag is **single-clip only**; do
 not infer multi-clip support from its presence.
-

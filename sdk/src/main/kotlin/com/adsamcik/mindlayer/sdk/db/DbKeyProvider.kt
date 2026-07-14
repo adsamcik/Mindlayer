@@ -67,9 +67,9 @@ internal object DbKeyProvider {
 
     /**
      * Returns the passphrase for the DB named [databaseName]. If regeneration is forced
-     * (Keystore key permanently invalidated), the existing DB file is deleted first. AEAD
-     * authentication failures are treated as tamper and **do not** delete the DB; they
-     * quarantine the key file and throw [IllegalStateException]. Callers must not cache
+     * (a missing or permanently invalidated Keystore key), the existing DB file is deleted
+     * first. AEAD authentication failures are treated as tamper and **do not** delete the DB;
+     * they quarantine the key file and throw [IllegalStateException]. Callers must not cache
      * the returned array; zero their reference once the database is built.
      */
     fun get(context: Context, databaseName: String): ByteArray {
@@ -101,15 +101,28 @@ internal object DbKeyProvider {
     private fun loadOrCreate(context: Context, databaseName: String): ByteArray {
         val keyFile = keyFile(context)
 
+        var justMigrated = false
         if (!keyFile.exists()) {
-            migrateLegacyPrefsIfPresent(context, keyFile)
+            justMigrated = migrateLegacyPrefsIfPresent(context, keyFile)
         }
 
         val record = readKeyFile(keyFile)
         if (record != null) {
             try {
                 val key = loadKeystoreKey()
-                    ?: error("Keystore key missing despite wrapped blob present")
+                if (key == null) {
+                    if (justMigrated) {
+                        throw IllegalStateException(
+                            "Keystore key missing despite wrapped blob present (post-legacy-migration)",
+                        )
+                    }
+                    Log.w(
+                        TAG,
+                        "Keystore key missing while wrapped DB key exists; regenerating passphrase and wiping $databaseName.",
+                    )
+                    forceReset(context, keyFile, databaseName)
+                    return createAndPersist(keyFile)
+                }
                 val cipher = Cipher.getInstance(AES_GCM_TRANSFORM)
                 cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, record.iv))
                 return cipher.doFinal(record.wrapped)
@@ -190,18 +203,20 @@ internal object DbKeyProvider {
         }
     }
 
-    private fun migrateLegacyPrefsIfPresent(context: Context, keyFile: File) {
+    private fun migrateLegacyPrefsIfPresent(context: Context, keyFile: File): Boolean {
         val prefs = context.getSharedPreferences(LEGACY_PREF_FILE, Context.MODE_PRIVATE)
-        val wrappedB64 = prefs.getString(LEGACY_PREF_WRAPPED, null) ?: return
-        val ivB64 = prefs.getString(LEGACY_PREF_IV, null) ?: return
+        val wrappedB64 = prefs.getString(LEGACY_PREF_WRAPPED, null) ?: return false
+        val ivB64 = prefs.getString(LEGACY_PREF_IV, null) ?: return false
         try {
             val wrapped = Base64.decode(wrappedB64, Base64.NO_WRAP)
             val iv = Base64.decode(ivB64, Base64.NO_WRAP)
             writeKeyFile(keyFile, KeyRecord(iv, wrapped))
             prefs.edit().clear().commit()
             Log.i(TAG, "Migrated wrapped DB key from legacy SharedPreferences to ${keyFile.name}.")
+            return true
         } catch (e: Exception) {
             Log.w(TAG, "Failed to migrate legacy wrapped DB key from prefs; will regenerate.", e)
+            return false
         }
     }
 

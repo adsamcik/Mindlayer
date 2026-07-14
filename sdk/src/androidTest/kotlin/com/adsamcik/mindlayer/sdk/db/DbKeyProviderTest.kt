@@ -91,6 +91,34 @@ class DbKeyProviderTest {
         assertArrayEquals(first, second)
     }
 
+    @Test
+    fun missingKeystoreKey_resetsUnrecoverableDatabaseAndRecreatesKey() {
+        val original = DbKeyProvider.get(context, TEST_DB)
+        val dbFile = context.getDatabasePath(TEST_DB).apply {
+            parentFile?.mkdirs()
+            writeBytes(byteArrayOf(1, 2, 3, 4))
+        }
+
+        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        ks.deleteEntry(keyAlias)
+
+        val recovered = DbKeyProvider.get(context, TEST_DB)
+
+        assertEquals(32, recovered.size)
+        assertFalse(
+            "a replacement passphrase must be generated after losing the Keystore alias",
+            original.contentEquals(recovered),
+        )
+        assertFalse("unrecoverable ciphertext DB must be removed", dbFile.exists())
+        assertTrue("wrapped DB key file must be recreated", File(context.filesDir, keyFile).exists())
+        assertTrue("replacement Keystore alias must exist", ks.containsAlias(keyAlias))
+        assertArrayEquals(
+            "reopened database must use the replacement passphrase",
+            recovered,
+            DbKeyProvider.get(context, TEST_DB),
+        )
+    }
+
     /**
      * AEAD authentication failure on the wrapped key is treated as tamper:
      * the key file is quarantined and [DbKeyProvider.get] throws
