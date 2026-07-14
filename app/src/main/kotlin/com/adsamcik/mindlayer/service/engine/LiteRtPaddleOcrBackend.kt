@@ -113,7 +113,7 @@ class LiteRtPaddleOcrBackend internal constructor(
             MindlayerLog.i(
                 TAG,
                 "PaddleOCR $resolvedRaw init skipped: prior failure within cooldown window " +
-                    "(cachedBackend=${cooldownRecord!!.lastFailedBackend}, " +
+                    "(cachedBackend=${cooldownRecord.lastFailedBackend}, " +
                     "ageMs=${clock() - cooldownRecord.lastFailedAtMs}, " +
                     "failureCount=${cooldownRecord.failureCount})",
             )
