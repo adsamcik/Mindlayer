@@ -565,8 +565,12 @@ android {
         // surfaces. The dashboard activities are fully resizable, so the
         // large-screen orientation/resizability restrictions are no-ops here.
         targetSdk = 37
-        versionCode = 5
-        versionName = "1.0.0-alpha.2"
+        // Derived from the root build's publishVersion so :app never
+        // drifts from the SDK's own published version again — see
+        // "Product/contract version synchronization" in the root
+        // build.gradle.kts and docs/architecture/AIDL_STABILITY.md.
+        versionCode = rootProject.extra["productVersionCode"] as Int
+        versionName = rootProject.extra["publishVersion"] as String
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Only bundle resources for the locales we actually ship.

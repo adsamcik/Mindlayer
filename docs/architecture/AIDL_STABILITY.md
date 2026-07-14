@@ -164,6 +164,19 @@ Real failure modes observed when AIDL discipline lapses:
 - **Silent semantic drift** — reused or repurposed an error code; SDK retry logic now matches the wrong condition. (This is roughly the bug `v02-error-codes` cleaned up — `Conversation.withSession` was catching `MindlayerException` codes the service never emitted, so eviction recovery was dead code in production.)
 - **`NullPointerException` deep in service code** — silently dropped a field's required validation by sneaking a default in. The validator's `require` blocks downstream throw NPE on the unmocked path.
 
+## Contract version and compatibility policy
+
+`com.adsamcik.mindlayer.shared.ContractVersion` (`shared/src/main/kotlin/com/adsamcik/mindlayer/shared/ContractVersion.kt`) is the formal, semver-numbered successor to the informal "(vX.Y)" labels used throughout this document and the codebase's comments (§ "Deferred inference surface (v0.6)" below, `"v1.1: ..."` comments in `SessionManager.kt`, etc.). Those labels tracked the same thing this object now tracks explicitly — the shape of the AIDL/wire contract — just without a single source of truth. Current value: `1.1.0`.
+
+**Relationship to the product version.** `ContractVersion` is a deliberately separate number from the product/SDK version (`publishVersion` in the root `build.gradle.kts`, e.g. `"1.0.0-alpha.4"`) — most product releases ship zero AIDL changes, so forcing them to share a full version would be misleading. They are linked at exactly one level:
+
+- **MAJOR is shared.** The root `build.gradle.kts` declares `contractMajorVersion` next to `publishVersion` and `require()`s they match at configuration time — any Gradle invocation fails immediately if one is bumped without the other. Neither is derived from the other; both are hand-maintained and kept in sync deliberately. A shared major is where either side may break compatibility outright.
+- **MINOR and PATCH are independent.** The contract's minor/patch move on their own cadence, tied to real wire changes (see the Process list below), completely decoupled from the product's own release cadence.
+
+**Compatibility guarantee — applies from product `1.0.0` stable onward.** Once the product ships `1.0.0`: any two builds whose `ContractVersion` values share the same MAJOR.MINOR are guaranteed wire-compatible; a PATCH difference never breaks compatibility. Only a MAJOR bump may break wire compatibility outright, and it always ships together with a product major bump.
+
+**Before `1.0.0` (current status).** The product is still on `1.0.0-alpha.x`, so this guarantee does **not** yet apply — no compatibility is promised between any two contract versions, including within the same MINOR, mirroring standard semver's own pre-1.0 rules. During this period (and always, as defense in depth once 1.0 ships too) the only real compatibility mechanism remains runtime capability negotiation: `ServiceCapabilities.supportedFeatures`, `apiVersion`, and `schemaVersion`. `ContractVersion` is a human/tooling-facing summary of "what generation of wire contract this build was compiled against" — it is never itself sent over the wire, so it cannot be used to negotiate compatibility between two different builds at runtime; that's what the capability-flag registry is for.
+
 ## Process
 
 When changing the AIDL surface:
@@ -173,6 +186,7 @@ When changing the AIDL surface:
 3. **Add tests** that round-trip the new Parcelable / method through `Parcel.marshall` + `unmarshall` to verify wire compat.
 4. **Document the new feature flag** in this file's table if you're adding capability-gated behavior.
 5. **Bump `MindlayerErrorCode`** if you're adding a typed error path. Mirror the symbolic name in `nameOf()` + `categoryOf()`.
+6. **Bump `ContractVersion.MINOR`** (or `PATCH` for a wire-invisible fix) in `shared/.../ContractVersion.kt`. Bump `MAJOR` there — and `contractMajorVersion` in the root `build.gradle.kts`, together — only for an intentionally wire-breaking change, and only in lockstep with a product major bump. See "Contract version and compatibility policy" above.
 
 If this document is wrong, **fix the document in the same PR as the code change**. Don't let the docs drift silently.
 

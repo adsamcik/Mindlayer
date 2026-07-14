@@ -35,6 +35,58 @@ extra["githubOwner"] = githubOwner
 extra["githubRepo"] = githubRepo
 extra["githubToken"] = githubToken
 
+// ── Product/contract version synchronization ───────────────────────────────
+// The product version (publishVersion, above) and the AIDL/wire contract
+// version (com.adsamcik.mindlayer.shared.ContractVersion, in :shared) are
+// two DELIBERATELY separate numbers — see docs/architecture/AIDL_STABILITY.md
+// § "Contract version and compatibility policy" — but they MUST share the
+// same MAJOR component. This is the single enforcement point: bump BOTH
+// `contractMajorVersion` below AND `ContractVersion.MAJOR` in the same PR
+// whenever either the product or the contract needs a major bump. Neither
+// side derives the other automatically — that would let a contract-breaking
+// change slip out under a same-major product patch release, or vice versa;
+// a deliberate, symmetric edit in both places is the point.
+val contractMajorVersion = 1
+val productMajorVersion = publishVersion.substringBefore("-").substringBefore(".").toInt()
+require(productMajorVersion == contractMajorVersion) {
+    "publishVersion's major ($productMajorVersion, from '$publishVersion') must equal " +
+        "contractMajorVersion ($contractMajorVersion) declared here. Bump " +
+        "ContractVersion.MAJOR in " +
+        "shared/src/main/kotlin/com/adsamcik/mindlayer/shared/ContractVersion.kt " +
+        "and this constant together — see docs/architecture/AIDL_STABILITY.md."
+}
+
+/**
+ * Deterministic Android `versionCode` derived from a semver-with-prerelease
+ * string like `"1.0.0-alpha.4"` or `"1.2.3"`. Encodes
+ * `MAJOR*1_000_000 + MINOR*10_000 + PATCH*100 + PRERELEASE_NUM`, where a
+ * stable release (no prerelease suffix) sorts after any alpha/beta/rc of
+ * the same MAJOR.MINOR.PATCH (`PRERELEASE_NUM = 99`).
+ *
+ * Introduced because `:app`'s own `versionCode`/`versionName` had drifted
+ * from `publishVersion` for multiple releases (both were bumped by hand,
+ * never in lockstep). Deriving `:app`'s Android version directly from
+ * `publishVersion` (see `app/build.gradle.kts`) eliminates that class of
+ * drift going forward.
+ */
+fun versionCodeFor(semverWithPrerelease: String): Int {
+    val (core, prerelease) = semverWithPrerelease.split("-", limit = 2)
+        .let { it[0] to it.getOrNull(1) }
+    val (major, minor, patch) = core.split(".").map { it.trim().toInt() }
+    val prereleaseNum = prerelease?.substringAfterLast(".")?.toIntOrNull() ?: 99
+    return major * 1_000_000 + minor * 10_000 + patch * 100 + prereleaseNum
+}
+
+// versionCode 5 ("1.0.0-alpha.2") already shipped under the old manual
+// scheme; every publishVersion from "1.0.0-alpha.3" onward already yields
+// >= 1_000_003 under the new scheme, but this guards against a future
+// rescoping of the function silently producing a lower/duplicate code.
+extra["productVersionCode"] = versionCodeFor(publishVersion).also { code ->
+    require(code >= 6) {
+        "versionCode $code for '$publishVersion' must be >= 6 (versionCode 5 already shipped as 1.0.0-alpha.2)"
+    }
+}
+
 // ── Release model provisioning from a local cache (never committed) ───────────
 // Release AABs/APKs bundle the on-device AI models (Gemma chat, EmbeddingGemma,
 // PaddleOCR) as install-time AI Asset Packs. The multi-GB model bytes are NOT in
