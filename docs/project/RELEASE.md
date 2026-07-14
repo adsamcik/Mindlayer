@@ -89,20 +89,28 @@ Commit both changes with a message like:
 release: 0.4.0
 ```
 
-### 2.2 Build the signed AAB
+### 2.2 Build the release AAB
 
-Models for a local release live in a flat **cache directory** outside the repo —
-the same one `tools/dev-models/push-models.*` uses. Point the build at it once
-with `MINDLAYER_MODEL_CACHE` (or `-Pmindlayer.modelCache=<dir>`) and the build
-copies the binaries into each AI-pack module and derives their pinned SHA-256
-automatically. No manual copying, no hand-typed `-P*Sha256` flags.
+With the `keystore.properties` setup from section 1.2 in place, this produces
+the signed AAB for Play upload. Models for a local release live in a flat
+**cache directory** — by default, the
+standardized, gitignored `<repo-root>\.models` directory that
+`tools/dev-models/push-models.*` uses. Override it with
+`MINDLAYER_MODEL_CACHE` or `-Pmindlayer.modelCache=<dir>` when the vetted model
+binaries live elsewhere. The build copies the binaries into each AI-pack module
+and derives their pinned SHA-256 automatically. No manual copying or hand-typed
+`-P*Sha256` flags are needed.
 
 ```powershell
-# One-time per machine: where your vetted release model binaries live (flat
-# layout — see docs/models/DEV_MODELS.md § "Recommended cache layout").
-$env:MINDLAYER_MODEL_CACHE = 'G:\mindlayer-models'
+# Default: populate <repo-root>\.models with the vetted flat model layout
+# (see docs/models/DEV_MODELS.md § "Recommended cache layout").
+# Disable the configuration cache so every release derives integrity digests
+# from the current model bytes.
+./gradlew.bat clean :app:bundleRelease --no-configuration-cache
 
-./gradlew.bat clean :app:bundleRelease
+# Optional: instead, point at a shared cache outside the repository.
+$env:MINDLAYER_MODEL_CACHE = 'G:\mindlayer-models'
+./gradlew.bat clean :app:bundleRelease --no-configuration-cache
 ```
 
 The cache must contain these seven files (the orientation classifier is the
@@ -127,7 +135,9 @@ app/build/outputs/bundle/release/app-release.aab
 
 This is the file you upload to Play. It is:
 
-* **Signed** with your release key (because `keystore.properties` is present).
+* **Signed** with your release key only when `keystore.properties` is present
+  and resolves. If Gradle reports an unsigned fallback, return to section 1.2;
+  do not upload that bundle to Play.
 * **Minified and shrunk** via R8 using `app/proguard-rules.pro`.
 * **Packaged with install-time AI packs** declared in `app/build.gradle.kts`:
   `:gemma_model`, `:gemma_embed_model`, and `:paddleocr_model`, whose bytes were
@@ -135,22 +145,26 @@ This is the file you upload to Play. It is:
 
 > ⚠️ The Gemma `.litertlm`, PaddleOCR `.tflite`/dictionary files, and
 > EmbeddingGemma artifacts are **not** checked into git. A release build fails
-> fast with a clear message if `MINDLAYER_MODEL_CACHE` is unset or a required
-> file is missing from both the cache and the AI-pack `src/main/assets/` dir.
+> fast with a clear message if neither `<repo-root>\.models` nor
+> `MINDLAYER_MODEL_CACHE`/`-Pmindlayer.modelCache` supplies a required file and
+> it is not already present in the AI-pack `src/main/assets/` dir.
 > Debug builds keep advisory model-hash behavior and the sideload path for local
 > development.
 >
 > If you swap a model's bytes **without** changing its filename, run the release
 > with `--no-configuration-cache` so the new digest is recomputed (the digest is
-> captured at configuration time).
+> captured at configuration time). The selected cache always overwrites an
+> existing staged asset, so the bundle's model bytes match its new digest even
+> when the old and new files have the same length.
 
 ### 2.2.1 Pre-release model artefact storage and SHA variables
 
 Model binaries are stored outside git because they are large release artefacts,
 not source files. Before a **local** release build, retrieve the vetted artefacts
-from the project's private model artefact store and drop them flat into your
-`MINDLAYER_MODEL_CACHE` directory; the build derives every SHA-256 from those
-exact bytes, so there is nothing to compute by hand.
+from the project's private model artefact store and drop them flat into
+`<repo-root>\.models` by default, or the directory selected through
+`MINDLAYER_MODEL_CACHE` / `-Pmindlayer.modelCache`; the build derives every
+SHA-256 from those exact bytes, so there is nothing to compute by hand.
 
 For **CI** release jobs the cache is not present, so the seven `-P*Sha256`
 properties (sourced from the repository variables below) remain the way SHAs are
@@ -381,4 +395,3 @@ Once F-078 (extended emulator matrix) and F-079
 (litertlm-aar-abi-inspection) land, items in the checklist that those
 gates fully cover should be removed. The list above is the **upper bound**
 — too long means people skip it.
-

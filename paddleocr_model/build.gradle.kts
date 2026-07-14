@@ -181,7 +181,9 @@ val provisionReleaseModelAssets by tasks.registering {
             val targetReady = target.isFile && target.length() > 1L
             val source = cacheDir?.resolve(fileName)?.takeIf { it.isFile && it.length() > 1L }
             when {
-                source != null && (!targetReady || target.length() != source.length()) -> {
+                // Equal byte lengths do not establish content integrity; the selected
+                // cache must always win so the asset matches its generated digest.
+                source != null -> {
                     target.parentFile.mkdirs()
                     source.copyTo(target, overwrite = true)
                 }
