@@ -9,22 +9,22 @@
   "models": [
     {
       "filename": "paddleocr-ppocrv5-mobile-det.tflite",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sha256": "497da16bd4559fae8ba04c699379aaf74999646ebb1f2cbc1cfcba8b5fcbd21b",
       "role": "detection"
     },
     {
       "filename": "paddleocr-ppocrv5-mobile-rec.tflite",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sha256": "5968e0dacda329f27ae7c7820d6bfece90ddfddd907728078a6493034800fae9",
       "role": "recognition"
     },
     {
       "filename": "paddleocr-ppocrv5-mobile-cls.tflite",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sha256": "5f56f02d24175cd582a2ca94c6895fd173f99d01d37c17806cc38e16392333df",
       "role": "orientation"
     },
     {
       "filename": "paddleocr-ppocrv5-mobile-dict.txt",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sha256": "e5f8ca61ba03d3a247d06b013119982fa6de2bd48a846018b67bca57ffc56de1",
       "role": "dictionary"
     }
   ]
