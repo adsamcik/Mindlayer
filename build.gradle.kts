@@ -92,7 +92,8 @@ extra["productVersionCode"] = versionCodeFor(publishVersion).also { code ->
 // PaddleOCR) as install-time AI Asset Packs. The multi-GB model bytes are NOT in
 // git (.gitignore). For a LOCAL release we source them from a flat cache dir —
 // the same one tools/dev-models/push-models.* uses — resolved from
-// `-Pmindlayer.modelCache=<path>` or the `MINDLAYER_MODEL_CACHE` env var.
+// `-Pmindlayer.modelCache=<path>`, the `MINDLAYER_MODEL_CACHE` env var, or the
+// standardized gitignored `<repo-root>/.models` directory when it exists.
 //
 // Gated on a release task + a resolved cache, we hash each canonical file ONCE
 // here and expose the digests via `extra`. Downstream:
@@ -113,8 +114,15 @@ val mindlayerReleaseTaskRequested: Boolean = gradle.startParameter.taskNames.any
 
 val mindlayerModelCachePath: String = (
     providers.gradleProperty("mindlayer.modelCache").orNull
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
         ?: providers.environmentVariable("MINDLAYER_MODEL_CACHE").orNull
-).orEmpty().trim()
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+        ?: rootDir.resolve(".models")
+            .takeIf { it.isDirectory }
+            ?.absolutePath
+).orEmpty()
 
 fun mindlayerSha256Hex(target: File): String {
     val digest = java.security.MessageDigest.getInstance("SHA-256")
