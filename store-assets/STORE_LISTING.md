@@ -33,7 +33,7 @@ RUN AI ON YOUR PHONE
 
 YOU CONTROL ACCESS
 
-Every external app must request permission before it can use Mindlayer. The Mindlayer-owned consent screen identifies the requesting app and its signing certificate. Approve with your device credential, deny the request, block the app, or revoke access later from the dashboard.
+Every external app must request permission before it can use Mindlayer. The Mindlayer-owned consent screen identifies the requesting app and its signing certificate. Confirm with biometrics or your device credential when available; devices without authentication hardware use an explicit confirmation screen. You can deny, block, or later revoke any app.
 
 A BUILT-IN SERVICE DASHBOARD
 
@@ -45,6 +45,7 @@ PRIVATE BY DESIGN
 • No accounts, advertising, analytics, telemetry, or cloud fallback.
 • Media staged for model processing is encrypted at rest and removed after the request.
 • Local diagnostic logs are encrypted and contain metadata only — never prompts, images, recognized text, or model output.
+• Deferred results are encrypted locally until fetched, acknowledged, cancelled, or automatically expired.
 • Model files are integrity-checked before use.
 
 Mindlayer itself cannot connect to the internet. Apps you approve receive the results they request and have their own permissions and privacy practices, so only approve apps you trust.
@@ -123,8 +124,10 @@ Answer the Console questionnaire as follows:
 Supporting facts (for your reference, all enforced in code):
 - No `INTERNET` / `ACCESS_NETWORK_STATE` permission in the app manifest.
 - No analytics, advertising, or crash-reporting SDKs.
-- Inference inputs/outputs are processed in memory and not persisted by the
-  service; staged media is AES-256-GCM encrypted and deleted after the request.
+- Synchronous inference inputs/outputs are processed in memory and not persisted
+  by the service. Deferred results are SQLCipher-encrypted locally and expire
+  after 24 hours by default unless fetched, acknowledged, or cancelled sooner.
+  Staged media is AES-256-GCM encrypted and deleted after the request.
 - Local diagnostic logs are SQLCipher-encrypted and contain metadata only.
 
 ---
@@ -135,7 +138,7 @@ Supporting facts (for your reference, all enforced in code):
 |---|---|
 | `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE` | Keep the model alive while actively serving a visible inference request. |
 | `POST_NOTIFICATIONS` | Show the required foreground-service notification during inference. |
-| `USE_BIOMETRIC` | Gate app-access approval/revocation behind a device biometric check. |
+| `USE_BIOMETRIC` | Protect approval/revocation with biometrics or device credentials when available; explicit confirmation remains available on devices without authentication hardware. |
 | `HIDE_OVERLAY_WINDOWS` | Protect the approval screen from tap-jacking overlays. |
 
 No location, contacts, microphone, camera, storage, or network permissions are

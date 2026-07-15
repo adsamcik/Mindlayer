@@ -4,7 +4,7 @@
 The Play Console "high-res icon" must match the launcher icon that installs on
 the device, so it is derived directly from the in-app adaptive icon rather than
 drawn fresh: the adaptive foreground art composited over the adaptive background
-colour, flattened to an opaque 512x512 RGB PNG (Play disallows transparency).
+colour and saved as a 32-bit RGBA PNG, as required by Google Play.
 
 Run from this directory:  python make_graphics.py
 """
@@ -29,7 +29,9 @@ def make_icon_512():
     fg = fg.resize((512, 512), Image.LANCZOS)
     canvas.alpha_composite(fg, (0, 0))
     out = os.path.join(HERE, "icon-512.png")
-    canvas.convert("RGB").save(out, "PNG")
+    # Google Play requires a 32-bit PNG. Keep the alpha channel even though the
+    # current composition is visually opaque.
+    canvas.save(out, "PNG")
     return out
 
 
