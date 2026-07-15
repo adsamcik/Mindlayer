@@ -25,9 +25,9 @@ WHITE = (255, 255, 255)
 SUBTLE = (223, 218, 255)  # Indigo90
 
 CAPTIONS = [
-    ("01-status.png", "On-device AI,", "ready when your apps are"),
-    ("02-models.png", "Local models —", "nothing leaves your phone"),
-    ("03-tests.png", "Text, embeddings & OCR,", "all running offline"),
+    ("01-status.png", "Private AI engine", "for the apps you approve"),
+    ("02-models.png", "Local AI models", "shared across compatible apps"),
+    ("03-tests.png", "Built-in checks", "test every engine on-device"),
 ]
 
 

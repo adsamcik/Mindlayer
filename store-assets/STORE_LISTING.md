@@ -15,51 +15,51 @@ Mindlayer: On-Device AI
 ## Short description  *(max 80 characters)*
 
 ```
-On-device AI for your apps. Fully offline, private — no cloud, no tracking.
+Private on-device AI for apps you approve — offline, shared, and open source.
 ```
-*(74 chars)*
+*(77 chars)*
 
 ## Full description  *(max 4000 characters)*
 
 ```
-Mindlayer is an on-device AI engine for Android that lets your apps run powerful AI — completely offline. It loads a large language model once and shares it with the apps you trust, so they can generate text, understand images, create text embeddings, and read text from photos, all without ever sending your data to the cloud.
+Mindlayer is a private, on-device AI service for Android. It is not a cloud chatbot: it provides one shared local AI engine that compatible apps can use after you approve them.
 
-WHY MINDLAYER
+RUN AI ON YOUR PHONE
 
-• Fully offline. Mindlayer does not request internet access. There is no cloud, no server, and no remote API. Everything happens on your phone.
+• Text and image understanding — generate text and analyze images with Gemma.
+• Embeddings — turn text into vectors for private semantic search.
+• OCR — recognize text in photos and screenshots with PaddleOCR.
+• Shared service — load the models once instead of bundling a separate AI engine into every app.
 
-• Private by design. No analytics, no advertising, no tracking, no accounts. Because the app has no network access, nothing about you can ever leave your device.
+YOU CONTROL ACCESS
 
-• You stay in control. No app can use Mindlayer until you approve it on a confirmation screen — protected by your fingerprint or face — that clearly shows which app is asking. You can deny or block any app at any time.
+Every external app must request permission before it can use Mindlayer. The Mindlayer-owned consent screen identifies the requesting app and its signing certificate. Approve with your device credential, deny the request, block the app, or revoke access later from the dashboard.
 
-• Efficient. A single shared model serves all your apps, with thermal- and memory-aware scheduling that adapts to your device so it stays fast and cool.
+A BUILT-IN SERVICE DASHBOARD
 
-WHAT IT CAN DO
+See whether the service is ready, which local models are installed, current thermal and memory conditions, active sessions, recent diagnostic events, and the apps you have approved. Built-in checks let you verify the language model, embeddings, image understanding, and OCR directly on your device.
 
-• Chat & vision — generate text replies and describe images on-device.
-• Embeddings — turn text into vectors for fast, private semantic search.
-• OCR — recognise text inside photos and screenshots, locally.
+PRIVATE BY DESIGN
 
-Powered by Google's Gemma open model running on the LiteRT on-device runtime, plus PaddleOCR for text recognition — all open-source and fully offline.
+• Mindlayer does not request the Android INTERNET permission.
+• No accounts, advertising, analytics, telemetry, or cloud fallback.
+• Media staged for model processing is encrypted at rest and removed after the request.
+• Local diagnostic logs are encrypted and contain metadata only — never prompts, images, recognized text, or model output.
+• Model files are integrity-checked before use.
 
-A BUILT-IN DASHBOARD
+Mindlayer itself cannot connect to the internet. Apps you approve receive the results they request and have their own permissions and privacy practices, so only approve apps you trust.
 
-Mindlayer includes a simple dashboard so you can see exactly what's happening: whether the service is ready, which models are loaded, how the device is performing, and which apps you've granted access to. You can run a quick on-device test at any time.
+FOR ANDROID DEVELOPERS
 
-FOR DEVELOPERS
+The open-source Kotlin SDK provides typed APIs for streaming inference, images, embeddings, OCR, deferred work, and lifecycle recovery. No API keys or usage bills are required. Mindlayer uses Google's Gemma open model with LiteRT-LM, EmbeddingGemma, and PaddleOCR.
 
-Mindlayer ships with a clean Kotlin SDK so your own apps can call on-device AI in a few lines of code — no API keys, no usage bills, no privacy compromises. One model instance serves every app on the device.
+BEFORE YOU INSTALL
 
-PRIVACY YOU CAN VERIFY
-
-• No INTERNET permission — the OS itself prevents Mindlayer from making any network connection.
-• Media handed to the model is encrypted while it's processed and deleted immediately afterwards.
-• Diagnostic logs are stored in an encrypted database and contain only metadata — never your prompts, images, or the AI's output.
-• On-device model files are integrity-checked before use.
+Mindlayer is an AI provider service, not a standalone chat interface. You need a compatible client app to use its AI features. The included models require substantial storage, and speed and available features depend on your device hardware.
 
 Read the full privacy policy: https://adsamcik.github.io/Mindlayer/privacy.html
 
-Mindlayer brings private, capable AI to your phone — and keeps it there.
+Mindlayer brings shared, user-controlled AI to Android while keeping its processing on-device.
 ```
 
 ---
@@ -79,9 +79,9 @@ Mindlayer brings private, capable AI to your phone — and keeps it there.
 Play-compliant phone screenshots (1242×2208, 1.78:1) are in
 `store-assets/screenshots/framed/`:
 
-1. `01-status.png` — service readiness dashboard
-2. `02-models.png` — the three on-device models
-3. `03-tests.png` — on-device inference tests
+1. `01-status.png` — clean service readiness and device-health dashboard
+2. `02-models.png` — the three shared on-device models
+3. `03-tests.png` — built-in on-device engine checks
 
 Raw device captures (1080×2400, 2.22:1 — **too tall for Play's 2:1 limit**, kept
 for reference only) are in `store-assets/screenshots/raw/`. Regenerate the

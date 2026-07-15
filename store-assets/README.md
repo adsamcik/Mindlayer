@@ -14,6 +14,9 @@ Google Play listing assets for Mindlayer.
 | `screenshots/raw/` | Raw 1080×2400 device captures (2.22:1 — **exceeds Play's 2:1 max**, reference only). |
 | `screenshots/framed/` | Play-ready 1242×2208 (1.78:1) screenshots to upload. |
 
+The current sequence shows service readiness, the local model inventory, and the
+built-in engine verification surface.
+
 The privacy policy is hosted via GitHub Pages on the `gh-pages` branch:
 <https://adsamcik.github.io/Mindlayer/privacy.html>
 

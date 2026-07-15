@@ -22,7 +22,7 @@ WHITE = (255, 255, 255)
 SUBTLE = (200, 196, 235)  # soft violet-white for the tagline
 
 TITLE = "Mindlayer"
-TAGLINE = "On-device AI for your apps"
+TAGLINE = "On-device AI for apps you approve"
 # Left edge of the text block — clear of the crystal, into the negative space.
 TEXT_X = 510
 RIGHT_MARGIN = 50
