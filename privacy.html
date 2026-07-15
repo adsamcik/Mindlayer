@@ -93,9 +93,16 @@
             cleared on the next start</td>
         </tr>
         <tr>
-          <td>Model output (generated text, embeddings, recognized text)</td>
+          <td>Synchronous model output (generated text, embeddings, recognized text)</td>
           <td>Returned to the requesting app in memory</td>
           <td>Not stored by the Mindlayer service</td>
+        </tr>
+        <tr>
+          <td>Deferred model output</td>
+          <td>A local, <strong>encrypted</strong> database (SQLCipher) on your
+            device; large embedding results may use encrypted private files</td>
+          <td>Kept until fetched, acknowledged, cancelled, or automatically
+            expired. The default expiry is 24 hours.</td>
         </tr>
         <tr>
           <td>Diagnostic logs</td>
@@ -117,8 +124,8 @@
 
     <h2>5. Data sharing</h2>
     <p>
-      <strong>We do not share any data, because no data is collected or
-      transmitted.</strong> Mindlayer has no servers and no third-party
+      <strong>We do not share any data off-device, because no data is collected
+      or transmitted over a network.</strong> Mindlayer has no servers and no third-party
       integrations that receive data. We do not sell, rent, or disclose personal
       information to anyone.
     </p>
@@ -142,9 +149,9 @@
         </tr>
         <tr>
           <td><code>USE_BIOMETRIC</code></td>
-          <td>To ask for your fingerprint/face confirmation before granting an
-            app access to the AI service or revoking it — a security check
-            performed entirely on-device.</td>
+          <td>To request biometric or device-credential confirmation before
+            granting or revoking access when authentication hardware is
+            available. Devices without it use the explicit confirmation screen.</td>
         </tr>
         <tr>
           <td><code>HIDE_OVERLAY_WINDOWS</code></td>
@@ -163,9 +170,9 @@
     <ul>
       <li>
         <strong>Consent.</strong> No app can use Mindlayer until you explicitly
-        approve it on a biometric-protected confirmation screen that shows the
-        requesting app's name, signing certificate, and install source. You can
-        deny or block any app.
+        approve it on a confirmation screen that shows the requesting app's
+        name, signing certificate, and install source. Device authentication is
+        requested when available. You can deny or block any app.
       </li>
       <li>
         <strong>In-memory data</strong> is released automatically when a request
@@ -191,15 +198,15 @@
       <li>media staged for the model is encrypted at rest with AES-256-GCM using
         a key that never leaves memory;</li>
       <li>diagnostic logs are stored in an encrypted (SQLCipher) database;</li>
-      <li>each app must be individually approved by you, gated behind a
-        biometric check, before it can use the service;</li>
+      <li>each app must be individually approved by you, with device
+        authentication requested when available, before it can use the service;</li>
       <li>the approval screen blocks screenshots and screen recording to prevent
         leaking sensitive identity and signing-certificate details;</li>
       <li>on-device model files are integrity-checked (SHA-256) before use.</li>
     </ul>
     <p>
-      No method of storage is 100% secure, but because nothing is transmitted,
-      your data is never exposed in transit or on any server.
+      No method of storage is 100% secure, but because Mindlayer makes no network
+      transmissions, your data is never exposed in network transit or on a server.
     </p>
 
     <h2>9. Children's privacy</h2>
