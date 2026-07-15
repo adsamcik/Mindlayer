@@ -80,8 +80,11 @@
       <tbody>
         <tr>
           <td>Prompts and other text you (or an app) provide</td>
-          <td>Device memory (RAM) only</td>
-          <td>Released when the request/session ends</td>
+          <td>Request buffers and session context in device memory (RAM)</td>
+          <td>Request-scoped buffers are released when the request ends.
+            Successful prompts and output may remain as session context until
+            the session ends, expires, is evicted, the client disconnects, or
+            the process stops.</td>
         </tr>
         <tr>
           <td>Images and audio sent for analysis</td>
@@ -116,9 +119,9 @@
             cleanup, or earlier when you clear app storage or uninstall. Logs
             contain <strong>only metadata</strong> — timing, token counts,
             request and session identifiers, error labels, and for security
-            decisions, package identifiers and signing-certificate hash
-            prefixes. They never contain your prompt text, images, audio, or
-            model output.</td>
+            decisions, caller identity metadata such as UIDs, package
+            identifiers, and signing-certificate hash prefixes. They never
+            contain your prompt text, images, audio, or model output.</td>
         </tr>
         <tr>
           <td>Consent and authorization metadata</td>
@@ -126,12 +129,14 @@
             and coordinated with file locks. Records can include package and
             display names, signing-certificate hashes, install source, decisions,
             timestamps, and consent-attempt counters.</td>
-          <td>Approvals remain until revoked. Temporary denials and pending
-            challenges expire and are pruned on later access. Consent-attempt
-            counters can remain after a cooldown expires and are cleared when
-            access is granted or explicitly denied. Permanent blocks remain
-            until removed. Clearing app storage or uninstalling removes all
-            records.</td>
+          <td>Approvals remain until revoked. Pending challenges expire and are
+            pruned during later challenge operations. Temporary denials stop
+            affecting authorization at expiry but may remain in the signed file
+            until a later denial write. Choosing “Not now” increments the
+            consent-attempt counter; counters can remain after cooldown and are
+            cleared by a grant, 24-hour denial, or permanent block. Permanent
+            blocks remain until removed. Clearing app storage or uninstalling
+            removes all records.</td>
         </tr>
       </tbody>
     </table>
@@ -199,8 +204,10 @@
         other preflight failures deny the action. You can deny or block any app.
       </li>
       <li>
-        <strong>In-memory data</strong> is released automatically when a request
-        or session ends.
+        <strong>In-memory data.</strong> Request-scoped buffers are released when
+        a request ends. Successful prompts and output may remain in session
+        context until that session ends, expires, is evicted, the client
+        disconnects, or the process stops.
       </li>
       <li>
         <strong>Local logs and any cached files</strong> can be removed at any
