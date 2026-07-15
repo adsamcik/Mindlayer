@@ -44,12 +44,12 @@
     <h2>2. No internet access — by design</h2>
     <p>
       Mindlayer does <strong>not request the <code>INTERNET</code>
-      permission</strong> (nor <code>ACCESS_NETWORK_STATE</code> or any other
-      network permission) in its Android manifest. The operating system
-      therefore prevents the app from making any network connection. There is no
-      cloud component, no backend server, and no remote API. A continuous
-      integration check fails our build if a network permission is ever
-      introduced.
+      permission</strong>. The packaged app includes
+      <code>ACCESS_NETWORK_STATE</code>, declared by bundled Android scheduling
+      components, which permits reading connectivity state but does not permit
+      sending or receiving network data. Without <code>INTERNET</code>, Android
+      prevents the app from opening network connections. There is no cloud
+      component, no backend server, and no remote API.
     </p>
 
     <h2>3. Information we collect</h2>
@@ -106,10 +106,13 @@
           <td>Deferred model output</td>
           <td>A local, <strong>encrypted</strong> database (SQLCipher) on your
             device; large embedding results may use encrypted private files</td>
-          <td>Fetching marks a result delivered but does not erase its encrypted
-            record. Acknowledgement deletes it. Records may also be quota-evicted
-            or expire after 24 hours by default; expired records are removed
-            during a later deferred operation.</td>
+          <td>Fetching marks a result delivered but does not by itself erase its
+            encrypted record. Acknowledgement deletes it. Deferred results are
+            not guaranteed to survive disconnection of the requesting app; large
+            embedding-result files may be removed when that client disconnects.
+            Records may also be quota-evicted or expire after 24 hours by
+            default; expired records are removed during a later deferred
+            operation.</td>
         </tr>
         <tr>
           <td>Diagnostic logs</td>
@@ -181,9 +184,32 @@
             Other preflight failures deny the action.</td>
         </tr>
         <tr>
+          <td><code>USE_FINGERPRINT</code></td>
+          <td>For backward-compatible device authentication support on older
+            Android versions.</td>
+        </tr>
+        <tr>
           <td><code>HIDE_OVERLAY_WINDOWS</code></td>
           <td>To protect the approval screen from tap-jacking overlays so you
             always see exactly which app you are granting access to.</td>
+        </tr>
+        <tr>
+          <td><code>ACCESS_NETWORK_STATE</code></td>
+          <td>Declared by bundled Android scheduling components for connectivity
+            constraints. It can read connectivity state but cannot transmit
+            data; Mindlayer does not request <code>INTERNET</code>.</td>
+        </tr>
+        <tr>
+          <td><code>WAKE_LOCK</code> / <code>RECEIVE_BOOT_COMPLETED</code></td>
+          <td>Declared by bundled Android scheduling components so scheduled
+            local work can complete reliably and be rescheduled after a device
+            restart.</td>
+        </tr>
+        <tr>
+          <td><code>FOREGROUND_SERVICE_DATA_SYNC</code></td>
+          <td>Declared by bundled on-device model-delivery and NPU components
+            for foreground model extraction or processing. It does not grant
+            network access.</td>
         </tr>
       </tbody>
     </table>
