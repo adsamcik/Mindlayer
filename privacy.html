@@ -11,27 +11,28 @@
   <header class="hero">
     <p class="brand">Mindlayer</p>
     <h1>Privacy Policy</h1>
-    <p>Mindlayer runs entirely on your device. It has no internet access and sends nothing — about you or your data — anywhere.</p>
+    <p>Mindlayer runs entirely on your device. It has no internet access and sends no data to the developer or any third party.</p>
   </header>
 
   <main>
     <p class="meta">
       <strong>Effective date:</strong> 6 June 2026 &nbsp;·&nbsp;
-      <strong>Last updated:</strong> 6 June 2026
+      <strong>Last updated:</strong> 15 July 2026
     </p>
 
     <div class="callout">
       <strong>The short version.</strong> Mindlayer is a fully on-device,
       offline AI service. It declares no internet permission, collects no
       personal data, contains no analytics, advertising, or tracking, and
-      transmits nothing to the developer or any third party. Everything you do
-      with Mindlayer stays on your device.
+      transmits nothing to the developer or any third party. Its AI processing
+      stays on your device; apps you approve receive the results they request and
+      have their own permissions and privacy practices.
     </div>
 
     <h2>1. Who this policy covers</h2>
     <p>
       This Privacy Policy applies to the <strong>Mindlayer</strong> Android
-      application (package <code>com.adsamcik.mindlayer.service</code>),
+      application (package <code>com.adsamcik.mindlayer</code>),
       published by <strong>adsamcik</strong> ("we", "us"). Mindlayer is a
       background service that loads an on-device large language model and lets
       other apps on the same device run AI inference (text generation, text
@@ -55,7 +56,7 @@
     <p>
       <strong>We collect no personal information.</strong> Because the app
       cannot access the network, no data of any kind — personal or otherwise —
-      is sent to us or to anyone else. Specifically, Mindlayer contains:
+      is sent off your device by Mindlayer. Specifically, Mindlayer contains:
     </p>
     <ul>
       <li>no analytics or usage-statistics SDKs;</li>
@@ -68,9 +69,9 @@
     <h2>4. How your data is processed (on your device only)</h2>
     <p>
       When an app on your device asks Mindlayer to run AI inference, the inputs
-      and outputs are processed entirely in your device's memory and are never
-      transmitted off the device. The table below describes how each kind of
-      data is handled.
+      and outputs are processed on-device and are never transmitted off the
+      device by Mindlayer. Results are returned to the requesting app. The table
+      below describes how each kind of data is handled.
     </p>
     <table>
       <thead>
@@ -192,8 +193,8 @@
       <li>diagnostic logs are stored in an encrypted (SQLCipher) database;</li>
       <li>each app must be individually approved by you, gated behind a
         biometric check, before it can use the service;</li>
-      <li>the approval and dashboard screens block screenshots and screen
-        recording to prevent leaking sensitive context;</li>
+      <li>the approval screen blocks screenshots and screen recording to prevent
+        leaking sensitive identity and signing-certificate details;</li>
       <li>on-device model files are integrity-checked (SHA-256) before use.</li>
     </ul>
     <p>
