@@ -95,23 +95,39 @@
         <tr>
           <td>Synchronous model output (generated text, embeddings, recognized text)</td>
           <td>Returned to the requesting app in memory</td>
-          <td>Not stored by the Mindlayer service</td>
+          <td>Not persisted to service storage. It may remain in service memory
+            as session context until the session ends, expires, is evicted, the
+            client disconnects, or the process stops.</td>
         </tr>
         <tr>
           <td>Deferred model output</td>
           <td>A local, <strong>encrypted</strong> database (SQLCipher) on your
             device; large embedding results may use encrypted private files</td>
-          <td>Kept until fetched, acknowledged, cancelled, or automatically
-            expired. The default expiry is 24 hours.</td>
+          <td>Fetching marks a result delivered but does not erase its encrypted
+            record. Acknowledgement deletes it. Records may also be quota-evicted
+            or expire after 24 hours by default; expired records are removed
+            during a later deferred operation.</td>
         </tr>
         <tr>
           <td>Diagnostic logs</td>
           <td>A local, <strong>encrypted</strong> database (SQLCipher) on your
             device</td>
-          <td>Retained locally until you clear data or uninstall. Logs contain
-            <strong>only metadata</strong> — timing, token counts, request and
-            session identifiers, and error labels. They never contain your
-            prompt text, images, audio, or model output.</td>
+          <td>Automatically deleted after seven days during startup and daily
+            cleanup, or earlier when you clear app storage or uninstall. Logs
+            contain <strong>only metadata</strong> — timing, token counts,
+            request and session identifiers, and error labels. They never
+            contain your prompt text, images, audio, or model output.</td>
+        </tr>
+        <tr>
+          <td>Consent and authorization metadata</td>
+          <td>App-private files protected against tampering with HMAC signatures
+            and coordinated with file locks. Records can include package and
+            display names, signing-certificate hashes, install source, decisions,
+            timestamps, and consent-attempt counters.</td>
+          <td>Approvals remain until revoked. Temporary denials and pending
+            challenges expire and are pruned on later access. Permanent blocks
+            remain until removed. Clearing app storage or uninstalling removes
+            all records.</td>
         </tr>
       </tbody>
     </table>
@@ -149,9 +165,10 @@
         </tr>
         <tr>
           <td><code>USE_BIOMETRIC</code></td>
-          <td>To request biometric or device-credential confirmation before
-            granting or revoking access when authentication hardware is
-            available. Devices without it use the explicit confirmation screen.</td>
+          <td>To request Android device authentication before granting or
+            revoking access when preflight succeeds. If preflight reports no
+            enrollment, no hardware, or unavailable hardware, the explicit
+            Mindlayer confirmation screen is used without an OS auth prompt.</td>
         </tr>
         <tr>
           <td><code>HIDE_OVERLAY_WINDOWS</code></td>
@@ -172,7 +189,8 @@
         <strong>Consent.</strong> No app can use Mindlayer until you explicitly
         approve it on a confirmation screen that shows the requesting app's
         name, signing certificate, and install source. Device authentication is
-        requested when available. You can deny or block any app.
+        requested when Android preflight succeeds; otherwise this explicit
+        confirmation screen is the approval gate. You can deny or block any app.
       </li>
       <li>
         <strong>In-memory data</strong> is released automatically when a request
@@ -198,8 +216,9 @@
       <li>media staged for the model is encrypted at rest with AES-256-GCM using
         a key that never leaves memory;</li>
       <li>diagnostic logs are stored in an encrypted (SQLCipher) database;</li>
-      <li>each app must be individually approved by you, with device
-        authentication requested when available, before it can use the service;</li>
+      <li>each app must be individually approved by you; Android device
+        authentication is requested when preflight succeeds, otherwise the
+        explicit Mindlayer confirmation screen is the approval gate;</li>
       <li>the approval screen blocks screenshots and screen recording to prevent
         leaking sensitive identity and signing-certificate details;</li>
       <li>on-device model files are integrity-checked (SHA-256) before use.</li>
