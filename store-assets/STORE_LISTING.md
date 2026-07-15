@@ -33,7 +33,7 @@ RUN AI ON YOUR PHONE
 
 YOU CONTROL ACCESS
 
-Every external app must request permission before it can use Mindlayer. The Mindlayer-owned consent screen identifies the requesting app and its signing certificate. Confirm with biometrics or your device credential when available; devices without authentication hardware use an explicit confirmation screen. You can deny, block, or later revoke any app.
+Every external app must request permission before it can use Mindlayer. The Mindlayer-owned consent screen identifies the requesting app and its signing certificate. When Android reports that device authentication is ready, Mindlayer shows the OS authentication prompt. Otherwise, the explicit Mindlayer confirmation screen is the approval gate. You can deny, block, or later revoke any app.
 
 A BUILT-IN SERVICE DASHBOARD
 
@@ -45,7 +45,7 @@ PRIVATE BY DESIGN
 • No accounts, advertising, analytics, telemetry, or cloud fallback.
 • Media staged for model processing is encrypted at rest and removed after the request.
 • Local diagnostic logs are encrypted and contain metadata only — never prompts, images, recognized text, or model output.
-• Deferred results are encrypted locally until fetched, acknowledged, cancelled, or automatically expired.
+• Deferred results are encrypted locally. Fetching marks a result delivered; acknowledging deletes it. Records may also be quota-evicted or expire after 24 hours by default.
 • Model files are integrity-checked before use.
 
 Mindlayer itself cannot connect to the internet. Apps you approve receive the results they request and have their own permissions and privacy practices, so only approve apps you trust.
@@ -125,9 +125,11 @@ Supporting facts (for your reference, all enforced in code):
 - No `INTERNET` / `ACCESS_NETWORK_STATE` permission in the app manifest.
 - No analytics, advertising, or crash-reporting SDKs.
 - Synchronous inference inputs/outputs are processed in memory and not persisted
-  by the service. Deferred results are SQLCipher-encrypted locally and expire
-  after 24 hours by default unless fetched, acknowledged, or cancelled sooner.
-  Staged media is AES-256-GCM encrypted and deleted after the request.
+  to service storage, though session context remains in RAM while the session is
+  active. Deferred results are SQLCipher-encrypted locally. Fetching marks them
+  delivered; acknowledgement deletes them. Records may also be quota-evicted or
+  expire after 24 hours by default. Staged media is AES-256-GCM encrypted and
+  deleted after the request.
 - Local diagnostic logs are SQLCipher-encrypted and contain metadata only.
 
 ---
@@ -138,7 +140,7 @@ Supporting facts (for your reference, all enforced in code):
 |---|---|
 | `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE` | Keep the model alive while actively serving a visible inference request. |
 | `POST_NOTIFICATIONS` | Show the required foreground-service notification during inference. |
-| `USE_BIOMETRIC` | Protect approval/revocation with biometrics or device credentials when available; explicit confirmation remains available on devices without authentication hardware. |
+| `USE_BIOMETRIC` | Request OS authentication when Android reports it is ready. If preflight reports no enrollment, no hardware, or unavailable hardware, the explicit Mindlayer confirmation screen remains the approval/revocation gate. |
 | `HIDE_OVERLAY_WINDOWS` | Protect the approval screen from tap-jacking overlays. |
 
 No location, contacts, microphone, camera, storage, or network permissions are
