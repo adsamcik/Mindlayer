@@ -9,9 +9,9 @@
 buildscript {
     configurations.classpath {
         resolutionStrategy.force(
-            "org.bouncycastle:bcprov-jdk18on:1.81.1",
-            "org.bouncycastle:bcpkix-jdk18on:1.81.1",
-            "org.bouncycastle:bcutil-jdk18on:1.81.1",
+            "org.bouncycastle:bcprov-jdk18on:1.85",
+            "org.bouncycastle:bcpkix-jdk18on:1.85",
+            "org.bouncycastle:bcutil-jdk18on:1.85",
         )
     }
 }
@@ -181,9 +181,9 @@ extra["mindlayerModelShas"] = mindlayerModelShas
 //     GHSA-c2gf-v879-257j, GHSA-5x3r-wrvg-rp6q are fixed in 4.1.135.Final. The
 //     entire netty family is pinned so all modules stay on one aligned version.
 val mindlayerSecurityDependencyForces = listOf(
-    "org.bouncycastle:bcprov-jdk18on:1.81.1",
-    "org.bouncycastle:bcpkix-jdk18on:1.81.1",
-    "org.bouncycastle:bcutil-jdk18on:1.81.1",
+    "org.bouncycastle:bcprov-jdk18on:1.85",
+    "org.bouncycastle:bcpkix-jdk18on:1.85",
+    "org.bouncycastle:bcutil-jdk18on:1.85",
     "io.netty:netty-buffer:4.2.16.Final",
     "io.netty:netty-codec:4.2.16.Final",
     "io.netty:netty-codec-http:4.2.16.Final",
