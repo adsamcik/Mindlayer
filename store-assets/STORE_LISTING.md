@@ -33,7 +33,7 @@ RUN AI ON YOUR PHONE
 
 YOU CONTROL ACCESS
 
-Every external app must request permission before it can use Mindlayer. The Mindlayer-owned consent screen identifies the requesting app and its signing certificate. When Android reports that device authentication is ready, Mindlayer shows the OS authentication prompt. Otherwise, the explicit Mindlayer confirmation screen is the approval gate. You can deny, block, or later revoke any app.
+Every external app must request permission before it can use Mindlayer. The Mindlayer-owned consent screen identifies the requesting app and its signing certificate. Mindlayer requests Android device authentication when preflight succeeds. If Android reports no enrollment, no authentication hardware, or unavailable hardware, the explicit confirmation screen is used without an OS prompt; other preflight failures deny the action. You can deny, block, or later revoke any app.
 
 A BUILT-IN SERVICE DASHBOARD
 
@@ -140,7 +140,7 @@ Supporting facts (for your reference, all enforced in code):
 |---|---|
 | `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE` | Keep the model alive while actively serving a visible inference request. |
 | `POST_NOTIFICATIONS` | Show the required foreground-service notification during inference. |
-| `USE_BIOMETRIC` | Request OS authentication when Android reports it is ready. If preflight reports no enrollment, no hardware, or unavailable hardware, the explicit Mindlayer confirmation screen remains the approval/revocation gate. |
+| `USE_BIOMETRIC` | Request Android device authentication when preflight succeeds. No enrollment, no hardware, or unavailable hardware uses explicit confirmation without an OS prompt; other preflight failures deny the action. |
 | `HIDE_OVERLAY_WINDOWS` | Protect the approval screen from tap-jacking overlays. |
 
 No location, contacts, microphone, camera, storage, or network permissions are
