@@ -22,20 +22,32 @@ WHITE = (255, 255, 255)
 SUBTLE = (200, 196, 235)  # soft violet-white for the tagline
 
 TITLE = "Mindlayer"
-TAGLINE = "On-device AI for your apps"
+TAGLINE = "On-device AI for apps you approve"
 # Left edge of the text block — clear of the crystal, into the negative space.
 TEXT_X = 510
 RIGHT_MARGIN = 50
 
 
 def load_font(size, bold=True):
-    for path in (
-        "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
-        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-    ):
+    candidates = (
+        (
+            "C:/Windows/Fonts/segoeuib.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        )
+        if bold
+        else (
+            "C:/Windows/Fonts/segoeui.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        )
+    )
+    for path in candidates:
         if os.path.exists(path):
             return ImageFont.truetype(path, size)
-    return ImageFont.load_default()
+    raise RuntimeError("No supported marketing font found; install Segoe UI, Arial, or DejaVu Sans")
 
 
 def fit_font(draw, text, start_size, max_width, bold=True):

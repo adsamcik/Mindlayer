@@ -25,21 +25,32 @@ WHITE = (255, 255, 255)
 SUBTLE = (223, 218, 255)  # Indigo90
 
 CAPTIONS = [
-    ("01-status.png", "On-device AI,", "ready when your apps are"),
-    ("02-models.png", "Local models —", "nothing leaves your phone"),
-    ("03-tests.png", "Text, embeddings & OCR,", "all running offline"),
+    ("01-status.png", "Private AI engine", "for the apps you approve"),
+    ("02-models.png", "Local AI models", "shared across compatible apps"),
+    ("03-tests.png", "Built-in checks", "test every engine on-device"),
 ]
 
 
 def load_font(size, bold=True):
-    candidates = [
-        "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
-        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-    ]
+    candidates = (
+        [
+            "C:/Windows/Fonts/segoeuib.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        ]
+        if bold
+        else [
+            "C:/Windows/Fonts/segoeui.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+    )
     for path in candidates:
         if os.path.exists(path):
             return ImageFont.truetype(path, size)
-    return ImageFont.load_default()
+    raise RuntimeError("No supported marketing font found; install Segoe UI, Arial, or DejaVu Sans")
 
 
 def vertical_gradient(w, h, top, bottom):
