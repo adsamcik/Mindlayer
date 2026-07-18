@@ -142,19 +142,7 @@ class DashboardViewModel @JvmOverloads constructor(
         if (bound) return
         val manager = deliveryManager ?: deliveryManagerFactory(context.applicationContext).also {
             deliveryManager = it
-            deliveryStateJob = viewModelScope.launch {
-                it.states.collect { states ->
-                    _uiState.update { current ->
-                        current.copy(
-                            modelDelivery = mapOf(
-                                ModelRole.CHAT_AND_VISION to states.getValue(ModelFamily.CHAT),
-                                ModelRole.EMBEDDINGS to states.getValue(ModelFamily.EMBEDDINGS),
-                                ModelRole.OCR to states.getValue(ModelFamily.OCR),
-                            ),
-                        )
-                    }
-                }
-            }
+            observeDeliveryManager(it)
         }
         manager.start()
         logDao = LogDatabase.getInstance(context).logDao()
@@ -198,6 +186,32 @@ class DashboardViewModel @JvmOverloads constructor(
         }
 
         startLogPolling()
+    }
+
+    private fun observeDeliveryManager(manager: ModelDeliveryManager) {
+        deliveryStateJob?.cancel()
+        deliveryStateJob = viewModelScope.launch {
+            launch {
+                manager.states.collect { states ->
+                    _uiState.update { current ->
+                        current.copy(
+                            modelDelivery = mapOf(
+                                ModelRole.CHAT_AND_VISION to states.getValue(ModelFamily.CHAT),
+                                ModelRole.EMBEDDINGS to states.getValue(ModelFamily.EMBEDDINGS),
+                                ModelRole.OCR to states.getValue(ModelFamily.OCR),
+                            ),
+                        )
+                    }
+                }
+            }
+            launch {
+                manager.refreshState.collect { refreshState ->
+                    _uiState.update { current ->
+                        current.copy(modelDeliveryRefresh = refreshState)
+                    }
+                }
+            }
+        }
     }
 
     fun unbindService(context: Context) {

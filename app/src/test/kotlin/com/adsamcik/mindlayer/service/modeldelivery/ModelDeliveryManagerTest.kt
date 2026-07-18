@@ -13,6 +13,7 @@ import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -32,6 +33,7 @@ import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.After
 import org.junit.Before
@@ -181,7 +183,108 @@ class ModelDeliveryManagerTest {
     }
 
     @Test
-    fun `refresh failure remains unsupported instead of reverting to not installed`() = runTest {
+    fun `refresh sets busy immediately coalesces and records successful timestamp`() = runTest {
+        val refreshGate = CompletableDeferred<Unit>()
+        val client = FakeAssetPackClient(emptyMap(), refreshGate = refreshGate)
+        var nowMs = 123L
+        val managerScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        val manager = ModelDeliveryManager(
+            context = context,
+            client = client,
+            scope = managerScope,
+            materializer = CountingMaterializer(),
+            clockMs = { nowMs },
+        )
+
+        try {
+            manager.refresh()
+            assertTrue(manager.refreshState.value.isRefreshing)
+            assertNull(manager.refreshState.value.lastSuccessfulRefreshAtMs)
+
+            repeat(3) { manager.refresh() }
+            runCurrent()
+
+            assertEquals(1, client.refreshCalls.get())
+            assertTrue(manager.refreshState.value.isRefreshing)
+
+            nowMs = 456L
+            refreshGate.complete(Unit)
+            advanceUntilIdle()
+
+            assertFalse(manager.refreshState.value.isRefreshing)
+            assertEquals(456L, manager.refreshState.value.lastSuccessfulRefreshAtMs)
+            assertNull(manager.refreshState.value.issue)
+        } finally {
+            manager.close()
+        }
+    }
+
+    @Test
+    fun `refresh failure preserves last-known family states and records typed refresh issue`() = runTest {
+        val client = FakeAssetPackClient(emptyMap())
+        val managerScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        val manager = ModelDeliveryManager(
+            context = context,
+            client = client,
+            scope = managerScope,
+            materializer = CountingMaterializer(),
+            clockMs = { 77L },
+        )
+
+        try {
+            manager.refresh()
+            advanceUntilIdle()
+            val lastKnownStates = manager.states.value
+            assertEquals(77L, manager.refreshState.value.lastSuccessfulRefreshAtMs)
+
+            client.refreshFailure = IllegalStateException("private Play failure detail")
+            manager.refresh()
+            assertTrue(manager.refreshState.value.isRefreshing)
+            advanceUntilIdle()
+
+            assertEquals(lastKnownStates, manager.states.value)
+            assertFalse(manager.refreshState.value.isRefreshing)
+            assertEquals(77L, manager.refreshState.value.lastSuccessfulRefreshAtMs)
+            assertEquals(ModelDeliveryIssue.RefreshFailed, manager.refreshState.value.issue)
+            assertFalse(manager.refreshState.value.toString().contains("private Play failure detail"))
+        } finally {
+            manager.close()
+        }
+    }
+
+    @Test
+    fun `refresh failure still activates one force-validated preexisting ocr install`() = runTest {
+        val client = FakeAssetPackClient(
+            emptyMap(),
+            refreshFailure = IllegalStateException("transient Play refresh failure"),
+        )
+        val materializer = CountingMaterializer(setOf(ModelFamily.OCR))
+        val runtimeControl = FakeRuntimeControl()
+        val manager = ModelDeliveryManager(
+            context = context,
+            client = client,
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = materializer,
+            runtimeControl = runtimeControl,
+        )
+
+        try {
+            manager.start()
+            advanceUntilIdle()
+
+            assertEquals(ModelDeliveryState.Installed, manager.states.value[ModelFamily.OCR])
+            assertEquals(1, runtimeControl.activationCalls.get())
+            assertEquals(ModelFamily.entries.size, materializer.forcedValidationCalls.get())
+            assertTrue(materializer.isMarkedInstalled(ModelFamily.OCR))
+            assertEquals(0, materializer.removeCalls.get())
+            assertEquals(ModelDeliveryIssue.RefreshFailed, manager.refreshState.value.issue)
+        } finally {
+            manager.close()
+        }
+    }
+
+    @Test
+    fun `initial refresh failure keeps checking states rather than claiming unsupported`() = runTest {
         val client = FakeAssetPackClient(emptyMap(), refreshFailure = IllegalStateException("no Play"))
         val managerScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
         val manager = ModelDeliveryManager(
@@ -196,19 +299,284 @@ class ModelDeliveryManagerTest {
             advanceUntilIdle()
 
             assertEquals(
-                ModelDeliveryState.Unsupported,
+                ModelDeliveryState.Checking,
                 manager.states.value[ModelFamily.CHAT],
             )
             assertEquals(
-                ModelDeliveryState.Unsupported,
+                ModelDeliveryState.Checking,
                 manager.states.value[ModelFamily.EMBEDDINGS],
             )
             assertEquals(
-                ModelDeliveryState.Unsupported,
+                ModelDeliveryState.Checking,
+                manager.states.value[ModelFamily.OCR],
+            )
+            assertEquals(ModelDeliveryIssue.RefreshFailed, manager.refreshState.value.issue)
+        } finally {
+            manager.close()
+        }
+    }
+
+    @Test
+    fun `download rejects insufficient storage with typed byte counts`() = runTest {
+        val required = ModelDeliveryCatalog.family(ModelFamily.CHAT).minimumFreeBytes
+        val manager = ModelDeliveryManager(
+            context = context,
+            client = FakeAssetPackClient(emptyMap()),
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = CountingMaterializer(),
+            availableBytes = { 42L },
+        )
+
+        try {
+            manager.download(ModelFamily.CHAT)
+            advanceUntilIdle()
+
+            assertEquals(
+                ModelDeliveryState.Failed(
+                    ModelDeliveryIssue.InsufficientStorage(
+                        requiredBytes = required,
+                        availableBytes = 42L,
+                    ),
+                ),
+                manager.states.value[ModelFamily.CHAT],
+            )
+        } finally {
+            manager.close()
+        }
+    }
+
+    @Test
+    fun `Play pack and fetch failures expose PlayDeliveryFailed without throwable text`() = runTest {
+        val failedPacks = ModelDeliveryCatalog.family(ModelFamily.EMBEDDINGS).packNames.associateWith { packName ->
+            AssetPackSnapshot(packName, AssetPackPhase.FAILED)
+        }
+        val phaseManager = ModelDeliveryManager(
+            context = context,
+            client = FakeAssetPackClient(failedPacks),
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = CountingMaterializer(),
+        )
+        val fetchManager = ModelDeliveryManager(
+            context = context,
+            client = FakeAssetPackClient(
+                emptyMap(),
+                fetchFailure = IllegalStateException("private fetch failure detail"),
+            ),
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = CountingMaterializer(),
+            availableBytes = { Long.MAX_VALUE },
+        )
+
+        try {
+            phaseManager.refresh()
+            fetchManager.download(ModelFamily.OCR)
+            advanceUntilIdle()
+
+            assertEquals(
+                ModelDeliveryState.Failed(ModelDeliveryIssue.PlayDeliveryFailed),
+                phaseManager.states.value[ModelFamily.EMBEDDINGS],
+            )
+            assertEquals(
+                ModelDeliveryState.Failed(ModelDeliveryIssue.PlayDeliveryFailed),
+                fetchManager.states.value[ModelFamily.OCR],
+            )
+            assertFalse(fetchManager.states.value.toString().contains("private fetch failure detail"))
+        } finally {
+            phaseManager.close()
+            fetchManager.close()
+        }
+    }
+
+    @Test
+    fun `materialization failure exposes VerificationFailed`() = runTest {
+        val sourceDir = File(context.filesDir, "verification-failure-source").apply { mkdirs() }
+        val manager = ModelDeliveryManager(
+            context = context,
+            client = FakeAssetPackClient(completedPacks(ModelFamily.OCR, sourceDir)),
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = FailingMaterializer(),
+        )
+
+        try {
+            manager.refresh()
+            advanceUntilIdle()
+
+            assertEquals(
+                ModelDeliveryState.Failed(ModelDeliveryIssue.VerificationFailed),
                 manager.states.value[ModelFamily.OCR],
             )
         } finally {
             manager.close()
+            sourceDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `unavailable confirmation becomes a typed actionable issue`() = runTest {
+        val confirmationPacks = ModelDeliveryCatalog.family(ModelFamily.CHAT).packNames.associateWith { packName ->
+            AssetPackSnapshot(packName, AssetPackPhase.REQUIRES_USER_CONFIRMATION)
+        }
+        val client = FakeAssetPackClient(confirmationPacks, confirmationResult = false)
+        val manager = ModelDeliveryManager(
+            context = context,
+            client = client,
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = CountingMaterializer(),
+        )
+
+        try {
+            manager.refresh()
+            advanceUntilIdle()
+            assertEquals(
+                ModelDeliveryState.RequiresConfirmation,
+                manager.states.value[ModelFamily.CHAT],
+            )
+
+            assertFalse(manager.showConfirmationDialog(mockk(relaxed = true)))
+
+            assertEquals(
+                ModelDeliveryState.Failed(ModelDeliveryIssue.ConfirmationUnavailable),
+                manager.states.value[ModelFamily.CHAT],
+            )
+        } finally {
+            manager.close()
+        }
+    }
+
+    @Test
+    fun `confirmation unavailable survives same-phase refresh and callback updates`() = runTest {
+        val sourceDir = File(context.filesDir, "confirmation-unavailable-source").apply { mkdirs() }
+        val confirmationPacks = ModelDeliveryCatalog.family(ModelFamily.CHAT).packNames.associateWith { packName ->
+            AssetPackSnapshot(packName, AssetPackPhase.REQUIRES_USER_CONFIRMATION)
+        }
+        val client = FakeAssetPackClient(confirmationPacks, confirmationResult = false)
+        val manager = ModelDeliveryManager(
+            context = context,
+            client = client,
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = CountingMaterializer(),
+        )
+
+        try {
+            manager.start()
+            advanceUntilIdle()
+            assertFalse(manager.showConfirmationDialog(mockk(relaxed = true)))
+
+            manager.refresh()
+            client.emitPhase(ModelFamily.CHAT, AssetPackPhase.REQUIRES_USER_CONFIRMATION, sourceDir)
+            advanceUntilIdle()
+
+            assertEquals(
+                ModelDeliveryState.Failed(ModelDeliveryIssue.ConfirmationUnavailable),
+                manager.states.value[ModelFamily.CHAT],
+            )
+        } finally {
+            manager.close()
+            sourceDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `successful confirmation launch clears unavailable issue`() = runTest {
+        val sourceDir = File(context.filesDir, "confirmation-success-source").apply { mkdirs() }
+        val confirmationPacks = ModelDeliveryCatalog.family(ModelFamily.CHAT).packNames.associateWith { packName ->
+            AssetPackSnapshot(packName, AssetPackPhase.REQUIRES_USER_CONFIRMATION)
+        }
+        val client = FakeAssetPackClient(confirmationPacks, confirmationResult = false)
+        val manager = ModelDeliveryManager(
+            context = context,
+            client = client,
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = CountingMaterializer(),
+        )
+
+        try {
+            manager.start()
+            advanceUntilIdle()
+            assertFalse(manager.showConfirmationDialog(mockk(relaxed = true)))
+
+            client.confirmationResult = true
+            assertTrue(manager.showConfirmationDialog(mockk(relaxed = true)))
+            client.emitPhase(ModelFamily.CHAT, AssetPackPhase.REQUIRES_USER_CONFIRMATION, sourceDir)
+            advanceUntilIdle()
+
+            assertEquals(
+                ModelDeliveryState.RequiresConfirmation,
+                manager.states.value[ModelFamily.CHAT],
+            )
+        } finally {
+            manager.close()
+            sourceDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `new download attempt clears confirmation unavailable latch`() = runTest {
+        val sourceDir = File(context.filesDir, "confirmation-download-retry-source").apply { mkdirs() }
+        val confirmationPacks = ModelDeliveryCatalog.family(ModelFamily.CHAT).packNames.associateWith { packName ->
+            AssetPackSnapshot(packName, AssetPackPhase.REQUIRES_USER_CONFIRMATION)
+        }
+        val client = FakeAssetPackClient(confirmationPacks, confirmationResult = false)
+        val manager = ModelDeliveryManager(
+            context = context,
+            client = client,
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = CountingMaterializer(),
+            availableBytes = { Long.MAX_VALUE },
+        )
+
+        try {
+            manager.start()
+            advanceUntilIdle()
+            assertFalse(manager.showConfirmationDialog(mockk(relaxed = true)))
+
+            manager.download(ModelFamily.CHAT)
+            advanceUntilIdle()
+            client.emitPhase(ModelFamily.CHAT, AssetPackPhase.REQUIRES_USER_CONFIRMATION, sourceDir)
+            advanceUntilIdle()
+
+            assertEquals(
+                ModelDeliveryState.RequiresConfirmation,
+                manager.states.value[ModelFamily.CHAT],
+            )
+        } finally {
+            manager.close()
+            sourceDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `leaving confirmation phase clears unavailable latch`() = runTest {
+        val sourceDir = File(context.filesDir, "confirmation-phase-exit-source").apply { mkdirs() }
+        val confirmationPacks = ModelDeliveryCatalog.family(ModelFamily.CHAT).packNames.associateWith { packName ->
+            AssetPackSnapshot(packName, AssetPackPhase.REQUIRES_USER_CONFIRMATION)
+        }
+        val client = FakeAssetPackClient(confirmationPacks, confirmationResult = false)
+        val manager = ModelDeliveryManager(
+            context = context,
+            client = client,
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = CountingMaterializer(),
+        )
+
+        try {
+            manager.start()
+            advanceUntilIdle()
+            assertFalse(manager.showConfirmationDialog(mockk(relaxed = true)))
+
+            client.emitPhase(ModelFamily.CHAT, AssetPackPhase.PENDING, sourceDir)
+            advanceUntilIdle()
+            assertEquals(ModelDeliveryState.Pending, manager.states.value[ModelFamily.CHAT])
+
+            client.emitPhase(ModelFamily.CHAT, AssetPackPhase.REQUIRES_USER_CONFIRMATION, sourceDir)
+            advanceUntilIdle()
+            assertEquals(
+                ModelDeliveryState.RequiresConfirmation,
+                manager.states.value[ModelFamily.CHAT],
+            )
+        } finally {
+            manager.close()
+            sourceDir.deleteRecursively()
         }
     }
 
@@ -287,8 +655,9 @@ class ModelDeliveryManagerTest {
             firstManager.remove(ModelFamily.CHAT)
             advanceUntilIdle()
 
-            assertTrue(
-                firstManager.states.value[ModelFamily.CHAT] is ModelDeliveryState.RemovalFailed,
+            assertEquals(
+                ModelDeliveryState.RemovalFailed(ModelDeliveryIssue.RemovalInterrupted),
+                firstManager.states.value[ModelFamily.CHAT],
             )
             assertEquals(0, materializer.removeCalls.get())
             firstManager.close()
@@ -820,7 +1189,10 @@ class ModelDeliveryManagerTest {
             releaseGate.complete(RuntimeReleaseResult.Failed(RuntimeControlFailure.RELEASE_FAILED))
             advanceUntilIdle()
 
-            assertTrue(manager.states.value[ModelFamily.EMBEDDINGS] is ModelDeliveryState.RemovalFailed)
+            assertEquals(
+                ModelDeliveryState.RemovalFailed(ModelDeliveryIssue.RemovalFailed),
+                manager.states.value[ModelFamily.EMBEDDINGS],
+            )
             assertEquals(0, materializer.removeCalls.get())
             assertTrue(
                 ModelDeliveryFileLock.pendingRemovalMarker(
@@ -902,6 +1274,7 @@ class ModelDeliveryManagerTest {
                 }.getValue(ModelFamily.OCR)
             }
             assertEquals(ModelDeliveryState.InstalledWithActivationError, state)
+            assertEquals(ModelDeliveryIssue.ActivationFailed, state.issueOrNull())
             assertTrue(materializer.isMarkedInstalled(ModelFamily.OCR))
             assertEquals(0, materializer.removeCalls.get())
         } finally {
@@ -1169,24 +1542,42 @@ class ModelDeliveryManagerTest {
             materializeCallsByFamily[family]?.get() ?: 0
     }
 
+    private class FailingMaterializer : ModelArtifactMaterializer {
+        override fun materialize(
+            family: ModelFamily,
+            packAssetDirectories: Map<String, File>,
+        ): MaterializationResult = MaterializationResult.Failed
+
+        override fun isMarkedInstalled(family: ModelFamily, forceValidation: Boolean): Boolean = false
+
+        override fun remove(family: ModelFamily) = Unit
+    }
+
     private class FakeAssetPackClient(
         initialStates: Map<String, AssetPackSnapshot>,
-        private val refreshFailure: Throwable? = null,
+        var refreshFailure: Throwable? = null,
         var removeFailureAtCall: Int? = null,
         private val events: MutableList<String>? = null,
+        private val refreshGate: CompletableDeferred<Unit>? = null,
+        private val fetchFailure: Throwable? = null,
+        var confirmationResult: Boolean = false,
     ) : AssetPackClient {
         private val mutableStates = MutableStateFlow(initialStates)
         val removeCalls = AtomicInteger()
         val fetchCalls = AtomicInteger()
+        val refreshCalls = AtomicInteger()
         override val states: StateFlow<Map<String, AssetPackSnapshot>> = mutableStates
 
         override suspend fun refresh(packNames: Collection<String>) {
+            refreshCalls.incrementAndGet()
+            refreshGate?.await()
             refreshFailure?.let { throw it }
         }
 
         override suspend fun fetch(packNames: Collection<String>) {
             fetchCalls.incrementAndGet()
             events?.add("fetch")
+            fetchFailure?.let { throw it }
         }
 
         override suspend fun cancel(packNames: Collection<String>) {
@@ -1215,7 +1606,7 @@ class ModelDeliveryManagerTest {
 
         override fun showConfirmationDialog(
             launcher: ActivityResultLauncher<IntentSenderRequest>,
-        ): Boolean = false
+        ): Boolean = confirmationResult
 
         override fun close() = Unit
 

@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.service.ui
 
 import com.adsamcik.mindlayer.service.engine.InitFailure
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -36,6 +37,28 @@ class DashboardUiStateTest {
 
         assertEquals(DashboardFreshness.FRESH, freshState.statusFreshness(nowMs))
         assertEquals(DashboardFreshness.STALE, staleState.statusFreshness(nowMs))
+    }
+
+    @Test
+    fun `stale status keeps chat metadata as last known without claiming ready`() {
+        val nowMs = 20_000L
+        val chat = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 7_000L,
+            isEngineLoaded = true,
+            backend = "GPU",
+            modelId = "models/gemma",
+            modelDelivery = mapOf(
+                ModelRole.CHAT_AND_VISION to ModelDeliveryState.Installed,
+            ),
+        ).modelSummaries(nowMs).single { it.role == ModelRole.CHAT_AND_VISION }
+
+        assertEquals(ModelRuntimeEvidence.LAST_KNOWN_SERVICE, chat.evidence)
+        assertEquals(ModelLoadState.IDLE, chat.state)
+        assertEquals(ModelReadiness.DOWNLOADED_IDLE, chat.readiness)
+        assertEquals("GPU", chat.backend)
+        assertEquals("gemma", chat.modelDisplayName)
     }
 
     @Test

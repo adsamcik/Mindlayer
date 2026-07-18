@@ -23,7 +23,7 @@ sealed class MaterializationResult {
     /** Another caller already published artifacts that passed forced validation. */
     data object AlreadyInstalled : MaterializationResult()
 
-    data class Failed(val reason: String) : MaterializationResult()
+    data object Failed : MaterializationResult()
 }
 
 interface ModelArtifactMaterializer {
@@ -102,7 +102,7 @@ class VerifiedModelMaterializer(
             val spec = catalog(family)
             cleanPublishedArtifacts(familyDir(family), spec)
             validatedFingerprints.remove(family)
-            MaterializationResult.Failed("Model verification failed")
+            MaterializationResult.Failed
         }
     }
 

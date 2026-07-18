@@ -324,12 +324,16 @@
     <string name="models_role_ocr">OCR</string>
     <string name="models_role_ocr_description">Recognizes text in images. Used by the SDK\'s ocrAsync path before any LLM extraction.</string>
     <string name="models_state_loaded">Loaded</string>
+    <string name="models_state_ready">Ready</string>
+    <string name="models_state_starting">Starting</string>
     <string name="models_state_idle">Not loaded</string>
     <string name="models_state_unknown">Not yet exercised</string>
     <string name="models_state_failed">Init failed</string>
     <string name="models_state_unknown_hint">Run this engine\'s test on the Tests tab to load it.</string>
     <string name="models_pack_label">Source</string>
     <string name="models_backend_label">Backend</string>
+    <string name="models_evidence_last_known_service">Runtime details are last known. Refresh service status for current readiness.</string>
+    <string name="models_evidence_service_status_unavailable">No runtime status sample is available yet. Refresh service status for current readiness.</string>
     <string name="models_init_time_label">Init time</string>
     <string name="models_pack_chat" translatable="false">On-demand PAD: gemma_model_part_1 + part_2</string>
     <string name="models_pack_embeddings" translatable="false">On-demand PAD: gemma_embed_model</string>
@@ -363,6 +367,15 @@
     <string name="models_delivery_unsupported">Google Play delivery unavailable</string>
     <string name="models_delivery_progress">%1$d MB of %2$d MB (%3$d%%)</string>
     <string name="models_activation_failed_message">Runtime activation failed. The OCR model remains downloaded; retry activation or restart Mindlayer.</string>
+    <string name="models_issue_insufficient_storage">Insufficient storage: %1$d MB required, %2$d MB available.</string>
+    <string name="models_issue_play_delivery_failed">Google Play could not deliver this model. Retry the download.</string>
+    <string name="models_issue_verification_failed">Model verification failed. Retry the download.</string>
+    <string name="models_issue_removal_interrupted">Model removal was interrupted. Retry removal.</string>
+    <string name="models_issue_removal_failed">Model removal failed. Retry removal.</string>
+    <string name="models_issue_refresh_failed">Delivery refresh failed. Last-known model states are still shown.</string>
+    <string name="models_issue_confirmation_unavailable">Google Play could not open the required confirmation. Retry confirmation.</string>
+    <string name="models_issue_runtime_initialization_failed">Runtime initialization failed. Review delivery state and retry.</string>
+    <string name="models_issue_runtime_verification_failed">The last dashboard verification failed.</string>
     <string name="models_loaded_separate_hint">Runtime load status is shown separately above.</string>
 
     <!-- Calm-IDLE first-time hint shown on the Status page when no engine

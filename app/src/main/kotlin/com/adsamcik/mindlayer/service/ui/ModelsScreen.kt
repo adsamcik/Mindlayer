@@ -40,7 +40,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import com.adsamcik.mindlayer.service.R
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryIssue
 import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryState
+import com.adsamcik.mindlayer.service.modeldelivery.issueOrNull
 
 @Composable
 fun ModelsScreen(
@@ -84,8 +86,24 @@ fun ModelsScreen(
                 }
             }
             item {
-                OutlinedButton(onClick = onRefresh) {
+                OutlinedButton(
+                    onClick = onRefresh,
+                    enabled = !state.modelDeliveryRefresh.isRefreshing,
+                ) {
                     Text(stringResource(R.string.models_refresh_action))
+                }
+            }
+            if (state.modelDeliveryRefresh.isRefreshing) {
+                item {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+            }
+            state.modelDeliveryRefresh.issue?.let { issue ->
+                item {
+                    DiagnosticCallout(
+                        message = deliveryIssueMessage(issue),
+                        tone = DashboardMessageTone.ERROR,
+                    )
                 }
             }
             summaries.forEachIndexed { index, summary ->
@@ -216,7 +234,10 @@ private fun RoleModelCard(
                 color = MaterialTheme.colorScheme.onSurface,
             )
 
-            LabelValue(stringResource(R.string.models_pack_label), summary.packDescription)
+            LabelValue(
+                stringResource(R.string.models_pack_label),
+                summary.deliveryPackNames.joinToString(" + "),
+            )
             DeliveryStatus(
                 state = summary.deliveryState,
                 onDownload = onDownload,
@@ -224,6 +245,24 @@ private fun RoleModelCard(
                 onRetryActivation = onRetryActivation,
                 onConfirmDownload = onConfirmDownload,
             )
+
+            when (summary.evidence) {
+                ModelRuntimeEvidence.LAST_KNOWN_SERVICE -> Text(
+                    text = stringResource(R.string.models_evidence_last_known_service),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.Medium,
+                )
+                ModelRuntimeEvidence.SERVICE_STATUS_UNAVAILABLE -> Text(
+                    text = stringResource(R.string.models_evidence_service_status_unavailable),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.Medium,
+                )
+                ModelRuntimeEvidence.LIVE_SERVICE,
+                ModelRuntimeEvidence.DASHBOARD_VERIFICATION,
+                -> Unit
+            }
 
             summary.backend?.takeIf { it.isNotBlank() }?.let { backend ->
                 Row(
@@ -249,7 +288,7 @@ private fun RoleModelCard(
             }
 
             when (summary.state) {
-                ModelLoadState.UNKNOWN -> {
+                ModelLoadState.NOT_VERIFIED -> {
                     Text(
                         text = stringResource(R.string.models_state_unknown_hint),
                         style = MaterialTheme.typography.bodySmall,
@@ -258,8 +297,11 @@ private fun RoleModelCard(
                     )
                 }
                 ModelLoadState.FAILED -> {
-                    summary.failureDetail?.let { detail ->
-                        DiagnosticCallout(message = detail, tone = DashboardMessageTone.ERROR)
+                    summary.runtimeIssue?.let { issue ->
+                        DiagnosticCallout(
+                            message = runtimeIssueMessage(issue),
+                            tone = DashboardMessageTone.ERROR,
+                        )
                     }
                 }
                 else -> Unit
@@ -311,35 +353,29 @@ private fun DeliveryStatus(
     if (state == ModelDeliveryState.Activating) {
         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
     }
-    if (state is ModelDeliveryState.Failed) {
-        DiagnosticCallout(message = state.message, tone = DashboardMessageTone.ERROR)
-    }
-    if (state is ModelDeliveryState.RemovalFailed) {
-        DiagnosticCallout(message = state.message, tone = DashboardMessageTone.ERROR)
-    }
-    if (state == ModelDeliveryState.InstalledWithActivationError) {
+    state.issueOrNull()?.let { issue ->
         DiagnosticCallout(
-            message = stringResource(R.string.models_activation_failed_message),
+            message = deliveryIssueMessage(issue),
             tone = DashboardMessageTone.ERROR,
         )
     }
-    when (state) {
-        ModelDeliveryState.NotInstalled -> Button(onClick = onDownload) {
+    when (modelDeliveryAction(state)) {
+        ModelDeliveryAction.DOWNLOAD -> Button(onClick = onDownload) {
             Text(stringResource(R.string.models_download_action))
         }
-        is ModelDeliveryState.Failed -> Button(onClick = onDownload) {
+        ModelDeliveryAction.RETRY_DOWNLOAD -> Button(onClick = onDownload) {
             Text(stringResource(R.string.models_retry_action))
         }
-        is ModelDeliveryState.RemovalFailed -> OutlinedButton(onClick = onRemove) {
+        ModelDeliveryAction.RETRY_REMOVE -> OutlinedButton(onClick = onRemove) {
             Text(stringResource(R.string.models_retry_remove_action))
         }
-        ModelDeliveryState.RequiresConfirmation -> Button(onClick = onConfirmDownload) {
+        ModelDeliveryAction.CONFIRM -> Button(onClick = onConfirmDownload) {
             Text(stringResource(R.string.models_confirm_action))
         }
-        ModelDeliveryState.Installed -> OutlinedButton(onClick = onRemove) {
+        ModelDeliveryAction.REMOVE -> OutlinedButton(onClick = onRemove) {
             Text(stringResource(R.string.models_remove_action))
         }
-        ModelDeliveryState.InstalledWithActivationError -> {
+        ModelDeliveryAction.RETRY_ACTIVATION -> {
             Button(onClick = onRetryActivation) {
                 Text(stringResource(R.string.models_retry_activation_action))
             }
@@ -347,7 +383,7 @@ private fun DeliveryStatus(
                 Text(stringResource(R.string.models_remove_action))
             }
         }
-        else -> Unit
+        ModelDeliveryAction.NONE -> Unit
     }
     if (
         state == ModelDeliveryState.Installed ||
@@ -360,14 +396,47 @@ private fun DeliveryStatus(
 
 @Composable
 private fun stateBadge(state: ModelLoadState): Pair<String, DashboardMessageTone> = when (state) {
-    ModelLoadState.LOADED ->
-        stringResource(R.string.models_state_loaded) to DashboardMessageTone.SUCCESS
+    ModelLoadState.READY ->
+        stringResource(R.string.models_state_ready) to DashboardMessageTone.SUCCESS
+    ModelLoadState.STARTING ->
+        stringResource(R.string.models_state_starting) to DashboardMessageTone.INFO
     ModelLoadState.IDLE ->
         stringResource(R.string.models_state_idle) to DashboardMessageTone.NEUTRAL
-    ModelLoadState.UNKNOWN ->
+    ModelLoadState.NOT_VERIFIED ->
         stringResource(R.string.models_state_unknown) to DashboardMessageTone.NEUTRAL
     ModelLoadState.FAILED ->
         stringResource(R.string.models_state_failed) to DashboardMessageTone.ERROR
+}
+
+@Composable
+private fun deliveryIssueMessage(issue: ModelDeliveryIssue): String = when (issue) {
+    is ModelDeliveryIssue.InsufficientStorage -> stringResource(
+        R.string.models_issue_insufficient_storage,
+        issue.requiredBytes / 1_000_000L,
+        issue.availableBytes / 1_000_000L,
+    )
+    ModelDeliveryIssue.PlayDeliveryFailed ->
+        stringResource(R.string.models_issue_play_delivery_failed)
+    ModelDeliveryIssue.VerificationFailed ->
+        stringResource(R.string.models_issue_verification_failed)
+    ModelDeliveryIssue.RemovalInterrupted ->
+        stringResource(R.string.models_issue_removal_interrupted)
+    ModelDeliveryIssue.RemovalFailed ->
+        stringResource(R.string.models_issue_removal_failed)
+    ModelDeliveryIssue.ActivationFailed ->
+        stringResource(R.string.models_activation_failed_message)
+    ModelDeliveryIssue.RefreshFailed ->
+        stringResource(R.string.models_issue_refresh_failed)
+    ModelDeliveryIssue.ConfirmationUnavailable ->
+        stringResource(R.string.models_issue_confirmation_unavailable)
+}
+
+@Composable
+private fun runtimeIssueMessage(issue: ModelRuntimeIssue): String = when (issue) {
+    is ModelRuntimeIssue.InitializationFailed ->
+        stringResource(R.string.models_issue_runtime_initialization_failed)
+    ModelRuntimeIssue.VerificationFailed ->
+        stringResource(R.string.models_issue_runtime_verification_failed)
 }
 
 private fun roleTitleRes(role: ModelRole): Int = when (role) {
