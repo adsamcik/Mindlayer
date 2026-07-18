@@ -38,12 +38,12 @@ object ModelDeliveryCatalog {
     private val families = mapOf(
         ModelFamily.CHAT to ModelFamilySpec(
             family = ModelFamily.CHAT,
-            packNames = listOf("gemma_model_part_1", "gemma_model_part_2"),
+            packNames = listOf("gemma_model", "gemma_model_part_2"),
             outputFileName = "gemma-4-E2B-it.litertlm",
             minimumFreeBytes = CHAT_FREE_SPACE_BYTES,
             fragments = listOf(
                 GemmaFragment(
-                    "gemma_model_part_1",
+                    "gemma_model",
                     metadataFilename = "gemma_part_1_integrity.json",
                     index = 1,
                     totalParts = 2,

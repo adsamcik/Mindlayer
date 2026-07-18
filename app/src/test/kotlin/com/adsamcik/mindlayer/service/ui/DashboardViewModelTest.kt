@@ -75,7 +75,7 @@ class DashboardViewModelTest {
                 forceValidation: Boolean,
             ): Boolean = false
 
-            override fun remove(family: ModelFamily) = Unit
+            override fun remove(family: ModelFamily, lockHeld: Boolean) = Unit
         }
         val manager = ModelDeliveryManager(
             context = applicationContext,

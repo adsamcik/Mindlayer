@@ -38,7 +38,7 @@ interface ModelArtifactMaterializer {
 
     fun isMarkedInstalled(family: ModelFamily, forceValidation: Boolean = false): Boolean
 
-    fun remove(family: ModelFamily)
+    fun remove(family: ModelFamily, lockHeld: Boolean = false)
 }
 
 /**
@@ -111,8 +111,8 @@ class VerifiedModelMaterializer(
             isMarkedInstalledLocked(family, catalog(family), forceValidation)
         }
 
-    override fun remove(family: ModelFamily) {
-        ModelDeliveryFileLock.withLock(filesDir, family) {
+    override fun remove(family: ModelFamily, lockHeld: Boolean) {
+        val removeArtifacts = {
             validatedFingerprints.remove(family)
             val spec = catalog(family)
             val targets = listOf(familyDir(family)) +
@@ -135,6 +135,11 @@ class VerifiedModelMaterializer(
             check(tombstone.exists() || tombstone.createNewFile()) {
                 "Could not persist model removal tombstone"
             }
+        }
+        if (lockHeld) {
+            removeArtifacts()
+        } else {
+            ModelDeliveryFileLock.withLock(filesDir, family, removeArtifacts)
         }
     }
 

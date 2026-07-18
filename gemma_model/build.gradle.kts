@@ -3,7 +3,7 @@ plugins {
 }
 
 assetPack {
-    packName = "gemma_model_part_1"
+    packName = "gemma_model"
     dynamicDelivery {
         deliveryType = "on-demand"
     }

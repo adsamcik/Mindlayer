@@ -23,7 +23,7 @@ This file is the single source of truth that:
 
 | Artifact | Role | SHA-256 |
 |---|---|---|
-| reconstructed from `gemma_model_part_1` + `gemma_model_part_2` | Gemma chat full-file pin (application-level split; not LiteRT-LM sharding) | `181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c` |
+| reconstructed from `gemma_model` + `gemma_model_part_2` | Gemma chat full-file pin (application-level split; not LiteRT-LM sharding) | `181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c` |
 | `.models/embedding-gemma-300m-v1.tflite` | EmbeddingGemma weights | `d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381` |
 | `.models/embedding-gemma-300m-v1.spm.model` | EmbeddingGemma SentencePiece tokenizer | `d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7` |
 | `.models/paddleocr-ppocrv5-mobile-det.tflite` | PaddleOCR detection | `497da16bd4559fae8ba04c699379aaf74999646ebb1f2cbc1cfcba8b5fcbd21b` |

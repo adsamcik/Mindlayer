@@ -11,7 +11,7 @@ class ModelDeliveryCatalogTest {
         val chat = ModelDeliveryCatalog.family(ModelFamily.CHAT)
 
         assertEquals(
-            listOf("gemma_model_part_1", "gemma_model_part_2"),
+            listOf("gemma_model", "gemma_model_part_2"),
             chat.packNames,
         )
         assertEquals("gemma-4-E2B-it.litertlm", chat.outputFileName)

@@ -3,6 +3,7 @@ package com.adsamcik.mindlayer.service.modeldelivery
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.RandomAccessFile
@@ -15,6 +16,7 @@ import java.util.concurrent.Semaphore
  */
 internal object ModelDeliveryFileLock {
     private val processLocks = ConcurrentHashMap<String, Semaphore>()
+    private val processOperationMutexes = ConcurrentHashMap<String, Mutex>()
 
     fun familyDir(filesDir: File, family: ModelFamily): File =
         File(filesDir, "model_delivery/${family.name.lowercase()}")
@@ -27,6 +29,16 @@ internal object ModelDeliveryFileLock {
 
     fun intentFile(filesDir: File, family: ModelFamily): File =
         File(filesDir, "model_delivery/.intent_${family.name.lowercase()}.json")
+
+    /**
+     * Serializes full family operations across manager instances in this
+     * process. Cross-process publication and final deletion remain protected by
+     * [withLock] and durable intent generations.
+     */
+    fun operationMutex(filesDir: File, family: ModelFamily): Mutex {
+        val key = familyDir(filesDir, family).toPath().toAbsolutePath().normalize().toString()
+        return processOperationMutexes.computeIfAbsent(key) { Mutex() }
+    }
 
     fun isRemovalAuthoritative(
         filesDir: File,

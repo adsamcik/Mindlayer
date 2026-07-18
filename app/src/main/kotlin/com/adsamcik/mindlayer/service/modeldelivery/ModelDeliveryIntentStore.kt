@@ -66,6 +66,25 @@ internal class ModelDeliveryIntentStore(
             readRecord(family)?.intent
         }
 
+    fun currentGeneration(family: ModelFamily, intent: ModelDeliveryIntent): Long? =
+        ModelDeliveryFileLock.withLock(filesDir, family) {
+            readRecord(family)?.takeIf { it.intent == intent }?.generation
+        }
+
+    fun matches(
+        family: ModelFamily,
+        intent: ModelDeliveryIntent,
+        generation: Long,
+        lockHeld: Boolean = false,
+    ): Boolean {
+        val readMatches = {
+            readRecord(family)?.let { record ->
+                record.intent == intent && record.generation == generation
+            } == true
+        }
+        return if (lockHeld) readMatches() else ModelDeliveryFileLock.withLock(filesDir, family, readMatches)
+    }
+
     /**
      * Converges derivative removal markers to the atomically replaced intent
      * record. Marker generations distinguish a completed REMOVE from a newer
@@ -76,13 +95,43 @@ internal class ModelDeliveryIntentStore(
             val record = readRecord(family)
             when (record?.intent) {
                 ModelDeliveryIntent.REMOVE -> reconcileRemovalMarkers(family, record.generation)
-                ModelDeliveryIntent.INSTALL -> {
-                    deleteRequired(ModelDeliveryFileLock.pendingRemovalMarker(filesDir, family))
-                    deleteRequired(ModelDeliveryFileLock.removalTombstone(filesDir, family))
-                }
+                ModelDeliveryIntent.INSTALL -> clearRemovalMarkers(family)
                 null -> Unit
             }
             record?.intent
+        }
+
+    /**
+     * Returns the generation of an interrupted removal that still needs work.
+     * Legacy marker-only state is upgraded to a canonical REMOVE atomically.
+     */
+    fun pendingRemovalGeneration(family: ModelFamily): Long? =
+        ModelDeliveryFileLock.withLock(filesDir, family) {
+            val pending = ModelDeliveryFileLock.pendingRemovalMarker(filesDir, family)
+            val tombstone = ModelDeliveryFileLock.removalTombstone(filesDir, family)
+            when (val record = readRecord(family)) {
+                null -> {
+                    if (!pending.exists() && !tombstone.exists()) {
+                        null
+                    } else {
+                        val recovered = nextRecord(family, ModelDeliveryIntent.REMOVE)
+                        writeRecord(family, recovered)
+                        writeGenerationMarker(pending, recovered.generation)
+                        writeGenerationMarker(tombstone, recovered.generation)
+                        recovered.generation
+                    }
+                }
+                else -> when (record.intent) {
+                    ModelDeliveryIntent.INSTALL -> {
+                        clearRemovalMarkers(family)
+                        null
+                    }
+                    ModelDeliveryIntent.REMOVE -> {
+                        reconcileRemovalMarkers(family, record.generation)
+                        record.generation.takeIf { pending.exists() }
+                    }
+                }
+            }
         }
 
     fun provisioningAllowed(family: ModelFamily): Boolean =
@@ -114,6 +163,11 @@ internal class ModelDeliveryIntentStore(
         } else if (pending.exists() && pendingGeneration != generation) {
             deleteRequired(pending)
         }
+    }
+
+    private fun clearRemovalMarkers(family: ModelFamily) {
+        deleteRequired(ModelDeliveryFileLock.pendingRemovalMarker(filesDir, family))
+        deleteRequired(ModelDeliveryFileLock.removalTombstone(filesDir, family))
     }
 
     private fun notifyTransition(

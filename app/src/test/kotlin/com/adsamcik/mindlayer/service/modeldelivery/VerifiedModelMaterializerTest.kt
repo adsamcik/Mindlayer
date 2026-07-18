@@ -45,7 +45,7 @@ class VerifiedModelMaterializerTest {
         val first = full.copyOfRange(0, 8)
         val second = full.copyOfRange(8, full.size)
         val fullHash = sha256(full)
-        val partOne = pack("gemma_model_part_1", first, 1, fullHash)
+        val partOne = pack("gemma_model", first, 1, fullHash)
         val partTwo = pack("gemma_model_part_2", second, 2, fullHash)
         val materializer = VerifiedModelMaterializer(
             filesDir = root,
@@ -56,7 +56,7 @@ class VerifiedModelMaterializerTest {
         val result = materializer.materialize(
             family = ModelFamily.CHAT,
             packAssetDirectories = mapOf(
-                "gemma_model_part_1" to partOne,
+                "gemma_model" to partOne,
                 "gemma_model_part_2" to partTwo,
             ),
         )
@@ -73,8 +73,8 @@ class VerifiedModelMaterializerTest {
         val full = "hello on-demand model".toByteArray()
         val fullHash = sha256(full)
         val packs = mapOf(
-            "gemma_model_part_1" to pack(
-                "gemma_model_part_1",
+            "gemma_model" to pack(
+                "gemma_model",
                 full.copyOfRange(0, 8),
                 1,
                 fullHash,
@@ -114,8 +114,8 @@ class VerifiedModelMaterializerTest {
         val full = "hello on-demand model".toByteArray()
         val fullHash = sha256(full)
         val packs = mapOf(
-            "gemma_model_part_1" to pack(
-                "gemma_model_part_1",
+            "gemma_model" to pack(
+                "gemma_model",
                 full.copyOfRange(0, 8),
                 1,
                 fullHash,
@@ -158,8 +158,8 @@ class VerifiedModelMaterializerTest {
         val full = "hello on-demand model".toByteArray()
         val fullHash = sha256(full)
         val packs = mapOf(
-            "gemma_model_part_1" to pack(
-                "gemma_model_part_1",
+            "gemma_model" to pack(
+                "gemma_model",
                 full.copyOfRange(0, 8),
                 1,
                 fullHash,
@@ -207,8 +207,8 @@ class VerifiedModelMaterializerTest {
             materializer.materialize(
                 family = ModelFamily.CHAT,
                 packAssetDirectories = mapOf(
-                    "gemma_model_part_1" to pack(
-                        "gemma_model_part_1",
+                    "gemma_model" to pack(
+                        "gemma_model",
                         full.copyOfRange(0, 8),
                         1,
                         fullHash,
@@ -233,7 +233,7 @@ class VerifiedModelMaterializerTest {
     fun `same-size installed byte mutation fails validation and can reprovision`() {
         val full = "hello on-demand model".toByteArray()
         val fullHash = sha256(full)
-        val partOne = pack("gemma_model_part_1", full.copyOfRange(0, 8), 1, fullHash)
+        val partOne = pack("gemma_model", full.copyOfRange(0, 8), 1, fullHash)
         val partTwo = pack("gemma_model_part_2", full.copyOfRange(8, full.size), 2, fullHash)
         val materializer = VerifiedModelMaterializer(
             filesDir = root,
@@ -243,7 +243,7 @@ class VerifiedModelMaterializerTest {
             },
         )
         val packs = mapOf(
-            "gemma_model_part_1" to partOne,
+            "gemma_model" to partOne,
             "gemma_model_part_2" to partTwo,
         )
         assertTrue(materializer.materialize(ModelFamily.CHAT, packs) is MaterializationResult.Installed)
@@ -267,8 +267,8 @@ class VerifiedModelMaterializerTest {
         val full = "hello on-demand model".toByteArray()
         val fullHash = sha256(full)
         val packs = mapOf(
-            "gemma_model_part_1" to pack(
-                "gemma_model_part_1",
+            "gemma_model" to pack(
+                "gemma_model",
                 full.copyOfRange(0, 8),
                 1,
                 fullHash,
@@ -320,8 +320,8 @@ class VerifiedModelMaterializerTest {
             },
         )
         val packs = mapOf(
-            "gemma_model_part_1" to pack(
-                "gemma_model_part_1",
+            "gemma_model" to pack(
+                "gemma_model",
                 full.copyOfRange(0, 8),
                 1,
                 fullHash,

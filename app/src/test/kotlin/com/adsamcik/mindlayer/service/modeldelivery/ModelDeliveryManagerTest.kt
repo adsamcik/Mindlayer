@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -29,6 +30,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -179,6 +181,91 @@ class ModelDeliveryManagerTest {
             firstExecutor.shutdownNow()
             secondExecutor.shutdownNow()
             sourceDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `newer download from independent manager cannot be undone by older removal`() = runTest {
+        val sourceDir = File(context.filesDir, "newer-download-source").apply { mkdirs() }
+        val releaseGate = CompletableDeferred<RuntimeReleaseResult>()
+        val materializer = CountingMaterializer(setOf(ModelFamily.CHAT))
+        val removalClient = FakeAssetPackClient(emptyMap())
+        val downloadClient = FakeAssetPackClient(completedPacks(ModelFamily.CHAT, sourceDir))
+        val firstManager = ModelDeliveryManager(
+            context = context,
+            client = removalClient,
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = materializer,
+            runtimeControl = FakeRuntimeControl(releaseGate = releaseGate),
+        )
+        val secondManager = ModelDeliveryManager(
+            context = context,
+            client = downloadClient,
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = materializer,
+            runtimeControl = FakeRuntimeControl(),
+            availableBytes = { Long.MAX_VALUE },
+        )
+
+        try {
+            val removal = launch { firstManager.remove(ModelFamily.CHAT) }
+            runCurrent()
+            assertEquals(ModelDeliveryState.Quiescing, firstManager.states.value[ModelFamily.CHAT])
+
+            secondManager.download(ModelFamily.CHAT)
+            runCurrent()
+
+            releaseGate.complete(RuntimeReleaseResult.Released)
+            advanceUntilIdle()
+            removal.join()
+
+            assertEquals(
+                ModelDeliveryIntent.INSTALL,
+                ModelDeliveryIntentStore(context.filesDir).currentIntent(ModelFamily.CHAT),
+            )
+            assertTrue(materializer.isMarkedInstalled(ModelFamily.CHAT))
+            assertEquals(1, materializer.removeCalls.get())
+            assertEquals(1, materializer.materializeCalls.get())
+            assertEquals(ModelDeliveryState.Installed, secondManager.states.value[ModelFamily.CHAT])
+        } finally {
+            releaseGate.complete(RuntimeReleaseResult.Released)
+            firstManager.close()
+            secondManager.close()
+            sourceDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `stale removal generation cannot delete after external newer install`() = runTest {
+        val releaseGate = CompletableDeferred<RuntimeReleaseResult>()
+        val materializer = CountingMaterializer(setOf(ModelFamily.CHAT))
+        val client = FakeAssetPackClient(emptyMap())
+        val manager = ModelDeliveryManager(
+            context = context,
+            client = client,
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = materializer,
+            runtimeControl = FakeRuntimeControl(releaseGate = releaseGate),
+        )
+        val intentStore = ModelDeliveryIntentStore(context.filesDir)
+
+        try {
+            val removal = launch { manager.remove(ModelFamily.CHAT) }
+            runCurrent()
+            assertEquals(ModelDeliveryState.Quiescing, manager.states.value[ModelFamily.CHAT])
+
+            intentStore.recordDownload(ModelFamily.CHAT)
+            releaseGate.complete(RuntimeReleaseResult.Released)
+            advanceUntilIdle()
+            removal.join()
+
+            assertEquals(ModelDeliveryIntent.INSTALL, intentStore.currentIntent(ModelFamily.CHAT))
+            assertTrue(materializer.isMarkedInstalled(ModelFamily.CHAT))
+            assertEquals(0, client.removeCalls.get())
+            assertEquals(0, materializer.removeCalls.get())
+        } finally {
+            releaseGate.complete(RuntimeReleaseResult.Released)
+            manager.close()
         }
     }
 
@@ -674,6 +761,7 @@ class ModelDeliveryManagerTest {
             try {
                 secondManager.refresh()
                 advanceUntilIdle()
+                awaitState(secondManager, ModelFamily.CHAT, ModelDeliveryState.NotInstalled)
 
                 assertEquals(
                     ModelDeliveryState.NotInstalled,
@@ -708,6 +796,7 @@ class ModelDeliveryManagerTest {
             manager.refresh()
             manager.refresh()
             advanceUntilIdle()
+            awaitState(manager, ModelFamily.CHAT, ModelDeliveryState.NotInstalled)
 
             assertEquals(
                 ModelDeliveryCatalog.family(ModelFamily.CHAT).packNames.size,
@@ -726,6 +815,7 @@ class ModelDeliveryManagerTest {
         val marker = File(context.filesDir, "model_delivery/.pending_remove_chat")
         marker.delete()
         val persistenceStarted = CountDownLatch(1)
+        val persistenceCompleted = CountDownLatch(1)
         val allowPersistence = CountDownLatch(1)
         val executor = Executors.newSingleThreadExecutor()
         val blockingDispatcher = executor.asCoroutineDispatcher()
@@ -743,6 +833,7 @@ class ModelDeliveryManagerTest {
                 persistenceStarted.countDown()
                 check(allowPersistence.await(5, TimeUnit.SECONDS))
                 intentStore.recordRemoval(family)
+                persistenceCompleted.countDown()
             },
         )
 
@@ -755,12 +846,13 @@ class ModelDeliveryManagerTest {
 
             removal.cancel()
             allowPersistence.countDown()
-            removal.join()
+            assertTrue(persistenceCompleted.await(5, TimeUnit.SECONDS))
 
             assertTrue(marker.isFile)
             assertEquals(ModelDeliveryIntent.REMOVE, intentStore.currentIntent(ModelFamily.CHAT))
             releaseGate.complete(RuntimeReleaseResult.Released)
             advanceUntilIdle()
+            removal.join()
         } finally {
             allowPersistence.countDown()
             releaseGate.complete(RuntimeReleaseResult.Released)
@@ -772,7 +864,7 @@ class ModelDeliveryManagerTest {
     }
 
     @Test
-    fun `immediate cancellation before io dispatch persists removal for restart`() = runTest {
+    fun `immediate cancellation before io dispatch still completes removal`() = runTest {
         val executor = Executors.newSingleThreadExecutor()
         val blockingDispatcher = executor.asCoroutineDispatcher()
         val dispatcherOccupied = CountDownLatch(1)
@@ -784,12 +876,13 @@ class ModelDeliveryManagerTest {
         }
         assertTrue(dispatcherOccupied.await(5, TimeUnit.SECONDS))
         val intentStore = ModelDeliveryIntentStore(context.filesDir)
+        val materializer = CountingMaterializer(setOf(ModelFamily.CHAT))
         val firstScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
         val firstManager = ModelDeliveryManager(
             context = context,
             client = FakeAssetPackClient(emptyMap()),
             scope = firstScope,
-            materializer = CountingMaterializer(setOf(ModelFamily.CHAT)),
+            materializer = materializer,
             runtimeControl = FakeRuntimeControl(),
             blockingDispatcher = blockingDispatcher,
             removalIntentRecorder = { family ->
@@ -804,33 +897,12 @@ class ModelDeliveryManagerTest {
             removal.cancel()
             releaseDispatcher.countDown()
             assertTrue(persistenceCompleted.await(5, TimeUnit.SECONDS))
-            firstManager.close()
-            runCurrent()
+            advanceUntilIdle()
             removal.join()
 
             assertEquals(ModelDeliveryIntent.REMOVE, intentStore.currentIntent(ModelFamily.CHAT))
-
-            val recoveredMaterializer = CountingMaterializer(setOf(ModelFamily.CHAT))
-            val secondScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
-            val secondManager = ModelDeliveryManager(
-                context = context,
-                client = FakeAssetPackClient(emptyMap()),
-                scope = secondScope,
-                materializer = recoveredMaterializer,
-                runtimeControl = FakeRuntimeControl(),
-            )
-            try {
-                secondManager.refresh()
-                advanceUntilIdle()
-
-                assertEquals(1, recoveredMaterializer.removeCalls.get())
-                assertEquals(
-                    ModelDeliveryState.NotInstalled,
-                    secondManager.states.value[ModelFamily.CHAT],
-                )
-            } finally {
-                secondManager.close()
-            }
+            assertEquals(1, materializer.removeCalls.get())
+            assertEquals(ModelDeliveryState.NotInstalled, firstManager.states.value[ModelFamily.CHAT])
         } finally {
             releaseDispatcher.countDown()
             firstManager.close()
@@ -865,6 +937,7 @@ class ModelDeliveryManagerTest {
         try {
             manager.start()
             advanceUntilIdle()
+            awaitState(manager, ModelFamily.CHAT, ModelDeliveryState.NotInstalled)
 
             assertEquals(1, materializer.removeCalls.get())
             assertEquals(ModelDeliveryState.NotInstalled, manager.states.value[ModelFamily.CHAT])
@@ -1180,7 +1253,7 @@ class ModelDeliveryManagerTest {
         )
 
         try {
-            manager.remove(ModelFamily.EMBEDDINGS)
+            val removal = launch { manager.remove(ModelFamily.EMBEDDINGS) }
             runCurrent()
 
             assertEquals(ModelDeliveryState.Quiescing, manager.states.value[ModelFamily.EMBEDDINGS])
@@ -1188,6 +1261,7 @@ class ModelDeliveryManagerTest {
 
             releaseGate.complete(RuntimeReleaseResult.Failed(RuntimeControlFailure.RELEASE_FAILED))
             advanceUntilIdle()
+            removal.join()
 
             assertEquals(
                 ModelDeliveryState.RemovalFailed(ModelDeliveryIssue.RemovalFailed),
@@ -1473,6 +1547,18 @@ class ModelDeliveryManagerTest {
     private fun sha256(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
+    private suspend fun awaitState(
+        manager: ModelDeliveryManager,
+        family: ModelFamily,
+        expected: ModelDeliveryState,
+    ) {
+        withContext(Dispatchers.Default) {
+            withTimeout(5_000) {
+                manager.states.first { it[family] == expected }
+            }
+        }
+    }
+
     private class CoordinatedMaterializer(
         private val delegate: ModelArtifactMaterializer,
         private val validationBarriers: List<CyclicBarrier>,
@@ -1501,8 +1587,8 @@ class ModelDeliveryManagerTest {
             return installed
         }
 
-        override fun remove(family: ModelFamily) {
-            delegate.remove(family)
+        override fun remove(family: ModelFamily, lockHeld: Boolean) {
+            delegate.remove(family, lockHeld)
         }
     }
 
@@ -1532,7 +1618,7 @@ class ModelDeliveryManagerTest {
             return family in installed
         }
 
-        override fun remove(family: ModelFamily) {
+        override fun remove(family: ModelFamily, lockHeld: Boolean) {
             removeCalls.incrementAndGet()
             installed -= family
             events?.add("materializerRemove:$family")
@@ -1550,7 +1636,7 @@ class ModelDeliveryManagerTest {
 
         override fun isMarkedInstalled(family: ModelFamily, forceValidation: Boolean): Boolean = false
 
-        override fun remove(family: ModelFamily) = Unit
+        override fun remove(family: ModelFamily, lockHeld: Boolean) = Unit
     }
 
     private class FakeAssetPackClient(

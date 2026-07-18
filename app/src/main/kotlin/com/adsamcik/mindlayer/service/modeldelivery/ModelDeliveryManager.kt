@@ -242,59 +242,63 @@ class ModelDeliveryManager internal constructor(
 
     fun download(family: ModelFamily) {
         scope.launch {
-            familyMutex(family).withLock {
-                clearConfirmationUnavailable(family)
-                val required = ModelDeliveryCatalog.family(family).minimumFreeBytes
-                val available = runCatching(availableBytes).getOrDefault(0L)
-                if (available < required) {
-                    updateState(
-                        family,
-                        ModelDeliveryState.Failed(
-                            ModelDeliveryIssue.InsufficientStorage(
-                                requiredBytes = required,
-                                availableBytes = available,
+            explicitOperationMutex(family).withLock {
+                familyMutex(family).withLock familyLock@ {
+                    clearConfirmationUnavailable(family)
+                    val required = ModelDeliveryCatalog.family(family).minimumFreeBytes
+                    val available = runCatching(availableBytes).getOrDefault(0L)
+                    if (available < required) {
+                        updateState(
+                            family,
+                            ModelDeliveryState.Failed(
+                                ModelDeliveryIssue.InsufficientStorage(
+                                    requiredBytes = required,
+                                    availableBytes = available,
+                                ),
                             ),
-                        ),
-                    )
-                    return@withLock
+                        )
+                        return@familyLock
+                    }
+                    val generation = try {
+                        intentStore.recordDownload(family)
+                    } catch (error: Throwable) {
+                        MindlayerLog.w(
+                            TAG,
+                            "Could not persist model download intent: ${error.safeLabel()}",
+                            throwable = null,
+                        )
+                        updateState(
+                            family,
+                            ModelDeliveryState.Failed(ModelDeliveryIssue.PlayDeliveryFailed),
+                        )
+                        return@familyLock
+                    }
+                    if (!intentStore.matches(family, ModelDeliveryIntent.INSTALL, generation)) {
+                        return@familyLock
+                    }
+                    updateState(family, ModelDeliveryState.Pending)
+                    val fetched = runCatching {
+                        client.fetch(ModelDeliveryCatalog.family(family).packNames)
+                    }.onFailure {
+                        recordFailure(it, family, ModelDeliveryIssue.PlayDeliveryFailed)
+                    }.isSuccess
+                    if (!fetched) return@familyLock
+                    reconcileLocked(family, provisionIfReady = true)
                 }
-                val intentRecorded = runCatching {
-                    intentStore.recordDownload(family)
-                }.onFailure { error ->
-                    MindlayerLog.w(
-                        TAG,
-                        "Could not persist model download intent: ${error.safeLabel()}",
-                        throwable = null,
-                    )
-                    updateState(
-                        family,
-                        ModelDeliveryState.Failed(ModelDeliveryIssue.PlayDeliveryFailed),
-                    )
-                }.isSuccess
-                if (!intentRecorded) return@withLock
-                updateState(family, ModelDeliveryState.Pending)
-                val fetched = runCatching {
-                    client.fetch(ModelDeliveryCatalog.family(family).packNames)
-                }.onFailure {
-                    recordFailure(it, family, ModelDeliveryIssue.PlayDeliveryFailed)
-                }.isSuccess
-                if (!fetched) return@withLock
-                reconcileLocked(family, provisionIfReady = true)
             }
         }
     }
 
     suspend fun remove(family: ModelFamily) {
         withContext(blockingDispatcher + NonCancellable) {
-            familyMutex(family).withLock {
-                updateState(family, ModelDeliveryState.Removing)
-                if (!persistRemovalIntent(family)) {
-                    return@withLock
-                }
-                scope.launch {
-                    familyMutex(family).withLock {
-                        removeLocked(family)
+            explicitOperationMutex(family).withLock {
+                familyMutex(family).withLock {
+                    updateState(family, ModelDeliveryState.Removing)
+                    val generation = persistRemovalIntent(family)
+                    if (generation == null) {
+                        return@withLock
                     }
+                    removeLocked(family, generation)
                 }
             }
         }
@@ -594,11 +598,10 @@ class ModelDeliveryManager internal constructor(
 
     private suspend fun resumePendingRemovals() {
         ModelFamily.entries.forEach { family ->
-            if (removalMarker(family).exists()) {
+            explicitOperationMutex(family).withLock {
                 familyMutex(family).withLock {
-                    if (removalMarker(family).exists()) {
-                        removeLocked(family)
-                    }
+                    val generation = intentStore.pendingRemovalGeneration(family) ?: return@withLock
+                    removeLocked(family, generation)
                 }
             }
         }
@@ -627,7 +630,11 @@ class ModelDeliveryManager internal constructor(
             installed
         }
 
-    private suspend fun removeLocked(family: ModelFamily) {
+    private suspend fun removeLocked(family: ModelFamily, expectedGeneration: Long) {
+        if (!intentStore.matches(family, ModelDeliveryIntent.REMOVE, expectedGeneration)) {
+            reconcileLocked(family, provisionIfReady = true)
+            return
+        }
         val marker = removalMarker(family)
         if (!marker.exists() && _states.value[family] == ModelDeliveryState.NotInstalled) {
             return
@@ -642,20 +649,41 @@ class ModelDeliveryManager internal constructor(
             val release = withTimeoutOrNull(RUNTIME_CONTROL_TIMEOUT_MS) {
                 runtimeControl.quiesce(family)
             }
+            if (!intentStore.matches(family, ModelDeliveryIntent.REMOVE, expectedGeneration)) {
+                reconcileLocked(family, provisionIfReady = true)
+                return
+            }
             check(
                 release == RuntimeReleaseResult.Released ||
                     release == RuntimeReleaseResult.NotRunning,
             ) {
                 "Model runtime did not acknowledge release"
             }
-            cancellationFailure?.let { throw it }
             updateState(family, ModelDeliveryState.Removing)
-            for (packName in packs) {
-                client.removePack(packName)
+            val removed = ModelDeliveryFileLock.withLockSuspending(appContext.filesDir, family) {
+                if (
+                    !intentStore.matches(
+                        family,
+                        ModelDeliveryIntent.REMOVE,
+                        expectedGeneration,
+                        lockHeld = true,
+                    )
+                ) {
+                    return@withLockSuspending false
+                }
+                cancellationFailure?.let { throw it }
+                for (packName in packs) {
+                    client.removePack(packName)
+                }
+                materializer.remove(family, lockHeld = true)
+                check(marker.delete() || !marker.exists()) {
+                    "Could not clear pending model removal"
+                }
+                true
             }
-            materializer.remove(family)
-            check(marker.delete() || !marker.exists()) {
-                "Could not clear pending model removal"
+            if (!removed) {
+                reconcileLocked(family, provisionIfReady = true)
+                return
             }
             updateState(family, ModelDeliveryState.NotInstalled)
         } catch (error: CancellationException) {
@@ -672,21 +700,30 @@ class ModelDeliveryManager internal constructor(
     private fun removalMarker(family: ModelFamily): File =
         ModelDeliveryFileLock.pendingRemovalMarker(appContext.filesDir, family)
 
-    private fun persistRemovalIntent(family: ModelFamily): Boolean {
+    private fun persistRemovalIntent(family: ModelFamily): Long? {
         return try {
-            removalIntentRecorder?.invoke(family) ?: intentStore.recordRemoval(family)
-            true
+            if (removalIntentRecorder == null) {
+                intentStore.recordRemoval(family)
+            } else {
+                removalIntentRecorder.invoke(family)
+                checkNotNull(intentStore.currentGeneration(family, ModelDeliveryIntent.REMOVE)) {
+                    "Removal intent recorder did not persist a canonical REMOVE"
+                }
+            }
         } catch (error: Throwable) {
             MindlayerLog.w(TAG, "Could not persist model removal: ${error.safeLabel()}", throwable = null)
             updateState(
                 family,
                 ModelDeliveryState.RemovalFailed(ModelDeliveryIssue.RemovalFailed),
             )
-            false
+            null
         }
     }
 
     private fun familyMutex(family: ModelFamily): Mutex = checkNotNull(familyMutexes[family])
+
+    private fun explicitOperationMutex(family: ModelFamily): Mutex =
+        ModelDeliveryFileLock.operationMutex(appContext.filesDir, family)
 
     private fun callbacksEnabled(): Boolean =
         synchronized(callbackLock) {

@@ -142,6 +142,34 @@ val releaseAssetAllowlists = mapOf(
         "paddleocr-ppocrv5-mobile-dict.txt",
     ),
 )
+val expectedReleaseAssetPackNames = setOf(
+    "gemma_model",
+    "gemma_model_part_2",
+    "gemma_embed_model",
+    "paddleocr_model",
+)
+val releaseBundleFile = layout.buildDirectory.file("outputs/bundle/release/app-release.aab")
+
+fun verifyReleaseBundleAssetPackNames(bundle: File) {
+    if (!bundle.isFile) {
+        throw GradleException("Release bundle is missing: ${bundle.path}")
+    }
+    val manifestEntry = Regex("^[^/]+/manifest/AndroidManifest\\.xml$")
+    val actual = ZipFile(bundle).use { zip ->
+        zip.entries().asSequence()
+            .map { it.name }
+            .filter(manifestEntry::matches)
+            .map { it.substringBefore('/') }
+            .filterNot { it == "base" }
+            .toSortedSet()
+    }
+    if (actual != expectedReleaseAssetPackNames) {
+        throw GradleException(
+            "Release AAB asset-pack names differ from the stable Play contract. " +
+                "Expected ${expectedReleaseAssetPackNames.sorted()}, got ${actual.sorted()}.",
+        )
+    }
+}
 
 val validateReleaseAssetPackContents by tasks.registering {
     dependsOn(
@@ -179,6 +207,15 @@ val validateReleaseAssetPackContents by tasks.registering {
                 )
             }
         }
+    }
+}
+
+val validateReleaseBundleAssetPackNames by tasks.registering {
+    group = "verification"
+    description = "Verifies the final AAB contains exactly the four stable on-demand pack names."
+    inputs.file(releaseBundleFile)
+    doLast {
+        verifyReleaseBundleAssetPackNames(releaseBundleFile.get().asFile)
     }
 }
 
@@ -914,6 +951,41 @@ androidComponents {
     }
 }
 
+val releaseRuntimeComponents = providers.provider {
+    configurations.getByName("releaseRuntimeClasspath")
+        .incoming
+        .resolutionResult
+        .allComponents
+        .mapNotNull { component ->
+            component.moduleVersion?.let { module ->
+                "${module.group}:${module.name}:${module.version}"
+            }
+        }
+        .sorted()
+}
+
+val validateNoAiDeliveryDependency by tasks.registering {
+    group = "verification"
+    description = "Rejects the beta Play AI Delivery client from the release runtime classpath."
+    inputs.property("releaseRuntimeComponents", releaseRuntimeComponents)
+    doLast {
+        @Suppress("UNCHECKED_CAST")
+        val components = inputs.properties["releaseRuntimeComponents"] as List<String>
+        if (components.isEmpty()) {
+            throw GradleException("Could not resolve releaseRuntimeClasspath for dependency validation.")
+        }
+        val forbidden = components.filter {
+            it.startsWith("com.google.android.play:ai-delivery:")
+        }
+        if (forbidden.isNotEmpty()) {
+            throw GradleException(
+                "Release runtime contains prohibited Play AI Delivery artifacts: " +
+                    forbidden.joinToString(),
+            )
+        }
+    }
+}
+
 tasks.configureEach {
     val releaseArtifactTasks = setOf(
         "assembleRelease",
@@ -932,7 +1004,13 @@ tasks.configureEach {
             validateReleaseModelSha256,
             validateReleasePaddleOcrSha256,
             validateReleaseEmbeddingSha256,
+            validateNoAiDeliveryDependency,
         )
+    }
+    if (name == "bundleRelease") {
+        doLast {
+            verifyReleaseBundleAssetPackNames(releaseBundleFile.get().asFile)
+        }
     }
     // F-079: every public APK/AAB packaging task must see the ABI validator.
     // assembleDebug + assembleRelease + bundleRelease are the lifecycle tasks
@@ -1005,7 +1083,9 @@ dependencies {
 
     implementation(project(":shared"))
     implementation(libs.litertlm.android)
-    implementation(libs.litert)
+    implementation(libs.litert) {
+        exclude(group = "com.google.android.play", module = "ai-delivery")
+    }
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)

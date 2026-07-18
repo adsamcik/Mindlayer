@@ -8,7 +8,9 @@ coroutines = "1.11.0"
 serialization = "1.11.0"
 room = "2.8.4"
 litertlm = "0.14.0"
-litert = "2.1.6"
+# 2.1.6 is blocked by upstream issue #8474: litert and litert-api publish the
+# same Android namespace, and excluding litert-api causes runtime failures.
+litert = "2.1.5"
 junit = "4.13.2"
 mockk = "1.14.11"
 robolectric = "4.16.1"
