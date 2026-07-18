@@ -1,3 +1,5 @@
+import com.android.build.api.variant.HasUnitTestBuilder
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.util.Properties
 import java.util.Base64
 import java.security.MessageDigest
@@ -93,11 +95,11 @@ val embeddingTokenizerSha256 = resolveModelSha("embeddingTokenizerSha256", "embe
 // Resolve the asset-pack integrity-manifest paths at configuration time so the
 // validator doLast actions capture plain Strings (config-cache safe) instead of
 // referencing rootProject at execution time.
-val gemmaIntegrityManifestPath = rootProject.layout.projectDirectory
+val gemmaIntegrityManifestPath: String = rootProject.layout.projectDirectory
     .file("gemma_model/src/main/assets/model_integrity.json").asFile.absolutePath
-val paddleIntegrityManifestPath = rootProject.layout.projectDirectory
+val paddleIntegrityManifestPath: String = rootProject.layout.projectDirectory
     .file("paddleocr_model/src/main/assets/paddleocr_model_integrity.json").asFile.absolutePath
-val embeddingIntegrityManifestPath = rootProject.layout.projectDirectory
+val embeddingIntegrityManifestPath: String = rootProject.layout.projectDirectory
     .file("gemma_embed_model/src/main/assets/embedding_model_integrity.json").asFile.absolutePath
 val paddleAssetPaths = mapOf(
     "detection" to rootProject.layout.projectDirectory
@@ -171,7 +173,7 @@ fun verifyReleaseBundleAssetPackNames(bundle: File) {
     }
 }
 
-val validateReleaseAssetPackContents by tasks.registering {
+val validateReleaseAssetPackContents = tasks.register("validateReleaseAssetPackContents") {
     dependsOn(
         ":provisionGemmaFragments",
         ":gemma_embed_model:generateEmbeddingModelIntegrityManifest",
@@ -210,7 +212,7 @@ val validateReleaseAssetPackContents by tasks.registering {
     }
 }
 
-val validateReleaseBundleAssetPackNames by tasks.registering {
+val validateReleaseBundleAssetPackNames = tasks.register("validateReleaseBundleAssetPackNames") {
     group = "verification"
     description = "Verifies the final AAB contains exactly the four stable on-demand pack names."
     inputs.file(releaseBundleFile)
@@ -219,7 +221,7 @@ val validateReleaseBundleAssetPackNames by tasks.registering {
     }
 }
 
-val validateReleaseModelSha256 by tasks.registering {
+val validateReleaseModelSha256 = tasks.register("validateReleaseModelSha256") {
     dependsOn(":provisionGemmaFragments")
     group = "verification"
     description = "Fails release builds unless the Gemma model SHA-256 (from -PmodelSha256 or the local cache) matches model_integrity.json."
@@ -259,7 +261,7 @@ val validateReleaseModelSha256 by tasks.registering {
 // builds if any -PpaddleOcr*Sha256 is missing/malformed; this validator
 // adds the same defense-in-depth cross-check on the :app side, ensuring
 // the manifest file on disk matches the four properties passed in.
-val validateReleasePaddleOcrSha256 by tasks.registering {
+val validateReleasePaddleOcrSha256 = tasks.register("validateReleasePaddleOcrSha256") {
     dependsOn(
         ":paddleocr_model:generatePaddleOcrModelIntegrityManifest",
         ":paddleocr_model:provisionReleaseModelAssets",
@@ -350,7 +352,7 @@ val validateReleasePaddleOcrSha256 by tasks.registering {
 // manifest file on disk matches the properties passed in. Without this
 // cross-check, a buggy CI script could silently regenerate the manifest
 // with zero hashes while still passing the per-module guard.
-val validateReleaseEmbeddingSha256 by tasks.registering {
+val validateReleaseEmbeddingSha256 = tasks.register("validateReleaseEmbeddingSha256") {
     dependsOn(
         ":gemma_embed_model:generateEmbeddingModelIntegrityManifest",
         ":gemma_embed_model:provisionReleaseModelAssets",
@@ -451,7 +453,7 @@ val ALLOWED_MISSING_LIBRARY_ABIS: Set<String> = setOf(
     "armeabi-v7a",   // intentionally absent in LiteRT-LM 0.10.0 — see comment above
 )
 
-val litertlmAarInspection: Configuration by configurations.creating {
+val litertlmAarInspection: Configuration = configurations.create("litertlmAarInspection") {
     isCanBeConsumed = false
     isCanBeResolved = true
     isTransitive = false
@@ -464,14 +466,14 @@ run {
     dependencies.add(litertlmAarInspection.name, coords)
 }
 
-val validateLitertlmAbis by tasks.registering {
+val validateLitertlmAbis = tasks.register("validateLitertlmAbis") {
     group = "verification"
     description = "Fails the build if the LiteRT-LM AAR no longer ships a required native ABI (F-079)."
 
     val aarFiles: FileCollection = litertlmAarInspection
     inputs.files(aarFiles)
         .withPropertyName("litertlmAar")
-        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+        .withPathSensitivity(PathSensitivity.RELATIVE)
 
     val expectedAbis = EXPECTED_LIBRARY_ABIS
     val allowedMissingAbis = ALLOWED_MISSING_LIBRARY_ABIS
@@ -553,7 +555,7 @@ val validateLitertlmAbis by tasks.registering {
     }
 }
 
-val litertAarInspection: Configuration by configurations.creating {
+val litertAarInspection: Configuration = configurations.create("litertAarInspection") {
     isCanBeConsumed = false
     isCanBeResolved = true
     isTransitive = false
@@ -566,14 +568,14 @@ run {
     dependencies.add(litertAarInspection.name, coords)
 }
 
-val validateLitertAbis by tasks.registering {
+val validateLitertAbis = tasks.register("validateLitertAbis") {
     group = "verification"
     description = "Fails the build if the base LiteRT AAR no longer ships a required native ABI."
 
     val aarFiles: FileCollection = litertAarInspection
     inputs.files(aarFiles)
         .withPropertyName("litertAar")
-        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+        .withPathSensitivity(PathSensitivity.RELATIVE)
 
     val expectedAbis = EXPECTED_LIBRARY_ABIS
     val allowedMissingAbis = ALLOWED_MISSING_LIBRARY_ABIS
@@ -662,7 +664,7 @@ val validateLitertAbis by tasks.registering {
 // removed from the packaging block below. This task re-checks that on every
 // build so a future dependency bump that reintroduces the collision fails loud
 // and early -- with an actionable message -- instead of resolving silently again.
-val validateNoLiteRtNativeLibCollision by tasks.registering {
+val validateNoLiteRtNativeLibCollision = tasks.register("validateNoLiteRtNativeLibCollision") {
     group = "verification"
     description = "Fails the build if litertlm-android and litert bundle a same-named " +
         "native library again (see docs/architecture/LITERT_COEXISTENCE.md)."
@@ -671,10 +673,10 @@ val validateNoLiteRtNativeLibCollision by tasks.registering {
     val litertAarFiles: FileCollection = litertAarInspection
     inputs.files(litertlmAarFiles)
         .withPropertyName("litertlmAar")
-        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+        .withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.files(litertAarFiles)
         .withPropertyName("litertAar")
-        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+        .withPathSensitivity(PathSensitivity.RELATIVE)
     val markerFile = layout.buildDirectory.file("litert-collision-check/result.txt")
     outputs.file(markerFile)
 
@@ -947,7 +949,7 @@ android {
 
 androidComponents {
     beforeVariants(selector().withBuildType("release")) { variantBuilder ->
-        (variantBuilder as com.android.build.api.variant.HasUnitTestBuilder).enableUnitTest = true
+        (variantBuilder as HasUnitTestBuilder).enableUnitTest = true
     }
 }
 
@@ -964,7 +966,7 @@ val releaseRuntimeComponents = providers.provider {
         .sorted()
 }
 
-val validateNoAiDeliveryDependency by tasks.registering {
+val validateNoAiDeliveryDependency = tasks.register("validateNoAiDeliveryDependency") {
     group = "verification"
     description = "Rejects the beta Play AI Delivery client from the release runtime classpath."
     inputs.property("releaseRuntimeComponents", releaseRuntimeComponents)
@@ -1042,7 +1044,7 @@ tasks.configureEach {
 
 kotlin {
     compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        jvmTarget.set(JvmTarget.JVM_17)
         freeCompilerArgs.addAll(
             "-opt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi",
             "-opt-in=androidx.compose.material3.Material3ExpressiveApi",

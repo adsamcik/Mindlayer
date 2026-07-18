@@ -54,7 +54,7 @@ val releaseTaskRequested = gradle.startParameter.taskNames.any {
     it.contains("Release", ignoreCase = false) && !it.contains("UnitTest", ignoreCase = false)
 }
 
-val generateEmbeddingModelIntegrityManifest by tasks.registering {
+val generateEmbeddingModelIntegrityManifest = tasks.register("generateEmbeddingModelIntegrityManifest") {
     group = "verification"
     description = "Writes the embedding_model_integrity.json asset from -PembeddingModelSha256 / -PembeddingTokenizerSha256."
     // All values that the doLast action needs are declared here as task inputs.
@@ -159,7 +159,7 @@ val generateEmbeddingModelIntegrityManifest by tasks.registering {
 // src/main/assets so the on-demand asset pack can bundle them for a release,
 // keeping the binaries out of git. No-op on debug. Fail-fast on release when a
 // required file is absent from both the asset dir and the cache.
-val provisionReleaseModelAssets by tasks.registering {
+val provisionReleaseModelAssets = tasks.register("provisionReleaseModelAssets") {
     group = "build"
     description = "Copies the EmbeddingGemma model + tokenizer from the local model cache into src/main/assets for release packaging."
     val assetsDir = layout.projectDirectory.dir("src/main/assets").asFile

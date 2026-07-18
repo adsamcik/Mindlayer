@@ -189,7 +189,7 @@ val requestedGemmaSha = providers.gradleProperty("modelSha256").orNull
     ?: mindlayerModelShas[gemmaFullModelName].orEmpty()
 val gemmaFragmentVersion = publishVersion
 
-val provisionGemmaFragments by tasks.registering {
+val provisionGemmaFragments = tasks.register("provisionGemmaFragments") {
     group = "build"
     description = "Streams the cached Gemma model into two verified on-demand asset-pack fragments."
     notCompatibleWithConfigurationCache(
@@ -353,7 +353,7 @@ val provisionGemmaFragments by tasks.registering {
     }
 }
 
-val validateNoFullGemmaInAssetPacks by tasks.registering {
+val validateNoFullGemmaInAssetPacks = tasks.register("validateNoFullGemmaInAssetPacks") {
     dependsOn(provisionGemmaFragments)
     group = "verification"
     description = "Fails if the complete Gemma container is present in either fragment pack."
