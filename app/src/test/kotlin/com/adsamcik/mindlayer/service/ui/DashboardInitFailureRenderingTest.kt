@@ -39,11 +39,11 @@ class DashboardInitFailureRenderingTest {
     }
 
     @Test
-    fun `ModelMissing renders ERROR with install AI Pack remediation`() {
+    fun `ModelMissing renders ERROR with Models tab remediation`() {
         val (tone, message) = describeInitFailure(InitFailure.ModelMissing, currentBackend = "NONE")
         assertEquals(DashboardMessageTone.ERROR, tone)
         assertTrue("Message should mention model: $message", message.contains("Model", ignoreCase = true))
-        assertTrue("Message should include AI Pack remediation: $message", message.contains("AI Pack", ignoreCase = true))
+        assertTrue("Message should include Models tab remediation: $message", message.contains("Models", ignoreCase = true))
     }
 
     @Test

@@ -454,6 +454,16 @@ class LogRepository(
      * this row.
      */
     fun logInitFailureCategorized(failure: com.adsamcik.mindlayer.service.engine.InitFailure) {
+        logInitFailureCategorized(failure, featureName = "chat")
+    }
+
+    fun logInitFailureCategorized(
+        failure: com.adsamcik.mindlayer.service.engine.InitFailure,
+        featureName: String,
+    ) {
+        require(featureName in setOf("chat", "embeddings", "ocr")) {
+            "Unknown engine feature"
+        }
         val (categoryName, backend, label) = when (failure) {
             com.adsamcik.mindlayer.service.engine.InitFailure.LowMemory ->
                 Triple("LowMemory", null, null)
@@ -474,6 +484,7 @@ class LogRepository(
             errorMessage = label,
             extraJson = buildJsonObject {
                 put("failureCategory", JsonPrimitive(categoryName))
+                put("feature", JsonPrimitive(featureName))
             }.toString(),
         ))
     }

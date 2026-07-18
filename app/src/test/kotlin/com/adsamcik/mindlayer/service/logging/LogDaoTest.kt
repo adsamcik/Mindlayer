@@ -324,6 +324,82 @@ class LogDaoTest {
         assertNull(dao.latestBackendDecisionByFeature("embeddings"))
     }
 
+    @Test
+    fun `latestInitFailureByFeature isolates roles and clears on matching recovery`() = runTest {
+        dao.insert(entry(
+            timestampMs = 100,
+            category = LogCategory.ENGINE,
+            event = LogEvent.INIT_FAILURE_CATEGORIZED.key,
+            extraJson = """{"failureCategory":"ModelMissing","feature":"chat"}""",
+        ))
+        dao.insert(entry(
+            timestampMs = 200,
+            category = LogCategory.ENGINE,
+            event = LogEvent.INIT_FAILURE_CATEGORIZED.key,
+            extraJson = """{"failureCategory":"ModelMissing","feature":"ocr"}""",
+        ))
+
+        assertEquals(100L, dao.latestInitFailureByFeature("chat")?.timestampMs)
+        assertEquals(200L, dao.latestInitFailureByFeature("ocr")?.timestampMs)
+
+        dao.insert(entry(
+            timestampMs = 300,
+            category = LogCategory.ENGINE,
+            event = LogEvent.ENGINE_INIT_SUCCESS.key,
+        ))
+
+        assertNull(dao.latestInitFailureByFeature("chat"))
+        assertEquals(200L, dao.latestInitFailureByFeature("ocr")?.timestampMs)
+    }
+
+    @Test
+    fun `recovered backend fallback remains visible until clean init or shutdown`() = runTest {
+        dao.insert(entry(
+            timestampMs = 100,
+            category = LogCategory.ENGINE,
+            event = LogEvent.INIT_FAILURE_CATEGORIZED.key,
+            extraJson = """{"failureCategory":"BackendUnavailable","feature":"chat"}""",
+        ))
+        dao.insert(entry(
+            timestampMs = 200,
+            category = LogCategory.ENGINE,
+            event = LogEvent.ENGINE_INIT_SUCCESS.key,
+        ))
+        dao.insert(entry(
+            timestampMs = 300,
+            category = LogCategory.ENGINE,
+            event = LogEvent.INIT_FAILURE_CATEGORIZED.key,
+            extraJson = """{"failureCategory":"BackendUnavailable","feature":"chat"}""",
+        ))
+
+        assertEquals(300L, dao.latestInitFailureByFeature("chat")?.timestampMs)
+
+        dao.insert(entry(
+            timestampMs = 400,
+            category = LogCategory.ENGINE,
+            event = LogEvent.ENGINE_SHUTDOWN.key,
+        ))
+
+        assertNull(dao.latestInitFailureByFeature("chat"))
+
+        dao.insert(entry(
+            timestampMs = 500,
+            category = LogCategory.ENGINE,
+            event = LogEvent.INIT_FAILURE_CATEGORIZED.key,
+            extraJson = """{"failureCategory":"ModelMissing","feature":"chat"}""",
+        ))
+
+        assertEquals(500L, dao.latestInitFailureByFeature("chat")?.timestampMs)
+
+        dao.insert(entry(
+            timestampMs = 600,
+            category = LogCategory.ENGINE,
+            event = LogEvent.ENGINE_INIT_SUCCESS.key,
+        ))
+
+        assertNull(dao.latestInitFailureByFeature("chat"))
+    }
+
     // --- empty database defaults ---
 
     @Test

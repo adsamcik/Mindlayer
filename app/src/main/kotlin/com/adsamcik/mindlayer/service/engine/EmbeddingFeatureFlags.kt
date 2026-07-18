@@ -51,8 +51,8 @@ object EmbeddingFeatureFlags {
      *     (production impl: `RealLiteRtRunner`).
      *   - Tokenizer defaults to [SentencePieceTokenizerFactory] which
      *     loads the Gemma `.spm.model` shipped in the
-     *     `gemma_embed_model` AI Pack.
-     *   - The AI Pack distribution + release SHA validation are wired
+     *     `gemma_embed_model` on-demand pack.
+     *   - The PAD distribution + release SHA validation are wired
      *     end-to-end (see `:app:validateReleaseEmbeddingSha256` +
      *     `:gemma_embed_model:generateEmbeddingModelIntegrityManifest`).
      *
@@ -77,4 +77,3 @@ object EmbeddingFeatureFlags {
      */
     const val IS_PRODUCTION_READY: Boolean = true
 }
-

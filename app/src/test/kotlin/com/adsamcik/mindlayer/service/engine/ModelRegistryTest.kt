@@ -118,6 +118,32 @@ class ModelRegistryTest {
     }
 
     @Test
+    fun `canonical removal intent suppresses discovery before markers are reconciled`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        context.filesDir.listFiles()?.forEach { it.deleteRecursively() }
+        context.cacheDir.listFiles()?.forEach { it.deleteRecursively() }
+        File(context.filesDir, "gemma-4-E2B-it.litertlm").writeText("legacy")
+        val family = com.adsamcik.mindlayer.service.modeldelivery.ModelFamily.CHAT
+        com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryIntentStore(context.filesDir)
+            .recordRemoval(family)
+        val pending = com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+            .pendingRemovalMarker(context.filesDir, family)
+        val tombstone = com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+            .removalTombstone(context.filesDir, family)
+        assertTrue(pending.delete())
+        assertTrue(tombstone.delete())
+        assertFalse(pending.exists())
+        assertFalse(tombstone.exists())
+
+        try {
+            assertTrue(ModelRegistry.discoverModels(context, requireIntegrity = false).isEmpty())
+        } finally {
+            context.filesDir.listFiles()?.forEach { it.deleteRecursively() }
+            context.cacheDir.listFiles()?.forEach { it.deleteRecursively() }
+        }
+    }
+
+    @Test
     fun `discoverModels dedups by filename and sorts by size descending`() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         context.filesDir.listFiles()?.forEach { it.delete() }
@@ -320,7 +346,7 @@ class ModelRegistryTest {
     }
 
     @Test
-    fun `discoverModels deletes invalid extracted ai pack model and rediscovers on next pass`() {
+    fun `discoverModels never extracts an invalid legacy AssetManager candidate`() {
         val baseContext = ApplicationProvider.getApplicationContext<android.content.Context>()
         baseContext.filesDir.listFiles()?.forEach { it.delete() }
         baseContext.cacheDir.listFiles()?.forEach { it.delete() }
@@ -334,12 +360,7 @@ class ModelRegistryTest {
         }
 
         assertTrue(ModelRegistry.discoverModels(context, requireIntegrity = true).isEmpty())
-        assertFalse(extracted.exists())
-
-        val rediscovered = ModelRegistry.discoverModels(context, requireIntegrity = true)
-
-        assertEquals(listOf("manifest-empty"), rediscovered.map { it.id })
-        assertEquals(0L, extracted.length())
+        assertTrue(extracted.exists())
     }
 
     @Test

@@ -10,7 +10,10 @@ import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.adsamcik.mindlayer.service.logging.safeLabelWithDetail
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+import com.adsamcik.mindlayer.service.modeldelivery.ModelFamily
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -236,20 +239,20 @@ class EngineManager(
     internal var expectedModelSha256: String =
         com.adsamcik.mindlayer.service.BuildConfig.MODEL_SHA256
 
-    /** All model files detected on the device for internal selection purposes. */
-    private val installedModels: List<ModelInfo> by lazy {
-        ModelRegistry.discoverModels(context)
-    }
-
-    /** The single model Mindlayer selects and exposes on this device. */
-    private val selectedModel: ModelInfo by lazy {
-        ModelRegistry.getDefaultModel(installedModels) ?: throw noModelFoundException()
-    }
+    /**
+     * Discovers on every fresh init attempt until an engine is loaded. On-demand
+     * delivery can complete after this process first observed no model, so an
+     * empty discovery result must never be memoized for its lifetime.
+     */
+    private fun selectModelForAttempt(deliveryLockHeld: Boolean = false): ModelInfo =
+        ModelRegistry.getDefaultModel(
+            ModelRegistry.discoverModels(context, deliveryLockHeld = deliveryLockHeld),
+        ) ?: throw noModelFoundException()
 
     /** Convenience: path of the currently loaded (or selected) model. */
     val modelPath: String
         get() = currentModel?.path
-            ?: selectedModel.path
+            ?: selectModelForAttempt().path
 
     // ---- Public API --------------------------------------------------------
 
@@ -269,36 +272,25 @@ class EngineManager(
         preferredBackend: String? = null,
         maxTokens: Int = 4096,
     ): Engine = mutex.withLock {
-        initializeLocked(preferredBackend, maxTokens)
+        ModelDeliveryFileLock.withLockSuspending(context.filesDir, ModelFamily.CHAT) {
+            initializeLocked(preferredBackend, maxTokens)
+        }
     }
 
     private suspend fun initializeLocked(
         preferredBackend: String? = null,
         maxTokens: Int = 4096,
     ): Engine {
-        _state.value = EngineState.Initializing
-        try {
-        val target = try {
-            withContext(Dispatchers.IO) { selectedModel }
-        } catch (e: IllegalStateException) {
-            // F-077: `selectedModel` is `by lazy { ... ?: throw noModelFoundException() }`.
-            // The only IllegalStateException reachable here is the no-model-file path
-            // — categorise it before re-throwing so the dashboard renders the
-            // ModelMissing remediation rather than a generic stale state.
-            recordInitFailure(InitFailure.ModelMissing)
-            throw e
-        }
-
-        // Fast-path: the selected device model is already loaded.
+        ModelDeliveryFileLock.requireAvailable(
+            context.filesDir,
+            ModelFamily.CHAT,
+            lockHeld = true,
+        )
         engine?.let { eng ->
-            MindlayerLog.i(TAG, "Engine already initialized with model=${target.id}, backend=$currentBackend")
-            // F-{prewarm-ceiling}: the requested maxTokens is silently
-            // discarded here — the engine keeps running at whatever
-            // ceiling it was FIRST initialized with. Surface it loudly if
-            // a caller ever asks for more than that, so a future caller
-            // hitting the same class of bug that root-caused the
-            // multi-turn SIGSEGV (see .incomplete.md) shows up in logs
-            // instead of silently corrupting state under KV-cache pressure.
+            MindlayerLog.i(
+                TAG,
+                "Engine already initialized with model=${currentModel?.id}, backend=$currentBackend",
+            )
             val loadedCeiling = currentMaxTokens
             if (loadedCeiling != null && maxTokens > loadedCeiling) {
                 MindlayerLog.w(
@@ -310,6 +302,20 @@ class EngineManager(
             }
             _state.value = EngineState.Ready
             return eng
+        }
+
+        _state.value = EngineState.Initializing
+        try {
+        val target = try {
+            withContext(Dispatchers.IO) { selectModelForAttempt(deliveryLockHeld = true) }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (e: IllegalStateException) {
+            // The only IllegalStateException reachable here is the no-model-file path
+            // — categorise it before re-throwing so the dashboard renders the
+            // ModelMissing remediation rather than a generic stale state.
+            recordInitFailure(InitFailure.ModelMissing)
+            throw e
         }
 
         // F-077: a fresh init attempt supersedes the previous run's outcome.
@@ -344,8 +350,8 @@ class EngineManager(
         }
 
         // F-002: verify the on-disk model SHA-256 matches the build-time
-        // manifest before handing it to native init. APK signing protects
-        // delivery via the AI Pack, but the extracted file in `filesDir`
+        // manifest before handing it to native init. Play signing protects
+        // the delivered fragments, but the reconstructed file in `filesDir`
         // is mutable (root, OEM agents) and never re-verified on later
         // loads. When `BuildConfig.MODEL_SHA256` is empty (the dev/CI
         // default) we emit a loud warning instead of failing — once the
@@ -537,6 +543,12 @@ class EngineManager(
                 initTimeSeconds = elapsed
                 isInitialized = true
                 logRepository?.logEngineInit(name, durationMs, path)
+                (lastInitFailure as? InitFailure.BackendUnavailable)?.let { recoveredFailure ->
+                    // Re-log after the success row so the feature-scoped DAO
+                    // keeps the recovered fallback visible. A later clean init
+                    // writes a newer success without this row and clears it.
+                    logRepository?.logInitFailureCategorized(recoveredFailure)
+                }
                 _state.value = EngineState.Ready
                 return eng
 
@@ -549,6 +561,7 @@ class EngineManager(
                 recordInitFailure(InitFailure.IntegrityMismatch)
                 throw e
             } catch (t: Throwable) {
+                if (t is CancellationException) throw t
                 // F-006: never persist or surface raw native exception text.
                 // LiteRT-LM tokenizer/template exceptions can inline prompt
                 // fragments; safeLabel() returns class names only. The
@@ -584,6 +597,10 @@ class EngineManager(
                 "Try closing other apps to free memory.", lastError
         )
         } catch (t: Throwable) {
+            if (t is CancellationException) {
+                _state.value = EngineState.Idle
+                throw t
+            }
             val existingFailure = lastInitFailure
             val failure = existingFailure ?: classifyInitFailure(t)
             if (existingFailure == null) recordInitFailure(failure)
@@ -725,11 +742,22 @@ class EngineManager(
     }
 
     /** Returns the current [Engine] or throws if not yet initialized. */
-    fun requireEngine(): Engine =
-        engine ?: throw IllegalStateException("Engine not initialized — call initialize() first.")
+    fun requireEngine(): Engine {
+        requireModelAvailable()
+        return engine ?: throw IllegalStateException("Engine not initialized — call initialize() first.")
+    }
+
+    fun requireModelAvailable() {
+        ModelDeliveryFileLock.requireAvailable(context.filesDir, ModelFamily.CHAT)
+    }
 
     /** Returns the current [Engine], or `null`. */
-    fun getEngine(): Engine? = engine
+    fun getEngine(): Engine? {
+        if (ModelDeliveryFileLock.isRemovalAuthoritative(context.filesDir, ModelFamily.CHAT)) {
+            return null
+        }
+        return engine
+    }
 
     /** Shut down the engine and release native resources. */
     suspend fun shutdown() = mutex.withLock {
@@ -939,7 +967,7 @@ class EngineManager(
     private fun noModelFoundException(): IllegalStateException =
         IllegalStateException(
             "No .litertlm model files found. Place a model in app filesDir, " +
-                "externalFilesDir, cacheDir, /data/local/tmp, or deploy via Play AI pack."
+                "externalFilesDir, cacheDir, /data/local/tmp, or download it from the Models tab."
         )
 
     /** Internal shutdown without acquiring the mutex (caller must hold it). */

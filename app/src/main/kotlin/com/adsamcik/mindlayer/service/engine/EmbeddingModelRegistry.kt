@@ -6,6 +6,8 @@ import android.os.Build
 import com.adsamcik.mindlayer.service.BuildConfig
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+import com.adsamcik.mindlayer.service.modeldelivery.ModelFamily
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -27,7 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * `gemma_embed_model` Asset Pack containing `embedding-*.tflite`, a
  * `sentencepiece.model` tokenizer, and integrity metadata.
  *
- * Trust ranking mirrors [ModelRegistry]: Play AI Pack assets, `filesDir`,
+ * Trust ranking mirrors [ModelRegistry]: verified on-demand delivery, `filesDir`,
  * external files, cache, then debug-only `/data/local/tmp` sideloads. A
  * candidate is accepted only when the `.tflite` model and sidecar tokenizer
  * are both present in the same directory.
@@ -43,12 +45,27 @@ object EmbeddingModelRegistry {
     private val SAFE_MODEL_NAME_PATTERN = Regex("^embedding-[A-Za-z0-9_.-]+\\.tflite$")
     private val SHA256_REGEX = Regex("(?i)^[0-9a-f]{64}$")
 
-    private enum class Origin { AI_PACK, FILES_DIR, EXTERNAL_FILES, CACHE_DIR, SIDELOAD }
+    private enum class Origin { MODEL_DELIVERY, FILES_DIR, EXTERNAL_FILES, CACHE_DIR, SIDELOAD }
 
     fun discoverModels(
         context: Context,
         requireIntegrity: Boolean = !isDebuggable(context),
+        deliveryLockHeld: Boolean = false,
     ): List<EmbeddingModelInfo> {
+        if (!deliveryLockHeld) {
+            return ModelDeliveryFileLock.withLock(context.filesDir, ModelFamily.EMBEDDINGS) {
+                discoverModels(context, requireIntegrity, deliveryLockHeld = true)
+            }
+        }
+        if (
+            ModelDeliveryFileLock.isRemovalAuthoritative(
+                context.filesDir,
+                ModelFamily.EMBEDDINGS,
+                lockHeld = true,
+            )
+        ) {
+            return emptyList()
+        }
         val seen = mutableSetOf<String>()
         val models = mutableListOf<Pair<Origin, EmbeddingModelInfo>>()
         val manifest = loadIntegrityManifest(context)
@@ -59,7 +76,14 @@ object EmbeddingModelRegistry {
             dir.listFiles()
                 ?.filter { it.isFile && it.name.endsWith(MODEL_EXTENSION) }
                 ?.forEach { file ->
-                    val info = candidateFromFile(file, dirCanonical, manifest, requireIntegrity)
+                    val info = candidateFromFile(
+                        file = file,
+                        dirCanonical = dirCanonical,
+                        manifest = manifest,
+                        requireIntegrity = requireIntegrity,
+                        isDeliveredArtifact = origin == Origin.MODEL_DELIVERY,
+                        isReleaseBuild = !isDebuggable(context),
+                    )
                         ?: return@forEach
                     if (file.name in seen) return@forEach
                     seen += file.name
@@ -67,59 +91,27 @@ object EmbeddingModelRegistry {
                 }
         }
 
-        try {
-            val assetNames = context.assets.list("")?.toSet().orEmpty()
-            for (name in assetNames) {
-                if (!name.endsWith(MODEL_EXTENSION)) continue
-                if (name in seen) continue
-                if (!SAFE_MODEL_NAME_PATTERN.matches(name)) {
-                    MindlayerLog.w(TAG, "Skipping AI-Pack embedding model with unexpected name: $name")
-                    continue
-                }
-                val modelId = name.removeSuffix(MODEL_EXTENSION)
-                val tokenizerName = tokenizerAssetName(modelId, assetNames)
-                if (tokenizerName == null) {
-                    MindlayerLog.w(TAG, "Skipping AI-Pack embedding model without tokenizer: $name")
-                    continue
-                }
-                val expected = manifest[name]
-                val tokenizerExpected = manifest[tokenizerName]
-                if (requireIntegrity && (expected == null || tokenizerExpected == null)) {
-                    MindlayerLog.w(TAG, "Skipping AI-Pack embedding pair without integrity metadata: $name")
-                    continue
-                }
-
-                val extracted = File(context.filesDir, name)
-                val tokenizer = File(context.filesDir, tokenizerName)
-                try {
-                    if (!extracted.exists()) {
-                        context.assets.open(name).use { input -> extracted.outputStream().use { input.copyTo(it) } }
-                    }
-                    if (!tokenizer.exists()) {
-                        context.assets.open(tokenizerName).use { input -> tokenizer.outputStream().use { input.copyTo(it) } }
-                    }
-                } catch (e: Exception) {
-                    MindlayerLog.w(TAG, "AI-Pack embedding extraction failed: ${e.safeLabel()}")
-                    extracted.delete()
-                    tokenizer.delete()
-                    continue
-                }
-
-                val verification = verifyModelFile(extracted, expected, requireIntegrity)
-                val tokenizerVerification = verifyModelFile(tokenizer, tokenizerExpected, requireIntegrity)
-                if (!verification.accepted || !tokenizerVerification.accepted) {
-                    MindlayerLog.w(TAG, "Skipping AI-Pack embedding pair with invalid integrity metadata: $name")
-                    extracted.delete()
-                    tokenizer.delete()
-                    continue
-                }
-                seen += name
-                models += Origin.AI_PACK to buildModelInfo(extracted, tokenizer, verification.sha256)
-            }
-        } catch (e: Exception) {
-            MindlayerLog.w(TAG, "AI-Pack embedding asset scan failed: ${e.safeLabel()}")
+        val scanDelivered = {
+            scanDir(
+                Origin.MODEL_DELIVERY,
+                ModelDeliveryFileLock.familyDir(context.filesDir, ModelFamily.EMBEDDINGS),
+            )
         }
-
+        runCatching {
+            if (deliveryLockHeld) {
+                scanDelivered()
+            } else {
+                ModelDeliveryFileLock.withLock(context.filesDir, ModelFamily.EMBEDDINGS) {
+                    scanDelivered()
+                }
+            }
+        }.onFailure { error ->
+            MindlayerLog.w(
+                TAG,
+                "On-demand embedding model scan deferred: ${error.safeLabel()}",
+                throwable = null,
+            )
+        }
         scanDir(Origin.FILES_DIR, context.filesDir)
         scanDir(Origin.EXTERNAL_FILES, context.getExternalFilesDir(null))
         scanDir(Origin.CACHE_DIR, context.cacheDir)
@@ -162,6 +154,8 @@ object EmbeddingModelRegistry {
         dirCanonical: File,
         manifest: Map<String, IntegrityMetadata>,
         requireIntegrity: Boolean,
+        isDeliveredArtifact: Boolean,
+        isReleaseBuild: Boolean,
     ): EmbeddingModelInfo? {
         if (!SAFE_MODEL_NAME_PATTERN.matches(file.name)) {
             MindlayerLog.w(TAG, "Skipping embedding model with unexpected name: ${file.name}")
@@ -189,8 +183,20 @@ object EmbeddingModelRegistry {
             MindlayerLog.w(TAG, "Skipping tokenizer outside scan dir for embedding model: ${file.name}")
             return null
         }
-        val verification = verifyModelFile(file, manifest[file.name], requireIntegrity)
-        val tokenizerVerification = verifyModelFile(tokenizer, manifest[tokenizer.name], requireIntegrity)
+        val verification = verifyModelFile(
+            file,
+            manifest[file.name],
+            requireIntegrity,
+            isDeliveredArtifact,
+            isReleaseBuild,
+        )
+        val tokenizerVerification = verifyModelFile(
+            tokenizer,
+            manifest[tokenizer.name],
+            requireIntegrity,
+            isDeliveredArtifact,
+            isReleaseBuild,
+        )
         if (!verification.accepted || !tokenizerVerification.accepted) {
             MindlayerLog.w(TAG, "Skipping embedding pair without valid integrity metadata: ${file.name}")
             return null
@@ -231,6 +237,8 @@ object EmbeddingModelRegistry {
         file: File,
         manifestEntry: IntegrityMetadata?,
         requireIntegrity: Boolean,
+        isDeliveredArtifact: Boolean,
+        isReleaseBuild: Boolean,
     ): VerificationResult {
         // S-5: on integrity-enforcing (release) builds, the expected digest
         // must come ONLY from the packaged, build-pinned manifest. A
@@ -238,7 +246,13 @@ object EmbeddingModelRegistry {
         // attacker-controllable (a writable model dir / post-discovery
         // swap) and must never be trusted as the source of truth. Debug
         // builds keep the sidecar fallback for local model iteration.
-        val expected = if (requireIntegrity) manifestEntry else (manifestEntry ?: readSidecarIntegrity(file))
+        val expected = if (requireIntegrity && isDeliveredArtifact && isReleaseBuild) {
+            pinnedIntegrity(file.name)
+        } else if (requireIntegrity) {
+            pinnedIntegrity(file.name) ?: manifestEntry
+        } else {
+            pinnedIntegrity(file.name) ?: manifestEntry ?: readSidecarIntegrity(file)
+        }
         if (expected == null) return VerificationResult(accepted = !requireIntegrity, sha256 = null)
         if (expected.sizeBytes != null && expected.sizeBytes != file.length()) {
             return VerificationResult(accepted = false, sha256 = null)
@@ -302,6 +316,16 @@ object EmbeddingModelRegistry {
         return IntegrityMetadata(sha256, sizeBytes = null)
     }
 
+    private fun pinnedIntegrity(filename: String): IntegrityMetadata? {
+        val sha = when (filename) {
+            "embedding-gemma-300m-v1.tflite" -> BuildConfig.EMBEDDING_MODEL_SHA256
+            "embedding-gemma-300m-v1.spm.model" -> BuildConfig.EMBEDDING_TOKENIZER_SHA256
+            else -> ""
+        }
+        return sha.takeIf { SHA256_REGEX.matches(it) && it != "0".repeat(64) }
+            ?.let { IntegrityMetadata(it, sizeBytes = null) }
+    }
+
     private fun sha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -358,4 +382,3 @@ object EmbeddingModelRegistry {
         val sha256: String?,
     )
 }
-

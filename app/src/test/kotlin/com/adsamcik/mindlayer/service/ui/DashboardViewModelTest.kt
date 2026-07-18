@@ -1,12 +1,30 @@
 package com.adsamcik.mindlayer.service.ui
 
+import android.content.Context
 import android.os.Binder
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.IntentSenderRequest
 import com.adsamcik.mindlayer.IMindlayerService
+import com.adsamcik.mindlayer.service.modeldelivery.AssetPackClient
+import com.adsamcik.mindlayer.service.modeldelivery.AssetPackSnapshot
+import com.adsamcik.mindlayer.service.modeldelivery.MaterializationResult
+import com.adsamcik.mindlayer.service.modeldelivery.ModelArtifactMaterializer
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryManager
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryState
+import com.adsamcik.mindlayer.service.modeldelivery.ModelFamily
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
+import java.io.File
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -23,6 +41,85 @@ import java.lang.reflect.Proxy
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
 class DashboardViewModelTest {
+
+    @Test
+    fun `model delivery refresh metadata and family states are wired into dashboard state`() = runTest {
+        val applicationContext =
+            androidx.test.core.app.ApplicationProvider.getApplicationContext<Context>()
+        val refreshGate = CompletableDeferred<Unit>()
+        val client = object : AssetPackClient {
+            private val mutableStates =
+                MutableStateFlow<Map<String, AssetPackSnapshot>>(emptyMap())
+            override val states: StateFlow<Map<String, AssetPackSnapshot>> = mutableStates
+
+            override suspend fun refresh(packNames: Collection<String>) {
+                refreshGate.await()
+            }
+
+            override suspend fun fetch(packNames: Collection<String>) = Unit
+            override suspend fun cancel(packNames: Collection<String>) = Unit
+            override suspend fun removePack(packName: String) = Unit
+            override fun showConfirmationDialog(
+                launcher: ActivityResultLauncher<IntentSenderRequest>,
+            ): Boolean = false
+            override fun close() = Unit
+        }
+        val materializer = object : ModelArtifactMaterializer {
+            override fun materialize(
+                family: ModelFamily,
+                packAssetDirectories: Map<String, File>,
+            ): MaterializationResult = MaterializationResult.Installed
+
+            override fun isMarkedInstalled(
+                family: ModelFamily,
+                forceValidation: Boolean,
+            ): Boolean = false
+
+            override fun remove(family: ModelFamily, lockHeld: Boolean) = Unit
+        }
+        val manager = ModelDeliveryManager(
+            context = applicationContext,
+            client = client,
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = materializer,
+            clockMs = { 314L },
+        )
+        val viewModel = DashboardViewModel()
+        val observeMethod = DashboardViewModel::class.java.getDeclaredMethod(
+            "observeDeliveryManager",
+            ModelDeliveryManager::class.java,
+        ).apply { isAccessible = true }
+
+        try {
+            observeMethod.invoke(viewModel, manager)
+            shadowOf(Looper.getMainLooper()).idle()
+            manager.start()
+            runCurrent()
+            shadowOf(Looper.getMainLooper()).idle()
+
+            assertTrue(viewModel.uiState.value.modelDeliveryRefresh.isRefreshing)
+
+            refreshGate.complete(Unit)
+            advanceUntilIdle()
+            shadowOf(Looper.getMainLooper()).idle()
+
+            val state = viewModel.uiState.value
+            assertFalse(state.modelDeliveryRefresh.isRefreshing)
+            assertEquals(314L, state.modelDeliveryRefresh.lastSuccessfulRefreshAtMs)
+            assertNull(state.modelDeliveryRefresh.issue)
+            assertEquals(
+                ModelDeliveryState.NotInstalled,
+                state.modelDelivery[ModelRole.CHAT_AND_VISION],
+            )
+            assertEquals(
+                ModelDeliveryState.NotInstalled,
+                state.modelDelivery[ModelRole.EMBEDDINGS],
+            )
+            assertEquals(ModelDeliveryState.NotInstalled, state.modelDelivery[ModelRole.OCR])
+        } finally {
+            manager.close()
+        }
+    }
 
     @Test
     fun `rejected test inference does not mark a completion timestamp`() {

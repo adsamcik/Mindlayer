@@ -1,6 +1,6 @@
-# `:gemma_embed_model` — EmbeddingGemma-300M AI Pack
+# `:gemma_embed_model` — EmbeddingGemma-300M on-demand pack
 
-Play Asset Delivery install-time pack carrying EmbeddingGemma `.tflite`
+Standard Play Asset Delivery on-demand pack carrying EmbeddingGemma `.tflite`
 weights plus the SentencePiece tokenizer. The service-side embedding engine
 loads both at first use.
 
@@ -42,7 +42,7 @@ directory name exactly, not do a substring `contains` on the full path.
   to verify both files at load time.
 
 The two model files are **deliberately not committed** (see `/.gitignore`).
-They are delivered via Play Asset Delivery (install-time pack) or sideloaded
+They are delivered via Play Asset Delivery on demand or sideloaded
 with `tools/dev-models/push-models.ps1`.
 
 ## Why the empty `assets/.gitkeep`
@@ -51,8 +51,8 @@ The `assets/` directory must exist at build time even when no model files are
 present locally. Without it, AGP's `:app:assetPackReleasePreBundleTask` fails
 with *"path does not exist"* and breaks the release AAB build in CI.
 
-The `.gitkeep` file content is **intentionally identical across all three AI
-Pack modules** (`gemma_model`, `gemma_embed_model`, `paddleocr_model`).
+The `.gitkeep` file content is **intentionally identical across all four asset
+pack modules**.
 bundletool's `EntryClashValidator` runs across the assembled bundle and
 rejects entries at the same relative path that differ in byte content. Keep
 this file in sync with the other packs' `.gitkeep` or `:app:packageDebugBundle`

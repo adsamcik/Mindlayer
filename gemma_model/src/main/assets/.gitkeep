@@ -1,13 +1,12 @@
-# AI Pack assets directory.
+# Play Asset Delivery assets directory.
 #
 # This file exists to keep the directory in git so AGP's
 # :app:assetPackReleasePreBundleTask does not fail with
 # "path does not exist" when the model artifacts are absent locally.
 #
 # The content of this .gitkeep is INTENTIONALLY IDENTICAL across all
-# three AI Pack modules (:gemma_model, :gemma_embed_model,
-# :paddleocr_model). bundletool's EntryClashValidator rejects entries
+# four asset-pack modules (:gemma_model, :gemma_model_part_2,
+# :gemma_embed_model, :paddleocr_model). bundletool rejects entries
 # at the same relative path that differ in byte content, and an asset
 # pack's .gitkeep would otherwise clash. Per-pack documentation lives
 # in the module's README.md (one level up).
-

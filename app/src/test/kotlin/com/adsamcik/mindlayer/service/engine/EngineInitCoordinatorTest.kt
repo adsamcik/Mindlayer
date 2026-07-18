@@ -112,14 +112,14 @@ class EngineInitCoordinatorTest {
     }
 
     @Test
-    fun `structural failures are cached as effectively permanent`() {
+    fun `delivery-remediable structural failures have finite retry windows`() {
         driveFailedInit(InitFailure.ModelMissing)
-        assertEquals(Long.MAX_VALUE, coordinator.peekCachedFailure()!!.retryAfterMs)
+        assertEquals(15_000L, coordinator.peekCachedFailure()!!.retryAfterMs)
 
         coordinator.shutdown()
         coordinator = EngineInitCoordinator(engineManager, initDispatcher = Dispatchers.Unconfined)
         driveFailedInit(InitFailure.IntegrityMismatch)
-        assertEquals(Long.MAX_VALUE, coordinator.peekCachedFailure()!!.retryAfterMs)
+        assertEquals(60_000L, coordinator.peekCachedFailure()!!.retryAfterMs)
     }
 
     @Test

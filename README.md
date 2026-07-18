@@ -75,8 +75,9 @@ handle.events.collect { event ->
 # Build debug APK
 ./gradlew :app:assembleDebug
 
-# Build AAB with AI pack (for Play Store)
-./gradlew :app:bundleRelease
+# Build a signed AAB with on-demand Play Asset Delivery packs (for Play Store)
+# Requires keystore.properties and the vetted model cache.
+./gradlew :app:bundleRelease --no-configuration-cache
 
 # Run tests
 ./gradlew :app:testDebugUnitTest :sdk:testDebugUnitTest :shared:testDebugUnitTest
@@ -101,9 +102,9 @@ adb shell am start -n com.adsamcik.mindlayer/com.adsamcik.mindlayer.service.ui.M
 | `sdk/` | Client SDK — connect, chat, media transfer, history, recovery, embeddings, OCR |
 | `sdk-camerax/` | Optional CameraX OCR adapter (`OcrImageAnalyzer`) |
 | `shared/` | Shared Parcelable types + streaming protocol |
-| `gemma_model/` | Play for On-device AI pack for Gemma 4 E2B |
-| `gemma_embed_model/` | Play for On-device AI pack for EmbeddingGemma |
-| `paddleocr_model/` | Play for On-device AI pack for PaddleOCR PP-OCRv5 |
+| `gemma_model/`, `gemma_model_part_2/` | Standard on-demand PAD fragments for Gemma 4 E2B |
+| `gemma_embed_model/` | Standard on-demand PAD pack for EmbeddingGemma |
+| `paddleocr_model/` | Standard on-demand PAD pack for PaddleOCR PP-OCRv5 |
 
 ## Capability matrix
 
@@ -121,7 +122,12 @@ Every AIDL entry point is gated by a default-deny user-approved allowlist. The f
 
 ## Model Deployment
 
-The Gemma 4 E2B model (~2.4GB) is delivered via **Play for On-device AI** as an install-time AI pack. For development, push manually via `adb`.
+All model families use **standard Play Asset Delivery 2.3.0** on demand. Google
+Play performs the one-time transfer; inference is on-device and Mindlayer has
+no network permission. Gemma is application-split into two packs then verified
+and reconstructed in private storage (not an official LiteRT-LM sharding
+feature); downloads preflight ~6 GB free space. Internal-track or bundletool
+local testing is required. Development remains sideload-only via `dev-install`.
 
 ## Releasing
 
@@ -144,4 +150,3 @@ In short: you are free to use, modify, and distribute this software, including o
 ### Deferred async inference
 
 Mindlayer supports fire-and-fetch-later flows for long-running work. Submit with `mindlayer.chatDeferred(sessionId, text)`, subscribe to `mindlayer.deferredCompletions()` for push notification, then call `fetchDeferredResult(requestId)`. Results are SQLCipher-encrypted at rest, scoped per UID, quota-limited, and expire after 24 hours by default.
-

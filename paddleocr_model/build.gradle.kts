@@ -1,5 +1,5 @@
 plugins {
-    id("com.android.ai-pack")
+    id("com.android.asset-pack")
 }
 
 // ── PaddleOCR PP-OCRv5 mobile asset pack ────────────────────────────────
@@ -21,7 +21,7 @@ plugins {
 //
 // Live artifact bytes are deliberately not committed (see .gitignore
 // `*.tflite`); they are delivered to devices via Play Asset Delivery
-// (install-time pack) or sideloaded via `adb push` for development.
+// (on-demand pack) or sideloaded via `adb push` for development.
 //
 // The release-build SHA-256 guard in :app:validateReleaseModelSha256 is
 // extended in this PR with parallel `-PpaddleOcrDetSha256`,
@@ -114,10 +114,30 @@ val generatePaddleOcrModelIntegrityManifest by tasks.registering {
             }
         }
 
-        val detSha = detSha256.takeIf { sha256Re.matches(it) } ?: "0".repeat(64)
-        val recSha = recSha256.takeIf { sha256Re.matches(it) } ?: "0".repeat(64)
-        val clsSha = clsSha256.takeIf { sha256Re.matches(it) } ?: "0".repeat(64)
-        val dictSha = dictSha256.takeIf { sha256Re.matches(it) } ?: "0".repeat(64)
+        val existingManifest = outputs.files.singleFile.takeIf { it.exists() }
+            ?.runCatching { readText() }?.getOrNull()
+            .orEmpty()
+        fun existingShaForRole(role: String): String? {
+            val perRole = Regex(
+                """\{[^}]*"role"\s*:\s*"$role"[^}]*\}""",
+                RegexOption.DOT_MATCHES_ALL,
+            ).find(existingManifest)?.value ?: return null
+            return Regex("\"sha256\"\\s*:\\s*\"([0-9a-fA-F]{64})\"")
+                .find(perRole)?.groupValues?.get(1)?.lowercase()
+                ?.takeIf { it != "0".repeat(64) }
+        }
+        val detSha = detSha256.takeIf { sha256Re.matches(it) }
+            ?: existingShaForRole("detection")
+            ?: "0".repeat(64)
+        val recSha = recSha256.takeIf { sha256Re.matches(it) }
+            ?: existingShaForRole("recognition")
+            ?: "0".repeat(64)
+        val clsSha = clsSha256.takeIf { sha256Re.matches(it) }
+            ?: existingShaForRole("orientation")
+            ?: "0".repeat(64)
+        val dictSha = dictSha256.takeIf { sha256Re.matches(it) }
+            ?: existingShaForRole("dictionary")
+            ?: "0".repeat(64)
 
         val file = outputs.files.singleFile
         file.parentFile.mkdirs()
@@ -160,7 +180,7 @@ val generatePaddleOcrModelIntegrityManifest by tasks.registering {
 }
 
 // Copies the four PaddleOCR artifacts from the local cache into src/main/assets
-// so the install-time AI pack can bundle them for a release, keeping the
+// so the on-demand asset pack can bundle them for a release, keeping the
 // binaries out of git. No-op on debug. Fail-fast on release when a required file
 // is absent from both the asset dir and the cache.
 val provisionReleaseModelAssets by tasks.registering {
@@ -206,15 +226,15 @@ tasks.configureEach {
     }
 }
 
-aiPack {
+assetPack {
     packName = "paddleocr_model"
     dynamicDelivery {
-        deliveryType = "install-time"
+        deliveryType = "on-demand"
     }
 }
 
 tasks.register("assembleDebug") {
     group = "build"
-    description = "Alias for assemble so CI gates can target debug-like AI-pack builds."
+    description = "Alias for assemble so CI gates can target debug-like asset-pack builds."
     dependsOn("assemble")
 }

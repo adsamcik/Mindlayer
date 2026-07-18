@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
@@ -51,6 +52,11 @@ class MainActivity : ComponentActivity() {
     private val historyViewModel: SessionHistoryViewModel by viewModels()
     private val detailViewModel: SessionDetailViewModel by viewModels()
     private val logsViewModel: RecentLogsViewModel by viewModels()
+    private val modelDeliveryConfirmation = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult(),
+    ) {
+        dashboardViewModel.refreshModelDelivery()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -115,7 +121,16 @@ class MainActivity : ComponentActivity() {
                             }
                             composable(MindlayerNavigation.ModelsRoute) {
                                 val state by dashboardViewModel.uiState.collectAsState()
-                                ModelsScreen(state = state)
+                                ModelsScreen(
+                                    state = state,
+                                    onDownload = dashboardViewModel::downloadModel,
+                                    onRemove = dashboardViewModel::removeModel,
+                                    onRetryActivation = dashboardViewModel::retryModelActivation,
+                                    onRefresh = dashboardViewModel::refreshModelDelivery,
+                                    onConfirmDownload = {
+                                        dashboardViewModel.showModelDeliveryConfirmation(modelDeliveryConfirmation)
+                                    },
+                                )
                             }
                             composable(MindlayerNavigation.TestsRoute) {
                                 val state by dashboardViewModel.uiState.collectAsState()

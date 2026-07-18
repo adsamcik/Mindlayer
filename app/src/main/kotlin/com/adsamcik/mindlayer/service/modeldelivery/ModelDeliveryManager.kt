@@ -1,0 +1,821 @@
+package com.adsamcik.mindlayer.service.modeldelivery
+
+import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.os.StatFs
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.IntentSenderRequest
+import com.adsamcik.mindlayer.service.BuildConfig
+import com.adsamcik.mindlayer.service.logging.MindlayerLog
+import com.adsamcik.mindlayer.service.logging.safeLabel
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
+import kotlin.coroutines.ContinuationInterceptor
+
+sealed interface ModelDeliveryIssue {
+    data class InsufficientStorage(
+        val requiredBytes: Long,
+        val availableBytes: Long,
+    ) : ModelDeliveryIssue
+
+    data object PlayDeliveryFailed : ModelDeliveryIssue
+    data object VerificationFailed : ModelDeliveryIssue
+    data object RemovalInterrupted : ModelDeliveryIssue
+    data object RemovalFailed : ModelDeliveryIssue
+    data object ActivationFailed : ModelDeliveryIssue
+    data object RefreshFailed : ModelDeliveryIssue
+    data object ConfirmationUnavailable : ModelDeliveryIssue
+}
+
+data class ModelDeliveryRefreshState(
+    val isRefreshing: Boolean = false,
+    val lastSuccessfulRefreshAtMs: Long? = null,
+    val issue: ModelDeliveryIssue? = null,
+)
+
+sealed interface ModelDeliveryState {
+    data object Checking : ModelDeliveryState
+    data object NotInstalled : ModelDeliveryState
+    data object Pending : ModelDeliveryState
+    data class Downloading(val downloadedBytes: Long, val totalBytes: Long) : ModelDeliveryState {
+        val progressPercent: Int = if (totalBytes > 0) {
+            ((downloadedBytes * 100L) / totalBytes).toInt().coerceIn(0, 100)
+        } else {
+            0
+        }
+    }
+    data object Transferring : ModelDeliveryState
+    data object WaitingForWifi : ModelDeliveryState
+    data object RequiresConfirmation : ModelDeliveryState
+    data object Provisioning : ModelDeliveryState
+    data object Installed : ModelDeliveryState
+    data object Activating : ModelDeliveryState
+    data object InstalledWithActivationError : ModelDeliveryState
+    data object Removing : ModelDeliveryState
+    data object Quiescing : ModelDeliveryState
+    data class RemovalFailed(val issue: ModelDeliveryIssue) : ModelDeliveryState
+    data class Failed(val issue: ModelDeliveryIssue) : ModelDeliveryState
+    data object Unsupported : ModelDeliveryState
+}
+
+fun ModelDeliveryState.issueOrNull(): ModelDeliveryIssue? = when (this) {
+    ModelDeliveryState.InstalledWithActivationError -> ModelDeliveryIssue.ActivationFailed
+    is ModelDeliveryState.RemovalFailed -> issue
+    is ModelDeliveryState.Failed -> issue
+    else -> null
+}
+
+/**
+ * Owns the dashboard's on-demand delivery lifecycle. It is process-local:
+ * closing it merely unregisters the listener; Play continues a requested
+ * download independently and a later [refresh] reconnects to its state.
+ */
+class ModelDeliveryManager internal constructor(
+    context: Context,
+    private val client: AssetPackClient = PlayAssetPackClient(context),
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    private val materializer: ModelArtifactMaterializer = VerifiedModelMaterializer(
+        filesDir = context.filesDir,
+        releaseBuild = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) == 0,
+        pinnedSha256 = ::pinnedSha256,
+    ),
+    private val runtimeControl: ModelRuntimeControl = BroadcastModelRuntimeControl(context),
+    private val availableBytes: () -> Long = {
+        StatFs(context.filesDir.absolutePath).availableBytes
+    },
+    private val blockingDispatcher: CoroutineDispatcher =
+        scope.coroutineContext[ContinuationInterceptor] as? CoroutineDispatcher ?: Dispatchers.IO,
+    private val removalIntentRecorder: ((ModelFamily) -> Unit)? = null,
+    private val beforeInitialCallbackHandoff: suspend () -> Unit = {},
+    private val beforeInitialCatchUp: suspend () -> Unit = {},
+    private val clockMs: () -> Long = System::currentTimeMillis,
+) : AutoCloseable {
+    private val appContext = context.applicationContext
+    private val intentStore = ModelDeliveryIntentStore(appContext.filesDir)
+    private val _states = MutableStateFlow(
+        ModelFamily.entries.associateWith<ModelFamily, ModelDeliveryState> { ModelDeliveryState.Checking },
+    )
+    val states: StateFlow<Map<ModelFamily, ModelDeliveryState>> = _states.asStateFlow()
+    private val _refreshState = MutableStateFlow(ModelDeliveryRefreshState())
+    val refreshState: StateFlow<ModelDeliveryRefreshState> = _refreshState.asStateFlow()
+    private val stateCollection: Job
+    private val familyMutexes = ModelFamily.entries.associateWith { Mutex() }
+    private val callbackLock = Any()
+    private var stateCallbacksEnabled = false
+    private var lastObservedPackStates = client.states.value
+    private val dirtyFamilies = mutableSetOf<ModelFamily>()
+    private val operationLock = Any()
+    private val confirmationIssueLock = Any()
+    private val confirmationUnavailableFamilies = mutableSetOf<ModelFamily>()
+    private var refreshJob: Job? = null
+    private val activationRecoveryJobs = mutableMapOf<ModelFamily, Job>()
+    private val activationAttempts = mutableMapOf<ModelFamily, Deferred<RuntimeActivationResult>>()
+
+    init {
+        stateCollection = scope.launch {
+            client.states.collect { snapshots ->
+                val shouldReconcile = synchronized(callbackLock) {
+                    val changedFamilies = changedFamilies(lastObservedPackStates, snapshots)
+                    lastObservedPackStates = snapshots
+                    if (stateCallbacksEnabled) {
+                        changedFamilies.isNotEmpty()
+                    } else {
+                        dirtyFamilies += changedFamilies
+                        false
+                    }
+                }
+                if (shouldReconcile) {
+                    ModelFamily.entries.forEach { family -> reconcile(family, provisionIfReady = true) }
+                }
+            }
+        }
+    }
+
+    fun start() {
+        refresh()
+    }
+
+    fun refresh() {
+        synchronized(operationLock) {
+            if (refreshJob?.isActive == true) return
+            _refreshState.update { current ->
+                current.copy(isRefreshing = true)
+            }
+            val job = scope.launch(start = CoroutineStart.LAZY) {
+                val successful = try {
+                    performRefresh()
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    recordRefreshFailure(error)
+                    false
+                }
+                _refreshState.update { current ->
+                    if (successful) {
+                        ModelDeliveryRefreshState(
+                            isRefreshing = false,
+                            lastSuccessfulRefreshAtMs = clockMs(),
+                        )
+                    } else {
+                        current.copy(
+                            isRefreshing = false,
+                            issue = ModelDeliveryIssue.RefreshFailed,
+                        )
+                    }
+                }
+            }
+            refreshJob = job
+            job.invokeOnCompletion {
+                synchronized(operationLock) {
+                    if (refreshJob === job) refreshJob = null
+                }
+            }
+            job.start()
+        }
+    }
+
+    private suspend fun performRefresh(): Boolean {
+        var successful = false
+        val ocrInstalledAtRefreshStart = familyMutex(ModelFamily.OCR).withLock {
+            materializer.isMarkedInstalled(ModelFamily.OCR)
+        }
+        try {
+            reconcileIntentMarkers()
+            resumePendingRemovals()
+            var ocrBytesRemainInstalled = false
+            ModelFamily.entries.forEach { family ->
+                val installed = forceValidateInstalledBytes(family)
+                if (family == ModelFamily.OCR) {
+                    ocrBytesRemainInstalled = installed
+                }
+            }
+            successful = runCatching {
+                client.refresh(ModelFamily.entries.flatMap { ModelDeliveryCatalog.family(it).packNames })
+            }.onFailure(::recordRefreshFailure).isSuccess
+            if (successful) {
+                ModelFamily.entries.forEach { family -> reconcile(family, provisionIfReady = true) }
+            }
+            if (ocrInstalledAtRefreshStart && ocrBytesRemainInstalled) {
+                familyMutex(ModelFamily.OCR).withLock {
+                    if (
+                        !ModelDeliveryFileLock.isRemovalAuthoritative(
+                            appContext.filesDir,
+                            ModelFamily.OCR,
+                        ) &&
+                        materializer.isMarkedInstalled(ModelFamily.OCR)
+                    ) {
+                        activateInstalledLocked(ModelFamily.OCR)
+                    }
+                }
+            }
+        } finally {
+            try {
+                if (!callbacksEnabled()) {
+                    beforeInitialCallbackHandoff()
+                }
+            } finally {
+                enableCallbacksAndReconcileDirtyFamilies()
+            }
+        }
+        return successful
+    }
+
+    fun download(family: ModelFamily) {
+        scope.launch {
+            explicitOperationMutex(family).withLock {
+                familyMutex(family).withLock familyLock@ {
+                    clearConfirmationUnavailable(family)
+                    val required = ModelDeliveryCatalog.family(family).minimumFreeBytes
+                    val available = runCatching(availableBytes).getOrDefault(0L)
+                    if (available < required) {
+                        updateState(
+                            family,
+                            ModelDeliveryState.Failed(
+                                ModelDeliveryIssue.InsufficientStorage(
+                                    requiredBytes = required,
+                                    availableBytes = available,
+                                ),
+                            ),
+                        )
+                        return@familyLock
+                    }
+                    val generation = try {
+                        intentStore.recordDownload(family)
+                    } catch (error: Throwable) {
+                        MindlayerLog.w(
+                            TAG,
+                            "Could not persist model download intent: ${error.safeLabel()}",
+                            throwable = null,
+                        )
+                        updateState(
+                            family,
+                            ModelDeliveryState.Failed(ModelDeliveryIssue.PlayDeliveryFailed),
+                        )
+                        return@familyLock
+                    }
+                    if (!intentStore.matches(family, ModelDeliveryIntent.INSTALL, generation)) {
+                        return@familyLock
+                    }
+                    updateState(family, ModelDeliveryState.Pending)
+                    val fetched = runCatching {
+                        client.fetch(ModelDeliveryCatalog.family(family).packNames)
+                    }.onFailure {
+                        recordFailure(it, family, ModelDeliveryIssue.PlayDeliveryFailed)
+                    }.isSuccess
+                    if (!fetched) return@familyLock
+                    reconcileLocked(family, provisionIfReady = true)
+                }
+            }
+        }
+    }
+
+    suspend fun remove(family: ModelFamily) {
+        withContext(blockingDispatcher + NonCancellable) {
+            explicitOperationMutex(family).withLock {
+                familyMutex(family).withLock {
+                    updateState(family, ModelDeliveryState.Removing)
+                    val generation = persistRemovalIntent(family)
+                    if (generation == null) {
+                        return@withLock
+                    }
+                    removeLocked(family, generation)
+                }
+            }
+        }
+    }
+
+    suspend fun retryActivation(family: ModelFamily) {
+        if (family == ModelFamily.OCR) {
+            activationRecoveryJob(family).join()
+        }
+    }
+
+    fun showConfirmationDialog(launcher: ActivityResultLauncher<IntentSenderRequest>): Boolean {
+        val attemptedFamilies = synchronized(confirmationIssueLock) {
+            ModelFamily.entries.filter { family ->
+                when (_states.value[family]) {
+                    ModelDeliveryState.RequiresConfirmation,
+                    ModelDeliveryState.Failed(ModelDeliveryIssue.ConfirmationUnavailable),
+                    -> true
+                    else -> false
+                }
+            }
+        }
+        val shown = runCatching {
+            client.showConfirmationDialog(launcher)
+        }.onFailure { error ->
+            MindlayerLog.w(
+                TAG,
+                "Model delivery confirmation failed: ${error.safeLabel()}",
+                throwable = null,
+            )
+        }.getOrDefault(false)
+        synchronized(confirmationIssueLock) {
+            if (shown) {
+                confirmationUnavailableFamilies.removeAll(attemptedFamilies.toSet())
+                _states.update { current ->
+                    attemptedFamilies.fold(current) { updated, family ->
+                        val state = updated[family]
+                        if (
+                            state == ModelDeliveryState.Failed(
+                                ModelDeliveryIssue.ConfirmationUnavailable,
+                            )
+                        ) {
+                            updated + (
+                                family to if (currentPadConfirmationPhase(family) == true) {
+                                    ModelDeliveryState.RequiresConfirmation
+                                } else {
+                                    ModelDeliveryState.Checking
+                                }
+                            )
+                        } else {
+                            updated
+                        }
+                    }
+                }
+                return shown
+            }
+            val unavailableFamilies = attemptedFamilies.filter { family ->
+                currentPadConfirmationPhase(family) == true
+            }
+            confirmationUnavailableFamilies += unavailableFamilies
+            _states.update { current ->
+                unavailableFamilies.fold(current) { updated, family ->
+                    updated + (
+                        family to ModelDeliveryState.Failed(
+                            ModelDeliveryIssue.ConfirmationUnavailable,
+                        )
+                    )
+                }
+            }
+        }
+        return shown
+    }
+
+    override fun close() {
+        stateCollection.cancel()
+        client.close()
+        scope.cancel()
+    }
+
+    private suspend fun reconcile(family: ModelFamily, provisionIfReady: Boolean) {
+        familyMutex(family).withLock {
+            reconcileLocked(family, provisionIfReady)
+        }
+    }
+
+    private suspend fun reconcileLocked(family: ModelFamily, provisionIfReady: Boolean) {
+        intentStore.reconcileMarkers(family)
+        val removalPending = removalMarker(family).exists()
+        if (ModelDeliveryFileLock.isRemovalAuthoritative(appContext.filesDir, family)) {
+            updateState(
+                family,
+                if (removalPending) {
+                    when (_states.value[family]) {
+                        ModelDeliveryState.Removing, ModelDeliveryState.Quiescing -> _states.value.getValue(family)
+                        else -> ModelDeliveryState.RemovalFailed(
+                            ModelDeliveryIssue.RemovalInterrupted,
+                        )
+                    }
+                } else {
+                    ModelDeliveryState.NotInstalled
+                },
+            )
+            return
+        }
+        if (materializer.isMarkedInstalled(family)) {
+            markInstalledPreservingActivationState(family)
+            return
+        }
+        val spec = ModelDeliveryCatalog.family(family)
+        val snapshots = spec.packNames.map { client.states.value[it] }
+        if (snapshots.any { it == null }) {
+            updateStateFromPadSnapshot(
+                family,
+                if (materializer.isMarkedInstalled(family)) {
+                    when (_states.value[family]) {
+                        ModelDeliveryState.Activating -> ModelDeliveryState.Activating
+                        ModelDeliveryState.InstalledWithActivationError ->
+                            ModelDeliveryState.InstalledWithActivationError
+                        else -> ModelDeliveryState.Installed
+                    }
+                } else {
+                    ModelDeliveryState.NotInstalled
+                },
+            )
+            return
+        }
+        val packs = snapshots.filterNotNull()
+        val phase = when {
+            packs.any { it.phase == AssetPackPhase.FAILED || it.phase == AssetPackPhase.CANCELED } ->
+                ModelDeliveryState.Failed(ModelDeliveryIssue.PlayDeliveryFailed)
+            packs.any { it.phase == AssetPackPhase.REQUIRES_USER_CONFIRMATION } ->
+                ModelDeliveryState.RequiresConfirmation
+            packs.any { it.phase == AssetPackPhase.WAITING_FOR_WIFI } -> ModelDeliveryState.WaitingForWifi
+            packs.any { it.phase == AssetPackPhase.TRANSFERRING } -> ModelDeliveryState.Transferring
+            packs.any { it.phase == AssetPackPhase.DOWNLOADING } -> ModelDeliveryState.Downloading(
+                downloadedBytes = packs.sumOf(AssetPackSnapshot::bytesDownloaded),
+                totalBytes = packs.sumOf(AssetPackSnapshot::totalBytesToDownload),
+            )
+            packs.any { it.phase == AssetPackPhase.PENDING } -> ModelDeliveryState.Pending
+            packs.all { it.phase == AssetPackPhase.COMPLETED } && provisionIfReady -> {
+                clearConfirmationUnavailableIfPadLeft(family)
+                if (!intentStore.provisioningAllowed(family)) {
+                    updateState(family, ModelDeliveryState.NotInstalled)
+                    return
+                }
+                provision(family, packs)
+                return
+            }
+            else -> ModelDeliveryState.NotInstalled
+        }
+        updateStateFromPadSnapshot(family, phase)
+    }
+
+    private suspend fun provision(family: ModelFamily, packs: List<AssetPackSnapshot>) {
+        updateState(family, ModelDeliveryState.Provisioning)
+        val sourceDirectories = runCatching {
+            packs.associate { pack ->
+                pack.packName to requireNotNull(pack.assetsPath).let(::File)
+            }
+        }.getOrElse { error ->
+            recordFailure(error, family, ModelDeliveryIssue.VerificationFailed)
+            return
+        }
+        val result = runCatching {
+            withContext(blockingDispatcher) {
+                check(intentStore.provisioningAllowed(family)) {
+                    "Model provisioning is disabled by removal intent"
+                }
+                materializer.materialize(family, sourceDirectories)
+            }
+        }.getOrElse { error ->
+            recordFailure(error, family, ModelDeliveryIssue.VerificationFailed)
+            return
+        }
+        when (result) {
+            MaterializationResult.Installed -> activateInstalledLocked(family)
+            MaterializationResult.AlreadyInstalled -> markInstalledPreservingActivationState(family)
+            MaterializationResult.Failed ->
+                updateState(
+                    family,
+                    ModelDeliveryState.Failed(ModelDeliveryIssue.VerificationFailed),
+                )
+        }
+    }
+
+    private suspend fun activateInstalledLocked(family: ModelFamily) {
+        if (family != ModelFamily.OCR) {
+            updateState(family, ModelDeliveryState.Installed)
+            return
+        }
+        updateState(family, ModelDeliveryState.Activating)
+        val activation = activationAttempt(family)
+        val result = try {
+            withTimeoutOrNull(RUNTIME_CONTROL_TIMEOUT_MS) {
+                activation.await()
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            RuntimeActivationResult.Failed(RuntimeControlFailure.ACTIVATION_FAILED)
+        }
+        when (result) {
+            RuntimeActivationResult.Activated,
+            RuntimeActivationResult.NotRunning,
+            -> updateState(family, ModelDeliveryState.Installed)
+            is RuntimeActivationResult.Failed, null ->
+                updateState(family, ModelDeliveryState.InstalledWithActivationError)
+        }
+    }
+
+    private fun activationAttempt(family: ModelFamily): Deferred<RuntimeActivationResult> =
+        synchronized(operationLock) {
+            activationAttempts[family]?.takeIf { it.isActive }?.let { return@synchronized it }
+            val attempt = scope.async(start = CoroutineStart.LAZY) {
+                runtimeControl.activate(family)
+            }
+            activationAttempts[family] = attempt
+            attempt.invokeOnCompletion { error ->
+                if (error == null) {
+                    scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                        val result = attempt.await()
+                        if (
+                            result == RuntimeActivationResult.Activated ||
+                            result == RuntimeActivationResult.NotRunning
+                        ) {
+                            _states.update { current ->
+                                when (current[family]) {
+                                    ModelDeliveryState.Activating,
+                                    ModelDeliveryState.InstalledWithActivationError,
+                                    -> current + (family to ModelDeliveryState.Installed)
+                                    else -> current
+                                }
+                            }
+                        }
+                        synchronized(operationLock) {
+                            if (activationAttempts[family] === attempt) {
+                                activationAttempts.remove(family)
+                            }
+                        }
+                    }
+                } else {
+                    synchronized(operationLock) {
+                        if (activationAttempts[family] === attempt) {
+                            activationAttempts.remove(family)
+                        }
+                    }
+                }
+            }
+            attempt.start()
+            attempt
+        }
+
+    private fun activationRecoveryJob(family: ModelFamily): Job =
+        synchronized(operationLock) {
+            activationRecoveryJobs[family]?.takeIf { it.isActive }?.let {
+                return@synchronized it
+            }
+            val job = scope.launch(start = CoroutineStart.LAZY) {
+                familyMutex(family).withLock {
+                    if (
+                        family != ModelFamily.OCR ||
+                        _states.value[family] != ModelDeliveryState.InstalledWithActivationError
+                    ) {
+                        return@withLock
+                    }
+                    if (!materializer.isMarkedInstalled(family)) {
+                        updateState(family, ModelDeliveryState.NotInstalled)
+                        return@withLock
+                    }
+                    activateInstalledLocked(family)
+                }
+            }
+            activationRecoveryJobs[family] = job
+            job.invokeOnCompletion {
+                synchronized(operationLock) {
+                    if (activationRecoveryJobs[family] === job) {
+                        activationRecoveryJobs.remove(family)
+                    }
+                }
+            }
+            job.start()
+            job
+        }
+
+    private fun recordFailure(
+        error: Throwable,
+        family: ModelFamily,
+        issue: ModelDeliveryIssue,
+    ) {
+        MindlayerLog.w(TAG, "Model delivery operation failed: ${error.safeLabel()}", throwable = null)
+        updateState(family, ModelDeliveryState.Failed(issue))
+    }
+
+    private fun recordRefreshFailure(error: Throwable) {
+        MindlayerLog.w(TAG, "Model delivery refresh failed: ${error.safeLabel()}", throwable = null)
+    }
+
+    private suspend fun resumePendingRemovals() {
+        ModelFamily.entries.forEach { family ->
+            explicitOperationMutex(family).withLock {
+                familyMutex(family).withLock {
+                    val generation = intentStore.pendingRemovalGeneration(family) ?: return@withLock
+                    removeLocked(family, generation)
+                }
+            }
+        }
+    }
+
+    private suspend fun reconcileIntentMarkers() {
+        ModelFamily.entries.forEach { family ->
+            familyMutex(family).withLock {
+                intentStore.reconcileMarkers(family)
+            }
+        }
+    }
+
+    private suspend fun forceValidateInstalledBytes(family: ModelFamily): Boolean =
+        familyMutex(family).withLock {
+            val installed = materializer.isMarkedInstalled(family, forceValidation = true)
+            if (installed) {
+                markInstalledPreservingActivationState(family)
+            } else if (
+                _states.value[family] == ModelDeliveryState.Installed ||
+                _states.value[family] == ModelDeliveryState.Activating ||
+                _states.value[family] == ModelDeliveryState.InstalledWithActivationError
+            ) {
+                updateState(family, ModelDeliveryState.Checking)
+            }
+            installed
+        }
+
+    private suspend fun removeLocked(family: ModelFamily, expectedGeneration: Long) {
+        if (!intentStore.matches(family, ModelDeliveryIntent.REMOVE, expectedGeneration)) {
+            reconcileLocked(family, provisionIfReady = true)
+            return
+        }
+        val marker = removalMarker(family)
+        if (!marker.exists() && _states.value[family] == ModelDeliveryState.NotInstalled) {
+            return
+        }
+        updateState(family, ModelDeliveryState.Removing)
+        try {
+            val packs = ModelDeliveryCatalog.family(family).packNames
+            val cancellationFailure = runCatching {
+                client.cancel(packs)
+            }.exceptionOrNull()
+            updateState(family, ModelDeliveryState.Quiescing)
+            val release = withTimeoutOrNull(RUNTIME_CONTROL_TIMEOUT_MS) {
+                runtimeControl.quiesce(family)
+            }
+            if (!intentStore.matches(family, ModelDeliveryIntent.REMOVE, expectedGeneration)) {
+                reconcileLocked(family, provisionIfReady = true)
+                return
+            }
+            check(
+                release == RuntimeReleaseResult.Released ||
+                    release == RuntimeReleaseResult.NotRunning,
+            ) {
+                "Model runtime did not acknowledge release"
+            }
+            updateState(family, ModelDeliveryState.Removing)
+            val removed = ModelDeliveryFileLock.withLockSuspending(appContext.filesDir, family) {
+                if (
+                    !intentStore.matches(
+                        family,
+                        ModelDeliveryIntent.REMOVE,
+                        expectedGeneration,
+                        lockHeld = true,
+                    )
+                ) {
+                    return@withLockSuspending false
+                }
+                cancellationFailure?.let { throw it }
+                for (packName in packs) {
+                    client.removePack(packName)
+                }
+                materializer.remove(family, lockHeld = true)
+                check(marker.delete() || !marker.exists()) {
+                    "Could not clear pending model removal"
+                }
+                true
+            }
+            if (!removed) {
+                reconcileLocked(family, provisionIfReady = true)
+                return
+            }
+            updateState(family, ModelDeliveryState.NotInstalled)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            MindlayerLog.w(TAG, "Model removal failed: ${error.safeLabel()}", throwable = null)
+            updateState(
+                family,
+                ModelDeliveryState.RemovalFailed(ModelDeliveryIssue.RemovalFailed),
+            )
+        }
+    }
+
+    private fun removalMarker(family: ModelFamily): File =
+        ModelDeliveryFileLock.pendingRemovalMarker(appContext.filesDir, family)
+
+    private fun persistRemovalIntent(family: ModelFamily): Long? {
+        return try {
+            if (removalIntentRecorder == null) {
+                intentStore.recordRemoval(family)
+            } else {
+                removalIntentRecorder.invoke(family)
+                checkNotNull(intentStore.currentGeneration(family, ModelDeliveryIntent.REMOVE)) {
+                    "Removal intent recorder did not persist a canonical REMOVE"
+                }
+            }
+        } catch (error: Throwable) {
+            MindlayerLog.w(TAG, "Could not persist model removal: ${error.safeLabel()}", throwable = null)
+            updateState(
+                family,
+                ModelDeliveryState.RemovalFailed(ModelDeliveryIssue.RemovalFailed),
+            )
+            null
+        }
+    }
+
+    private fun familyMutex(family: ModelFamily): Mutex = checkNotNull(familyMutexes[family])
+
+    private fun explicitOperationMutex(family: ModelFamily): Mutex =
+        ModelDeliveryFileLock.operationMutex(appContext.filesDir, family)
+
+    private fun callbacksEnabled(): Boolean =
+        synchronized(callbackLock) {
+            stateCallbacksEnabled
+        }
+
+    private suspend fun enableCallbacksAndReconcileDirtyFamilies() {
+        val families = synchronized(callbackLock) {
+            stateCallbacksEnabled = true
+            ModelFamily.entries.filter { family -> dirtyFamilies.remove(family) }
+        }
+        if (families.isNotEmpty()) {
+            beforeInitialCatchUp()
+        }
+        families.forEach { family -> reconcile(family, provisionIfReady = true) }
+    }
+
+    private fun changedFamilies(
+        previous: Map<String, AssetPackSnapshot>,
+        current: Map<String, AssetPackSnapshot>,
+    ): Set<ModelFamily> =
+        ModelFamily.entries.filterTo(mutableSetOf()) { family ->
+            ModelDeliveryCatalog.family(family).packNames.any { packName ->
+                previous[packName] != current[packName]
+            }
+        }
+
+    private fun markInstalledPreservingActivationState(family: ModelFamily) {
+        when (_states.value[family]) {
+            ModelDeliveryState.Activating,
+            ModelDeliveryState.InstalledWithActivationError,
+            -> Unit
+            else -> updateState(family, ModelDeliveryState.Installed)
+        }
+    }
+
+    private fun updateStateFromPadSnapshot(family: ModelFamily, state: ModelDeliveryState) {
+        synchronized(confirmationIssueLock) {
+            val confirmationPhase = currentPadConfirmationPhase(family)
+            if (confirmationPhase == false) {
+                confirmationUnavailableFamilies.remove(family)
+            }
+            val resolvedState = when {
+                confirmationPhase != false && family in confirmationUnavailableFamilies ->
+                    ModelDeliveryState.Failed(ModelDeliveryIssue.ConfirmationUnavailable)
+                else -> state
+            }
+            updateState(family, resolvedState)
+        }
+    }
+
+    private fun currentPadConfirmationPhase(family: ModelFamily): Boolean? {
+        val snapshots = ModelDeliveryCatalog.family(family).packNames.map { packName ->
+            client.states.value[packName]
+        }
+        if (snapshots.any { it == null }) return null
+        return snapshots.filterNotNull().any {
+            it.phase == AssetPackPhase.REQUIRES_USER_CONFIRMATION
+        }
+    }
+
+    private fun clearConfirmationUnavailable(family: ModelFamily) {
+        synchronized(confirmationIssueLock) {
+            confirmationUnavailableFamilies.remove(family)
+        }
+    }
+
+    private fun clearConfirmationUnavailableIfPadLeft(family: ModelFamily) {
+        synchronized(confirmationIssueLock) {
+            if (currentPadConfirmationPhase(family) == false) {
+                confirmationUnavailableFamilies.remove(family)
+            }
+        }
+    }
+
+    private fun updateState(family: ModelFamily, state: ModelDeliveryState) {
+        _states.update { current -> current + (family to state) }
+    }
+
+    private companion object {
+        const val TAG = "ModelDelivery"
+        const val RUNTIME_CONTROL_TIMEOUT_MS = 10_000L
+
+        fun pinnedSha256(filename: String): String? = when (filename) {
+            "gemma-4-E2B-it.litertlm" -> BuildConfig.MODEL_SHA256
+            "embedding-gemma-300m-v1.tflite" -> BuildConfig.EMBEDDING_MODEL_SHA256
+            "embedding-gemma-300m-v1.spm.model" -> BuildConfig.EMBEDDING_TOKENIZER_SHA256
+            "paddleocr-ppocrv5-mobile-det.tflite" -> BuildConfig.PADDLE_OCR_DET_SHA256
+            "paddleocr-ppocrv5-mobile-rec.tflite" -> BuildConfig.PADDLE_OCR_REC_SHA256
+            "paddleocr-ppocrv5-mobile-cls.tflite" -> BuildConfig.PADDLE_OCR_CLS_SHA256
+            "paddleocr-ppocrv5-mobile-dict.txt" -> BuildConfig.PADDLE_OCR_DICT_SHA256
+            else -> null
+        }
+    }
+}

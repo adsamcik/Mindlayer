@@ -8,7 +8,9 @@ coroutines = "1.11.0"
 serialization = "1.11.0"
 room = "2.8.4"
 litertlm = "0.14.0"
-litert = "2.1.6"
+# 2.1.6 is blocked by upstream issue #8474: litert and litert-api publish the
+# same Android namespace, and excluding litert-api causes runtime failures.
+litert = "2.1.5"
 junit = "4.13.2"
 mockk = "1.14.11"
 robolectric = "4.16.1"
@@ -25,6 +27,7 @@ navigationCompose = "2.9.8"
 sqlcipher = "4.17.0"
 biometric = "1.4.0-alpha07"
 zxing = "3.5.4"
+playAssetDelivery = "2.3.0"
 # OCR engine benchmark — Tesseract4Android (Apache 2.0). Used by
 # `OcrEngineBenchmarkInstrumentedTest` only (androidTestImplementation).
 # NOT shipped in any production artifact. See settings.gradle.kts repo block.
@@ -60,6 +63,7 @@ sqlcipher-android = { module = "net.zetetic:sqlcipher-android", version.ref = "s
 androidx-biometric = { module = "androidx.biometric:biometric", version.ref = "biometric" }
 androidx-biometric-compose = { module = "androidx.biometric:biometric-compose", version.ref = "biometric" }
 zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
+play-asset-delivery = { module = "com.google.android.play:asset-delivery", version.ref = "playAssetDelivery" }
 # Testing
 junit = { module = "junit:junit", version.ref = "junit" }
 mockk = { module = "io.mockk:mockk", version.ref = "mockk" }

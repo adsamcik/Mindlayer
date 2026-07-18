@@ -153,16 +153,13 @@ class EngineManagerTest {
     }
 
     @Test
-    fun `findModelFile - model in assets (AI pack) extracts and returns path`() {
-        every { assetManager.list("") } returns arrayOf(EngineManager.DEFAULT_MODEL_FILENAME)
-        every { assetManager.open(EngineManager.DEFAULT_MODEL_FILENAME) } returns
-                ByteArrayInputStream(byteArrayOf(1, 2, 3, 4))
-
+    fun `findModelFile - materialized on-demand model returns private path`() {
+        val deliveryDir = File(filesDir, "model_delivery/chat").apply { mkdirs() }
+        val expected = File(deliveryDir, EngineManager.DEFAULT_MODEL_FILENAME)
+        expected.writeBytes(byteArrayOf(1, 2, 3, 4))
         val mgr = EngineManager(context)
         val path = mgr.modelPath
 
-        // Should have been extracted to filesDir
-        val expected = File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME)
         assertEquals(expected.absolutePath, path)
         assertTrue(expected.exists())
     }
@@ -277,6 +274,31 @@ class EngineManagerTest {
             return
         }
         throw AssertionError("Expected IllegalStateException")
+    }
+
+    @Test
+    fun `initialized fast path rejects canonical chat removal before marker reconciliation`() = runTest {
+        val mgr = EngineManager(context)
+        val engineField = EngineManager::class.java.getDeclaredField("engine")
+        engineField.isAccessible = true
+        engineField.set(mgr, mockk<Engine>(relaxed = true))
+        val family = com.adsamcik.mindlayer.service.modeldelivery.ModelFamily.CHAT
+        com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryIntentStore(filesDir)
+            .recordRemoval(family)
+        val pending = com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+            .pendingRemovalMarker(filesDir, family)
+        val tombstone = com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+            .removalTombstone(filesDir, family)
+        assertTrue(pending.delete())
+        assertTrue(tombstone.delete())
+
+        assertNull(mgr.getEngine())
+        val result = runCatching { mgr.requireEngine() }
+        assertTrue(result.exceptionOrNull() is IllegalStateException)
+        assertTrue(result.exceptionOrNull()?.message?.contains("removal") == true)
+        assertTrue(runCatching { mgr.initialize() }.exceptionOrNull() is IllegalStateException)
+        assertFalse(pending.exists())
+        assertFalse(tombstone.exists())
     }
 
     @Test

@@ -6,6 +6,7 @@ import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.adsamcik.mindlayer.service.logging.safeLabelWithDetail
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -120,6 +121,9 @@ class LiteRtEmbeddingBackend internal constructor(
     private var runner: LiteRtRunner? = null
 
     @Volatile
+    private var pendingRunner: LiteRtRunner? = null
+
+    @Volatile
     private var backendLabel: String = "NONE"
 
     override val activeBackend: String
@@ -144,6 +148,7 @@ class LiteRtEmbeddingBackend internal constructor(
         try {
             attemptInit(model, selectedBackend)
         } catch (t: Throwable) {
+            if (t is CancellationException) throw t
             // LowMemoryException stays terminal — callers (engine + UI) need
             // to see it. CPU is the last-resort backend, so a CPU-forced
             // failure is also terminal: no fallback dance, original behaviour.
@@ -181,6 +186,7 @@ class LiteRtEmbeddingBackend internal constructor(
                     throwable = null,
                 )
             } catch (cpuT: Throwable) {
+                if (cpuT is CancellationException) throw cpuT
                 MindlayerLog.w(
                     TAG,
                     "Embedding CPU last-resort init failed (${cpuT.safeLabelWithDetail()})",
@@ -198,9 +204,12 @@ class LiteRtEmbeddingBackend internal constructor(
         try {
             val newRunner = withContext(Dispatchers.IO) {
                 verifyArtifactFilesExist(model)
-                runnerFactory(model.modelPath, backend)
+                runnerFactory(model.modelPath, backend).also { created ->
+                    pendingRunner = created
+                }
             }
             runner = newRunner
+            pendingRunner = null
             tokenizer = tokenizerFactory(model)
             loadedModel = model
             backendLabel = backend
@@ -232,12 +241,15 @@ class LiteRtEmbeddingBackend internal constructor(
                 "Embedding backend ready: model=${model.id}, backend=$backend",
             )
         } catch (t: Throwable) {
+            pendingRunner?.runCatching { close() }
             runner?.runCatching { close() }
             runner = null
             loadedModel = null
             tokenizer = NoOpSentencePieceTokenizer
             backendLabel = "NONE"
             throw t
+        } finally {
+            pendingRunner = null
         }
     }
 

@@ -80,10 +80,10 @@ sealed class InitFailure {
     /**
      * No `.litertlm` model file was found in any of the candidate
      * directories (filesDir, externalFilesDir, cacheDir,
-     * /data/local/tmp, AI Pack assets). Maps from
+     * /data/local/tmp, or on-demand delivery storage). Maps from
      * `EngineManager.noModelFoundException()`.
      *
-     * Dashboard remediation: "Model file missing — install the AI Pack."
+     * Dashboard remediation: download the model from the Models screen.
      */
     object ModelMissing : InitFailure()
 

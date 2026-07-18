@@ -1,6 +1,10 @@
 package com.adsamcik.mindlayer.service.ui
 
 import com.adsamcik.mindlayer.service.engine.OcrAcceleratorFailureCache
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryCatalog
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryIssue
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryRefreshState
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryState
 
 private const val STATUS_STALE_AFTER_MS = 6_000L
 private const val LOGS_STALE_AFTER_MS = 12_000L
@@ -211,6 +215,10 @@ data class DashboardUiState(
      * [com.adsamcik.mindlayer.OcrImageOptions.runLlmExtraction] enabled.
      */
     val ocrLlmExtractionTest: EngineTestState = EngineTestState(),
+    /** Independent Play delivery state; this is intentionally separate from
+     * runtime load state because downloaded bytes are not necessarily loaded. */
+    val modelDelivery: Map<ModelRole, ModelDeliveryState> = emptyMap(),
+    val modelDeliveryRefresh: ModelDeliveryRefreshState = ModelDeliveryRefreshState(),
 ) {
     fun statusFreshness(nowMs: Long = System.currentTimeMillis()): DashboardFreshness =
         freshnessOf(lastStatusUpdateMs, nowMs, STATUS_STALE_AFTER_MS)
@@ -593,27 +601,130 @@ data class LogUiItem(
 /**
  * Per-role view-model summary backing the Models page card list. Pure data,
  * with no Compose or Context dependencies — derived by
- * [DashboardUiState.modelSummaries] from existing state fields plus the
- * per-engine test result so the Models tab can render LOADED / IDLE /
- * UNKNOWN / FAILED without re-querying the service.
+ * [DashboardUiState.modelSummaries] from delivery state plus either live
+ * service evidence (chat) or the latest dashboard verification (embeddings/OCR).
+ * [lastRuntimeStatusAtMs] timestamps retained service evidence only; dashboard
+ * verification roles use [lastVerificationAtMs] instead.
  */
 data class RoleModelSummary(
     val role: ModelRole,
     val modelDisplayName: String,
-    val packDescription: String,
+    val deliveryPackNames: List<String>,
     val state: ModelLoadState,
+    val evidence: ModelRuntimeEvidence,
+    val readiness: ModelReadiness,
     val backend: String?,
     val initTimeSeconds: Float?,
-    val failureDetail: String?,
+    val runtimeIssue: ModelRuntimeIssue?,
+    val lastRuntimeStatusAtMs: Long?,
+    val lastVerificationAtMs: Long?,
+    val lastVerificationPassed: Boolean?,
+    val deliveryState: ModelDeliveryState,
 )
 
 enum class ModelRole { CHAT_AND_VISION, EMBEDDINGS, OCR }
 
-enum class ModelLoadState { UNKNOWN, IDLE, LOADED, FAILED }
+enum class ModelLoadState { NOT_VERIFIED, IDLE, STARTING, READY, FAILED }
 
-private const val MODEL_PACK_CHAT = "Install-time AI Pack: gemma_model"
-private const val MODEL_PACK_EMBEDDINGS = "Install-time AI Pack: gemma_embed_model"
-private const val MODEL_PACK_OCR = "Install-time AI Pack: paddleocr_model"
+enum class ModelRuntimeEvidence {
+    LIVE_SERVICE,
+    LAST_KNOWN_SERVICE,
+    SERVICE_STATUS_UNAVAILABLE,
+    DASHBOARD_VERIFICATION,
+}
+
+sealed interface ModelRuntimeIssue {
+    data class InitializationFailed(
+        val failure: com.adsamcik.mindlayer.service.engine.InitFailure,
+    ) : ModelRuntimeIssue
+
+    data object VerificationFailed : ModelRuntimeIssue
+}
+
+enum class ModelReadiness {
+    CHECKING,
+    DOWNLOAD_REQUIRED,
+    WAITING,
+    DOWNLOADING,
+    PREPARING,
+    DOWNLOADED_IDLE,
+    STARTING,
+    READY,
+    NEEDS_ATTENTION,
+    REMOVING,
+    UNAVAILABLE,
+}
+
+enum class ModelDeliveryAction {
+    NONE,
+    DOWNLOAD,
+    RETRY_DOWNLOAD,
+    RETRY_ACTIVATION,
+    CONFIRM,
+    REMOVE,
+    RETRY_REMOVE,
+}
+
+fun modelDeliveryAction(
+    state: ModelDeliveryState,
+): ModelDeliveryAction = when (state) {
+    ModelDeliveryState.NotInstalled -> ModelDeliveryAction.DOWNLOAD
+    is ModelDeliveryState.Failed -> when (state.issue) {
+        ModelDeliveryIssue.ConfirmationUnavailable -> ModelDeliveryAction.CONFIRM
+        else -> ModelDeliveryAction.RETRY_DOWNLOAD
+    }
+    is ModelDeliveryState.RemovalFailed -> ModelDeliveryAction.RETRY_REMOVE
+    ModelDeliveryState.RequiresConfirmation -> ModelDeliveryAction.CONFIRM
+    ModelDeliveryState.Installed -> ModelDeliveryAction.REMOVE
+    ModelDeliveryState.InstalledWithActivationError -> ModelDeliveryAction.RETRY_ACTIVATION
+    else -> ModelDeliveryAction.NONE
+}
+
+fun modelReadiness(
+    role: ModelRole,
+    deliveryState: ModelDeliveryState,
+    runtimeState: ModelLoadState,
+    evidence: ModelRuntimeEvidence,
+): ModelReadiness = when (deliveryState) {
+    ModelDeliveryState.Checking -> ModelReadiness.CHECKING
+    ModelDeliveryState.NotInstalled -> ModelReadiness.DOWNLOAD_REQUIRED
+    ModelDeliveryState.Pending,
+    ModelDeliveryState.WaitingForWifi,
+    ModelDeliveryState.RequiresConfirmation,
+    -> ModelReadiness.WAITING
+    is ModelDeliveryState.Downloading -> ModelReadiness.DOWNLOADING
+    ModelDeliveryState.Transferring,
+    ModelDeliveryState.Provisioning,
+    ModelDeliveryState.Activating,
+    -> ModelReadiness.PREPARING
+    ModelDeliveryState.Removing,
+    ModelDeliveryState.Quiescing,
+    -> ModelReadiness.REMOVING
+    is ModelDeliveryState.Failed,
+    is ModelDeliveryState.RemovalFailed,
+    ModelDeliveryState.InstalledWithActivationError,
+    -> ModelReadiness.NEEDS_ATTENTION
+    ModelDeliveryState.Unsupported -> ModelReadiness.UNAVAILABLE
+    ModelDeliveryState.Installed -> when {
+        runtimeState == ModelLoadState.FAILED &&
+            evidence != ModelRuntimeEvidence.LAST_KNOWN_SERVICE ->
+            ModelReadiness.NEEDS_ATTENTION
+        runtimeState == ModelLoadState.STARTING &&
+            evidence != ModelRuntimeEvidence.LAST_KNOWN_SERVICE ->
+            ModelReadiness.STARTING
+        role == ModelRole.CHAT_AND_VISION &&
+            runtimeState == ModelLoadState.READY &&
+            evidence == ModelRuntimeEvidence.LIVE_SERVICE -> ModelReadiness.READY
+        else -> ModelReadiness.DOWNLOADED_IDLE
+    }
+}
+
+internal fun ModelRole.toModelFamily(): com.adsamcik.mindlayer.service.modeldelivery.ModelFamily = when (this) {
+    ModelRole.CHAT_AND_VISION -> com.adsamcik.mindlayer.service.modeldelivery.ModelFamily.CHAT
+    ModelRole.EMBEDDINGS -> com.adsamcik.mindlayer.service.modeldelivery.ModelFamily.EMBEDDINGS
+    ModelRole.OCR -> com.adsamcik.mindlayer.service.modeldelivery.ModelFamily.OCR
+}
+
 private const val MODEL_DISPLAY_CHAT_DEFAULT = "Gemma 4 E2B"
 private const val MODEL_DISPLAY_EMBEDDINGS = "EmbeddingGemma"
 private const val MODEL_DISPLAY_OCR = "PaddleOCR PP-OCRv5 mobile"
@@ -622,95 +733,127 @@ private const val MODEL_DISPLAY_OCR = "PaddleOCR PP-OCRv5 mobile"
  * Pure derivation of the three role cards rendered by `ModelsScreen`.
  * Does NOT touch Compose or Context — safe to unit-test.
  *
- *  - Chat & vision: derived from [isEngineLoaded] + [backend] + [modelId]
- *    + [lastInitFailure] + [initTimeSeconds]. State LOADED when the engine
- *    is loaded; FAILED when an init failure is recorded; IDLE otherwise.
- *  - Embeddings: state is UNKNOWN until the embedding test has been
- *    exercised at least once (no failure pathway is observable through
- *    [DashboardUiState] today; SUCCESS-toned completed test → LOADED;
- *    ERROR-toned → FAILED; otherwise IDLE).
- *  - OCR: same shape as embeddings, plus an explicit FAILED if the test
- *    tone is ERROR.
+ * Chat only uses live service runtime state when the latest successful status
+ * sample is current. Otherwise it retains the last sampled state and metadata
+ * without claiming current READY. Embeddings and OCR only have historical
+ * dashboard verification evidence, so a successful test never claims READY.
  */
-fun DashboardUiState.modelSummaries(): List<RoleModelSummary> {
-    val chatState = when {
-        lastInitFailure != null -> ModelLoadState.FAILED
-        isEngineLoaded -> ModelLoadState.LOADED
-        else -> ModelLoadState.IDLE
+fun DashboardUiState.modelSummaries(
+    nowMs: Long = System.currentTimeMillis(),
+): List<RoleModelSummary> {
+    val hasLiveChatEvidence =
+        connectionState == DashboardConnectionState.CONNECTED &&
+            !isStatusLoading &&
+            statusErrorMessage == null &&
+            lastStatusUpdateMs != null &&
+            statusFreshness(nowMs) == DashboardFreshness.FRESH
+    val chatEvidence = when {
+        hasLiveChatEvidence -> ModelRuntimeEvidence.LIVE_SERVICE
+        lastStatusUpdateMs != null -> ModelRuntimeEvidence.LAST_KNOWN_SERVICE
+        else -> ModelRuntimeEvidence.SERVICE_STATUS_UNAVAILABLE
     }
     val chatBackend = backend.takeIf { it.isNotBlank() && !it.equals("NONE", ignoreCase = true) }
-    val chatFailureDetail = lastInitFailure?.let { failure ->
-        // Reuse the same human-readable mapping used by the Status page,
-        // but only emit the text — the tone is implied by ModelLoadState.
-        // Mirrors describeInitFailure(...) without taking a Compose dep
-        // here; we accept slight string duplication to keep this file
-        // free of UI dependencies for tests.
-        when (failure) {
-            com.adsamcik.mindlayer.service.engine.InitFailure.LowMemory ->
-                "Engine init refused: insufficient memory. Free up memory and retry."
-            com.adsamcik.mindlayer.service.engine.InitFailure.ModelMissing ->
-                "Model file missing — install the AI Pack."
-            com.adsamcik.mindlayer.service.engine.InitFailure.IntegrityMismatch ->
-                "Model file corrupted — reinstall."
-            is com.adsamcik.mindlayer.service.engine.InitFailure.BackendUnavailable -> {
-                val recovered = backend.isNotBlank() &&
-                    !backend.equals("NONE", ignoreCase = true) &&
-                    !backend.equals(failure.backend, ignoreCase = true)
-                if (recovered) {
-                    "${failure.backend} backend failed (${failure.safeLabel}) — running on $backend."
-                } else {
-                    "${failure.backend} backend failed (${failure.safeLabel})."
-                }
-            }
-            is com.adsamcik.mindlayer.service.engine.InitFailure.NativeError ->
-                "Native runtime error (${failure.safeLabel})."
-        }
+    val chatState = when {
+        lastStatusUpdateMs == null -> ModelLoadState.NOT_VERIFIED
+        isEngineLoaded && chatBackend != null -> ModelLoadState.READY
+        lastInitFailure != null -> ModelLoadState.FAILED
+        else -> ModelLoadState.IDLE
     }
+    val chatIssue = lastInitFailure
+        ?.takeIf { chatState == ModelLoadState.FAILED }
+        ?.let(ModelRuntimeIssue::InitializationFailed)
     val chatDisplay = modelId.takeIf { it.isNotBlank() }
         ?.substringAfterLast('/')
         ?.substringAfterLast('\\')
         ?: MODEL_DISPLAY_CHAT_DEFAULT
+    val chatDelivery = modelDelivery[ModelRole.CHAT_AND_VISION] ?: ModelDeliveryState.Checking
     val chat = RoleModelSummary(
         role = ModelRole.CHAT_AND_VISION,
         modelDisplayName = chatDisplay,
-        packDescription = MODEL_PACK_CHAT,
+        deliveryPackNames = ModelDeliveryCatalog.family(ModelRole.CHAT_AND_VISION.toModelFamily()).packNames,
         state = chatState,
+        evidence = chatEvidence,
+        readiness = modelReadiness(
+            ModelRole.CHAT_AND_VISION,
+            chatDelivery,
+            chatState,
+            chatEvidence,
+        ),
         backend = chatBackend,
         initTimeSeconds = initTimeSeconds.takeIf { it > 0f },
-        failureDetail = chatFailureDetail,
+        runtimeIssue = chatIssue,
+        lastRuntimeStatusAtMs = lastStatusUpdateMs,
+        lastVerificationAtMs = null,
+        lastVerificationPassed = null,
+        deliveryState = chatDelivery,
     )
 
+    val embeddingsRuntime = derivedTestRuntime(embeddingTest)
+    val embeddingsDelivery = modelDelivery[ModelRole.EMBEDDINGS] ?: ModelDeliveryState.Checking
     val embeddings = RoleModelSummary(
         role = ModelRole.EMBEDDINGS,
         modelDisplayName = MODEL_DISPLAY_EMBEDDINGS,
-        packDescription = MODEL_PACK_EMBEDDINGS,
-        state = derivedTestState(embeddingTest),
+        deliveryPackNames = ModelDeliveryCatalog.family(ModelRole.EMBEDDINGS.toModelFamily()).packNames,
+        state = embeddingsRuntime.state,
+        evidence = ModelRuntimeEvidence.DASHBOARD_VERIFICATION,
+        readiness = modelReadiness(
+            ModelRole.EMBEDDINGS,
+            embeddingsDelivery,
+            embeddingsRuntime.state,
+            ModelRuntimeEvidence.DASHBOARD_VERIFICATION,
+        ),
         backend = null,
         initTimeSeconds = null,
-        failureDetail = embeddingTest.status.takeIf {
-            it.isNotBlank() && embeddingTest.tone == DashboardMessageTone.ERROR
-        },
+        runtimeIssue = embeddingsRuntime.issue,
+        lastRuntimeStatusAtMs = null,
+        lastVerificationAtMs = embeddingTest.lastCompletedAtMs,
+        lastVerificationPassed = embeddingsRuntime.passed,
+        deliveryState = embeddingsDelivery,
     )
 
+    val ocrRuntime = derivedTestRuntime(ocrTest)
+    val ocrDelivery = modelDelivery[ModelRole.OCR] ?: ModelDeliveryState.Checking
     val ocr = RoleModelSummary(
         role = ModelRole.OCR,
         modelDisplayName = MODEL_DISPLAY_OCR,
-        packDescription = MODEL_PACK_OCR,
-        state = derivedTestState(ocrTest),
+        deliveryPackNames = ModelDeliveryCatalog.family(ModelRole.OCR.toModelFamily()).packNames,
+        state = ocrRuntime.state,
+        evidence = ModelRuntimeEvidence.DASHBOARD_VERIFICATION,
+        readiness = modelReadiness(
+            ModelRole.OCR,
+            ocrDelivery,
+            ocrRuntime.state,
+            ModelRuntimeEvidence.DASHBOARD_VERIFICATION,
+        ),
         backend = null,
         initTimeSeconds = null,
-        failureDetail = ocrTest.status.takeIf {
-            it.isNotBlank() && ocrTest.tone == DashboardMessageTone.ERROR
-        },
+        runtimeIssue = ocrRuntime.issue,
+        lastRuntimeStatusAtMs = null,
+        lastVerificationAtMs = ocrTest.lastCompletedAtMs,
+        lastVerificationPassed = ocrRuntime.passed,
+        deliveryState = ocrDelivery,
     )
 
     return listOf(chat, embeddings, ocr)
 }
 
-private fun derivedTestState(test: EngineTestState): ModelLoadState = when {
-    test.isRunning -> ModelLoadState.UNKNOWN
-    test.lastCompletedAtMs == null -> ModelLoadState.UNKNOWN
-    test.tone == DashboardMessageTone.SUCCESS -> ModelLoadState.LOADED
-    test.tone == DashboardMessageTone.ERROR -> ModelLoadState.FAILED
-    else -> ModelLoadState.IDLE
+private data class DerivedTestRuntime(
+    val state: ModelLoadState,
+    val issue: ModelRuntimeIssue?,
+    val passed: Boolean?,
+)
+
+private fun derivedTestRuntime(test: EngineTestState): DerivedTestRuntime = when {
+    test.isRunning -> DerivedTestRuntime(ModelLoadState.STARTING, issue = null, passed = null)
+    test.lastCompletedAtMs == null ->
+        DerivedTestRuntime(ModelLoadState.NOT_VERIFIED, issue = null, passed = null)
+    test.tone == DashboardMessageTone.SUCCESS ->
+        DerivedTestRuntime(ModelLoadState.IDLE, issue = null, passed = true)
+    test.tone == DashboardMessageTone.ERROR ->
+        DerivedTestRuntime(
+            ModelLoadState.FAILED,
+            issue = ModelRuntimeIssue.VerificationFailed,
+            passed = false,
+        )
+    else -> DerivedTestRuntime(ModelLoadState.IDLE, issue = null, passed = null)
 }

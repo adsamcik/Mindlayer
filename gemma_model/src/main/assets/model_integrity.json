@@ -1,6 +1,6 @@
 {
   "modelFile": "gemma-4-E2B-it.litertlm",
   "sha256": "181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c",
-  "version": "0.0.0",
+  "version": "1.0.0-alpha.5",
   "schema": 1
 }

@@ -332,17 +332,26 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             // first caller until EngineManager reports Ready or Failed. This
             // replaces the old fast-fail/retry loop for cold createSession.
             initCoordinator.startInitIfNeeded(config.backend, effectiveMaxTokens)
-            when (val state = runBlocking { engineManager.awaitReady(SESSION_INIT_AWAIT_TIMEOUT_MS) }) {
+            val observedState = runBlocking { engineManager.awaitReady(SESSION_INIT_AWAIT_TIMEOUT_MS) }
+            val settledState = if (
+                observedState is EngineState.Failed &&
+                !initCoordinator.isSyntheticInitTimeout(observedState.cause)
+            ) {
+                initCoordinator.awaitCurrentInitJob()
+                engineManager.state.value
+            } else {
+                observedState
+            }
+            when (settledState) {
                 is EngineState.Ready -> Unit
                 is EngineState.Failed -> {
-                    if (initCoordinator.isSyntheticInitTimeout(state.cause)) {
+                    if (initCoordinator.isSyntheticInitTimeout(settledState.cause)) {
                         throw EngineNotReadyException(
                             retryAfterMs = INIT_RETRY_AFTER_MS,
                         )
                     }
-                    initCoordinator.awaitCurrentInitJob()
                     throw initCoordinator.peekCachedFailure()?.throwable
-                        ?: IllegalStateException("Engine init failed: ${state.cause}")
+                        ?: IllegalStateException("Engine init failed: ${settledState.cause}")
                 }
                 EngineState.Idle, EngineState.Initializing -> throw EngineNotReadyException(
                     retryAfterMs = INIT_RETRY_AFTER_MS,
@@ -654,7 +663,9 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
     suspend fun <R> withWarmConversation(
         handle: SessionHandle,
         block: suspend (Conversation) -> R,
-    ): R = warmSlot.lease(
+    ): R {
+        engineManager.requireModelAvailable()
+        return warmSlot.lease(
         handle = handle,
         sessions = sessions,
         createConversation = {
@@ -673,7 +684,8 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             engine.createConversation(effectiveConfig)
         },
         block = block,
-    )
+        )
+    }
 
     @Synchronized
     private fun rewarmBackendInvalidatedSession(id: String, expected: SessionHandle): SessionHandle? {

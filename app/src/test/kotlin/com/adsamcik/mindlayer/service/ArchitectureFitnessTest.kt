@@ -1,5 +1,6 @@
 package com.adsamcik.mindlayer.service
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.file.Files
@@ -62,15 +63,11 @@ class ArchitectureFitnessTest {
         ).map { root.resolve(it) }.filter { Files.exists(it) }
         assertTrue("Expected at least the :app manifest to exist", manifests.isNotEmpty())
 
-        val networkPerms = listOf(
-            "android.permission.INTERNET",
-            "android.permission.ACCESS_NETWORK_STATE",
-        )
         val violations = mutableListOf<String>()
         for (m in manifests) {
             val text = readText(m)
-            for (perm in networkPerms) {
-                if (text.contains(perm)) violations += "${root.relativize(m)} declares $perm"
+            invalidNetworkPermissionDeclarations(text).forEach { permission ->
+                violations += "${root.relativize(m)} declares $permission"
             }
         }
         assertTrue(
@@ -78,6 +75,47 @@ class ArchitectureFitnessTest {
                 "Violations:\n" + violations.joinToString("\n"),
             violations.isEmpty(),
         )
+    }
+
+    @Test
+    fun `every network permission declaration must independently be an unscoped removal`() {
+        val manifest = """
+            <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+                xmlns:tools="http://schemas.android.com/tools">
+                <uses-permission
+                    android:name="android.permission.ACCESS_NETWORK_STATE"
+                    tools:node="remove" />
+                <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+            </manifest>
+        """.trimIndent()
+
+        assertEquals(
+            listOf("android.permission.ACCESS_NETWORK_STATE"),
+            invalidNetworkPermissionDeclarations(manifest),
+        )
+    }
+
+    private fun invalidNetworkPermissionDeclarations(manifest: String): List<String> {
+        val blocked = setOf(
+            "android.permission.INTERNET",
+            "android.permission.ACCESS_NETWORK_STATE",
+        )
+        return Regex("""<uses-permission\b[^>]*>""")
+            .findAll(manifest)
+            .map(MatchResult::value)
+            .mapNotNull { declaration ->
+                val permission = Regex("""android:name="([^"]+)"""")
+                    .find(declaration)
+                    ?.groupValues
+                    ?.get(1)
+                    ?: return@mapNotNull null
+                if (permission !in blocked) return@mapNotNull null
+                val unscopedRemoval = permission == "android.permission.ACCESS_NETWORK_STATE" &&
+                    declaration.contains("""tools:node="remove"""") &&
+                    !declaration.contains("tools:selector")
+                permission.takeUnless { unscopedRemoval }
+            }
+            .toList()
     }
 
     private fun readText(path: Path): String = String(Files.readAllBytes(path), Charsets.UTF_8)

@@ -8,7 +8,10 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -23,6 +26,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowLog
 import java.io.File
+import java.util.concurrent.CountDownLatch
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -70,6 +74,19 @@ class EmbeddingEngineTest {
         assertTrue(first.exceptionOrNull() is IllegalStateException)
         assertTrue(second.exceptionOrNull() is IllegalStateException)
         coVerify(exactly = 1) { backend.initialize(any(), any()) }
+    }
+
+    @Test
+    fun `missing model is rediscovered after on-demand materialization in same process`() = runTest {
+        val backend = configuredBackend()
+        val engine = EmbeddingEngine(context, backendFactory = { backend })
+
+        assertTrue(runCatching { engine.initialize() }.exceptionOrNull() is IllegalStateException)
+        installModel()
+
+        engine.initialize()
+        coVerify(exactly = 1) { backend.initialize(any(), any()) }
+        assertTrue(engine.state.value is EmbeddingEngineState.Ready)
     }
 
     @Test
@@ -184,6 +201,30 @@ class EmbeddingEngineTest {
     }
 
     @Test
+    fun `initialized fast path rejects embedding while removal is authoritative`() = runTest {
+        installModel()
+        val backend = configuredBackend()
+        val engine = EmbeddingEngine(context, backendFactory = { backend })
+        engine.embed("before removal")
+        val family = com.adsamcik.mindlayer.service.modeldelivery.ModelFamily.EMBEDDINGS
+        com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryIntentStore(context.filesDir)
+            .recordRemoval(family)
+        val pending = com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+            .pendingRemovalMarker(context.filesDir, family)
+        val tombstone = com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+            .removalTombstone(context.filesDir, family)
+        assertTrue(pending.delete())
+        assertTrue(tombstone.delete())
+
+        val result = runCatching { engine.embed("after removal") }
+
+        assertTrue(result.exceptionOrNull() is IllegalStateException)
+        assertFalse(pending.exists())
+        assertFalse(tombstone.exists())
+        coVerify(exactly = 1) { backend.embed(any(), any(), any()) }
+    }
+
+    @Test
     fun `task parameter prepends correct prefix before tokenize`() = runTest {
         installModel()
         val backend = configuredBackend()
@@ -279,6 +320,60 @@ class EmbeddingEngineTest {
         val second = runCatching { engine.embed("hello") }
         assertTrue("LowMemory must allow retry, got: ${second.exceptionOrNull()}", second.isSuccess)
         coVerify(exactly = 2) { backend.initialize(any(), any()) }
+    }
+
+    @Test
+    fun `cancelled initialization is not cached and retry can succeed`() = runTest {
+        installModel()
+        val backend = mockk<EmbeddingBackend>()
+        var attempts = 0
+        every { backend.isInitialized } answers { attempts > 1 }
+        every { backend.currentModel } answers {
+            if (attempts > 1) {
+                EmbeddingModelInfo("embedding-test", "M", "/m", "/t", 1, 768, listOf(768), 2048, null)
+            } else {
+                null
+            }
+        }
+        every { backend.activeBackend } returns "CPU"
+        coEvery { backend.initialize(any(), any()) } coAnswers {
+            attempts++
+            if (attempts == 1) throw CancellationException("cancelled")
+        }
+        val engine = EmbeddingEngine(context, backendFactory = { backend })
+
+        assertTrue(runCatching { engine.initialize() }.exceptionOrNull() is CancellationException)
+        assertEquals(EmbeddingEngineState.Idle, engine.state.value)
+
+        engine.initialize()
+        coVerify(exactly = 2) { backend.initialize(any(), any()) }
+        assertEquals(EmbeddingEngineState.Ready, engine.state.value)
+    }
+
+    @Test
+    fun `cancellation while waiting for model lease restores Idle`() = runTest {
+        installModel()
+        val acquired = CompletableDeferred<Unit>()
+        val release = CountDownLatch(1)
+        val holder = async(Dispatchers.IO) {
+            com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock.withLock(
+                context.filesDir,
+                com.adsamcik.mindlayer.service.modeldelivery.ModelFamily.EMBEDDINGS,
+            ) {
+                acquired.complete(Unit)
+                release.await()
+            }
+        }
+        acquired.await()
+        val engine = EmbeddingEngine(context, backendFactory = { configuredBackend() })
+        val initialization = async { engine.initialize() }
+        runCurrent()
+
+        initialization.cancelAndJoin()
+
+        assertEquals(EmbeddingEngineState.Idle, engine.state.value)
+        release.countDown()
+        holder.await()
     }
 
     @Test

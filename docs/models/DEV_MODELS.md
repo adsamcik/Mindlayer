@@ -1,9 +1,13 @@
 # Dev model sideload
 
-Mindlayer ships three on-device AI models as Play install-time **AI
-Asset Packs** (`:gemma_model`, `:gemma_embed_model`,
-`:paddleocr_model`). In production that's the right choice — packs
-are integrity-verified and lifecycle-managed by the Play installer.
+Mindlayer ships three on-device AI model families via **standard Google Play
+Asset Delivery 2.3.0 on-demand packs** (`:gemma_model` +
+`:gemma_model_part_2`, `:gemma_embed_model`, `:paddleocr_model`). Google Play
+does the one-time delivery; Mindlayer itself has no network permission. Gemma
+is split and reconstructed by this application, not by LiteRT-LM. Production
+delivery must be tested through an internal Play track or bundletool local
+testing. This document remains strictly about the distinct sideload-only dev
+workflow.
 In development it's painful: every `installDebug` shoves multi-GB of
 unchanged model bytes over USB.
 
@@ -385,4 +389,3 @@ models are present and skip cleanly when they are not. Use
 - Engine code: `app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/`.
 - Privacy invariants:
   [`.github/instructions/privacy-offline.instructions.md`](../../.github/instructions/privacy-offline.instructions.md).
-

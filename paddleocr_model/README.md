@@ -1,6 +1,6 @@
-# `:paddleocr_model` — PaddleOCR PP-OCRv5 mobile AI Pack
+# `:paddleocr_model` — PaddleOCR PP-OCRv5 on-demand pack
 
-Play Asset Delivery install-time pack carrying the four runtime artifacts
+Standard Play Asset Delivery on-demand pack carrying the four runtime artifacts
 that the service-side OCR engine loads when handling the multi-frame OCR
 session API.
 
@@ -36,8 +36,8 @@ The `assets/` directory must exist at build time even when no model files are
 present locally. Without it, AGP's `:app:assetPackReleasePreBundleTask` fails
 with *"path does not exist"* and breaks the release AAB build in CI.
 
-The `.gitkeep` file content is **intentionally identical across all three AI
-Pack modules** (`gemma_model`, `gemma_embed_model`, `paddleocr_model`).
+The `.gitkeep` file content is **intentionally identical across all four asset
+pack modules**.
 bundletool's `EntryClashValidator` runs across the assembled bundle and
 rejects entries at the same relative path that differ in byte content. Keep
 this file in sync with the other packs' `.gitkeep` or `:app:packageDebugBundle`

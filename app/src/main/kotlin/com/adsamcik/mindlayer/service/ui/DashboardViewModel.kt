@@ -13,6 +13,8 @@ import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.IntentSenderRequest
 import com.adsamcik.mindlayer.EmbeddingRequest
 import com.adsamcik.mindlayer.EngineInfo
 import com.adsamcik.mindlayer.ImageTransfer
@@ -30,6 +32,8 @@ import com.adsamcik.mindlayer.service.logging.LogDao
 import com.adsamcik.mindlayer.service.logging.LogDatabase
 import com.adsamcik.mindlayer.service.logging.LogEntry
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryManager
+import com.adsamcik.mindlayer.service.modeldelivery.ModelFamily
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import com.adsamcik.mindlayer.shared.StreamEvent
 import com.adsamcik.mindlayer.shared.StreamHeader
@@ -40,6 +44,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -59,7 +64,11 @@ import java.util.UUID
  * Connects to [com.adsamcik.mindlayer.service.MindlayerMlService] via AIDL (cross-process :ml)
  * and reads the Room log database directly (file-based, accessible from main process).
  */
-class DashboardViewModel : ViewModel() {
+class DashboardViewModel @JvmOverloads constructor(
+    private val deliveryManagerFactory: (Context) -> ModelDeliveryManager = { context ->
+        ModelDeliveryManager(context.applicationContext)
+    },
+) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DashboardUiState())
     val uiState: StateFlow<DashboardUiState> = _uiState.asStateFlow()
@@ -77,6 +86,8 @@ class DashboardViewModel : ViewModel() {
     private var bound = false
     private var statusPollingJob: Job? = null
     private var logPollingJob: Job? = null
+    private var deliveryStateJob: Job? = null
+    private var deliveryManager: ModelDeliveryManager? = null
 
     /**
      * Test-only injectable SDK client. When non-null, [runSdkInferAsyncTest],
@@ -129,6 +140,11 @@ class DashboardViewModel : ViewModel() {
 
     fun bindService(context: Context) {
         if (bound) return
+        val manager = deliveryManager ?: deliveryManagerFactory(context.applicationContext).also {
+            deliveryManager = it
+            observeDeliveryManager(it)
+        }
+        manager.start()
         logDao = LogDatabase.getInstance(context).logDao()
         // F-074: the dashboard reads the watchdog state directly from the
         // shared file in `filesDir/ml_health/` — no AIDL hop required.
@@ -172,11 +188,41 @@ class DashboardViewModel : ViewModel() {
         startLogPolling()
     }
 
+    private fun observeDeliveryManager(manager: ModelDeliveryManager) {
+        deliveryStateJob?.cancel()
+        deliveryStateJob = viewModelScope.launch {
+            launch {
+                manager.states.collect { states ->
+                    _uiState.update { current ->
+                        current.copy(
+                            modelDelivery = mapOf(
+                                ModelRole.CHAT_AND_VISION to states.getValue(ModelFamily.CHAT),
+                                ModelRole.EMBEDDINGS to states.getValue(ModelFamily.EMBEDDINGS),
+                                ModelRole.OCR to states.getValue(ModelFamily.OCR),
+                            ),
+                        )
+                    }
+                }
+            }
+            launch {
+                manager.refreshState.collect { refreshState ->
+                    _uiState.update { current ->
+                        current.copy(modelDeliveryRefresh = refreshState)
+                    }
+                }
+            }
+        }
+    }
+
     fun unbindService(context: Context) {
         if (!bound) return
         bound = false
         statusPollingJob?.cancel()
         logPollingJob?.cancel()
+        deliveryStateJob?.cancel()
+        deliveryStateJob = null
+        deliveryManager?.close()
+        deliveryManager = null
         context.unbindService(connection)
         service = null
         _uiState.update {
@@ -187,6 +233,31 @@ class DashboardViewModel : ViewModel() {
             )
         }
     }
+
+    fun downloadModel(role: ModelRole) {
+        deliveryManager?.download(role.toModelFamily())
+    }
+
+    fun removeModel(role: ModelRole) {
+        val manager = deliveryManager ?: return
+        viewModelScope.launch {
+            manager.remove(role.toModelFamily())
+        }
+    }
+
+    fun retryModelActivation(role: ModelRole) {
+        val manager = deliveryManager ?: return
+        viewModelScope.launch {
+            manager.retryActivation(role.toModelFamily())
+        }
+    }
+
+    fun refreshModelDelivery() {
+        deliveryManager?.refresh()
+    }
+
+    fun showModelDeliveryConfirmation(launcher: ActivityResultLauncher<IntentSenderRequest>): Boolean =
+        deliveryManager?.showConfirmationDialog(launcher) == true
 
     /**
      * F-055: ask the `:ml` service (over self-UID AIDL) to revoke a caller
@@ -359,7 +430,7 @@ class DashboardViewModel : ViewModel() {
                             recent = dao.getRecent(20),
                             gpuFailure = dao.latestGpuFallbackMessage(),
                             sampledAtMs = System.currentTimeMillis(),
-                            initFailure = dao.latestInitFailure()?.let(::parseInitFailureLogRow),
+                            initFailure = dao.latestInitFailureByFeature("chat")?.let(::parseInitFailureLogRow),
                             acceleratorDecisions = BACKEND_DECISION_FEATURES.mapNotNull { feature ->
                                 dao.latestBackendDecisionByFeature(feature)?.let(::parseBackendDecisionLogRow)
                             },
@@ -659,6 +730,9 @@ class DashboardViewModel : ViewModel() {
     override fun onCleared() {
         statusPollingJob?.cancel()
         logPollingJob?.cancel()
+        deliveryStateJob?.cancel()
+        deliveryManager?.close()
+        deliveryManager = null
         super.onCleared()
     }
 

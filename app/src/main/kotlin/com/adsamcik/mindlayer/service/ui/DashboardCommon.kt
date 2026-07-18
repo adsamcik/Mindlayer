@@ -256,7 +256,7 @@ internal fun describeInitFailure(
     }
     com.adsamcik.mindlayer.service.engine.InitFailure.ModelMissing -> {
         DashboardMessageTone.ERROR to
-            "Model file missing — install the AI Pack."
+            "Model file missing — download it from the Models tab."
     }
     com.adsamcik.mindlayer.service.engine.InitFailure.IntegrityMismatch -> {
         DashboardMessageTone.ERROR to

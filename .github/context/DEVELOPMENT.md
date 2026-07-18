@@ -13,7 +13,7 @@
 | Kotlin | 2.3.21 (KSP 2.3.8) | `kotlin.code.style=official` |
 | Compose | BOM 2026.04.01, Material3 1.5.0-alpha18 | |
 | LiteRT-LM | 0.12.0 (`com.google.ai.edge.litertlm:litertlm-android`) + LiteRT 2.1.5 | |
-| Model files | Gemma `.litertlm`, EmbeddingGemma `.tflite` + tokenizer, PaddleOCR PP-OCRv5 assets | **NOT in git.** Delivered via install-time Play AI Packs (`:gemma_model`, `:gemma_embed_model`, `:paddleocr_model`) or staged manually for dev/release. |
+| Model files | Gemma `.litertlm`, EmbeddingGemma `.tflite` + tokenizer, PaddleOCR PP-OCRv5 assets | **NOT in git.** Delivered through standard on-demand PAD packs or staged manually for development. |
 | Emulator/device | API 26+, GPU recommended (Vulkan/OpenCL); Robolectric covers `:test` | Native libs `libvndksupport.so`, `libOpenCL.so` declared `required="false"`. |
 
 ## Common Commands
@@ -40,8 +40,8 @@
 # Instrumented tests (needs an emulator/device on `adb`)
 ./gradlew :app:connectedDebugAndroidTest :sdk:connectedDebugAndroidTest
 
-# Release AAB (signed if keystore.properties present, else unsigned)
-./gradlew :app:bundleRelease
+# Signed release AAB (requires keystore.properties and the model cache)
+./gradlew :app:bundleRelease --no-configuration-cache
 ```
 
 ## Running on a device / emulator
@@ -56,9 +56,9 @@ adb shell am start -n com.adsamcik.mindlayer.debug/com.adsamcik.mindlayer.servic
 
 (Note the `.debug` `applicationIdSuffix` — debug builds end in `…mindlayer.debug`.)
 
-For Play Store builds the model files are delivered via the `:gemma_model`,
-`:gemma_embed_model`, and `:paddleocr_model` install-time AI packs — see
-`docs/project/RELEASE.md`.
+For Play Store builds users download each model family independently from the
+dashboard. Standard PAD packs are `:gemma_model` + `:gemma_model_part_2`,
+`:gemma_embed_model`, and `:paddleocr_model` — see `docs/project/RELEASE.md`.
 
 ## Environment / properties
 
@@ -68,7 +68,7 @@ For Play Store builds the model files are delivered via the `:gemma_model`,
 | `GITHUB_TOKEN` | env or gradle property | GitHub Packages auth (needs `read:packages` to consume, `write:packages` to publish) | empty |
 | `GITHUB_REPO` | gradle property | Publish target repo | `Mindlayer` |
 | `publishVersion` | `-PpublishVersion=X.Y.Z` or CI from `v*` tag | SDK/shared artifact version | `0.1.0` |
-| `keystore.properties` | repo root (gitignored) | Local-only release signing — see `docs/project/RELEASE.md` | absent → unsigned release |
+| `keystore.properties` | repo root (gitignored) | Local-only release signing — see `docs/project/RELEASE.md` | absent → release packaging fails |
 
 ## ⚠️ The Java 21 test-runtime gotcha
 
@@ -98,8 +98,8 @@ If you change CI Java setup or local JDK, run the unit-test suite end-to-end bef
 | `build-and-test` | every push/PR to `main` | `assembleDebug` + `testDebugUnitTest`, uploads HTML + JUnit XML reports. |
 | `instrumented-tests` | every push/PR | Spins up `reactivecircus/android-emulator-runner` AVD api-33, runs `connectedDebugAndroidTest` for `:app` and `:sdk`. |
 | `lint` | every push/PR | `./gradlew lintDebug`, uploads HTML reports. Lint fatal set: `NewApi`, `MissingTranslation`. `InlinedApi` is intentionally **not** fatal (always-safe behind `SDK_INT` checks). |
-| `validate-release-shas` | every push/PR | Reports which of the seven release SHA repository variables are set; malformed set values fail fast. |
-| `build-bundle` | push to `main` only, after `build-and-test` + `validate-release-shas` | Skips cleanly unless all seven SHA vars and the Gemma payload are present; then runs `:app:bundleRelease` and uploads the AAB (signed when CI signing secrets are configured). |
+| `validate-release-shas` | disabled | Reserved for a future authenticated direct-Play-upload pipeline. |
+| `build-bundle` | disabled | Hosted runners do not hold the private multi-GB model payload or upload key. |
 
 There is also `.github/workflows/publish.yml` for SDK/shared artifact publishing on `v*` tags.
 
@@ -107,13 +107,13 @@ Dependabot is enabled for Gradle and GitHub Actions; PRs land regularly.
 
 ## Releasing
 
-Production builds can be signed locally or by CI when signing secrets are configured — see `docs/project/RELEASE.md` for the keystore and model-SHA flow. Quick summary:
+Production builds are signed locally — see `docs/project/RELEASE.md` for the keystore and model-cache flow. Quick summary:
 
 1. Drop `keystore.properties` (with `storeFile`, `storePassword`, `keyAlias`, `keyPassword`) at the repo root.
-2. Compute the Gemma, PaddleOCR, and EmbeddingGemma SHA-256 values and pass the seven `-P*Sha256` properties documented in `docs/project/RELEASE.md`.
-3. `./gradlew :app:bundleRelease` produces `app/build/outputs/bundle/release/app-release.aab`.
-4. Upload to Play Console with the `:gemma_model`, `:gemma_embed_model`, and `:paddleocr_model` install-time asset packs.
-5. Tag the commit `vX.Y.Z` to trigger SDK publishing and optional GitHub Release AAB attachment.
+2. Populate the flat `.models` cache (or set `MINDLAYER_MODEL_CACHE`).
+3. `./gradlew :app:bundleRelease --no-configuration-cache` produces `app/build/outputs/bundle/release/app-release.aab`.
+4. Upload to Play Console with all four on-demand asset packs.
+5. Upload the signed AAB directly to Play Console, then tag `vX.Y.Z` to publish the SDK and code-only debug APK.
 
 R8/proguard rules: `app/proguard-rules.pro`, `sdk/consumer-rules.pro`, `shared/consumer-rules.pro`.
 
@@ -126,7 +126,7 @@ R8/proguard rules: `app/proguard-rules.pro`, `sdk/consumer-rules.pro`, `shared/c
 | Robolectric tests SIGSEGV (`G1SATBMarkQueueSet::filter`) | Wrong JDK on the Gradle test runtime. | Use Java 21 for Gradle (see Java 21 gotcha above). Don't auto-provision Temurin 17 toolchain. |
 | `IllegalStateException: SQLCipher not loaded` | First boot after install, native lib missing. | Code already guards with `try { System.loadLibrary("sqlcipher") } catch (_: UnsatisfiedLinkError) { }`. Ensure `libs.sqlcipher.android` is on the classpath. |
 | Engine init never returns | Backend-fallback chain is exhausted (NPU → GPU → CPU). | Check `EngineManager.lastGpuFailureReason`. Inspect `adb logcat -s "Mindlayer.EngineManager:D"`. |
-| Model not found | `gemma-4-E2B-it.litertlm` missing in `filesDir/`, asset pack, or external/internal app dirs. | Run the `adb push` recipe above, or install the AI pack (Play Store). `ModelRegistry.discoverModels` lists every probed location. |
+| Model not found | `gemma-4-E2B-it.litertlm` missing in delivered private storage or a debug sideload directory. | Download Chat & vision from the dashboard Models tab, or use the dev sideload workflow. |
 | `bindService` fails / returns null binding | Service package, action, or installation issue. The v0.10 service has no custom bind permission. | Verify Mindlayer is installed/enabled and the client uses the SDK's service intent. If binding succeeds but calls fail, handle `CONSENT_REQUIRED` via the consent-Intent flow. |
 | `Rate limit exceeded` from an approved caller | Client UID is exceeding the shared 60 RPM budget. | Throttle the caller, or increase `RateLimiter` defaults if the product policy needs widening. |
 
@@ -142,4 +142,3 @@ adb logcat -s "Mindlayer.InferenceOrchestrator:D"
 # Capture full structured trace for one request
 adb logcat -s "Mindlayer.*:D" | grep "req=req-12345"
 ```
-

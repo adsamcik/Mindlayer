@@ -36,6 +36,11 @@ import com.adsamcik.mindlayer.service.logging.LogEvent
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.modeldelivery.DefaultLiveModelRuntimeController
+import com.adsamcik.mindlayer.service.modeldelivery.LiveModelRuntimeController
+import com.adsamcik.mindlayer.service.modeldelivery.LiveRuntimeReleaseResult
+import com.adsamcik.mindlayer.service.modeldelivery.ModelFamily
+import com.adsamcik.mindlayer.service.modeldelivery.ModelRuntimeControlRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -62,6 +67,7 @@ class MindlayerMlService : Service() {
         private const val LOG_CLEANUP_INTERVAL_MS = 24L * 60 * 60 * 1000
         private const val OCR_SESSION_SWEEP_INTERVAL_MS = 60_000L
         private const val EMERGENCY_DRAIN_TIMEOUT_MS = 2_000L
+        private const val MODEL_RELEASE_DRAIN_TIMEOUT_MS = 5_000L
 
         /**
          * R-3: how long a thermal-driven GPU→CPU downshift may be deferred
@@ -124,6 +130,7 @@ class MindlayerMlService : Service() {
     private lateinit var sharedMemoryPool: SharedMemoryPool
     private lateinit var binder: ServiceBinder
     private lateinit var logRepository: LogRepository
+    private lateinit var modelRuntimeController: LiveModelRuntimeController
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val applyPressureMutex = Mutex()
@@ -342,6 +349,12 @@ class MindlayerMlService : Service() {
             engineManager, thermalMonitor, memoryBudget, sessionManager, logDb.logDao()
         )
         binder = ServiceBinder(this, engineManager, orchestrator, diagnosticExporter, thermalMonitor, memoryBudget, allowlistStore = allowlistStore, consentChallengeStore = com.adsamcik.mindlayer.service.security.ConsentChallengeStore(this), consentAttemptStore = com.adsamcik.mindlayer.service.security.ConsentAttemptStore(this), logRepository = logRepository, mlHealthRecorder = mlHealthRecorder, deferredStore = deferredStore, embeddingCoordinator = embeddingCoordinator, callbackRegistry = callbackRegistry, ocrSessionManager = ocrSessionManager, sharedMemoryPool = sharedMemoryPool, paddleOcrEngine = paddleOcrEngine, ocrLlmExtractor = ocrLlmExtractor, autoAcceptGate = { debugAutoAcceptAllEnabled(this) }, mockEngineMode = mockEngines != null)
+        modelRuntimeController = DefaultLiveModelRuntimeController(
+            quiesceAction = ::quiesceModelRuntime,
+            retryOcrActivation = { paddleOcrEngine.retryInitialize() },
+            recordCleanShutdownBeforeProcessExit = { mlHealthRecorder.recordCleanShutdown() },
+        )
+        ModelRuntimeControlRegistry.install(modelRuntimeController)
 
         logRepository.log(LogEntry(
             timestampMs = System.currentTimeMillis(),
@@ -468,6 +481,9 @@ class MindlayerMlService : Service() {
 
     override fun onDestroy() {
         MindlayerLog.i(TAG, "Service destroyed")
+        if (::modelRuntimeController.isInitialized) {
+            ModelRuntimeControlRegistry.clear(modelRuntimeController)
+        }
         thermalMonitor.stop()
         memoryBudget.stop()
         // v0.4: tear down eviction-callback registrations (unlinks death recipients).
@@ -516,6 +532,32 @@ class MindlayerMlService : Service() {
         }
         super.onDestroy()
     }
+
+    private suspend fun quiesceModelRuntime(family: ModelFamily): LiveRuntimeReleaseResult =
+        when (family) {
+            ModelFamily.CHAT -> {
+                orchestrator.cancelAll()
+                check(orchestrator.awaitAllJobs(MODEL_RELEASE_DRAIN_TIMEOUT_MS)) {
+                    "Chat runtime did not drain"
+                }
+                ocrSessionManager.drainForMemoryPressure()
+                sessionManager.shutdown()
+                LiveRuntimeReleaseResult.RequiresProcessExit(android.os.Process.myPid())
+            }
+            ModelFamily.EMBEDDINGS -> {
+                embeddingCoordinator.cancelAll()
+                check(embeddingCoordinator.awaitAllJobs(MODEL_RELEASE_DRAIN_TIMEOUT_MS)) {
+                    "Embedding runtime did not drain"
+                }
+                embeddingEngine.shutdown()
+                LiveRuntimeReleaseResult.Released
+            }
+            ModelFamily.OCR -> {
+                ocrSessionManager.drainForMemoryPressure()
+                paddleOcrEngine.shutdown()
+                LiveRuntimeReleaseResult.Released
+            }
+        }
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
@@ -1015,9 +1057,5 @@ class MindlayerMlService : Service() {
         nm.notify(NOTIFICATION_ID, buildNotification(text))
     }
 }
-
-
-
-
 
 

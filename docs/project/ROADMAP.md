@@ -2,7 +2,7 @@
 
 > What's complete, what's in progress, and what's gated on device validation.
 >
-> **Last updated:** 2026-05-23
+> **Last updated:** 2026-07-15
 
 This file is the single source of truth for outstanding Mindlayer work. It's
 intended to survive across contributors and AI-assisted sessions, so anyone
@@ -104,6 +104,10 @@ workflow (not in the repo, by design).
   `safeLabel()` for native-failure paths, no raw stack traces.
 
 ### Build / CI / release
+- Standard Play Asset Delivery 2.3.0 on-demand delivery for chat, embeddings,
+  and OCR. Gemma is application-split into two verified fragments, materialized
+  privately after a ~6 GB free-space preflight; internal-track/bundletool
+  validation remains required. Debug `dev-install` remains sideload-only.
 - Gradle 9.5 with AGP 9.2.1, Kotlin 2.3.21, JDK 17 source / JBR 21
   runtime (CI's "Set up JDK 17" intentionally installs Java 21).
 - Parallel + caching + Kotlin incremental enabled; 4 GiB heap.
@@ -366,4 +370,3 @@ ring buffer with explicit user-initiated export (similar to
 | The dev environment + JDK gotcha | `.github/context/DEVELOPMENT.md` |
 | Code-of-conduct + contributing | `CONTRIBUTING.md` |
 | What's changed and when | `CHANGELOG.md` (this file is the *next-up* list, not the changelog) |
-

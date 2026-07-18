@@ -82,6 +82,27 @@ class PaddleOcrModelRegistryTest {
         assertNull(bundles.first().classifierPath)
     }
 
+    @Test fun `canonical removal intent suppresses OCR discovery before markers are reconciled`() {
+        writeFile("paddleocr-ppocrv5-mobile-det.tflite", byteArrayOf(1, 2, 3))
+        writeFile("paddleocr-ppocrv5-mobile-rec.tflite", byteArrayOf(4, 5, 6))
+        writeFile("paddleocr-ppocrv5-mobile-dict.txt", byteArrayOf(10, 11))
+        val family = com.adsamcik.mindlayer.service.modeldelivery.ModelFamily.OCR
+        com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryIntentStore(filesDir)
+            .recordRemoval(family)
+        val pending = com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+            .pendingRemovalMarker(filesDir, family)
+        val tombstone = com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+            .removalTombstone(filesDir, family)
+        assertTrue(pending.delete())
+        assertTrue(tombstone.delete())
+
+        assertTrue(
+            PaddleOcrModelRegistry.discoverBundles(realContext, requireIntegrity = false).isEmpty(),
+        )
+        assertFalse(pending.exists())
+        assertFalse(tombstone.exists())
+    }
+
     @Test fun `discoverBundles rejects bundle missing rec head`() {
         writeFile("paddleocr-ppocrv5-mobile-det.tflite", byteArrayOf(1, 2, 3))
         writeFile("paddleocr-ppocrv5-mobile-dict.txt", byteArrayOf(10, 11))

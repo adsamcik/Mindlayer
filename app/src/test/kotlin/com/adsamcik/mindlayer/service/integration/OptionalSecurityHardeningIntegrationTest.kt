@@ -119,7 +119,10 @@ class OptionalSecurityHardeningIntegrationTest {
     }
 
     @Test
-    fun `engine manager release context accepts verified ai pack extraction`() {
+    fun `engine manager release context rejects materialized delivery without a BuildConfig pin`() {
+        val deliveryDir = File(filesDir, "model_delivery/chat").apply { mkdirs() }
+        val delivered = File(deliveryDir, EngineManager.DEFAULT_MODEL_FILENAME)
+        delivered.writeBytes(ByteArray(0))
         val context = modelContext(
             debuggable = false,
             manifest = """
@@ -128,46 +131,19 @@ class OptionalSecurityHardeningIntegrationTest {
                     {
                       "filename": "${EngineManager.DEFAULT_MODEL_FILENAME}",
                       "sha256": "${sha256(ByteArray(0))}",
-                      "sizeBytes": 1
+                      "sizeBytes": 0
                     }
                   ]
                 }
             """.trimIndent(),
-            assetNames = arrayOf(EngineManager.DEFAULT_MODEL_FILENAME),
-            assetContents = mapOf(EngineManager.DEFAULT_MODEL_FILENAME to ByteArray(0)),
         )
         val manager = EngineManager(context)
-
         try {
             manager.modelPath
-            fail("Expected size-mismatch failure before corrected manifest")
+            fail("Release delivery must not trust its writable manifest without a BuildConfig pin")
         } catch (e: IllegalStateException) {
             assertTrue(e.message!!.contains("litertlm"))
         }
-
-        val corrected = EngineManager(
-            modelContext(
-                debuggable = false,
-                manifest = """
-                    {
-                      "models": [
-                        {
-                          "filename": "${EngineManager.DEFAULT_MODEL_FILENAME}",
-                          "sha256": "${sha256(ByteArray(0))}",
-                          "sizeBytes": 0
-                        }
-                      ]
-                    }
-                """.trimIndent(),
-                assetNames = arrayOf(EngineManager.DEFAULT_MODEL_FILENAME),
-                assetContents = mapOf(EngineManager.DEFAULT_MODEL_FILENAME to ByteArray(0)),
-            ),
-        )
-
-        assertEquals(
-            File(filesDir, EngineManager.DEFAULT_MODEL_FILENAME).absolutePath,
-            corrected.modelPath,
-        )
     }
 
     private fun allowlistDir(): File = File(appContext.filesDir, allowlistDirName)

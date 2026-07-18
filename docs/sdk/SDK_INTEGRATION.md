@@ -511,7 +511,7 @@ Bump version in `build.gradle.kts` root `publishVersion` before releasing.
 - **User consent**: the user must approve your app once via the Mindlayer
   consent screen (any signing key works — no first-party registration)
 - **Android 8.0+** (minSdk 26)
-- **Model files** must be deployed (via Play AI Packs or manual staging)
+- **Model files** must be downloaded from Mindlayer's Models screen or staged for development
 
 ## Deferred async inference (push primary, polling fallback)
 
@@ -617,13 +617,13 @@ host app supplies its CameraX version.
 
 ## Embeddings
 
-Mindlayer embeddings compute semantic vectors for short text on-device with EmbeddingGemma-300M. Use them for RAG, semantic search, clustering, and classification when `ServiceCapabilities.FEATURE_EMBEDDINGS` is advertised; clients should degrade gracefully while the install-time Asset Pack is still extracting.
+Mindlayer embeddings compute semantic vectors for short text on-device with EmbeddingGemma-300M. Use them for RAG, semantic search, clustering, and classification when `ServiceCapabilities.FEATURE_EMBEDDINGS` is advertised; clients should degrade gracefully until the user downloads and verifies the Embeddings pack.
 
 ### Capability check
 
 ```kotlin
 if (!mindlayer.getCapabilities().supports(ServiceCapabilities.FEATURE_EMBEDDINGS)) {
-    // Show "Indexing unavailable" UI; Asset Pack may still be downloading.
+    // Show "Indexing unavailable"; the user may still be downloading the model.
 }
 ```
 
@@ -740,5 +740,8 @@ S25 Ultra spike measurements for EmbeddingGemma-300M:
 
 ### Asset Pack delivery
 
-The `:gemma_embed_model` Play AI Pack is install-time delivery and carries both `embedding-gemma-300m-v1.tflite` and `embedding-gemma-300m-v1.spm.model`. The service advertises `FEATURE_EMBEDDINGS` only after extraction and SHA-256 verification succeed.
-
+The `:gemma_embed_model` standard PAD pack is downloaded on demand and carries
+both `embedding-gemma-300m-v1.tflite` and
+`embedding-gemma-300m-v1.spm.model`. The service advertises
+`FEATURE_EMBEDDINGS` only after local materialization and SHA-256 verification
+succeed.
