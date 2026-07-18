@@ -1,5 +1,5 @@
 plugins {
-    id("com.android.asset-pack")
+    id("mindlayer.assetpack")
 }
 
 // ── PaddleOCR PP-OCRv5 mobile asset pack ────────────────────────────────
@@ -223,13 +223,6 @@ tasks.configureEach {
         name != "provisionReleaseModelAssets"
     ) {
         dependsOn(generatePaddleOcrModelIntegrityManifest, provisionReleaseModelAssets)
-    }
-}
-
-assetPack {
-    packName = "paddleocr_model"
-    dynamicDelivery {
-        deliveryType = "on-demand"
     }
 }
 

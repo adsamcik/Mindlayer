@@ -1,72 +1,18 @@
 plugins {
-    alias(libs.plugins.android.library)
-    id("maven-publish")
+    id("mindlayer.android.library.published")
 }
 
 android {
     namespace = "com.adsamcik.mindlayer.sdk.camerax"
-    compileSdk = 37
-
-    defaultConfig {
-        minSdk = 26
-        consumerProguardFiles("consumer-rules.pro")
-    }
-
-    buildTypes {
-        release {
-            isMinifyEnabled = false
-        }
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    publishing {
-        singleVariant("release") {
-            withSourcesJar()
-        }
-    }
 }
 
-kotlin {
-    compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-    }
-}
-
-afterEvaluate {
-    publishing {
-        publications {
-            create<MavenPublication>("release") {
-                from(components["release"])
-                groupId = "com.adsamcik.mindlayer"
-                artifactId = "sdk-camerax"
-                version = rootProject.extra.get("publishVersion") as String
-
-                pom {
-                    name.set("Mindlayer SDK CameraX integration")
-                    description.set(
-                        "Optional CameraX ImageAnalysis.Analyzer integration for the " +
-                            "Mindlayer multi-frame OCR API. Brings your own CameraX " +
-                            "version (compileOnly).",
-                    )
-                }
-            }
-        }
-
-        repositories {
-            maven {
-                name = "GitHubPackages"
-                url = uri("https://maven.pkg.github.com/${rootProject.extra.get("githubOwner")}/${rootProject.extra.get("githubRepo")}")
-                credentials {
-                    username = rootProject.extra.get("githubOwner") as String
-                    password = rootProject.extra.get("githubToken") as String
-                }
-            }
-        }
-    }
+mindlayerPublish {
+    pomName.set("Mindlayer SDK CameraX integration")
+    pomDescription.set(
+        "Optional CameraX ImageAnalysis.Analyzer integration for the " +
+            "Mindlayer multi-frame OCR API. Brings your own CameraX " +
+            "version (compileOnly).",
+    )
 }
 
 dependencies {

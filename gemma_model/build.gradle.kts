@@ -1,12 +1,5 @@
 plugins {
-    id("com.android.asset-pack")
-}
-
-assetPack {
-    packName = "gemma_model"
-    dynamicDelivery {
-        deliveryType = "on-demand"
-    }
+    id("mindlayer.assetpack")
 }
 
 tasks.configureEach {
