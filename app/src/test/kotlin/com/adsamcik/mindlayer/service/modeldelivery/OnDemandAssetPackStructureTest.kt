@@ -31,18 +31,46 @@ class OnDemandAssetPackStructureTest {
         assertTrue(appBuild.contains("validateNoAiDeliveryDependency"))
         assertTrue(appBuild.contains("validateReleaseBundleAssetPackNames"))
 
-        mapOf(
-            "gemma_model" to "gemma_model",
-            "gemma_model_part_2" to "gemma_model_part_2",
-            "gemma_embed_model" to "gemma_embed_model",
-            "paddleocr_model" to "paddleocr_model",
-        ).forEach { (module, packName) ->
+        // The standard on-demand PAD wiring now lives in the shared
+        // `mindlayer.assetpack` convention plugin (build-logic) instead of being
+        // copy-pasted into each pack module. Assert the invariant there, then
+        // assert each module applies it. `validateReleaseBundleAssetPackNames`
+        // (checked above) additionally hard-verifies the four stable pack names
+        // in the final AAB.
+        val assetPackConvention = root.resolve(
+            "build-logic/src/main/kotlin/mindlayer.assetpack.gradle.kts",
+        ).readText()
+        assertTrue(
+            "asset-pack convention must use standard PAD",
+            assetPackConvention.contains("com.android.asset-pack"),
+        )
+        assertTrue(
+            "asset-pack convention must be on demand",
+            assetPackConvention.contains("deliveryType = \"on-demand\""),
+        )
+        assertTrue(
+            "asset-pack convention must derive the stable pack identity from the module name",
+            assetPackConvention.contains("packName = project.name"),
+        )
+        assertFalse(
+            "asset-pack convention must not use the beta AI pack plugin",
+            assetPackConvention.contains("com.android.ai-pack"),
+        )
+
+        listOf(
+            "gemma_model",
+            "gemma_model_part_2",
+            "gemma_embed_model",
+            "paddleocr_model",
+        ).forEach { module ->
             val build = root.resolve("$module/build.gradle.kts").readText()
-            assertTrue("$module must use standard PAD", build.contains("com.android.asset-pack"))
-            assertTrue("$module must be on demand", build.contains("deliveryType = \"on-demand\""))
             assertTrue(
-                "$module must publish the stable pack identity $packName",
-                build.contains("""packName = "$packName""""),
+                "$module must apply the standard on-demand asset-pack convention",
+                build.contains("id(\"mindlayer.assetpack\")"),
+            )
+            assertTrue(
+                "$module must be included with its stable pack identity",
+                settings.contains("include(\":$module\")"),
             )
             assertFalse("$module must not use the beta AI pack plugin", build.contains("com.android.ai-pack"))
         }

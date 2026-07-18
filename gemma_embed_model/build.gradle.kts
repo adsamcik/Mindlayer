@@ -1,5 +1,5 @@
 plugins {
-    id("com.android.asset-pack")
+    id("mindlayer.assetpack")
 }
 
 // ── EmbeddingGemma-300M asset pack ──────────────────────────────────────
@@ -201,14 +201,6 @@ tasks.configureEach {
         dependsOn(generateEmbeddingModelIntegrityManifest, provisionReleaseModelAssets)
     }
 }
-
-assetPack {
-    packName = "gemma_embed_model"
-    dynamicDelivery {
-        deliveryType = "on-demand"
-    }
-}
-
 
 tasks.register("assembleDebug") {
     group = "build"

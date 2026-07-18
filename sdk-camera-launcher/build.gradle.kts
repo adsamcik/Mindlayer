@@ -1,79 +1,25 @@
 plugins {
-    alias(libs.plugins.android.library)
-    id("org.jetbrains.kotlin.plugin.compose") version libs.versions.kotlin.get()
+    id("mindlayer.android.library.published")
+    alias(libs.plugins.kotlin.compose)
     id("kotlin-parcelize")
-    id("maven-publish")
 }
 
 android {
     namespace = "com.adsamcik.mindlayer.sdk.camera.launcher"
-    compileSdk = 37
-
-    defaultConfig {
-        minSdk = 26
-        consumerProguardFiles("consumer-rules.pro")
-    }
-
-    buildTypes {
-        release {
-            isMinifyEnabled = false
-        }
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
 
     buildFeatures {
         compose = true
     }
-
-    publishing {
-        singleVariant("release") {
-            withSourcesJar()
-        }
-    }
 }
 
-kotlin {
-    compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-    }
-}
-
-afterEvaluate {
-    publishing {
-        publications {
-            create<MavenPublication>("release") {
-                from(components["release"])
-                groupId = "com.adsamcik.mindlayer"
-                artifactId = "sdk-camera-launcher"
-                version = rootProject.extra.get("publishVersion") as String
-
-                pom {
-                    name.set("Mindlayer SDK camera launcher")
-                    description.set(
-                        "Turn-key Activity-result-based camera capture flow that " +
-                            "calls Mindlayer.ocrRealtime() or Mindlayer.ocrAsync() under " +
-                            "the hood. Consumers register a single ActivityResultContract " +
-                            "and never touch CameraX or runtime permissions directly.",
-                    )
-                }
-            }
-        }
-
-        repositories {
-            maven {
-                name = "GitHubPackages"
-                url = uri("https://maven.pkg.github.com/${rootProject.extra.get("githubOwner")}/${rootProject.extra.get("githubRepo")}")
-                credentials {
-                    username = rootProject.extra.get("githubOwner") as String
-                    password = rootProject.extra.get("githubToken") as String
-                }
-            }
-        }
-    }
+mindlayerPublish {
+    pomName.set("Mindlayer SDK camera launcher")
+    pomDescription.set(
+        "Turn-key Activity-result-based camera capture flow that " +
+            "calls Mindlayer.ocrRealtime() or Mindlayer.ocrAsync() under " +
+            "the hood. Consumers register a single ActivityResultContract " +
+            "and never touch CameraX or runtime permissions directly.",
+    )
 }
 
 dependencies {

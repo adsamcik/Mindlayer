@@ -1,15 +1,14 @@
 import com.android.build.api.variant.HasUnitTestBuilder
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.util.Properties
 import java.util.Base64
 import java.security.MessageDigest
 import java.util.zip.ZipFile
 
 plugins {
-    alias(libs.plugins.android.application)
+    id("mindlayer.android.application")
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
-    id("org.jetbrains.kotlin.plugin.compose") version libs.versions.kotlin.get()
+    alias(libs.plugins.kotlin.compose)
 }
 
 // ── Release signing (local-only) ──────────────────────────────────────────────
@@ -748,21 +747,18 @@ val validateNoLiteRtNativeLibCollision = tasks.register("validateNoLiteRtNativeL
 
 android {
     namespace = "com.adsamcik.mindlayer.service"
-    // Compose BOM 2026.05.01 pulls androidx.compose.* 1.12.0-alpha03 and
-    // material3 1.5.0-alpha20, which require compileSdk 37 via AAR
-    // metadata. minSdk is intentionally unchanged.
-    compileSdk = 37
+    // compileSdk 37 / minSdk 26 / targetSdk 37 are set by the
+    // mindlayer.android.application convention (build-logic). Compose BOM
+    // requires compileSdk 37 via AAR metadata; minSdk is intentionally 26.
+    // targetSdk 37 (Android 17 / API 37) was audited against the API-37
+    // behaviour changes: no native System.load() DCL (only loadLibrary of
+    // bundled libs), no MessageQueue reflection, no orientation lock, no
+    // INTERNET/local-network/SMS/contacts/WebView/background-audio surfaces.
+    // The dashboard activities are fully resizable, so the large-screen
+    // orientation/resizability restrictions are no-ops here.
 
     defaultConfig {
         applicationId = "com.adsamcik.mindlayer"
-        minSdk = 26
-        // targetSdk 37 (Android 17 / API 37). Audited against the API-37
-        // behaviour changes: no native System.load() DCL (only loadLibrary
-        // of bundled libs), no MessageQueue reflection, no orientation lock,
-        // no INTERNET/local-network/SMS/contacts/WebView/background-audio
-        // surfaces. The dashboard activities are fully resizable, so the
-        // large-screen orientation/resizability restrictions are no-ops here.
-        targetSdk = 37
         // Derived from the root build's publishVersion so :app never
         // drifts from the SDK's own published version again — see
         // "Product/contract version synchronization" in the root
@@ -905,20 +901,11 @@ android {
         }
     }
 
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
     packaging {
-        resources {
-            excludes += setOf(
-                "META-INF/LICENSE.md",
-                "META-INF/LICENSE-notice.md",
-                "META-INF/AL2.0",
-                "META-INF/LGPL2.1",
-            )
-        }
+        // Resource excludes (duplicate META-INF license files) and Java 17
+        // source/target levels are applied by the mindlayer.android.application
+        // convention.
+        //
         // No jniLibs { pickFirsts } rule here on purpose: litertlm 0.14.0 no
         // longer bundles libLiteRt*.so at all, so litert:2.1.5 is the sole
         // provider and there's no AAR-vs-AAR collision to silence. If a future
@@ -1044,7 +1031,7 @@ tasks.configureEach {
 
 kotlin {
     compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_17)
+        // jvmTarget is set by the mindlayer.android.application convention.
         freeCompilerArgs.addAll(
             "-opt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi",
             "-opt-in=androidx.compose.material3.Material3ExpressiveApi",

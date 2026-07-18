@@ -79,9 +79,14 @@ android-tools-lint-checks = { module = "com.android.tools.lint:lint-checks", ver
 android-tools-lint-tests = { module = "com.android.tools.lint:lint-tests", version.ref = "lint" }
 # Bench-only — see `tesseract4android` version comment above.
 tesseract4android = { module = "cz.adaptech.tesseract4android:tesseract4android", version.ref = "tesseract4android" }
+# Gradle plugin artifacts on the build-logic classpath (see build-logic/). These
+# let the convention plugins apply AGP + the Kotlin Gradle plugin by id.
+android-gradlePlugin = { module = "com.android.tools.build:gradle", version.ref = "agp" }
+kotlin-gradlePlugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }

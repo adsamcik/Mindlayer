@@ -1,19 +1,14 @@
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-
 plugins {
-    alias(libs.plugins.android.application)
+    id("mindlayer.android.application")
     alias(libs.plugins.kotlin.serialization)
-    id("org.jetbrains.kotlin.plugin.compose") version libs.versions.kotlin.get()
+    alias(libs.plugins.kotlin.compose)
 }
 
 android {
     namespace = "com.adsamcik.mindlayer.ocrdriver"
-    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.adsamcik.mindlayer.ocrdriver"
-        minSdk = 26
-        targetSdk = 37
         versionCode = 1
         versionName = "0.9.0"
 
@@ -45,31 +40,9 @@ android {
         }
     }
 
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
     buildFeatures {
         compose = true
         buildConfig = true
-    }
-
-    packaging {
-        resources {
-            excludes += setOf(
-                "META-INF/LICENSE.md",
-                "META-INF/LICENSE-notice.md",
-                "META-INF/AL2.0",
-                "META-INF/LGPL2.1",
-            )
-        }
-    }
-}
-
-kotlin {
-    compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_17)
     }
 }
 
