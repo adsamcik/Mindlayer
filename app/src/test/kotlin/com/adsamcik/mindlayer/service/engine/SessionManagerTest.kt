@@ -16,6 +16,7 @@ import io.mockk.mockkStatic
 import io.mockk.verify
 import io.mockk.unmockkAll
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -150,6 +151,27 @@ class SessionManagerTest {
         assertEquals(200L, error.retryAfterMs)
         assertTrue("createSession should not join a wedged init job (elapsed=${elapsedMs}ms)", elapsedMs < 1_000L)
         coVerify(exactly = 1) { engineManager.awaitReady(any()) }
+    }
+
+    @Test
+    fun `createSession rechecks state after joining retry behind stale failure`() = runTest {
+        val state = MutableStateFlow<EngineState>(
+            EngineState.Failed(InitFailure.LowMemory),
+        )
+        var initialized = false
+        every { engineManager.isInitialized } answers { initialized }
+        every { engineManager.state } returns state
+        coEvery { engineManager.awaitReady(any()) } returns state.value
+        coEvery { engineManager.initialize(any(), any()) } coAnswers {
+            initialized = true
+            state.value = EngineState.Ready
+            mockEngine
+        }
+
+        val sessionId = createDefaultSession()
+
+        assertNotNull(sessionManager.getSession(sessionId))
+        coVerify(exactly = 1) { engineManager.initialize(any(), any()) }
     }
 
     // ---- Priority calculation ----------------------------------------------

@@ -107,6 +107,22 @@ interface LogDao {
     """)
     suspend fun latestInitFailure(): LogEntry?
 
+    @Query("""
+        SELECT * FROM usage_logs
+        WHERE event = 'init_failure_categorized'
+          AND extraJson LIKE '%' || '"feature":"' || :featureName || '"' || '%'
+          AND id > (
+              SELECT COALESCE(MAX(id), 0)
+              FROM usage_logs
+              WHERE (:featureName = 'chat' AND event IN ('engine_init_success', 'engine_init'))
+                 OR (:featureName = 'embeddings' AND event = 'embedding_backend_ready')
+                 OR (:featureName = 'ocr' AND event = 'ocr_backend_ready')
+          )
+        ORDER BY timestampMs DESC
+        LIMIT 1
+    """)
+    suspend fun latestInitFailureByFeature(featureName: String): LogEntry?
+
     @Query("SELECT * FROM usage_logs WHERE event = 'backend_decision' ORDER BY timestampMs DESC LIMIT 1")
     suspend fun latestBackendDecision(): LogEntry?
 

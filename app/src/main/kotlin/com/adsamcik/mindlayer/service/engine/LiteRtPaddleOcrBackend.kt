@@ -7,6 +7,7 @@ import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.safeLabel
 import com.adsamcik.mindlayer.service.logging.safeLabelWithDetail
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -158,6 +159,7 @@ class LiteRtPaddleOcrBackend internal constructor(
                 )
             }
         } catch (t: Throwable) {
+            if (t is CancellationException) throw t
             // LowMemoryException stays terminal — callers (engine + UI) need
             // to see it. CPU is the last-resort backend, so a CPU-forced
             // failure is also terminal: no fallback dance, original behaviour.
@@ -192,6 +194,7 @@ class LiteRtPaddleOcrBackend internal constructor(
                     throwable = null,
                 )
             } catch (cpuT: Throwable) {
+                if (cpuT is CancellationException) throw cpuT
                 MindlayerLog.w(
                     TAG,
                     "PaddleOCR CPU last-resort init failed (${cpuT.safeLabelWithDetail()})",

@@ -46,13 +46,14 @@ internal class EngineInitCoordinator(
     companion object {
         private const val TAG = "EngineInitCoordinator"
 
-        // H-E1: per-variant retry policy. Transient causes get a finite window
-        // so the service recovers in-process; structural causes (missing
-        // model file, integrity mismatch) are effectively permanent because
-        // retrying without operator action would just churn.
+        // H-E1: per-variant retry policy. On-demand delivery can remediate a
+        // missing/corrupt model without restarting `:ml`, so even structural
+        // failures have finite windows rather than poisoning the process.
         private const val LOW_MEMORY_RETRY_MS = 30_000L
         private const val BACKEND_UNAVAILABLE_RETRY_MS = 60_000L
         private const val NATIVE_ERROR_RETRY_MS = 60_000L
+        private const val MODEL_MISSING_RETRY_MS = 15_000L
+        private const val INTEGRITY_MISMATCH_RETRY_MS = 60_000L
         private const val DEFAULT_RETRY_MS = 60_000L
     }
 
@@ -233,8 +234,8 @@ internal class EngineInitCoordinator(
         is InitFailure.LowMemory -> LOW_MEMORY_RETRY_MS
         is InitFailure.BackendUnavailable -> BACKEND_UNAVAILABLE_RETRY_MS
         is InitFailure.NativeError -> NATIVE_ERROR_RETRY_MS
-        InitFailure.ModelMissing -> Long.MAX_VALUE
-        InitFailure.IntegrityMismatch -> Long.MAX_VALUE
+        InitFailure.ModelMissing -> MODEL_MISSING_RETRY_MS
+        InitFailure.IntegrityMismatch -> INTEGRITY_MISMATCH_RETRY_MS
         null -> DEFAULT_RETRY_MS
     }
 }

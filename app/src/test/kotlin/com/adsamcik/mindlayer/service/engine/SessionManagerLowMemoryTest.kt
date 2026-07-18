@@ -12,6 +12,7 @@ import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.junit.After
@@ -79,6 +80,9 @@ class SessionManagerLowMemoryTest {
         engineManager = mockk(relaxed = true) {
             every { isInitialized } returns false
             every { currentBackend } returns "NONE"
+            every { state } returns MutableStateFlow(
+                EngineState.Failed(InitFailure.LowMemory),
+            )
         }
 
         val tier = DeviceTier(

@@ -3,8 +3,11 @@ package com.adsamcik.mindlayer.service.engine
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.os.Build
+import com.adsamcik.mindlayer.service.BuildConfig
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+import com.adsamcik.mindlayer.service.modeldelivery.ModelFamily
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -25,8 +28,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * ``.tflite`` files plus a character dictionary ``.txt``.
  *
  * Trust ranking follows [ModelRegistry] / [EmbeddingModelRegistry]:
- *   1. Play AI Pack assets (in ``:paddleocr_model``'s asset directory)
- *   2. ``filesDir`` (extracted Play AI Pack or migration target)
+ *   1. verified on-demand materialization in ``filesDir/model_delivery/ocr``
+ *   2. ``filesDir`` (legacy migration target)
  *   3. ``externalFilesDir`` (developer sideload)
  *   4. ``cacheDir`` (transient)
  *   5. ``/data/local/tmp`` (debuggable builds only)
@@ -62,7 +65,7 @@ object PaddleOcrModelRegistry {
 
     internal val SHA256_REGEX = Regex("(?i)^[0-9a-f]{64}$")
 
-    internal enum class Origin { AI_PACK, FILES_DIR, EXTERNAL_FILES, CACHE_DIR, SIDELOAD }
+    internal enum class Origin { MODEL_DELIVERY, FILES_DIR, EXTERNAL_FILES, CACHE_DIR, SIDELOAD }
 
     /**
      * Discover all installed PaddleOCR bundles, ranked by trust.
@@ -76,7 +79,22 @@ object PaddleOcrModelRegistry {
     fun discoverBundles(
         context: Context,
         requireIntegrity: Boolean = !isDebuggable(context),
+        deliveryLockHeld: Boolean = false,
     ): List<PaddleOcrModelInfo> {
+        if (!deliveryLockHeld) {
+            return ModelDeliveryFileLock.withLock(context.filesDir, ModelFamily.OCR) {
+                discoverBundles(context, requireIntegrity, deliveryLockHeld = true)
+            }
+        }
+        if (
+            ModelDeliveryFileLock.isRemovalAuthoritative(
+                context.filesDir,
+                ModelFamily.OCR,
+                lockHeld = true,
+            )
+        ) {
+            return emptyList()
+        }
         val manifest = loadIntegrityManifest(context)
         val seenIds = mutableSetOf<String>()
         val bundles = mutableListOf<Pair<Origin, PaddleOcrModelInfo>>()
@@ -88,12 +106,37 @@ object PaddleOcrModelRegistry {
             bundles += origin to bundle
         }
 
-        // 1. AI-Pack assets — extract on first run to filesDir so the engine
-        //    has stable file paths (LiteRT cannot read straight from AAB
-        //    assets without an mmap-friendly file).
-        consider(Origin.AI_PACK, bundleFromAssetPack(context, manifest, requireIntegrity))
+        // Standard PAD data is materialized into a verified private directory
+        // before registry discovery. Do not extract mutable AssetManager assets.
+        val scanDelivered = {
+            consider(
+                Origin.MODEL_DELIVERY,
+                bundleFromDir(
+                    dir = ModelDeliveryFileLock.familyDir(context.filesDir, ModelFamily.OCR),
+                    manifest = manifest,
+                    requireIntegrity = requireIntegrity,
+                    isDeliveredArtifact = true,
+                    isReleaseBuild = !isDebuggable(context),
+                ),
+            )
+        }
+        runCatching {
+            if (deliveryLockHeld) {
+                scanDelivered()
+            } else {
+                ModelDeliveryFileLock.withLock(context.filesDir, ModelFamily.OCR) {
+                    scanDelivered()
+                }
+            }
+        }.onFailure { error ->
+            MindlayerLog.w(
+                TAG,
+                "On-demand OCR model scan deferred: ${error.safeLabel()}",
+                throwable = null,
+            )
+        }
 
-        // 2. filesDir / external / cache scans
+        // Migration/debug fallbacks remain lower trust.
         consider(Origin.FILES_DIR, bundleFromDir(context.filesDir, manifest, requireIntegrity))
         consider(Origin.EXTERNAL_FILES, bundleFromDir(context.getExternalFilesDir(null), manifest, requireIntegrity))
         consider(Origin.CACHE_DIR, bundleFromDir(context.cacheDir, manifest, requireIntegrity))
@@ -123,83 +166,14 @@ object PaddleOcrModelRegistry {
     fun findBundleById(bundles: List<PaddleOcrModelInfo>, id: String): PaddleOcrModelInfo? =
         bundles.find { it.id == id }
 
-    // ── Asset-Pack extraction ────────────────────────────────────────────
-
-    private fun bundleFromAssetPack(
-        context: Context,
-        manifest: Map<String, IntegrityMetadata>,
-        requireIntegrity: Boolean,
-    ): PaddleOcrModelInfo? {
-        val assetNames = try {
-            context.assets.list("")?.toSet().orEmpty()
-        } catch (e: Exception) {
-            MindlayerLog.w(TAG, "Asset-pack listing failed: ${e.safeLabel()}")
-            return null
-        }
-
-        val detAsset = assetNames.firstOrNull { SAFE_DET_NAME.matches(it) } ?: return null
-        val recAsset = assetNames.firstOrNull { SAFE_REC_NAME.matches(it) } ?: return null
-        val dictAsset = assetNames.firstOrNull { SAFE_DICT_NAME.matches(it) } ?: return null
-        val clsAsset = assetNames.firstOrNull { SAFE_CLS_NAME.matches(it) }
-
-        if (requireIntegrity) {
-            val required = listOfNotNull(detAsset, recAsset, dictAsset, clsAsset)
-            if (required.any { it !in manifest }) {
-                MindlayerLog.w(TAG, "Asset-pack bundle missing integrity entry; skipping.")
-                return null
-            }
-        }
-
-        val extracted = listOfNotNull(detAsset, recAsset, dictAsset, clsAsset)
-            .map { name -> name to extractAsset(context, name) }
-        if (extracted.any { (_, file) -> file == null }) {
-            // One or more extractions failed — clean up partial files.
-            extracted.forEach { (_, file) -> file?.delete() }
-            return null
-        }
-
-        // Verify each extracted file matches the manifest.
-        for ((name, file) in extracted) {
-            val expected = manifest[name]
-            val verification = verifyFile(file!!, expected, requireIntegrity)
-            if (!verification.accepted) {
-                MindlayerLog.w(TAG, "Asset-pack file failed integrity check: $name")
-                extracted.forEach { (_, f) -> f?.delete() }
-                return null
-            }
-        }
-
-        val byName = extracted.associate { (n, f) -> n to f!! }
-        return buildBundle(
-            detFile = byName.getValue(detAsset),
-            recFile = byName.getValue(recAsset),
-            clsFile = clsAsset?.let { byName[it] },
-            dictFile = byName.getValue(dictAsset),
-            manifest = manifest,
-        )
-    }
-
-    private fun extractAsset(context: Context, name: String): File? {
-        val target = File(context.filesDir, name)
-        if (target.exists()) return target
-        return try {
-            context.assets.open(name).use { input ->
-                target.outputStream().use { output -> input.copyTo(output) }
-            }
-            target
-        } catch (e: Exception) {
-            MindlayerLog.w(TAG, "Failed to extract asset $name: ${e.safeLabel()}")
-            target.delete()
-            null
-        }
-    }
-
     // ── Directory scan ───────────────────────────────────────────────────
 
     private fun bundleFromDir(
         dir: File?,
         manifest: Map<String, IntegrityMetadata>,
         requireIntegrity: Boolean,
+        isDeliveredArtifact: Boolean = false,
+        isReleaseBuild: Boolean = false,
     ): PaddleOcrModelInfo? {
         if (dir == null || !dir.isDirectory) return null
         val dirCanonical = try { dir.canonicalFile } catch (_: Exception) { return null }
@@ -227,7 +201,13 @@ object PaddleOcrModelRegistry {
 
         // Integrity verification.
         for (f in listOfNotNull(det, rec, dict, cls)) {
-            val verification = verifyFile(f, manifest[f.name], requireIntegrity)
+            val verification = verifyFile(
+                file = f,
+                expected = manifest[f.name],
+                requireIntegrity = requireIntegrity,
+                isDeliveredArtifact = isDeliveredArtifact,
+                isReleaseBuild = isReleaseBuild,
+            )
             if (!verification.accepted) {
                 MindlayerLog.w(TAG, "PaddleOCR file failed integrity: ${f.name}")
                 return null
@@ -301,13 +281,20 @@ object PaddleOcrModelRegistry {
         file: File,
         expected: IntegrityMetadata?,
         requireIntegrity: Boolean,
+        isDeliveredArtifact: Boolean,
+        isReleaseBuild: Boolean,
     ): VerificationResult {
-        if (expected == null) {
+        val trustedExpected = if (requireIntegrity && isDeliveredArtifact && isReleaseBuild) {
+            pinnedIntegrity(file.name)
+        } else {
+            pinnedIntegrity(file.name) ?: expected
+        }
+        if (trustedExpected == null) {
             return VerificationResult(accepted = !requireIntegrity, sha256 = null)
         }
         val actual = sha256(file)
         return VerificationResult(
-            accepted = actual.equals(expected.sha256, ignoreCase = true),
+            accepted = actual.equals(trustedExpected.sha256, ignoreCase = true),
             sha256 = actual,
         )
     }
@@ -323,6 +310,18 @@ object PaddleOcrModelRegistry {
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun pinnedIntegrity(filename: String): IntegrityMetadata? {
+        val sha = when (filename) {
+            "paddleocr-ppocrv5-mobile-det.tflite" -> BuildConfig.PADDLE_OCR_DET_SHA256
+            "paddleocr-ppocrv5-mobile-rec.tflite" -> BuildConfig.PADDLE_OCR_REC_SHA256
+            "paddleocr-ppocrv5-mobile-cls.tflite" -> BuildConfig.PADDLE_OCR_CLS_SHA256
+            "paddleocr-ppocrv5-mobile-dict.txt" -> BuildConfig.PADDLE_OCR_DICT_SHA256
+            else -> ""
+        }
+        return sha.takeIf { SHA256_REGEX.matches(it) && it != "0".repeat(64) }
+            ?.let(::IntegrityMetadata)
     }
 
     internal fun isDebuggable(context: Context): Boolean =

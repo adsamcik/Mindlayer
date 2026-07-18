@@ -316,7 +316,7 @@
 
     <!-- Models page -->
     <string name="models_title">Models</string>
-    <string name="models_offline_banner">All models run fully on-device. Nothing leaves your phone.</string>
+    <string name="models_offline_banner">Google Play performs a one-time model download. Inference stays on-device and Mindlayer has no network permission.</string>
     <string name="models_role_chat">Chat &amp; vision</string>
     <string name="models_role_chat_description">Generates text replies and describes images. Used by the SDK\'s infer and ocrAsync (extraction) paths.</string>
     <string name="models_role_embeddings">Embeddings</string>
@@ -331,12 +331,39 @@
     <string name="models_pack_label">Source</string>
     <string name="models_backend_label">Backend</string>
     <string name="models_init_time_label">Init time</string>
-    <string name="models_pack_chat" translatable="false">Install-time AI Pack: gemma_model</string>
-    <string name="models_pack_embeddings" translatable="false">Install-time AI Pack: gemma_embed_model</string>
-    <string name="models_pack_ocr" translatable="false">Install-time AI Pack: paddleocr_model</string>
+    <string name="models_pack_chat" translatable="false">On-demand PAD: gemma_model_part_1 + part_2</string>
+    <string name="models_pack_embeddings" translatable="false">On-demand PAD: gemma_embed_model</string>
+    <string name="models_pack_ocr" translatable="false">On-demand PAD: paddleocr_model</string>
     <string name="models_chat_display_name" translatable="false">Gemma 4 E2B (multimodal)</string>
     <string name="models_embeddings_display_name" translatable="false">EmbeddingGemma</string>
     <string name="models_ocr_display_name" translatable="false">PaddleOCR PP-OCRv5 mobile</string>
+    <string name="models_refresh_action">Refresh delivery</string>
+    <string name="models_download_action">Download</string>
+    <string name="models_retry_action">Retry download</string>
+    <string name="models_retry_activation_action">Retry activation</string>
+    <string name="models_retry_remove_action">Retry removal</string>
+    <string name="models_confirm_action">Confirm download</string>
+    <string name="models_remove_action">Remove</string>
+    <string name="models_cancel_action">Cancel</string>
+    <string name="models_remove_confirm_title">Remove model files?</string>
+    <string name="models_remove_confirm_message">Remove %1$s from this device? An already loaded engine can remain active until the service unloads or restarts.</string>
+    <string name="models_delivery_checking">Checking delivery</string>
+    <string name="models_delivery_not_installed">Not downloaded</string>
+    <string name="models_delivery_pending">Download queued</string>
+    <string name="models_delivery_downloading">Downloading from Google Play</string>
+    <string name="models_delivery_transferring">Installing download</string>
+    <string name="models_delivery_waiting_wifi">Waiting for Wi-Fi</string>
+    <string name="models_delivery_confirmation">Download confirmation required</string>
+    <string name="models_delivery_provisioning">Verifying model files</string>
+    <string name="models_delivery_installed">Downloaded and verified</string>
+    <string name="models_delivery_activating">Starting OCR runtime</string>
+    <string name="models_delivery_removing">Removing model files</string>
+    <string name="models_delivery_failed">Download failed</string>
+    <string name="models_delivery_removal_failed">Removal failed</string>
+    <string name="models_delivery_unsupported">Google Play delivery unavailable</string>
+    <string name="models_delivery_progress">%1$d MB of %2$d MB (%3$d%%)</string>
+    <string name="models_activation_failed_message">Runtime activation failed. The OCR model remains downloaded; retry activation or restart Mindlayer.</string>
+    <string name="models_loaded_separate_hint">Runtime load status is shown separately above.</string>
 
     <!-- Calm-IDLE first-time hint shown on the Status page when no engine
          test has ever been run. Replaces the use-site of

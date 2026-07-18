@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.service.ui
 
 import com.adsamcik.mindlayer.service.engine.InitFailure
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -33,6 +34,21 @@ class ModelsScreenStateTest {
     }
 
     @Test
+    fun `loaded chat is not marked failed by a stale optional-engine failure row`() {
+        val state = DashboardUiState(
+            isEngineLoaded = true,
+            backend = "CPU",
+            modelId = "gemma",
+            lastInitFailure = InitFailure.ModelMissing,
+        )
+
+        val chat = state.modelSummaries().single { it.role == ModelRole.CHAT_AND_VISION }
+
+        assertEquals(ModelLoadState.LOADED, chat.state)
+        assertNull(chat.failureDetail)
+    }
+
+    @Test
     fun `chat role is FAILED when init failure recorded`() {
         val state = DashboardUiState(
             isEngineLoaded = false,
@@ -46,8 +62,8 @@ class ModelsScreenStateTest {
         assertNull(chat.backend)
         assertNotNull(chat.failureDetail)
         assertTrue(
-            "failureDetail should mention the AI Pack remediation, was: ${chat.failureDetail}",
-            chat.failureDetail!!.contains("AI Pack", ignoreCase = true),
+            "failureDetail should mention the Models tab remediation, was: ${chat.failureDetail}",
+            chat.failureDetail!!.contains("Models", ignoreCase = true),
         )
     }
 
@@ -87,5 +103,32 @@ class ModelsScreenStateTest {
         val ocr = state.modelSummaries().single { it.role == ModelRole.OCR }
         assertEquals(ModelLoadState.FAILED, ocr.state)
         assertEquals("OCR engine init failed", ocr.failureDetail)
+    }
+
+    @Test
+    fun `delivery state is separate from runtime load and exposes the right primary action`() {
+        val state = DashboardUiState(
+            isEngineLoaded = true,
+            modelDelivery = mapOf(
+                ModelRole.CHAT_AND_VISION to ModelDeliveryState.NotInstalled,
+                ModelRole.EMBEDDINGS to ModelDeliveryState.RequiresConfirmation,
+                ModelRole.OCR to ModelDeliveryState.Installed,
+            ),
+        )
+
+        val summaries = state.modelSummaries()
+        assertEquals(ModelLoadState.LOADED, summaries.single { it.role == ModelRole.CHAT_AND_VISION }.state)
+        assertEquals(ModelDeliveryAction.DOWNLOAD, modelDeliveryAction(ModelDeliveryState.NotInstalled))
+        assertEquals(ModelDeliveryAction.CONFIRM, modelDeliveryAction(ModelDeliveryState.RequiresConfirmation))
+        assertEquals(ModelDeliveryAction.REMOVE, modelDeliveryAction(ModelDeliveryState.Installed))
+        assertEquals(
+            ModelDeliveryAction.RETRY_ACTIVATION,
+            modelDeliveryAction(ModelDeliveryState.InstalledWithActivationError),
+        )
+        assertEquals(ModelDeliveryAction.NONE, modelDeliveryAction(ModelDeliveryState.Activating))
+        assertEquals(
+            25,
+            ModelDeliveryState.Downloading(downloadedBytes = 25L, totalBytes = 100L).progressPercent,
+        )
     }
 }

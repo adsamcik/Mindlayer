@@ -52,9 +52,9 @@
 | `:sdk` | `com.adsamcik.mindlayer:sdk` | Client-facing SDK: `Mindlayer`, `Conversation`, `ConnectionManager`, `TokenStreamReader`, encrypted history DB, embeddings, OCR sessions. |
 | `:sdk-camerax` | `com.adsamcik.mindlayer:sdk-camerax` | Optional CameraX adapter for OCR (`OcrImageAnalyzer`) with client-side presort. |
 | `:shared` | `com.adsamcik.mindlayer:shared` | Wire types only — `StreamEvent`, `StreamEventType`, `StreamHeader`, AIDL-adjacent Parcelables. Pure Kotlin + `kotlinx.serialization`. |
-| `:gemma_model` | (asset pack) | Play for On-device AI install-time pack delivering the ~2.4 GB `.litertlm` model file. |
-| `:gemma_embed_model` | (asset pack) | Install-time EmbeddingGemma `.tflite` weights plus SentencePiece tokenizer. |
-| `:paddleocr_model` | (asset pack) | Install-time PaddleOCR PP-OCRv5 mobile detector/recognizer/classifier/dictionary assets. |
+| `:gemma_model`, `:gemma_model_part_2` | (asset packs) | Standard on-demand PAD fragments reconstructed into the verified Gemma `.litertlm`. |
+| `:gemma_embed_model` | (asset pack) | On-demand EmbeddingGemma `.tflite` weights plus SentencePiece tokenizer. |
+| `:paddleocr_model` | (asset pack) | On-demand PaddleOCR PP-OCRv5 detector/recognizer/classifier/dictionary assets. |
 
 `:sdk` declares `api(project(":shared"))` so consumers transitively get the wire types.
 
@@ -158,15 +158,14 @@ list, and API 26–30 `knownSigner` caveat are gone with the consent model. See
 
 ## Embedding runtime addendum
 
-- Module `:gemma_embed_model` is a Play for On-device AI install-time asset pack for EmbeddingGemma-300M `.tflite` weights plus the SentencePiece tokenizer.
+- Module `:gemma_embed_model` is a standard on-demand PAD pack for EmbeddingGemma-300M `.tflite` weights plus the SentencePiece tokenizer.
 - LiteRT-LM 0.12.0 handles the generative model (Gemma 4 E2B); base LiteRT 2.1.5 handles the embedding model (EmbeddingGemma-300M).
 - The two runtimes have separate native handles and lifecycles. GPU/NPU coexistence is unverified on real devices; fallback is a process-wide accelerator mutex serializing both runtimes.
 - Memory pressure unloads the embedding model first.
 
 ## OCR runtime addendum
 
-- Module `:paddleocr_model` delivers the PaddleOCR PP-OCRv5 mobile assets as an install-time AI pack.
+- Module `:paddleocr_model` delivers the PaddleOCR PP-OCRv5 mobile assets as a standard on-demand PAD pack.
 - OCR exposes multi-frame sessions through AIDL + `OcrSession`/`OcrEvent` in the SDK, with optional CameraX integration in `:sdk-camerax`.
 - The OCR stream is wired, including `FRAME_DROPPED`, terminal `RESULT_FINALIZED`, and terminal `OcrEvent.Error`.
 - Production exposure is gated by `OcrFeatureFlags.IS_PRODUCTION_READY=false` until real-device validation signs off; OCR defaults to GPU via `LiteRtAcceleratorResolver` (mirroring chat — `null` → GPU; explicit `NPU` probed with GPU-fallback; explicit `CPU`/`GPU` honored). LiteRT/LiteRT-LM coexistence remains real-device-gated.
-

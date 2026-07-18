@@ -6,6 +6,8 @@ import android.os.Build
 import com.adsamcik.mindlayer.service.BuildConfig
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+import com.adsamcik.mindlayer.service.modeldelivery.ModelFamily
 import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
@@ -23,7 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * **Trust ranking (F-003)**: each discovered candidate is annotated with an
  * [origin] field. When choosing a default we prefer the most-trusted origin
- * (Play AI Pack > internal storage > cache > sideload), then by largest size
+ * (verified on-demand delivery > internal storage > cache > sideload), then by largest size
  * within that tier. The previous "largest wins regardless of origin" policy
  * let an attacker with `/data/local/tmp` write access shadow the legitimate
  * AI-Pack-extracted model with a backdoored larger file.
@@ -51,14 +53,14 @@ object ModelRegistry {
     private const val DEFAULT_MAX_IMAGES_PER_TURN: Int = 1
 
     /** Strict ordering of trust tiers. Lower ordinal = more trusted. */
-    private enum class Origin { AI_PACK, FILES_DIR, EXTERNAL_FILES, CACHE_DIR, SIDELOAD }
+    private enum class Origin { MODEL_DELIVERY, FILES_DIR, EXTERNAL_FILES, CACHE_DIR, SIDELOAD }
 
     /**
      * Scan device directories for `.litertlm` model files.
      *
      * Search order (later tiers add candidates only if not already found
      * from an earlier, more-trusted tier):
-     *  1. Play AI Pack assets (extracted to filesDir on first access)
+     *  1. verified on-demand materialization in `filesDir/model_delivery/chat`
      *  2. `context.filesDir`
      *  3. `context.getExternalFilesDir(null)`
      *  4. `context.cacheDir`
@@ -77,7 +79,22 @@ object ModelRegistry {
     fun discoverModels(
         context: Context,
         requireIntegrity: Boolean = !isDebuggable(context),
+        deliveryLockHeld: Boolean = false,
     ): List<ModelInfo> {
+        if (!deliveryLockHeld) {
+            return ModelDeliveryFileLock.withLock(context.filesDir, ModelFamily.CHAT) {
+                discoverModels(context, requireIntegrity, deliveryLockHeld = true)
+            }
+        }
+        if (
+            ModelDeliveryFileLock.isRemovalAuthoritative(
+                context.filesDir,
+                ModelFamily.CHAT,
+                lockHeld = true,
+            )
+        ) {
+            return emptyList()
+        }
         val seen = mutableSetOf<String>()
         val models = mutableListOf<Pair<Origin, ModelInfo>>()
         val manifest = loadIntegrityManifest(context)
@@ -104,7 +121,13 @@ object ModelRegistry {
                         MindlayerLog.w(TAG, "Skipping model outside scan dir (path traversal?): ${file.name}")
                         return@forEach
                     }
-                    val verification = verifyModelFile(file, manifest[file.name], requireIntegrity)
+                    val verification = verifyModelFile(
+                        file = file,
+                        manifestEntry = manifest[file.name],
+                        requireIntegrity = requireIntegrity,
+                        isDeliveredArtifact = origin == Origin.MODEL_DELIVERY,
+                        isReleaseBuild = !isDebuggable(context),
+                    )
                     if (!verification.accepted) {
                         MindlayerLog.w(TAG, "Skipping model without valid integrity metadata: ${file.name}")
                         return@forEach
@@ -114,49 +137,32 @@ object ModelRegistry {
                 }
         }
 
-        // 1: Play AI Pack assets — extract any .litertlm assets not yet on
-        //    disk. We do this BEFORE scanning filesDir so the extracted
-        //    artifact dominates over a sideload of the same name (see the
-        //    `seen` dedup which we therefore prime with AI-Pack names).
-        try {
-            val assetNames = context.assets.list("") ?: emptyArray()
-            for (name in assetNames) {
-                if (!name.endsWith(MODEL_EXTENSION)) continue
-                if (!SAFE_NAME_PATTERN.matches(name)) {
-                    MindlayerLog.w(TAG, "Skipping AI-Pack asset with unexpected name: $name")
-                    continue
-                }
-                if (name in seen) continue
-                val expected = manifest[name]
-                if (requireIntegrity && expected == null) {
-                    MindlayerLog.w(TAG, "Skipping AI pack model without integrity metadata: $name")
-                    continue
-                }
-
-                val extracted = File(context.filesDir, name)
-                if (!extracted.exists()) {
-                    MindlayerLog.i(TAG, "Extracting model from AI pack: $name")
-                    context.assets.open(name).use { input ->
-                        extracted.outputStream().use { output ->
-                            input.copyTo(output, bufferSize = 8 * 1024 * 1024)
-                        }
-                    }
-                    MindlayerLog.i(TAG, "Extracted: ${extracted.length() / 1_048_576}MB")
-                }
-                val verification = verifyModelFile(extracted, expected, requireIntegrity)
-                if (verification.accepted) {
-                    seen += name
-                    models += Origin.AI_PACK to buildModelInfo(extracted, verification.sha256)
-                } else {
-                    extracted.delete()
-                    MindlayerLog.w(TAG, "Skipping AI pack model with invalid integrity metadata: $name")
+        // Standard PAD exposes pack assets by filesystem path. The delivery
+        // manager verifies and atomically materializes them before discovery;
+        // registries never extract mutable AssetManager bytes themselves.
+        val scanDelivered = {
+            scanDir(
+                Origin.MODEL_DELIVERY,
+                ModelDeliveryFileLock.familyDir(context.filesDir, ModelFamily.CHAT),
+            )
+        }
+        runCatching {
+            if (deliveryLockHeld) {
+                scanDelivered()
+            } else {
+                ModelDeliveryFileLock.withLock(context.filesDir, ModelFamily.CHAT) {
+                    scanDelivered()
                 }
             }
-        } catch (e: Exception) {
-            MindlayerLog.w(TAG, "AI pack asset scan failed: ${e.safeLabel()}")
+        }.onFailure { error ->
+            MindlayerLog.w(
+                TAG,
+                "On-demand chat model scan deferred: ${error.safeLabel()}",
+                throwable = null,
+            )
         }
 
-        // 2-4: Standard app storage
+        // Migration/dev fallbacks remain deliberately lower trust.
         scanDir(Origin.FILES_DIR, context.filesDir)
         scanDir(Origin.EXTERNAL_FILES, context.getExternalFilesDir(null))
         scanDir(Origin.CACHE_DIR, context.cacheDir)
@@ -256,8 +262,19 @@ object ModelRegistry {
         file: File,
         manifestEntry: IntegrityMetadata?,
         requireIntegrity: Boolean,
+        isDeliveredArtifact: Boolean,
+        isReleaseBuild: Boolean,
     ): VerificationResult {
-        val expected = manifestEntry ?: readSidecarIntegrity(file)
+        val pinned = BuildConfig.MODEL_SHA256
+            .takeIf { SHA256_REGEX.matches(it) && it != "0".repeat(64) }
+            ?.let { IntegrityMetadata(it, sizeBytes = null) }
+        val expected = if (requireIntegrity && isDeliveredArtifact && isReleaseBuild) {
+            pinned
+        } else if (requireIntegrity && isDeliveredArtifact) {
+            pinned ?: manifestEntry
+        } else {
+            pinned ?: manifestEntry ?: readSidecarIntegrity(file)
+        }
         if (expected == null) {
             return VerificationResult(accepted = !requireIntegrity, sha256 = null)
         }

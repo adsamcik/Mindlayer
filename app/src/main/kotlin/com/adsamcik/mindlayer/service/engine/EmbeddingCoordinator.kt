@@ -30,7 +30,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.RandomAccessFile
@@ -329,11 +331,20 @@ class EmbeddingCoordinator(
         // entries completing jobs remove concurrently. Kotlin toList()'s size==1
         // fast path reads size then iterator().next() non-atomically and throws
         // NoSuchElementException if the lone entry is removed in between.
-        val keys = activeJobs.keys.toMutableList()
-        keys.forEach { activeJobs.remove(it)?.cancel() }
-        if (keys.isNotEmpty()) {
-            MindlayerLog.i(TAG, "Cancelled ${keys.size} embedding job(s) (service stop/timeout)")
+        val jobs = activeJobs.values.toMutableList()
+        jobs.forEach(Job::cancel)
+        if (jobs.isNotEmpty()) {
+            MindlayerLog.i(TAG, "Cancelled ${jobs.size} embedding job(s) (service stop/timeout)")
         }
+    }
+
+    suspend fun awaitAllJobs(timeoutMs: Long): Boolean {
+        val jobs = activeJobs.values.toMutableList()
+        val completed = withTimeoutOrNull(timeoutMs) {
+            jobs.joinAll()
+            true
+        } == true
+        return completed && activeJobs.isEmpty()
     }
 
     private suspend fun <T> withTracked(uid: Int, requestId: String, block: suspend () -> T): T {

@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.service.ui
 
 import com.adsamcik.mindlayer.service.engine.OcrAcceleratorFailureCache
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryState
 
 private const val STATUS_STALE_AFTER_MS = 6_000L
 private const val LOGS_STALE_AFTER_MS = 12_000L
@@ -211,6 +212,9 @@ data class DashboardUiState(
      * [com.adsamcik.mindlayer.OcrImageOptions.runLlmExtraction] enabled.
      */
     val ocrLlmExtractionTest: EngineTestState = EngineTestState(),
+    /** Independent Play delivery state; this is intentionally separate from
+     * runtime load state because downloaded bytes are not necessarily loaded. */
+    val modelDelivery: Map<ModelRole, ModelDeliveryState> = emptyMap(),
 ) {
     fun statusFreshness(nowMs: Long = System.currentTimeMillis()): DashboardFreshness =
         freshnessOf(lastStatusUpdateMs, nowMs, STATUS_STALE_AFTER_MS)
@@ -605,15 +609,36 @@ data class RoleModelSummary(
     val backend: String?,
     val initTimeSeconds: Float?,
     val failureDetail: String?,
+    val deliveryState: ModelDeliveryState,
 )
 
 enum class ModelRole { CHAT_AND_VISION, EMBEDDINGS, OCR }
 
 enum class ModelLoadState { UNKNOWN, IDLE, LOADED, FAILED }
 
-private const val MODEL_PACK_CHAT = "Install-time AI Pack: gemma_model"
-private const val MODEL_PACK_EMBEDDINGS = "Install-time AI Pack: gemma_embed_model"
-private const val MODEL_PACK_OCR = "Install-time AI Pack: paddleocr_model"
+enum class ModelDeliveryAction { NONE, DOWNLOAD, RETRY, RETRY_ACTIVATION, CONFIRM, REMOVE }
+
+fun modelDeliveryAction(
+    state: ModelDeliveryState,
+): ModelDeliveryAction = when (state) {
+    ModelDeliveryState.NotInstalled -> ModelDeliveryAction.DOWNLOAD
+    is ModelDeliveryState.Failed -> ModelDeliveryAction.RETRY
+    is ModelDeliveryState.RemovalFailed -> ModelDeliveryAction.REMOVE
+    ModelDeliveryState.RequiresConfirmation -> ModelDeliveryAction.CONFIRM
+    ModelDeliveryState.Installed -> ModelDeliveryAction.REMOVE
+    ModelDeliveryState.InstalledWithActivationError -> ModelDeliveryAction.RETRY_ACTIVATION
+    else -> ModelDeliveryAction.NONE
+}
+
+internal fun ModelRole.toModelFamily(): com.adsamcik.mindlayer.service.modeldelivery.ModelFamily = when (this) {
+    ModelRole.CHAT_AND_VISION -> com.adsamcik.mindlayer.service.modeldelivery.ModelFamily.CHAT
+    ModelRole.EMBEDDINGS -> com.adsamcik.mindlayer.service.modeldelivery.ModelFamily.EMBEDDINGS
+    ModelRole.OCR -> com.adsamcik.mindlayer.service.modeldelivery.ModelFamily.OCR
+}
+
+private const val MODEL_PACK_CHAT = "On-demand Play delivery: Gemma parts 1 and 2"
+private const val MODEL_PACK_EMBEDDINGS = "On-demand Play delivery: gemma_embed_model"
+private const val MODEL_PACK_OCR = "On-demand Play delivery: paddleocr_model"
 private const val MODEL_DISPLAY_CHAT_DEFAULT = "Gemma 4 E2B"
 private const val MODEL_DISPLAY_EMBEDDINGS = "EmbeddingGemma"
 private const val MODEL_DISPLAY_OCR = "PaddleOCR PP-OCRv5 mobile"
@@ -634,12 +659,12 @@ private const val MODEL_DISPLAY_OCR = "PaddleOCR PP-OCRv5 mobile"
  */
 fun DashboardUiState.modelSummaries(): List<RoleModelSummary> {
     val chatState = when {
-        lastInitFailure != null -> ModelLoadState.FAILED
         isEngineLoaded -> ModelLoadState.LOADED
+        lastInitFailure != null -> ModelLoadState.FAILED
         else -> ModelLoadState.IDLE
     }
     val chatBackend = backend.takeIf { it.isNotBlank() && !it.equals("NONE", ignoreCase = true) }
-    val chatFailureDetail = lastInitFailure?.let { failure ->
+    val chatFailureDetail = lastInitFailure?.takeIf { chatState == ModelLoadState.FAILED }?.let { failure ->
         // Reuse the same human-readable mapping used by the Status page,
         // but only emit the text — the tone is implied by ModelLoadState.
         // Mirrors describeInitFailure(...) without taking a Compose dep
@@ -649,7 +674,7 @@ fun DashboardUiState.modelSummaries(): List<RoleModelSummary> {
             com.adsamcik.mindlayer.service.engine.InitFailure.LowMemory ->
                 "Engine init refused: insufficient memory. Free up memory and retry."
             com.adsamcik.mindlayer.service.engine.InitFailure.ModelMissing ->
-                "Model file missing — install the AI Pack."
+                "Model file missing — download it from the Models tab."
             com.adsamcik.mindlayer.service.engine.InitFailure.IntegrityMismatch ->
                 "Model file corrupted — reinstall."
             is com.adsamcik.mindlayer.service.engine.InitFailure.BackendUnavailable -> {
@@ -678,6 +703,7 @@ fun DashboardUiState.modelSummaries(): List<RoleModelSummary> {
         backend = chatBackend,
         initTimeSeconds = initTimeSeconds.takeIf { it > 0f },
         failureDetail = chatFailureDetail,
+        deliveryState = modelDelivery[ModelRole.CHAT_AND_VISION] ?: ModelDeliveryState.Checking,
     )
 
     val embeddings = RoleModelSummary(
@@ -690,6 +716,7 @@ fun DashboardUiState.modelSummaries(): List<RoleModelSummary> {
         failureDetail = embeddingTest.status.takeIf {
             it.isNotBlank() && embeddingTest.tone == DashboardMessageTone.ERROR
         },
+        deliveryState = modelDelivery[ModelRole.EMBEDDINGS] ?: ModelDeliveryState.Checking,
     )
 
     val ocr = RoleModelSummary(
@@ -702,6 +729,7 @@ fun DashboardUiState.modelSummaries(): List<RoleModelSummary> {
         failureDetail = ocrTest.status.takeIf {
             it.isNotBlank() && ocrTest.tone == DashboardMessageTone.ERROR
         },
+        deliveryState = modelDelivery[ModelRole.OCR] ?: ModelDeliveryState.Checking,
     )
 
     return listOf(chat, embeddings, ocr)

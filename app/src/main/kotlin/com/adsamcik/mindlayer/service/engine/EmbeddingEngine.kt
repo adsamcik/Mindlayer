@@ -5,11 +5,15 @@ import com.adsamcik.mindlayer.EmbeddingTask
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+import com.adsamcik.mindlayer.service.modeldelivery.ModelFamily
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import java.util.Objects
 
 sealed class EmbeddingEngineState {
@@ -100,6 +104,7 @@ class EmbeddingEngine(
         outputDim: Int?,
         normalize: Boolean,
     ): EmbeddingOutput {
+        ModelDeliveryFileLock.requireAvailable(context.filesDir, ModelFamily.EMBEDDINGS)
         if (text.isEmpty()) throw IllegalArgumentException("Empty text not supported for embedding")
         val model = initializeLocked(preferredBackend = null)
         val dim = outputDim ?: model.nativeDim
@@ -139,48 +144,55 @@ class EmbeddingEngine(
     }
 
     private suspend fun initializeLocked(preferredBackend: String?): EmbeddingModelInfo {
-        if (backend.isInitialized) {
-            _state.value = EmbeddingEngineState.Ready
-            return checkNotNull(backend.currentModel)
-        }
-        lastInitFailure?.let { throw cachedInitException() }
-
-        _state.value = EmbeddingEngineState.Initializing
         return try {
-            val model = EmbeddingModelRegistry.getDefaultModel(
-                EmbeddingModelRegistry.discoverModels(context),
-            ) ?: throw noEmbeddingModelFoundException()
-            backend.initialize(model, preferredBackend)
-            LiteRtAcceleratorResolver.latestDecision("embeddings")?.let { decision ->
-                logRepository?.logBackendDecision(
-                    featureName = "embeddings",
-                    backend = decision.backend,
-                    reason = decision.reason,
-                    attempted = decision.attempted,
+            ModelDeliveryFileLock.withLockSuspending(context.filesDir, ModelFamily.EMBEDDINGS) {
+                ModelDeliveryFileLock.requireAvailable(
+                    context.filesDir,
+                    ModelFamily.EMBEDDINGS,
+                    lockHeld = true,
                 )
+                if (backend.isInitialized) {
+                    _state.value = EmbeddingEngineState.Ready
+                    return@withLockSuspending checkNotNull(backend.currentModel)
+                }
+                lastInitFailure?.let { throw cachedInitException() }
+                _state.value = EmbeddingEngineState.Initializing
+                try {
+                    val model = EmbeddingModelRegistry.getDefaultModel(
+                        EmbeddingModelRegistry.discoverModels(context, deliveryLockHeld = true),
+                    ) ?: throw noEmbeddingModelFoundException()
+                    backend.initialize(model, preferredBackend)
+                    LiteRtAcceleratorResolver.latestDecision("embeddings")?.let { decision ->
+                        logRepository?.logBackendDecision(
+                            featureName = "embeddings",
+                            backend = decision.backend,
+                            reason = decision.reason,
+                            attempted = decision.attempted,
+                        )
+                    }
+                    lastInitFailure = null
+                    lastInitThrowable = null
+                    _state.value = EmbeddingEngineState.Ready
+                    model
+                } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
+                    val failure = classifyInitFailure(t)
+                    // On-demand delivery can fix absent/corrupt artifacts while this
+                    // process stays alive. Keep only native failures sticky; retries
+                    // rediscover the private model_delivery directory after a fetch.
+                    if (failure is InitFailure.NativeError || failure is InitFailure.BackendUnavailable) {
+                        lastInitFailure = failure
+                        lastInitThrowable = t
+                    }
+                    _state.value = EmbeddingEngineState.Failed(failure)
+                    logRepository?.logInitFailureCategorized(failure, featureName = "embeddings")
+                    MindlayerLog.w(TAG, "Embedding init failed: ${t.safeLabel()}", throwable = null)
+                    throw t
+                }
             }
-            lastInitFailure = null
-            lastInitThrowable = null
-            _state.value = EmbeddingEngineState.Ready
-            model
-        } catch (t: Throwable) {
-            val failure = classifyInitFailure(t)
-            // Transient failures must not poison the engine for the rest of
-            // the process lifetime. [InitFailure.LowMemory] is the canonical
-            // transient case: memory pressure typically recovers, and the
-            // caller should be allowed to retry rather than be wedged until
-            // an explicit [unloadForMemoryPressure] / [shutdown] call. All
-            // other failure classes are sticky because they reflect on-disk
-            // model state that doesn't fix itself without operator action
-            // (ModelMissing, IntegrityMismatch, NativeError).
-            if (failure !is InitFailure.LowMemory) {
-                lastInitFailure = failure
-                lastInitThrowable = t
-            }
-            _state.value = EmbeddingEngineState.Failed(failure)
-            logRepository?.logInitFailureCategorized(failure)
-            MindlayerLog.w(TAG, "Embedding init failed: ${t.safeLabel()}", throwable = null)
-            throw t
+        } catch (cancellation: CancellationException) {
+            _state.value = EmbeddingEngineState.Idle
+            throw cancellation
         }
     }
 
@@ -189,6 +201,7 @@ class EmbeddingEngine(
 
     private fun classifyInitFailure(t: Throwable): InitFailure = when (t) {
         is LowMemoryException -> InitFailure.LowMemory
+        is IOException -> InitFailure.ModelMissing
         is SecurityException -> InitFailure.IntegrityMismatch
         is IllegalStateException -> if (t.message?.contains("No embedding model", ignoreCase = true) == true) {
             InitFailure.ModelMissing
@@ -199,7 +212,9 @@ class EmbeddingEngine(
     }
 
     private fun noEmbeddingModelFoundException(): IllegalStateException =
-        IllegalStateException("No embedding model files found. Phase D adds the embedding Asset Pack.")
+        IllegalStateException(
+            "No embedding model files found. Download EmbeddingGemma from the Models screen.",
+        )
 
     private companion object {
         private const val TAG = "EmbeddingEngine"

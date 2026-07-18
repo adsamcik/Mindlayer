@@ -1,5 +1,6 @@
 import java.util.Properties
 import java.util.Base64
+import java.security.MessageDigest
 import java.util.zip.ZipFile
 
 plugins {
@@ -11,9 +12,8 @@ plugins {
 
 // ── Release signing (local-only) ──────────────────────────────────────────────
 // If keystore.properties is present at the repo root, wire a release signing
-// config that reads from it. If absent, release builds are produced unsigned —
-// useful for CI (`:app:bundleRelease` artifact) and for developers who haven't
-// set up a key yet. See docs/project/RELEASE.md for the full signing flow.
+// config that reads from it. Play-bound release packaging fails without a key;
+// an explicit local-only override exists for bundle diagnostics.
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 val keystoreProperties = Properties().apply {
     if (keystorePropertiesFile.exists()) {
@@ -35,6 +35,26 @@ val ciReleaseKeystore = ciKeystoreBase64?.let { encoded ->
 val hasCiReleaseKeystore =
     ciReleaseKeystore != null && ciKeystorePassword != null && ciKeyAlias != null && ciKeyPassword != null
 val hasReleaseKeystore = hasLocalReleaseKeystore || hasCiReleaseKeystore
+val allowUnsignedRelease = providers.gradleProperty("mindlayer.allowUnsignedRelease")
+    .orNull
+    ?.equals("true", ignoreCase = true) == true
+val validateReleaseSigning = tasks.register("validateReleaseSigning") {
+    group = "verification"
+    description = "Requires signing credentials for Play-bound release packaging."
+    inputs.property("hasReleaseKeystore", hasReleaseKeystore)
+    inputs.property("allowUnsignedRelease", allowUnsignedRelease)
+    doLast {
+        val signingConfigured = inputs.properties["hasReleaseKeystore"] == true
+        val unsignedAllowed = inputs.properties["allowUnsignedRelease"] == true
+        if (!signingConfigured && !unsignedAllowed) {
+            throw GradleException(
+                "Release packaging requires keystore.properties or ANDROID_KEYSTORE_* credentials. " +
+                    "For local bundle diagnostics only, pass -Pmindlayer.allowUnsignedRelease=true; " +
+                    "never upload that unsigned AAB to Play.",
+            )
+        }
+    }
+}
 
 // SHA precedence for every model digest the release guards + BuildConfig need:
 //   1. explicit -P<name>Sha256 (CI / power-user override), else
@@ -45,9 +65,20 @@ val hasReleaseKeystore = hasLocalReleaseKeystore || hasCiReleaseKeystore
 val releaseModelShas: Map<String, String> =
     (rootProject.extra["mindlayerModelShas"] as? Map<String, String>).orEmpty()
 
-fun resolveModelSha(propName: String, cacheFileName: String): String =
-    project.findProperty(propName)?.toString()?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
-        ?: releaseModelShas[cacheFileName].orEmpty()
+fun resolveModelSha(propName: String, cacheFileName: String): String {
+    val explicit = project.findProperty(propName)
+        ?.toString()
+        ?.trim()
+        ?.lowercase()
+        ?.takeIf { it.isNotEmpty() }
+    val derived = releaseModelShas[cacheFileName]
+    if (explicit != null && derived != null && explicit != derived) {
+        throw GradleException(
+            "-P$propName does not match the SHA-256 derived from '$cacheFileName' in the selected model cache.",
+        )
+    }
+    return derived ?: explicit.orEmpty()
+}
 
 val modelSha256 = resolveModelSha("modelSha256", "gemma-4-E2B-it.litertlm")
 
@@ -59,7 +90,7 @@ val paddleOcrDictSha256 = resolveModelSha("paddleOcrDictSha256", "paddleocr-ppoc
 val embeddingModelSha256 = resolveModelSha("embeddingModelSha256", "embedding-gemma-300m-v1.tflite")
 val embeddingTokenizerSha256 = resolveModelSha("embeddingTokenizerSha256", "embedding-gemma-300m-v1.spm.model")
 
-// Resolve the AI-pack integrity-manifest paths at configuration time so the
+// Resolve the asset-pack integrity-manifest paths at configuration time so the
 // validator doLast actions capture plain Strings (config-cache safe) instead of
 // referencing rootProject at execution time.
 val gemmaIntegrityManifestPath = rootProject.layout.projectDirectory
@@ -68,9 +99,91 @@ val paddleIntegrityManifestPath = rootProject.layout.projectDirectory
     .file("paddleocr_model/src/main/assets/paddleocr_model_integrity.json").asFile.absolutePath
 val embeddingIntegrityManifestPath = rootProject.layout.projectDirectory
     .file("gemma_embed_model/src/main/assets/embedding_model_integrity.json").asFile.absolutePath
+val paddleAssetPaths = mapOf(
+    "detection" to rootProject.layout.projectDirectory
+        .file("paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-det.tflite").asFile.absolutePath,
+    "recognition" to rootProject.layout.projectDirectory
+        .file("paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-rec.tflite").asFile.absolutePath,
+    "orientation" to rootProject.layout.projectDirectory
+        .file("paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-cls.tflite").asFile.absolutePath,
+    "dictionary" to rootProject.layout.projectDirectory
+        .file("paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-dict.txt").asFile.absolutePath,
+)
+val embeddingAssetPaths = mapOf(
+    "weights" to rootProject.layout.projectDirectory
+        .file("gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.tflite").asFile.absolutePath,
+    "tokenizer" to rootProject.layout.projectDirectory
+        .file("gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.spm.model").asFile.absolutePath,
+)
+val releaseAssetAllowlists = mapOf(
+    rootProject.layout.projectDirectory.dir("gemma_model/src/main/assets").asFile.absolutePath to setOf(
+        ".gitkeep",
+        "model_integrity.json",
+        "gemma-4-E2B-it.litertlm.part1",
+        "gemma_part_1_integrity.json",
+    ),
+    rootProject.layout.projectDirectory.dir("gemma_model_part_2/src/main/assets").asFile.absolutePath to setOf(
+        ".gitkeep",
+        "gemma-4-E2B-it.litertlm.part2",
+        "gemma_part_2_integrity.json",
+    ),
+    rootProject.layout.projectDirectory.dir("gemma_embed_model/src/main/assets").asFile.absolutePath to setOf(
+        ".gitkeep",
+        "embedding_model_integrity.json",
+        "embedding-gemma-300m-v1.tflite",
+        "embedding-gemma-300m-v1.spm.model",
+    ),
+    rootProject.layout.projectDirectory.dir("paddleocr_model/src/main/assets").asFile.absolutePath to setOf(
+        ".gitkeep",
+        "paddleocr_model_integrity.json",
+        "paddleocr-ppocrv5-mobile-det.tflite",
+        "paddleocr-ppocrv5-mobile-rec.tflite",
+        "paddleocr-ppocrv5-mobile-cls.tflite",
+        "paddleocr-ppocrv5-mobile-dict.txt",
+    ),
+)
+
+val validateReleaseAssetPackContents by tasks.registering {
+    dependsOn(
+        ":provisionGemmaFragments",
+        ":gemma_embed_model:generateEmbeddingModelIntegrityManifest",
+        ":gemma_embed_model:provisionReleaseModelAssets",
+        ":paddleocr_model:generatePaddleOcrModelIntegrityManifest",
+        ":paddleocr_model:provisionReleaseModelAssets",
+    )
+    group = "verification"
+    description = "Rejects unexpected files from release asset-pack directories."
+    inputs.property("assetDirectoryCount", releaseAssetAllowlists.size)
+    releaseAssetAllowlists.entries.forEachIndexed { index, (directory, allowed) ->
+        inputs.property("assetDirectory$index", directory)
+        inputs.property("assetAllowlist$index", allowed.sorted().joinToString("|"))
+    }
+    doLast {
+        val props = inputs.properties
+        val count = props["assetDirectoryCount"] as Int
+        repeat(count) { index ->
+            val directory = File(props["assetDirectory$index"] as String)
+            val allowed = (props["assetAllowlist$index"] as String)
+                .split('|')
+                .filter(String::isNotEmpty)
+                .toSet()
+            val actual = directory.walkTopDown()
+                .filter(File::isFile)
+                .map { file -> file.relativeTo(directory).invariantSeparatorsPath }
+                .toSet()
+            val unexpected = actual - allowed
+            if (unexpected.isNotEmpty()) {
+                throw GradleException(
+                    "Unexpected release asset-pack payload in ${directory.path}: " +
+                        unexpected.sorted().joinToString(),
+                )
+            }
+        }
+    }
+}
 
 val validateReleaseModelSha256 by tasks.registering {
-    dependsOn(":gemma_model:generateModelIntegrityManifest")
+    dependsOn(":provisionGemmaFragments")
     group = "verification"
     description = "Fails release builds unless the Gemma model SHA-256 (from -PmodelSha256 or the local cache) matches model_integrity.json."
     inputs.property("modelSha256", modelSha256)
@@ -110,7 +223,10 @@ val validateReleaseModelSha256 by tasks.registering {
 // adds the same defense-in-depth cross-check on the :app side, ensuring
 // the manifest file on disk matches the four properties passed in.
 val validateReleasePaddleOcrSha256 by tasks.registering {
-    dependsOn(":paddleocr_model:generatePaddleOcrModelIntegrityManifest")
+    dependsOn(
+        ":paddleocr_model:generatePaddleOcrModelIntegrityManifest",
+        ":paddleocr_model:provisionReleaseModelAssets",
+    )
     group = "verification"
     description = "Fails release builds unless the four PaddleOCR SHA-256 digests (from -PpaddleOcr*Sha256 or the local cache) match the manifest."
     inputs.property("detSha256", paddleOcrDetSha256)
@@ -118,6 +234,7 @@ val validateReleasePaddleOcrSha256 by tasks.registering {
     inputs.property("clsSha256", paddleOcrClsSha256)
     inputs.property("dictSha256", paddleOcrDictSha256)
     inputs.property("manifestPath", paddleIntegrityManifestPath)
+    paddleAssetPaths.forEach { (role, path) -> inputs.property("${role}AssetPath", path) }
     doLast {
         val props = inputs.properties
         val sha256Re = Regex("^[0-9a-f]{64}$")
@@ -160,6 +277,25 @@ val validateReleasePaddleOcrSha256 by tasks.registering {
                     "paddleocr_model_integrity.json sha256 for '$role' does not match the expected digest.",
                 )
             }
+            val asset = File(props["${role}AssetPath"] as String)
+            if (!asset.isFile) {
+                throw GradleException("Staged PaddleOCR asset is missing for role '$role'.")
+            }
+            val digest = MessageDigest.getInstance("SHA-256")
+            asset.inputStream().buffered().use { input ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+            val stagedSha = digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+            if (stagedSha != expected.lowercase()) {
+                throw GradleException(
+                    "Staged PaddleOCR asset for '$role' does not match its selected SHA-256 pin.",
+                )
+            }
         }
         assertRole("detection", detSha)
         assertRole("recognition", recSha)
@@ -169,7 +305,7 @@ val validateReleasePaddleOcrSha256 by tasks.registering {
 }
 
 // Phase D #1 (release-validation): mirror the Gemma + PaddleOCR release
-// SHA guards for the two EmbeddingGemma AI-pack artifacts. The
+// SHA guards for the two EmbeddingGemma on-demand asset-pack artifacts. The
 // :gemma_embed_model module's own generateEmbeddingModelIntegrityManifest
 // task already fails release builds if either -PembeddingModelSha256 or
 // -PembeddingTokenizerSha256 is missing/malformed; this validator adds
@@ -178,12 +314,16 @@ val validateReleasePaddleOcrSha256 by tasks.registering {
 // cross-check, a buggy CI script could silently regenerate the manifest
 // with zero hashes while still passing the per-module guard.
 val validateReleaseEmbeddingSha256 by tasks.registering {
-    dependsOn(":gemma_embed_model:generateEmbeddingModelIntegrityManifest")
+    dependsOn(
+        ":gemma_embed_model:generateEmbeddingModelIntegrityManifest",
+        ":gemma_embed_model:provisionReleaseModelAssets",
+    )
     group = "verification"
     description = "Fails release builds unless the EmbeddingGemma weights + tokenizer SHA-256 (from -Pembedding*Sha256 or the local cache) match embedding_model_integrity.json."
     inputs.property("modelSha256", embeddingModelSha256)
     inputs.property("tokenizerSha256", embeddingTokenizerSha256)
     inputs.property("manifestPath", embeddingIntegrityManifestPath)
+    embeddingAssetPaths.forEach { (role, path) -> inputs.property("${role}AssetPath", path) }
     doLast {
         val props = inputs.properties
         val sha256Re = Regex("^[0-9a-f]{64}$")
@@ -220,6 +360,25 @@ val validateReleaseEmbeddingSha256 by tasks.registering {
             if (actual != expected.lowercase()) {
                 throw GradleException(
                     "embedding_model_integrity.json sha256 for '$role' does not match the expected digest.",
+                )
+            }
+            val asset = File(props["${role}AssetPath"] as String)
+            if (!asset.isFile) {
+                throw GradleException("Staged EmbeddingGemma asset is missing for role '$role'.")
+            }
+            val digest = MessageDigest.getInstance("SHA-256")
+            asset.inputStream().buffered().use { input ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+            val stagedSha = digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+            if (stagedSha != expected.lowercase()) {
+                throw GradleException(
+                    "Staged EmbeddingGemma asset for '$role' does not match its selected SHA-256 pin.",
                 )
             }
         }
@@ -586,6 +745,12 @@ android {
         // keeps verification advisory (logged warning only) so debug
         // builds work without the manifest.
         buildConfigField("String", "MODEL_SHA256", "\"${modelSha256.lowercase()}\"")
+        buildConfigField("String", "EMBEDDING_MODEL_SHA256", "\"${embeddingModelSha256.lowercase()}\"")
+        buildConfigField("String", "EMBEDDING_TOKENIZER_SHA256", "\"${embeddingTokenizerSha256.lowercase()}\"")
+        buildConfigField("String", "PADDLE_OCR_DET_SHA256", "\"${paddleOcrDetSha256.lowercase()}\"")
+        buildConfigField("String", "PADDLE_OCR_REC_SHA256", "\"${paddleOcrRecSha256.lowercase()}\"")
+        buildConfigField("String", "PADDLE_OCR_CLS_SHA256", "\"${paddleOcrClsSha256.lowercase()}\"")
+        buildConfigField("String", "PADDLE_OCR_DICT_SHA256", "\"${paddleOcrDictSha256.lowercase()}\"")
     }
 
     signingConfigs {
@@ -658,8 +823,8 @@ android {
         buildConfig = true
     }
 
-    // Selective AI Asset Pack bundling for dev iteration.
-    // Defaults preserve current release/CI behavior (all packs bundled).
+    // Selective on-demand Asset Pack bundling for dev iteration.
+    // Defaults preserve current release/CI behavior (all packs are available).
     // Override per-pack to build a small code-only APK and sideload models via
     // `tools/dev-models/push-models.ps1` (see `docs/models/DEV_MODELS.md`). Sideloaded
     // files are read from `/data/local/tmp/` by the runtime registries on
@@ -672,6 +837,7 @@ android {
             if (enabled) add(pack)
         }
         bundle("mindlayer.bundleGemma", ":gemma_model")
+        bundle("mindlayer.bundleGemma", ":gemma_model_part_2")
         bundle("mindlayer.bundleEmbeddings", ":gemma_embed_model")
         bundle("mindlayer.bundlePaddleocr", ":paddleocr_model")
     }
@@ -690,7 +856,7 @@ android {
                 paddleOcrAssetsDir.resolve(name).let { it.isFile && it.length() > 0L }
             }
             if (hasRequiredPaddleOcrAssets) {
-                // Mirror the install-time AI Pack into the test APK so the
+                // Mirror the on-demand asset pack into the test APK so the
                 // production coexistence smoke can exercise real assets on CI
                 // when the SHA-gated bundle is provisioned. The orientation
                 // classifier is optional; detection, recognition, dictionary,
@@ -749,10 +915,24 @@ androidComponents {
 }
 
 tasks.configureEach {
+    val releaseArtifactTasks = setOf(
+        "assembleRelease",
+        "bundleRelease",
+        "packageRelease",
+        "packageReleaseBundle",
+        "signReleaseBundle",
+        "packageReleaseUniversalApk",
+    )
     val isReleasePackageTask = !name.contains("UnitTest") &&
-        (name == "assembleRelease" || name == "bundleRelease" || name == "packageRelease")
+        name in releaseArtifactTasks
     if (isReleasePackageTask) {
-        dependsOn(validateReleaseModelSha256, validateReleasePaddleOcrSha256, validateReleaseEmbeddingSha256)
+        dependsOn(
+            validateReleaseSigning,
+            validateReleaseAssetPackContents,
+            validateReleaseModelSha256,
+            validateReleasePaddleOcrSha256,
+            validateReleaseEmbeddingSha256,
+        )
     }
     // F-079: every public APK/AAB packaging task must see the ABI validator.
     // assembleDebug + assembleRelease + bundleRelease are the lifecycle tasks
@@ -761,7 +941,7 @@ tasks.configureEach {
         dependsOn(validateLitertlmAbis, validateLitertAbis, validateNoLiteRtNativeLibCollision)
     }
 
-    // The release AI Asset Pack staging tasks read each pack module's
+    // The release Asset Pack staging tasks read each pack module's
     // src/main/assets directly. By AGP's default ordering the per-module model
     // provisioning + integrity-manifest tasks would otherwise run AFTER staging,
     // so the cache-derived model bytes and freshly-pinned SHAs would not make it
@@ -773,8 +953,7 @@ tasks.configureEach {
         name == "assetPackReleaseAssemble"
     if (stagesReleaseAssetPacks) {
         dependsOn(
-            ":gemma_model:provisionReleaseModelAssets",
-            ":gemma_model:generateModelIntegrityManifest",
+            ":validateNoFullGemmaInAssetPacks",
             ":gemma_embed_model:provisionReleaseModelAssets",
             ":gemma_embed_model:generateEmbeddingModelIntegrityManifest",
             ":paddleocr_model:provisionReleaseModelAssets",
@@ -857,6 +1036,7 @@ dependencies {
     // BarcodeAnchorDetector to inject GTIN / QR / Code-128 anchors
     // into the OCR evidence package. Pure JVM => unit-testable.
     implementation(libs.zxing.core)
+    implementation(libs.play.asset.delivery)
 
     testImplementation(libs.junit)
     testImplementation(libs.mockk)
@@ -883,4 +1063,3 @@ dependencies {
     // `settings.gradle.kts` (Apache 2.0).
     androidTestImplementation(libs.tesseract4android)
 }
-

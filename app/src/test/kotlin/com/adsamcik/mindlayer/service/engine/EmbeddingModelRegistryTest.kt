@@ -47,6 +47,25 @@ class EmbeddingModelRegistryTest {
     }
 
     @Test
+    fun `canonical removal intent suppresses embedding discovery before markers are reconciled`() {
+        File(context.filesDir, "embedding-gemma-300m-v1.tflite").writeText("model")
+        File(context.filesDir, "sentencepiece.model").writeText("tok")
+        val family = com.adsamcik.mindlayer.service.modeldelivery.ModelFamily.EMBEDDINGS
+        com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryIntentStore(context.filesDir)
+            .recordRemoval(family)
+        val pending = com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+            .pendingRemovalMarker(context.filesDir, family)
+        val tombstone = com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+            .removalTombstone(context.filesDir, family)
+        assertTrue(pending.delete())
+        assertTrue(tombstone.delete())
+
+        assertTrue(EmbeddingModelRegistry.discoverModels(context, requireIntegrity = false).isEmpty())
+        assertFalse(pending.exists())
+        assertFalse(tombstone.exists())
+    }
+
+    @Test
     fun `discoverModels accepts sentencepiece tokenizer in same directory`() {
         val model = File(context.filesDir, "embedding-gemma-300m-v1.tflite").apply { writeText("model") }
         val tokenizer = File(context.filesDir, "sentencepiece.model").apply { writeText("tok") }
@@ -156,7 +175,7 @@ class EmbeddingModelRegistryTest {
     }
 
     @Test
-    fun `discoverModels extracts valid AI pack pair before scanning filesDir`() {
+    fun `discoverModels prioritizes materialized on-demand pair before filesDir`() {
         val modelBytes = "asset-model".toByteArray()
         val assetManager = mockk<AssetManager> {
             every { list("") } returns arrayOf("embedding-asset.tflite", "sentencepiece.model")
@@ -166,13 +185,16 @@ class EmbeddingModelRegistryTest {
             every { open("embedding-asset.tflite") } returns ByteArrayInputStream(modelBytes)
             every { open("sentencepiece.model") } returns ByteArrayInputStream("tok".toByteArray())
         }
+        val deliveryDir = File(context.filesDir, "model_delivery/embeddings").apply { mkdirs() }
+        File(deliveryDir, "embedding-asset.tflite").writeBytes(modelBytes)
+        File(deliveryDir, "sentencepiece.model").writeBytes("tok".toByteArray())
         val mocked = contextWithDirs(context.filesDir, null, context.cacheDir, assetManager)
 
         val models = EmbeddingModelRegistry.discoverModels(mocked, requireIntegrity = true)
 
         assertEquals(listOf("embedding-asset"), models.map { it.id })
-        assertTrue(File(context.filesDir, "embedding-asset.tflite").isFile)
-        assertTrue(File(context.filesDir, "sentencepiece.model").isFile)
+        assertTrue(File(deliveryDir, "embedding-asset.tflite").isFile)
+        assertTrue(File(deliveryDir, "sentencepiece.model").isFile)
     }
 
 
@@ -264,7 +286,9 @@ class EmbeddingModelRegistryTest {
         every { this@mockk.filesDir } returns filesDir
         every { getExternalFilesDir(null) } returns externalDir
         every { this@mockk.cacheDir } returns cacheDir
-        every { applicationInfo } returns ApplicationInfo()
+        every { applicationInfo } returns ApplicationInfo().apply {
+            flags = ApplicationInfo.FLAG_DEBUGGABLE
+        }
         every { this@mockk.assets } returns assets
     }
 

@@ -24,7 +24,7 @@ Android service app (`com.adsamcik.mindlayer`) that loads a single LLM (Gemma 4 
 ## Tech stack
 
 - Kotlin 2.3.21 / JDK 17 bytecode (Gradle tests on JDK 21) / AGP 9.2.1 / `compileSdk 37`, `minSdk 26`, `targetSdk 37`
-- Modules: `:app` (service+dashboard), `:sdk` (client SDK), `:sdk-camerax` (optional CameraX adapter), `:shared` (wire types), `:gemma_model`, `:gemma_embed_model`, `:paddleocr_model` (install-time AI packs)
+- Modules: `:app` (service+dashboard), `:sdk` (client SDK), `:sdk-camerax` (optional CameraX adapter), `:shared` (wire types), and four standard on-demand PAD packs (`:gemma_model`, `:gemma_model_part_2`, `:gemma_embed_model`, `:paddleocr_model`)
 - LiteRT-LM 0.12.0 + base LiteRT 2.1.5 for EmbeddingGemma, Jetpack Compose (BOM 2026.04.01), Room 2.8.4 + SQLCipher 4.15.0
 - Tests: JUnit 4, MockK, Robolectric (sdk=33), Turbine, kotlinx-coroutines-test
 
@@ -104,9 +104,14 @@ The PR template asks for explicit confirmation that AIDL changes are mirrored. D
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ```
 
-## On-device install + AI Pack delivery — read this before touching adb
+## On-device install + model delivery — read this before touching adb
 
-The three AI models (`gemma-4-E2B-it.litertlm` ~2.4 GB, EmbeddingGemma ~250 MB, PaddleOCR PP-OCRv5 ~12 MB) are **deliberately not in `:app`**. They ship to end-users as Play [install-time AI Asset Packs](https://developer.android.com/google/play/on-device-ai/asset-delivery) (`:gemma_model`, `:gemma_embed_model`, `:paddleocr_model`), and to devs via a sideload script. **Don't try to bundle them into the debug APK** — the AAB-only delivery is the design.
+The three AI model families are **deliberately not in `:app`**. End users
+download them independently through the Models dashboard using standard Play
+Asset Delivery 2.3.0. Gemma is split across `:gemma_model` and
+`:gemma_model_part_2`, then verified and reconstructed in private storage;
+EmbeddingGemma and PaddleOCR each use one on-demand pack. Development uses the
+sideload script. **Don't try to bundle them into the debug APK**.
 
 Concretely this means:
 
@@ -246,4 +251,3 @@ Loaded automatically by Copilot via `applyTo` frontmatter:
 - `.github/instructions/embeddings.instructions.md` — EmbeddingGemma, tokenizer, SHM/deferred transport rules
 - `.github/instructions/ipc.instructions.md` — pipe framing, SharedMemory, wire protocol
 - `.github/instructions/tests.instructions.md` — Robolectric, MockK, Turbine patterns
-

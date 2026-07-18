@@ -1,9 +1,9 @@
 # Releasing Mindlayer to Google Play
 
 This document is the end-to-end flow for cutting a release build, signing it
-locally or in CI, and uploading it to the Play Console. Local signing remains
-the default for Play uploads; CI can build and attach a signed AAB when the
-release model payloads, SHA variables, and Android signing secrets are present.
+locally, and uploading it to the Play Console. The production AAB contains
+multi-gigabyte on-demand asset packs and exceeds GitHub's 2 GiB release-asset
+limit, so hosted CI does not build or publish the Play bundle.
 
 ---
 
@@ -97,8 +97,10 @@ the signed AAB for Play upload. Models for a local release live in a flat
 standardized, gitignored `<repo-root>\.models` directory that
 `tools/dev-models/push-models.*` uses. Override it with
 `MINDLAYER_MODEL_CACHE` or `-Pmindlayer.modelCache=<dir>` when the vetted model
-binaries live elsewhere. The build copies the binaries into each AI-pack module
-and derives their pinned SHA-256 automatically. No manual copying or hand-typed
+binaries live elsewhere. The build streams the binaries into standard on-demand PAD assets and derives
+their pinned SHA-256 automatically. Gemma is deterministically split into two
+at-most-1,350,000,000-byte fragments; this is an application-level
+reconstruction prototype, not LiteRT-LM sharding. No manual copying or hand-typed
 `-P*Sha256` flags are needed.
 
 ```powershell
@@ -135,19 +137,21 @@ app/build/outputs/bundle/release/app-release.aab
 
 This is the file you upload to Play. It is:
 
-* **Signed** with your release key only when `keystore.properties` is present
-  and resolves. If Gradle reports an unsigned fallback, return to section 1.2;
-  do not upload that bundle to Play.
+* **Signed** with your release key. `bundleRelease` fails when signing
+  credentials are absent. For local packaging diagnostics only, the explicit
+  `-Pmindlayer.allowUnsignedRelease=true` override permits an unsigned bundle;
+  never upload that output to Play.
 * **Minified and shrunk** via R8 using `app/proguard-rules.pro`.
-* **Packaged with install-time AI packs** declared in `app/build.gradle.kts`:
-  `:gemma_model`, `:gemma_embed_model`, and `:paddleocr_model`, whose bytes were
-  copied from the cache by each module's `provisionReleaseModelAssets` task.
+* **Packaged with standard on-demand PAD packs** declared in `app/build.gradle.kts`:
+  `:gemma_model`, `:gemma_model_part_2`, `:gemma_embed_model`, and
+  `:paddleocr_model`. Validate delivery through an internal Play track or
+  bundletool local testing; the dashboard preflights ~6 GB free space before
+  the Gemma request.
 
 > ⚠️ The Gemma `.litertlm`, PaddleOCR `.tflite`/dictionary files, and
 > EmbeddingGemma artifacts are **not** checked into git. A release build fails
 > fast with a clear message if neither `<repo-root>\.models` nor
-> `MINDLAYER_MODEL_CACHE`/`-Pmindlayer.modelCache` supplies a required file and
-> it is not already present in the AI-pack `src/main/assets/` dir.
+> `MINDLAYER_MODEL_CACHE`/`-Pmindlayer.modelCache` supplies a required file.
 > Debug builds keep advisory model-hash behavior and the sideload path for local
 > development.
 >
@@ -166,28 +170,11 @@ from the project's private model artefact store and drop them flat into
 `MINDLAYER_MODEL_CACHE` / `-Pmindlayer.modelCache`; the build derives every
 SHA-256 from those exact bytes, so there is nothing to compute by hand.
 
-For **CI** release jobs the cache is not present, so the seven `-P*Sha256`
-properties (sourced from the repository variables below) remain the way SHAs are
-supplied — they always take precedence over the cache fallback. For PaddleOCR
-refreshes, the manual `build-paddleocr-models.yml` workflow emits an
-`expected_shas.txt` artifact whose values should match the hashes the build
-derives. Set these repository variables for CI release jobs:
-
-* `MODEL_SHA256`
-* `PADDLEOCR_DET_SHA256`
-* `PADDLEOCR_REC_SHA256`
-* `PADDLEOCR_CLS_SHA256`
-* `PADDLEOCR_DICT_SHA256`
-* `EMBEDDING_MODEL_SHA256`
-* `EMBEDDING_TOKENIZER_SHA256`
-
-`.github/workflows/ci.yml` runs `validate-release-shas` first; if any variable
-is missing it reports which ones are unset and skips `build-bundle` cleanly.
-`publish.yml` uses the same seven variables for the tag-driven `release-aab`
-job. Configure `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
-`ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD` as repository secrets only when
-CI should attach a signed AAB; otherwise CI may produce unsigned smoke-test
-artifacts that must not be uploaded to Play.
+For PaddleOCR refreshes, the manual `build-paddleocr-models.yml` workflow emits
+an `expected_shas.txt` artifact whose values should match the hashes derived by
+the release build. SHA override properties remain available for controlled
+local reproduction, but the normal release path derives every pin from the
+vetted bytes in the selected model cache.
 
 
 ### 2.3 (Optional) Build a signed universal APK for side-loading
@@ -195,7 +182,7 @@ artifacts that must not be uploaded to Play.
 Play Store only accepts AAB, but you may want an APK for direct install:
 
 ```powershell
-./gradlew.bat :app:assembleRelease
+./gradlew.bat :app:assembleRelease --no-configuration-cache
 ```
 
 Output:
@@ -257,26 +244,16 @@ bundletool dump manifest --bundle app\build\outputs\bundle\release\app-release.a
 | `:app:testDebugUnitTest`        | ✅ every push                 | ✅                                        |
 | `:app:connectedDebugAndroidTest`| ✅ every push (API 33 AVD)    | ✅ with connected device                  |
 | `lintDebug`                     | ✅ every push                 | ✅                                        |
-| `:app:bundleRelease` (unsigned) | ✅ on `main` with all model SHA repo variables when CI signing secrets are absent | ✅ with all `-P*Sha256=...` properties |
-| `:app:bundleRelease` (signed)   | ✅ on `main` when all model SHA repo variables and CI signing secrets are configured | ✅ only when `keystore.properties` is set |
-| **`v*` tag → attached AAB on GitHub Release** | ✅ on every release tag — `publish.yml`'s `release-aab` job builds + attaches `app-release.aab` to the GitHub Release alongside the SDK pointer (signed when CI secrets are configured, unsigned otherwise). Gated on the same `gemma-4-E2B-it.litertlm` presence check as the `main`-branch flow. | — |
+| `:app:bundleRelease` (unsigned) | ❌ not built in hosted CI | ✅ for local packaging diagnostics only; never upload to Play |
+| `:app:bundleRelease` (signed)   | ❌ model payload and upload key are intentionally local/private | ✅ when `keystore.properties` is set |
+| **`v*` tag → attached AAB on GitHub Release** | ❌ the PAD bundle exceeds GitHub's 2 GiB release-asset limit | Upload the signed AAB directly to Play Console |
 | **`v*` tag → attached debug APK on GitHub Release** | ✅ on every release tag — `publish.yml`'s `release-apk` job builds a code-only **debug** APK (AI packs excluded via `-Pmindlayer.bundle*=false`) and attaches `mindlayer-service-debug-<tag>.apk` (~78 MB) to the Release. Debug-signed by the in-repo keystore; needs no model artefacts or signing secrets. Testers sideload it and push models with `tools/dev-models/push-models.*`. A *release* code-only APK is deliberately **not** built: its integrity manifests ship inside the excluded AI-pack modules, so a non-debuggable build rejects sideloaded models. A full APK with models (~2.5 GB) exceeds GitHub's 2 GiB asset cap. | — |
 
-CI can sign the release AAB when `ANDROID_KEYSTORE_BASE64`,
-`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`
-are configured as repository secrets, in addition to the `MODEL_SHA256`,
-`PADDLEOCR_*_SHA256`, and `EMBEDDING_*_SHA256` repository variables that all
-release builds require. Without the signing secrets, CI still builds an
-unsigned `app-release.aab` on `main`; that artifact is **not** uploadable to
-Play and only proves that R8 + resource shrinking still succeeds end-to-end
-with the same model-hash manifests a real release must provide.
-
-On `v*` release tags, `publish.yml` mirrors that build and **also attaches
-the resulting AAB to the GitHub Release** so SDK consumers can grab the
-matching service-side bundle from the same release page that hosts the SDK
-Maven coordinate. The Phase 3 `p3-signed-release` track wired this end of
-the pipeline; before it, only the SDK AAR was visible on the release page
-and the service-side AAB lived only in the `actions/upload-artifact` ZIP.
+Hosted CI validates code, tests, and lint without access to the private model
+payload or upload key. The release owner builds the signed AAB locally from the
+vetted model cache, validates it with bundletool, and uploads it directly to
+Play Console. GitHub Releases continue to publish the SDK pointer and code-only
+debug APK, but never an unsigned or oversized production AAB.
 
 ### 5.1 Dependency-integrity policy (F-067)
 

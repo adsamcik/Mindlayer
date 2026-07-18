@@ -502,7 +502,7 @@ class InferenceOrchestrator(
      * session shutdown) to ensure no in-flight [Conversation.sendMessageAsync]
      * calls race against teardown.
      */
-    suspend fun awaitAllJobs(timeoutMs: Long = 5_000) {
+    suspend fun awaitAllJobs(timeoutMs: Long = 5_000): Boolean {
         // ConcurrentHashMap's `values` view exposes a weakly-consistent
         // iterator whose `hasNext()` / `next()` aren't atomic under
         // concurrent `remove(...)` from completing jobs — calling
@@ -511,12 +511,14 @@ class InferenceOrchestrator(
         // bulk traversal (`forEach`) instead.
         val jobs = ArrayList<Job>(activeJobs.size)
         activeJobs.forEach { _, job -> jobs.add(job) }
-        if (jobs.isEmpty()) return
+        if (jobs.isEmpty()) return true
         try {
             withTimeout(timeoutMs) { jobs.joinAll() }
         } catch (_: TimeoutCancellationException) {
             MindlayerLog.w(TAG, "awaitAllJobs timed out; ${activeJobs.size} job(s) still active")
+            return false
         }
+        return activeJobs.isEmpty()
     }
 
     // ---- Private -----------------------------------------------------------

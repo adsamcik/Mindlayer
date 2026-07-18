@@ -194,27 +194,20 @@ jobs:
               attached by the `release-apk` job. Sideload it and push the
               models with `tools/dev-models/push-models.*`. It is debug-signed
               and intended for testing / sideloading, not Play distribution.
-            - **Signed AAB** — attached by the `release-aab` job only when the
-              model artefacts and signing secrets are provisioned in CI. This
-              is the Play Store distribution artifact. A full standalone APK
-              with the bundled models (~2.5 GB) exceeds GitHub's 2 GiB
-              release-asset cap, so it is intentionally not attached here. See
-              `docs/project/RELEASE.md` for the local signed-build flow.
+            - **Play AAB** — built and signed locally from the vetted model
+              cache, then uploaded directly to Play Console. Standard PAD makes
+              the production bundle larger than GitHub's 2 GiB release-asset
+              limit, so it is intentionally not attached here. See
+              `docs/project/RELEASE.md` for the signed-build flow.
 
   release-aab:
-    # Phase 3 #5 (p3-signed-release): attach the service-side AAB (and
-    # universal APK when bundletool is available) to the GitHub Release
-    # so end users can actually install the service the SDK talks to.
-    # Mirrors the build matrix in `ci.yml` -> `release-aab` job so the
-    # MODEL_SHA256 / PADDLEOCR_* / EMBEDDING_* + ANDROID_KEYSTORE_* secret
-    # discipline is identical.
-    # Skipped silently when the gemma .litertlm payload is not yet
-    # uploaded — the artifact-upload step in the model-publish flow
-    # gates this end of the pipeline too.
+    # Disabled: the PAD bundle exceeds GitHub's 2 GiB release-asset limit,
+    # and hosted runners do not hold the private model payload or upload key.
+    # Production AABs are built locally and uploaded directly to Play Console.
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: [ publish ]
-    if: github.ref_type == 'tag' && vars.MODEL_SHA256 != ''
+    if: ${{ false }}
     permissions:
       # Need write to upload assets to the GitHub Release that the
       # `publish` job above just created.
@@ -228,13 +221,13 @@ jobs:
         shell: bash
         run: |
           required_files=(
-            "gemma_model/src/main/assets/gemma-4-E2B-it.litertlm"
-            "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-det.tflite"
-            "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-rec.tflite"
-            "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-cls.tflite"
-            "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-dict.txt"
-            "gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.tflite"
-            "gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.spm.model"
+            ".models/gemma-4-E2B-it.litertlm"
+            ".models/paddleocr-ppocrv5-mobile-det.tflite"
+            ".models/paddleocr-ppocrv5-mobile-rec.tflite"
+            ".models/paddleocr-ppocrv5-mobile-cls.tflite"
+            ".models/paddleocr-ppocrv5-mobile-dict.txt"
+            ".models/embedding-gemma-300m-v1.tflite"
+            ".models/embedding-gemma-300m-v1.spm.model"
           )
           missing=()
           for path in "${required_files[@]}"; do
@@ -294,7 +287,7 @@ jobs:
       - name: Build release AAB
         if: steps.check-bundle.outputs.have-bundle == 'true'
         run: |
-          ./gradlew :app:bundleRelease --no-daemon \
+          ./gradlew :app:bundleRelease --no-daemon --no-configuration-cache \
             -PmodelSha256="${MODEL_SHA256}" \
             -PpaddleOcrDetSha256="${PADDLEOCR_DET_SHA256}" \
             -PpaddleOcrRecSha256="${PADDLEOCR_REC_SHA256}" \
@@ -427,4 +420,3 @@ jobs:
           # Keep the pre-release flag stable no matter which job updates the
           # release last (see "Create GitHub Release").
           prerelease: ${{ contains(github.ref_name, '-') }}
-

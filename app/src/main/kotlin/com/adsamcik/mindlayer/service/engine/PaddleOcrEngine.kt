@@ -4,11 +4,15 @@ import android.content.Context
 import com.adsamcik.mindlayer.service.logging.LogRepository
 import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.adsamcik.mindlayer.service.logging.safeLabel
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+import com.adsamcik.mindlayer.service.modeldelivery.ModelFamily
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.IOException
+import kotlinx.coroutines.CancellationException
 
 /**
  * Lifecycle states for [PaddleOcrEngine]. Mirrors
@@ -81,6 +85,40 @@ class PaddleOcrEngine(
     }
 
     /**
+     * Retry a sticky native/backend initialization failure.
+     *
+     * The reset and fresh initialization are one mutex-atomic operation. A
+     * concurrent retry that arrives after the first succeeds observes the
+     * initialized fast path instead of tearing the backend down again.
+     */
+    suspend fun retryInitialize(preferredBackend: String? = null): PaddleOcrModelInfo = mutex.withLock {
+        try {
+            ModelDeliveryFileLock.withLockSuspending(context.filesDir, ModelFamily.OCR) {
+                ModelDeliveryFileLock.requireAvailable(
+                    context.filesDir,
+                    ModelFamily.OCR,
+                    lockHeld = true,
+                )
+                if (backend.isInitialized) {
+                    _state.value = PaddleOcrEngineState.Ready
+                    return@withLockSuspending checkNotNull(backend.currentBundle)
+                }
+                try {
+                    backend.shutdown()
+                } finally {
+                    lastInitFailure = null
+                    lastInitThrowable = null
+                    _state.value = PaddleOcrEngineState.Idle
+                }
+                initializeWithDeliveryLockHeld(preferredBackend)
+            }
+        } catch (cancellation: CancellationException) {
+            _state.value = PaddleOcrEngineState.Idle
+            throw cancellation
+        }
+    }
+
+    /**
      * Recognise a single Y-plane frame.
      *
      * Lazily initialises the backend on first call. Mutex-serialised
@@ -92,6 +130,7 @@ class PaddleOcrEngine(
         height: Int,
         config: OcrEngineConfig = OcrEngineConfig(),
     ): OcrEngineOutput = mutex.withLock {
+        ModelDeliveryFileLock.requireAvailable(context.filesDir, ModelFamily.OCR)
         require(width > 0 && height > 0) {
             "width and height must be positive (got $width x $height)"
         }
@@ -102,10 +141,7 @@ class PaddleOcrEngine(
         backend.recognise(yPlane, width, height, config)
     }
 
-    /**
-     * Release native resources without invalidating cached init
-     * failure state. Subsequent calls re-init from scratch.
-     */
+    /** Release native resources and reset initialization state. */
     suspend fun unloadForMemoryPressure() = mutex.withLock {
         backend.shutdown()
         lastInitFailure = null
@@ -123,6 +159,22 @@ class PaddleOcrEngine(
     }
 
     private suspend fun initializeLocked(preferredBackend: String?): PaddleOcrModelInfo {
+        return try {
+            ModelDeliveryFileLock.withLockSuspending(context.filesDir, ModelFamily.OCR) {
+                initializeWithDeliveryLockHeld(preferredBackend)
+            }
+        } catch (cancellation: CancellationException) {
+            _state.value = PaddleOcrEngineState.Idle
+            throw cancellation
+        }
+    }
+
+    private suspend fun initializeWithDeliveryLockHeld(preferredBackend: String?): PaddleOcrModelInfo {
+        ModelDeliveryFileLock.requireAvailable(
+            context.filesDir,
+            ModelFamily.OCR,
+            lockHeld = true,
+        )
         if (backend.isInitialized) {
             _state.value = PaddleOcrEngineState.Ready
             return checkNotNull(backend.currentBundle)
@@ -132,7 +184,7 @@ class PaddleOcrEngine(
         _state.value = PaddleOcrEngineState.Initializing
         return try {
             val bundle = PaddleOcrModelRegistry.getDefaultBundle(
-                PaddleOcrModelRegistry.discoverBundles(context),
+                PaddleOcrModelRegistry.discoverBundles(context, deliveryLockHeld = true),
             ) ?: throw noPaddleOcrBundleFoundException()
             backend.initialize(bundle, preferredBackend)
             LiteRtAcceleratorResolver.latestDecision("ocr")?.let { decision ->
@@ -148,15 +200,17 @@ class PaddleOcrEngine(
             _state.value = PaddleOcrEngineState.Ready
             bundle
         } catch (t: Throwable) {
+            if (t is CancellationException) throw t
             val failure = classifyInitFailure(t)
-            // LowMemory is transient: mirror EmbeddingEngine and do not poison
-            // the process-lifetime init cache. On-disk/native failures remain sticky.
-            if (failure !is InitFailure.LowMemory) {
+            // ModelMissing and IntegrityMismatch can be remediated by a
+            // completed on-demand delivery without restarting `:ml`.
+            // Native backend errors remain sticky until an explicit unload.
+            if (failure is InitFailure.NativeError || failure is InitFailure.BackendUnavailable) {
                 lastInitFailure = failure
                 lastInitThrowable = t
             }
             _state.value = PaddleOcrEngineState.Failed(failure)
-            logRepository?.logInitFailureCategorized(failure)
+            logRepository?.logInitFailureCategorized(failure, featureName = "ocr")
             MindlayerLog.w(TAG, "PaddleOCR init failed: ${t.safeLabel()}", throwable = null)
             throw t
         }
@@ -167,6 +221,7 @@ class PaddleOcrEngine(
 
     private fun classifyInitFailure(t: Throwable): InitFailure = when (t) {
         is LowMemoryException -> InitFailure.LowMemory
+        is IOException -> InitFailure.ModelMissing
         is SecurityException -> InitFailure.IntegrityMismatch
         is IllegalStateException -> if (t.message?.contains("No PaddleOCR bundle", ignoreCase = true) == true) {
             InitFailure.ModelMissing
@@ -178,8 +233,8 @@ class PaddleOcrEngine(
 
     private fun noPaddleOcrBundleFoundException(): IllegalStateException =
         IllegalStateException(
-            "No PaddleOCR bundle files found. Install the paddleocr_model AI Pack " +
-                "or sideload PP-OCRv5 mobile artifacts to filesDir.",
+            "No PaddleOCR bundle files found. Download PaddleOCR from the Models screen " +
+                "or sideload PP-OCRv5 mobile artifacts for development.",
         )
 
     private companion object {

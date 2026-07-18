@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.lint
 
 import com.android.SdkConstants.ANDROID_URI
+import com.android.SdkConstants.TOOLS_URI
 import com.android.tools.lint.detector.api.Category
 import com.android.tools.lint.detector.api.Detector
 import com.android.tools.lint.detector.api.GradleContext
@@ -61,6 +62,13 @@ class NoNetworkTelemetryDetector : Detector(), GradleScanner, XmlScanner {
         if (!MindlayerLintPaths.isAppOrSdkMainManifest(context.file)) return
         val permissionName = element.getAttributeNS(ANDROID_URI, "name")
         if (permissionName !in BLOCKED_PERMISSIONS) return
+        if (
+            permissionName == "android.permission.ACCESS_NETWORK_STATE" &&
+            element.getAttributeNS(TOOLS_URI, "node") == "remove" &&
+            element.getAttributeNS(TOOLS_URI, "selector").isBlank()
+        ) {
+            return
+        }
 
         val nameAttribute = element.getAttributeNodeNS(ANDROID_URI, "name")
         context.report(

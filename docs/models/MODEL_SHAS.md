@@ -17,32 +17,30 @@ This file is the single source of truth that:
   `PADDLEOCR_{DET,REC,CLS,DICT}_SHA256` GitHub repository variables
   for CI builds. The committed
   `paddleocr_model/src/main/assets/paddleocr_model_integrity.json`
-  intentionally carries all-zero placeholders for security review
-  reasons — see
-  `PaddleOcrAssetPackTest.committed integrity manifest carries all-zero placeholders`.
+  carries the vetted pins and is regenerated from the selected release cache.
 
 ## Currently shipped artifacts
 
 | Artifact | Role | SHA-256 |
 |---|---|---|
-| `gemma_model/src/main/assets/gemma-4-E2B-it.litertlm` | Gemma chat (LiteRT-LM 0.12.0) | `181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c` |
-| `gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.tflite` | EmbeddingGemma weights | `d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381` |
-| `gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.spm.model` | EmbeddingGemma SentencePiece tokenizer | `d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7` |
-| `paddleocr-ppocrv5-mobile-det.tflite` *(from workflow run `26704498612`)* | PaddleOCR detection | `03a5b639ef85b30fe0b227fd06c99e23caa1772ac85081350cdb63a4fb5f252b` |
-| `paddleocr-ppocrv5-mobile-rec.tflite` *(from workflow run `26704498612`)* | PaddleOCR recognition | `374ab36289ab5a2b798bb41d8b85641e28e2cb1e65298da65e4e0c2498194d2b` |
-| `paddleocr-ppocrv5-mobile-cls.tflite` *(from workflow run `26704498612`)* | PaddleOCR orientation classifier | `76a292681fb774f5f89f6d50e1312757f6857cfaefab6953ef657040e8364093` |
-| `paddleocr-ppocrv5-mobile-dict.txt` *(from workflow run `26704498612`)* | PaddleOCR character dictionary | `e5f8ca61ba03d3a247d06b013119982fa6de2bd48a846018b67bca57ffc56de1` |
+| reconstructed from `gemma_model_part_1` + `gemma_model_part_2` | Gemma chat full-file pin (application-level split; not LiteRT-LM sharding) | `181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c` |
+| `.models/embedding-gemma-300m-v1.tflite` | EmbeddingGemma weights | `d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381` |
+| `.models/embedding-gemma-300m-v1.spm.model` | EmbeddingGemma SentencePiece tokenizer | `d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7` |
+| `.models/paddleocr-ppocrv5-mobile-det.tflite` | PaddleOCR detection | `497da16bd4559fae8ba04c699379aaf74999646ebb1f2cbc1cfcba8b5fcbd21b` |
+| `.models/paddleocr-ppocrv5-mobile-rec.tflite` | PaddleOCR recognition | `5968e0dacda329f27ae7c7820d6bfece90ddfddd907728078a6493034800fae9` |
+| `.models/paddleocr-ppocrv5-mobile-cls.tflite` | PaddleOCR orientation classifier | `5f56f02d24175cd582a2ca94c6895fd173f99d01d37c17806cc38e16392333df` |
+| `.models/paddleocr-ppocrv5-mobile-dict.txt` | PaddleOCR character dictionary | `e5f8ca61ba03d3a247d06b013119982fa6de2bd48a846018b67bca57ffc56de1` |
 
 ## Verifying your local copy
 
 ```powershell
 # PowerShell
 $shas = [ordered]@{
-  "gemma_model/src/main/assets/gemma-4-E2B-it.litertlm" =
+  ".models/gemma-4-E2B-it.litertlm" =
     "181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c"
-  "gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.tflite" =
+  ".models/embedding-gemma-300m-v1.tflite" =
     "d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381"
-  "gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.spm.model" =
+  ".models/embedding-gemma-300m-v1.spm.model" =
     "d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7"
 }
 foreach ($p in $shas.Keys) {
@@ -57,9 +55,9 @@ foreach ($p in $shas.Keys) {
 ```bash
 # bash
 declare -A SHAS=(
-  ["gemma_model/src/main/assets/gemma-4-E2B-it.litertlm"]="181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c"
-  ["gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.tflite"]="d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381"
-  ["gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.spm.model"]="d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7"
+  [".models/gemma-4-E2B-it.litertlm"]="181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c"
+  [".models/embedding-gemma-300m-v1.tflite"]="d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381"
+  [".models/embedding-gemma-300m-v1.spm.model"]="d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7"
 )
 for p in "${!SHAS[@]}"; do
   [[ -f "$p" ]] || { echo "missing: $p"; continue; }
@@ -87,9 +85,9 @@ Actions → Variables tab):
 | `MODEL_SHA256` | `181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c` |
 | `EMBEDDING_MODEL_SHA256` | `d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381` |
 | `EMBEDDING_TOKENIZER_SHA256` | `d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7` |
-| `PADDLEOCR_DET_SHA256` | `03a5b639ef85b30fe0b227fd06c99e23caa1772ac85081350cdb63a4fb5f252b` |
-| `PADDLEOCR_REC_SHA256` | `374ab36289ab5a2b798bb41d8b85641e28e2cb1e65298da65e4e0c2498194d2b` |
-| `PADDLEOCR_CLS_SHA256` | `76a292681fb774f5f89f6d50e1312757f6857cfaefab6953ef657040e8364093` |
+| `PADDLEOCR_DET_SHA256` | `497da16bd4559fae8ba04c699379aaf74999646ebb1f2cbc1cfcba8b5fcbd21b` |
+| `PADDLEOCR_REC_SHA256` | `5968e0dacda329f27ae7c7820d6bfece90ddfddd907728078a6493034800fae9` |
+| `PADDLEOCR_CLS_SHA256` | `5f56f02d24175cd582a2ca94c6895fd173f99d01d37c17806cc38e16392333df` |
 | `PADDLEOCR_DICT_SHA256` | `e5f8ca61ba03d3a247d06b013119982fa6de2bd48a846018b67bca57ffc56de1` |
 
 ## Dev-local override
@@ -103,9 +101,9 @@ PowerShell snippet):
   -PmodelSha256="181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c" \
   -PembeddingModelSha256="d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381" \
   -PembeddingTokenizerSha256="d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7" \
-  -PpaddleOcrDetSha256="03a5b639ef85b30fe0b227fd06c99e23caa1772ac85081350cdb63a4fb5f252b" \
-  -PpaddleOcrRecSha256="374ab36289ab5a2b798bb41d8b85641e28e2cb1e65298da65e4e0c2498194d2b" \
-  -PpaddleOcrClsSha256="76a292681fb774f5f89f6d50e1312757f6857cfaefab6953ef657040e8364093" \
+  -PpaddleOcrDetSha256="497da16bd4559fae8ba04c699379aaf74999646ebb1f2cbc1cfcba8b5fcbd21b" \
+  -PpaddleOcrRecSha256="5968e0dacda329f27ae7c7820d6bfece90ddfddd907728078a6493034800fae9" \
+  -PpaddleOcrClsSha256="5f56f02d24175cd582a2ca94c6895fd173f99d01d37c17806cc38e16392333df" \
   -PpaddleOcrDictSha256="e5f8ca61ba03d3a247d06b013119982fa6de2bd48a846018b67bca57ffc56de1"
 ```
 
@@ -128,4 +126,3 @@ The integrity-manifest tests in `:app:testDebugUnitTest` validate
 that the committed values match a 64-hex pattern (no length / case
 drift) but do NOT pin the SHA value itself — so step 2 above can
 land in a single commit without test churn.
-

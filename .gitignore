@@ -44,17 +44,19 @@ keystore.properties
 # Google Services
 google-services.json
 
-# Large model files — delivered via Play AI Pack, not committed
+# Large model files — delivered via on-demand PAD, not committed
 *.litertlm
+*.litertlm.part*
+gemma_part_*_integrity.json
 
 # PaddleOCR PP-OCRv5 mobile artifacts — produced at build time by the
 # .github/workflows/build-paddleocr-models.yml pipeline (paddle2onnx
-# -> onnx2tf) and delivered via Play AI Pack. Never committed. See
+# -> onnx2tf) and delivered via on-demand PAD. Never committed. See
 # paddleocr_model/src/main/assets/.gitkeep for details.
 *.tflite
 paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-*.txt
 # SentencePiece tokenizer binaries (e.g. EmbeddingGemma's .spm.model).
-# Delivered via Play AI Pack alongside the matching .tflite; same
+# Delivered via on-demand PAD alongside the matching .tflite; same
 # distribution + integrity-pinning story as the .tflite files.
 *.spm.model
 # Intermediate ONNX conversion artifacts (the workflow's transient

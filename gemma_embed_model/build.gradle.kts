@@ -1,5 +1,5 @@
 plugins {
-    id("com.android.ai-pack")
+    id("com.android.asset-pack")
 }
 
 // ── EmbeddingGemma-300M asset pack ──────────────────────────────────────
@@ -16,14 +16,14 @@ plugins {
 //
 // Live artifact bytes are deliberately not committed (see .gitignore
 // `*.tflite` + `*.spm.model`); they are delivered to devices via Play
-// Asset Delivery (install-time pack) or sideloaded via `adb push` for
+// Asset Delivery (on-demand pack) or sideloaded via `adb push` for
 // development.
 //
 // The release-build SHA-256 guard in :app:validateReleaseEmbeddingSha256
 // mirrors :validateReleaseModelSha256 / :validateReleasePaddleOcrSha256;
 // release tasks require -PembeddingModelSha256 + -PembeddingTokenizerSha256.
 
-// AI pack carries two artifacts: the model and the tokenizer. Both must
+// On-demand asset pack carries two artifacts: the model and the tokenizer. Both must
 // pass integrity verification before EmbeddingEngine accepts them.
 private val modelFileName = "embedding-gemma-300m-v1.tflite"
 private val tokenizerFileName = "embedding-gemma-300m-v1.spm.model"
@@ -156,7 +156,7 @@ val generateEmbeddingModelIntegrityManifest by tasks.registering {
 }
 
 // Copies the EmbeddingGemma weights + tokenizer from the local cache into
-// src/main/assets so the install-time AI pack can bundle them for a release,
+// src/main/assets so the on-demand asset pack can bundle them for a release,
 // keeping the binaries out of git. No-op on debug. Fail-fast on release when a
 // required file is absent from both the asset dir and the cache.
 val provisionReleaseModelAssets by tasks.registering {
@@ -202,17 +202,16 @@ tasks.configureEach {
     }
 }
 
-aiPack {
+assetPack {
     packName = "gemma_embed_model"
     dynamicDelivery {
-        deliveryType = "install-time"
+        deliveryType = "on-demand"
     }
 }
 
 
 tasks.register("assembleDebug") {
     group = "build"
-    description = "Alias for assemble so CI gates can target debug-like AI-pack builds."
+    description = "Alias for assemble so CI gates can target debug-like asset-pack builds."
     dependsOn("assemble")
 }
-

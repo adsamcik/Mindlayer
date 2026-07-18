@@ -306,6 +306,9 @@ jobs:
   validate-release-shas:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Retained as a future direct-Play-upload prerequisite, but disabled while
+    # hosted CI has no authenticated model-artifact retrieval.
+    if: ${{ false }}
     permissions:
       contents: read
     outputs:
@@ -363,10 +366,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [ build-and-test, validate-release-shas ]
-    # Skip cleanly until all seven release SHA variables and the local model
-    # payload are present. The model bundles are multi-gigabyte and gitignored,
-    # so normal main pushes report "skipped" instead of failing release packaging.
-    if: github.ref == 'refs/heads/main' && needs.validate-release-shas.outputs.release-shas-ready == 'true'
+    # Disabled until CI has authenticated retrieval for the private multi-GB
+    # model payload and direct Play upload. Production AABs are signed locally;
+    # hosted CI must never publish an unsigned or incomplete bundle.
+    if: ${{ false }}
     permissions:
       contents: read
 
@@ -382,13 +385,13 @@ jobs:
           # an upstream artefact-upload step has not run; that's the normal
           # pre-release state.
           required_files=(
-            "gemma_model/src/main/assets/gemma-4-E2B-it.litertlm"
-            "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-det.tflite"
-            "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-rec.tflite"
-            "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-cls.tflite"
-            "paddleocr_model/src/main/assets/paddleocr-ppocrv5-mobile-dict.txt"
-            "gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.tflite"
-            "gemma_embed_model/src/main/assets/embedding-gemma-300m-v1.spm.model"
+            ".models/gemma-4-E2B-it.litertlm"
+            ".models/paddleocr-ppocrv5-mobile-det.tflite"
+            ".models/paddleocr-ppocrv5-mobile-rec.tflite"
+            ".models/paddleocr-ppocrv5-mobile-cls.tflite"
+            ".models/paddleocr-ppocrv5-mobile-dict.txt"
+            ".models/embedding-gemma-300m-v1.tflite"
+            ".models/embedding-gemma-300m-v1.spm.model"
           )
           missing=()
           for path in "${required_files[@]}"; do
@@ -421,7 +424,7 @@ jobs:
       - name: Build release AAB
         if: steps.check-bundle.outputs.have-bundle == 'true'
         run: |
-          ./gradlew :app:bundleRelease --no-daemon \
+          ./gradlew :app:bundleRelease --no-daemon --no-configuration-cache \
             -PmodelSha256="${MODEL_SHA256}" \
             -PpaddleOcrDetSha256="${PADDLEOCR_DET_SHA256}" \
             -PpaddleOcrRecSha256="${PADDLEOCR_REC_SHA256}" \
@@ -464,4 +467,3 @@ jobs:
           name: release-bundle
           path: app/build/outputs/bundle/release/*.aab
           retention-days: 30
-

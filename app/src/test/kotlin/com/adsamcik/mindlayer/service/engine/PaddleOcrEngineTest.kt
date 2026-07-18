@@ -4,6 +4,16 @@ import android.content.Context
 import android.content.ContextWrapper
 import androidx.test.core.app.ApplicationProvider
 import com.adsamcik.mindlayer.service.engine.OcrFieldFusion.Confidence
+import com.adsamcik.mindlayer.service.modeldelivery.DefaultLiveModelRuntimeController
+import com.adsamcik.mindlayer.service.modeldelivery.LiveRuntimeReleaseResult
+import com.adsamcik.mindlayer.service.modeldelivery.ModelFamily
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -15,6 +25,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import java.util.concurrent.CountDownLatch
 
 /**
  * Unit tests for [PaddleOcrEngine] using a fake backend.
@@ -30,6 +41,7 @@ import java.io.File
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
+@OptIn(ExperimentalCoroutinesApi::class)
 class PaddleOcrEngineTest {
 
     private lateinit var realContext: Context
@@ -99,6 +111,22 @@ class PaddleOcrEngineTest {
         }
     }
 
+    @Test fun `missing bundle is rediscovered after on-demand materialization in same process`() = runTest {
+        filesDir.listFiles()?.forEach { it.deleteRecursively() }
+        val backend = FakePaddleOcrBackend()
+        val engine = engine(backend)
+        assertThrows(IllegalStateException::class.java) {
+            kotlinx.coroutines.runBlocking { engine.initialize() }
+        }
+        File(filesDir, "paddleocr-ppocrv5-mobile-det.tflite").writeBytes(byteArrayOf(1))
+        File(filesDir, "paddleocr-ppocrv5-mobile-rec.tflite").writeBytes(byteArrayOf(2))
+        File(filesDir, "paddleocr-ppocrv5-mobile-dict.txt").writeBytes(byteArrayOf(3))
+
+        engine.initialize()
+        assertEquals(1, backend.initCallCount)
+        assertEquals(PaddleOcrEngineState.Ready, engine.state.value)
+    }
+
 
     @Test fun lowMemoryInitFailureIsNotCachedAndRetryCanSucceed() = runTest {
         val backend = FakePaddleOcrBackend(initErrors = ArrayDeque(listOf(LowMemoryException(1, 2))))
@@ -125,6 +153,103 @@ class PaddleOcrEngineTest {
             kotlinx.coroutines.runBlocking { engine.initialize() }
         }
         assertEquals(1, backend.initCallCount)
+    }
+
+    @Test fun runtimeActivationRetriesStickyNativeFailureAndSucceeds() = runTest {
+        val backend = FakePaddleOcrBackend(
+            initErrors = ArrayDeque(listOf(IllegalStateException("native secret detail"))),
+        )
+        val engine = engine(backend)
+        val controller = DefaultLiveModelRuntimeController(
+            quiesceAction = { LiveRuntimeReleaseResult.Released },
+            retryOcrActivation = { engine.retryInitialize() },
+            recordCleanShutdownBeforeProcessExit = {},
+        )
+
+        assertThrows(IllegalStateException::class.java) {
+            kotlinx.coroutines.runBlocking { engine.initialize() }
+        }
+
+        controller.activate(ModelFamily.OCR)
+
+        assertEquals(PaddleOcrEngineState.Ready, engine.state.value)
+        assertEquals(2, backend.initCallCount)
+        assertEquals(1, backend.shutdownCallCount)
+    }
+
+    @Test fun concurrentRuntimeActivationRetriesDoNotDoubleInitializeNativeBackend() = runTest {
+        val backend = FakePaddleOcrBackend(
+            initErrors = ArrayDeque(listOf(IllegalStateException("native secret detail"))),
+        )
+        val engine = engine(backend)
+        val controller = DefaultLiveModelRuntimeController(
+            quiesceAction = { LiveRuntimeReleaseResult.Released },
+            retryOcrActivation = { engine.retryInitialize() },
+            recordCleanShutdownBeforeProcessExit = {},
+        )
+        assertThrows(IllegalStateException::class.java) {
+            kotlinx.coroutines.runBlocking { engine.initialize() }
+        }
+        val allowRetryInitialization = CompletableDeferred<Unit>()
+        val retryInitializationStarted = CompletableDeferred<Unit>()
+        backend.initializeGate = allowRetryInitialization
+        backend.initializeStarted = retryInitializationStarted
+
+        val firstRetry = async { controller.activate(ModelFamily.OCR) }
+        runCurrent()
+        retryInitializationStarted.await()
+        assertEquals(2, backend.initCallCount)
+        val secondRetry = async { controller.activate(ModelFamily.OCR) }
+        runCurrent()
+        assertEquals(2, backend.initCallCount)
+
+        allowRetryInitialization.complete(Unit)
+        firstRetry.await()
+        secondRetry.await()
+
+        assertEquals(PaddleOcrEngineState.Ready, engine.state.value)
+        assertEquals(2, backend.initCallCount)
+        assertEquals(1, backend.shutdownCallCount)
+    }
+
+    @Test fun cancelledInitializationIsNotCachedAndRetryCanSucceed() = runTest {
+        val backend = FakePaddleOcrBackend(
+            initErrors = ArrayDeque(listOf(CancellationException("cancelled"))),
+        )
+        val engine = engine(backend)
+
+        assertThrows(CancellationException::class.java) {
+            kotlinx.coroutines.runBlocking { engine.initialize() }
+        }
+        assertEquals(PaddleOcrEngineState.Idle, engine.state.value)
+
+        engine.initialize()
+        assertEquals(2, backend.initCallCount)
+        assertEquals(PaddleOcrEngineState.Ready, engine.state.value)
+    }
+
+    @Test fun cancellationWhileWaitingForModelLeaseRestoresIdle() = runTest {
+        val acquired = CompletableDeferred<Unit>()
+        val release = CountDownLatch(1)
+        val holder = async(Dispatchers.IO) {
+            com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock.withLock(
+                realContext.filesDir,
+                com.adsamcik.mindlayer.service.modeldelivery.ModelFamily.OCR,
+            ) {
+                acquired.complete(Unit)
+                release.await()
+            }
+        }
+        acquired.await()
+        val engine = engine()
+        val initialization = async { engine.initialize() }
+        runCurrent()
+
+        initialization.cancelAndJoin()
+
+        assertEquals(PaddleOcrEngineState.Idle, engine.state.value)
+        release.countDown()
+        holder.await()
     }
 
     // ── recognise() ──────────────────────────────────────────────────────
@@ -193,6 +318,30 @@ class PaddleOcrEngineTest {
         assertEquals(1, backend.shutdownCallCount)
     }
 
+    @Test fun `initialized fast path rejects OCR while removal is authoritative`() = runTest {
+        val backend = FakePaddleOcrBackend()
+        val engine = engine(backend)
+        engine.recognise(ByteArray(64 * 64), 64, 64)
+        val family = com.adsamcik.mindlayer.service.modeldelivery.ModelFamily.OCR
+        com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryIntentStore(realContext.filesDir)
+            .recordRemoval(family)
+        val pending = com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+            .pendingRemovalMarker(realContext.filesDir, family)
+        val tombstone = com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryFileLock
+            .removalTombstone(realContext.filesDir, family)
+        assertTrue(pending.delete())
+        assertTrue(tombstone.delete())
+
+        val result = runCatching {
+            engine.recognise(ByteArray(64 * 64), 64, 64)
+        }
+
+        assertTrue(result.exceptionOrNull() is IllegalStateException)
+        assertTrue(!pending.exists())
+        assertTrue(!tombstone.exists())
+        assertEquals(1, backend.recogniseCallCount)
+    }
+
     // ── Backend factory + dependency injection ───────────────────────────
 
     @Test fun `default backendFactory produces LiteRtPaddleOcrBackend`() {
@@ -226,10 +375,14 @@ internal class FakePaddleOcrBackend(
         private set
     var recogniseCallCount: Int = 0
         private set
+    var initializeGate: CompletableDeferred<Unit>? = null
+    var initializeStarted: CompletableDeferred<Unit>? = null
 
     override suspend fun initialize(bundle: PaddleOcrModelInfo, preferredBackend: String?) {
         initCallCount++
         initErrors.removeFirstOrNull()?.let { throw it }
+        initializeStarted?.complete(Unit)
+        initializeGate?.await()
         currentBundle = bundle
         isInitialized = true
         activeBackend = preferredBackend ?: "GPU"

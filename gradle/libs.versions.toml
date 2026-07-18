@@ -25,6 +25,7 @@ navigationCompose = "2.9.8"
 sqlcipher = "4.15.0"
 biometric = "1.4.0-alpha07"
 zxing = "3.5.4"
+playAssetDelivery = "2.3.0"
 # OCR engine benchmark — Tesseract4Android (Apache 2.0). Used by
 # `OcrEngineBenchmarkInstrumentedTest` only (androidTestImplementation).
 # NOT shipped in any production artifact. See settings.gradle.kts repo block.
@@ -60,6 +61,7 @@ sqlcipher-android = { module = "net.zetetic:sqlcipher-android", version.ref = "s
 androidx-biometric = { module = "androidx.biometric:biometric", version.ref = "biometric" }
 androidx-biometric-compose = { module = "androidx.biometric:biometric-compose", version.ref = "biometric" }
 zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
+play-asset-delivery = { module = "com.google.android.play:asset-delivery", version.ref = "playAssetDelivery" }
 # Testing
 junit = { module = "junit:junit", version.ref = "junit" }
 mockk = { module = "io.mockk:mockk", version.ref = "mockk" }

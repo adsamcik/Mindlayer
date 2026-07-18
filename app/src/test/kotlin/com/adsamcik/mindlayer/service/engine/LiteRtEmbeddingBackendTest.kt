@@ -5,6 +5,10 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -17,6 +21,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import java.util.concurrent.CountDownLatch
 import kotlin.math.sqrt
 
 @RunWith(RobolectricTestRunner::class)
@@ -300,6 +305,33 @@ class LiteRtEmbeddingBackendTest {
         assertTrue(ex is IllegalStateException)
         assertFalse(backend.isInitialized)
         assertEquals(null, backend.currentModel)
+        assertEquals("NONE", backend.activeBackend)
+    }
+
+    @Test
+    fun `cancellation after runner creation closes pending runner`() = runTest {
+        val runner = mockk<LiteRtRunner>(relaxed = true)
+        val created = CompletableDeferred<Unit>()
+        val release = CountDownLatch(1)
+        val backend = LiteRtEmbeddingBackend.forTesting(
+            context = context,
+            runnerFactory = { _, _ ->
+                created.complete(Unit)
+                release.await()
+                runner
+            },
+        )
+        val initialization = async(Dispatchers.Default) {
+            backend.initialize(model, preferredBackend = "CPU")
+        }
+        created.await()
+
+        initialization.cancel()
+        release.countDown()
+        initialization.cancelAndJoin()
+
+        verify(exactly = 1) { runner.close() }
+        assertFalse(backend.isInitialized)
         assertEquals("NONE", backend.activeBackend)
     }
 

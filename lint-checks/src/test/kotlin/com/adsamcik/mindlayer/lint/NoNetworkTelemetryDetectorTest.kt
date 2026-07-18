@@ -60,6 +60,54 @@ class NoNetworkTelemetryDetectorTest {
     }
 
     @Test
+    fun `allows only removal of transitive PAD network-state permission`() {
+        lint()
+            .projects(
+                ProjectDescription().name("app").files(
+                    manifest(
+                        """
+                            <manifest
+                                xmlns:android="http://schemas.android.com/apk/res/android"
+                                xmlns:tools="http://schemas.android.com/tools">
+                                <uses-permission
+                                    android:name="android.permission.ACCESS_NETWORK_STATE"
+                                    tools:node="remove" />
+                            </manifest>
+                        """.trimIndent(),
+                    ),
+                ),
+            )
+            .issues(NoNetworkTelemetryDetector.ISSUE)
+            .run()
+            .expectClean()
+    }
+
+    @Test
+    fun `rejects selector-scoped network-state permission removal`() {
+        lint()
+            .projects(
+                ProjectDescription().name("app").files(
+                    manifest(
+                        """
+                            <manifest
+                                xmlns:android="http://schemas.android.com/apk/res/android"
+                                xmlns:tools="http://schemas.android.com/tools">
+                                <uses-permission
+                                    android:name="android.permission.ACCESS_NETWORK_STATE"
+                                    tools:node="remove"
+                                    tools:selector="com.example.library" />
+                            </manifest>
+                        """.trimIndent(),
+                    ),
+                ),
+            )
+            .issues(NoNetworkTelemetryDetector.ISSUE)
+            .run()
+            .expectContains("MindlayerNoNetworkTelemetry")
+            .expectContains("android.permission.ACCESS_NETWORK_STATE")
+    }
+
+    @Test
     fun `allows current offline dependencies and signature permission`() {
         lint()
             .projects(
