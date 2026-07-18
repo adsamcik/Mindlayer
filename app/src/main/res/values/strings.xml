@@ -316,67 +316,163 @@
 
     <!-- Models page -->
     <string name="models_title">Models</string>
-    <string name="models_offline_banner">Google Play performs a one-time model download. Inference stays on-device and Mindlayer has no network permission.</string>
+    <string name="models_offline_banner">AI requests stay on this device. Model files are delivered by Google Play and require connectivity for the initial download.</string>
     <string name="models_role_chat">Chat &amp; vision</string>
-    <string name="models_role_chat_description">Generates text replies and describes images. Used by the SDK\'s infer and ocrAsync (extraction) paths.</string>
+    <string name="models_role_chat_description">Generates text replies and describes images for inference and structured extraction.</string>
     <string name="models_role_embeddings">Embeddings</string>
-    <string name="models_role_embeddings_description">Turns text into vectors for semantic search. Used by the SDK\'s embed path.</string>
+    <string name="models_role_embeddings_description">Turns text into vectors for on-device semantic search.</string>
     <string name="models_role_ocr">OCR</string>
-    <string name="models_role_ocr_description">Recognizes text in images. Used by the SDK\'s ocrAsync path before any LLM extraction.</string>
-    <string name="models_state_loaded">Loaded</string>
-    <string name="models_state_ready">Ready</string>
-    <string name="models_state_starting">Starting</string>
-    <string name="models_state_idle">Not loaded</string>
-    <string name="models_state_unknown">Not yet exercised</string>
-    <string name="models_state_failed">Init failed</string>
-    <string name="models_state_unknown_hint">Run this engine\'s test on the Tests tab to load it.</string>
-    <string name="models_pack_label">Source</string>
-    <string name="models_backend_label">Backend</string>
-    <string name="models_evidence_last_known_service">Runtime details are last known. Refresh service status for current readiness.</string>
-    <string name="models_evidence_service_status_unavailable">No runtime status sample is available yet. Refresh service status for current readiness.</string>
-    <string name="models_init_time_label">Init time</string>
-    <string name="models_pack_chat" translatable="false">On-demand PAD: gemma_model_part_1 + part_2</string>
-    <string name="models_pack_embeddings" translatable="false">On-demand PAD: gemma_embed_model</string>
-    <string name="models_pack_ocr" translatable="false">On-demand PAD: paddleocr_model</string>
-    <string name="models_chat_display_name" translatable="false">Gemma 4 E2B (multimodal)</string>
-    <string name="models_embeddings_display_name" translatable="false">EmbeddingGemma</string>
-    <string name="models_ocr_display_name" translatable="false">PaddleOCR PP-OCRv5 mobile</string>
+    <string name="models_role_ocr_description">Recognizes text in images before optional model-based extraction.</string>
+
     <string name="models_refresh_action">Refresh delivery</string>
+    <string name="models_refreshing_action">Refreshing delivery…</string>
+    <string name="models_delivery_checked">Delivery checked %1$s</string>
+    <string name="models_delivery_not_checked">Delivery has not been checked yet</string>
+    <string name="models_refresh_warning_title">Couldn’t refresh delivery status</string>
+    <string name="models_refresh_failed_detail">Last-known delivery states remain visible. Runtime status continues updating automatically.</string>
+    <string name="models_try_again_action">Try delivery refresh again</string>
+
+    <string name="models_overview_title">Model availability</string>
+    <plurals name="models_overview_attention">
+        <item quantity="one">%1$d model set needs attention</item>
+        <item quantity="other">%1$d model sets need attention</item>
+    </plurals>
+    <plurals name="models_overview_activity">
+        <item quantity="one">Model activity is in progress for %1$d model set</item>
+        <item quantity="other">Model activity is in progress for %1$d model sets</item>
+    </plurals>
+    <plurals name="models_overview_downloaded_count">
+        <item quantity="one">%1$d model set downloaded out of %2$d</item>
+        <item quantity="other">%1$d model sets downloaded out of %2$d</item>
+    </plurals>
+    <plurals name="models_overview_all_available">
+        <item quantity="one">%1$d model set is downloaded and available</item>
+        <item quantity="other">All %1$d model sets are downloaded and available</item>
+    </plurals>
+
+    <string name="models_readiness_checking">Checking</string>
+    <string name="models_readiness_download_required">Download needed</string>
+    <string name="models_readiness_waiting">Waiting</string>
+    <string name="models_readiness_downloading">Downloading</string>
+    <string name="models_readiness_preparing">Preparing</string>
+    <string name="models_readiness_downloaded">Downloaded</string>
+    <string name="models_readiness_starting">Starting</string>
+    <string name="models_readiness_verifying">Verifying</string>
+    <string name="models_readiness_ready">Ready</string>
+    <string name="models_readiness_needs_attention">Needs attention</string>
+    <string name="models_readiness_removing">Removing</string>
+    <string name="models_readiness_unavailable">Unavailable</string>
+
+    <string name="models_status_checking_headline">Checking model status</string>
+    <string name="models_status_checking_detail">Checking Google Play delivery and the files already on this device.</string>
+    <string name="models_status_download_required_headline">Download required</string>
+    <string name="models_status_download_required_detail">Google Play downloads these files once. After download and verification, this model can be used offline.</string>
+    <string name="models_status_pending_headline">Waiting to start download</string>
+    <string name="models_status_pending_detail">The request is queued with Google Play.</string>
+    <string name="models_status_waiting_wifi_headline">Waiting for Wi-Fi</string>
+    <string name="models_status_waiting_wifi_detail">Connect to Wi-Fi to continue. Google Play may offer a mobile data confirmation.</string>
+    <string name="models_status_confirmation_headline">Download confirmation needed</string>
+    <string name="models_status_confirmation_detail">Review the Google Play prompt to continue the download.</string>
+    <string name="models_status_confirmation_unavailable_headline">Couldn’t open download confirmation</string>
+    <string name="models_status_confirmation_unavailable_detail">Try opening the Google Play confirmation again.</string>
+    <string name="models_status_downloading_headline">Downloading model files</string>
+    <string name="models_status_downloading_detail">Google Play is delivering the model files to this device.</string>
+    <string name="models_status_transferring_headline">Installing model files</string>
+    <string name="models_status_transferring_detail">Google Play is installing the downloaded files.</string>
+    <string name="models_status_provisioning_headline">Preparing and verifying model files</string>
+    <string name="models_status_provisioning_chat_detail">Combining the two downloaded parts and checking them can take several minutes.</string>
+    <string name="models_status_provisioning_detail">Mindlayer is checking the downloaded files before first use.</string>
+    <string name="models_status_activating_headline">Starting OCR</string>
+    <string name="models_status_activating_detail">OCR startup may take about 15 seconds.</string>
+    <string name="models_status_downloaded_idle_headline">Downloaded — starts when needed</string>
+    <string name="models_status_downloaded_idle_chat_detail">Chat and vision start automatically on the first request; the first startup may take about 15 seconds.</string>
+    <string name="models_status_downloaded_idle_embeddings_detail">Embeddings start automatically when requested.</string>
+    <string name="models_status_downloaded_idle_ocr_detail">OCR starts automatically when requested; startup time varies by device.</string>
+    <string name="models_status_starting_headline">Starting model</string>
+    <string name="models_status_starting_chat_detail">Chat startup may take about 15 seconds.</string>
+    <string name="models_status_verification_running_headline">Verifying downloaded model</string>
+    <string name="models_status_verification_running_detail">Downloaded model verification is running from Tests. This does not mean the model is currently loaded for service use.</string>
+    <string name="models_status_ready_headline">Ready to use</string>
+    <string name="models_status_ready_detail">Chat and vision are loaded in the live service.</string>
+    <string name="models_status_storage_headline">Free storage to continue</string>
+    <string name="models_status_storage_detail">%1$s is required and %2$s is available. Free storage, then try the download again.</string>
+    <string name="models_status_download_failed_headline">Download failed</string>
+    <string name="models_status_download_failed_detail">Google Play could not deliver the model. Try the download again.</string>
+    <string name="models_status_verification_failed_headline">Model files couldn’t be verified</string>
+    <string name="models_status_verification_failed_detail">Try the download again. Mindlayer will replace and prepare the model files.</string>
+    <string name="models_status_activation_failed_headline">OCR couldn’t start</string>
+    <string name="models_status_activation_failed_detail">The OCR files remain downloaded. Retry activation, or remove the files and download them again.</string>
+    <string name="models_status_removal_interrupted_headline">Removal needs to finish</string>
+    <string name="models_status_removal_interrupted_detail">Active use was stopped, but file removal did not finish. Finish removing the files.</string>
+    <string name="models_status_removal_failed_headline">Removal failed</string>
+    <string name="models_status_removal_failed_detail">Mindlayer could not remove all model files. Retry removal.</string>
+    <string name="models_status_runtime_failed_headline">Model couldn’t start</string>
+    <string name="models_status_runtime_failed_detail">The live service reported a startup failure. Retry from the Tests tab or reinstall the model files.</string>
+    <string name="models_status_runtime_verification_failed_headline">Downloaded — verification needs attention</string>
+    <string name="models_status_runtime_verification_failed_detail">The model files remain downloaded. Run verification again from Tests.</string>
+    <string name="models_status_attention_headline">Model needs attention</string>
+    <string name="models_status_attention_detail">Review the runtime and delivery information below, then retry the available action.</string>
+    <string name="models_status_quiescing_headline">Waiting for active use to stop</string>
+    <string name="models_status_quiescing_detail">Mindlayer is safely draining active work before deleting model files.</string>
+    <string name="models_status_removing_headline">Removing model files</string>
+    <string name="models_status_removing_detail">Deletion may take a moment. The model can be downloaded again later.</string>
+    <string name="models_status_unavailable_headline">Google Play delivery unavailable</string>
+    <string name="models_status_unavailable_detail">This install cannot use Google Play model delivery. Install Mindlayer through a supported Google Play distribution.</string>
+    <string name="models_delivery_progress_known">%1$s of %2$s (%3$d%%)</string>
+    <string name="models_delivery_progress_unknown">%1$s downloaded; total size is not available yet</string>
+    <string name="models_a11y_phase_status">%1$s status: %2$s</string>
+    <string name="models_a11y_runtime_status">%1$s: %2$s</string>
+
     <string name="models_download_action">Download</string>
-    <string name="models_retry_action">Retry download</string>
+    <string name="models_try_download_again_action">Try download again</string>
     <string name="models_retry_activation_action">Retry activation</string>
+    <string name="models_finish_remove_action">Finish removal</string>
     <string name="models_retry_remove_action">Retry removal</string>
-    <string name="models_confirm_action">Confirm download</string>
+    <string name="models_review_confirmation_action">Review confirmation</string>
+    <string name="models_retry_confirmation_action">Retry confirmation</string>
     <string name="models_remove_action">Remove</string>
     <string name="models_cancel_action">Cancel</string>
     <string name="models_remove_confirm_title">Remove model files?</string>
-    <string name="models_remove_confirm_message">Remove %1$s from this device? An already loaded engine can remain active until the service unloads or restarts.</string>
-    <string name="models_delivery_checking">Checking delivery</string>
-    <string name="models_delivery_not_installed">Not downloaded</string>
-    <string name="models_delivery_pending">Download queued</string>
-    <string name="models_delivery_downloading">Downloading from Google Play</string>
-    <string name="models_delivery_transferring">Installing download</string>
-    <string name="models_delivery_waiting_wifi">Waiting for Wi-Fi</string>
-    <string name="models_delivery_confirmation">Download confirmation required</string>
-    <string name="models_delivery_provisioning">Verifying model files</string>
-    <string name="models_delivery_installed">Downloaded and verified</string>
-    <string name="models_delivery_activating">Starting OCR runtime</string>
-    <string name="models_delivery_removing">Removing model files</string>
-    <string name="models_delivery_failed">Download failed</string>
-    <string name="models_delivery_removal_failed">Removal failed</string>
-    <string name="models_delivery_unsupported">Google Play delivery unavailable</string>
-    <string name="models_delivery_progress">%1$d MB of %2$d MB (%3$d%%)</string>
-    <string name="models_activation_failed_message">Runtime activation failed. The OCR model remains downloaded; retry activation or restart Mindlayer.</string>
-    <string name="models_issue_insufficient_storage">Insufficient storage: %1$d MB required, %2$d MB available.</string>
-    <string name="models_issue_play_delivery_failed">Google Play could not deliver this model. Retry the download.</string>
-    <string name="models_issue_verification_failed">Model verification failed. Retry the download.</string>
-    <string name="models_issue_removal_interrupted">Model removal was interrupted. Retry removal.</string>
-    <string name="models_issue_removal_failed">Model removal failed. Retry removal.</string>
-    <string name="models_issue_refresh_failed">Delivery refresh failed. Last-known model states are still shown.</string>
-    <string name="models_issue_confirmation_unavailable">Google Play could not open the required confirmation. Retry confirmation.</string>
-    <string name="models_issue_runtime_initialization_failed">Runtime initialization failed. Review delivery state and retry.</string>
-    <string name="models_issue_runtime_verification_failed">The last dashboard verification failed.</string>
-    <string name="models_loaded_separate_hint">Runtime load status is shown separately above.</string>
+    <string name="models_remove_confirm_message">Remove %1$s from this device? Mindlayer will stop or drain active use before deleting the files. Deletion may take a moment, and the model can be downloaded again later.</string>
+
+    <string name="models_runtime_section_title">Runtime &amp; verification</string>
+    <string name="models_runtime_live_ready_headline">Current runtime: Ready</string>
+    <string name="models_runtime_live_ready_detail">The live service reports that this model is loaded.</string>
+    <string name="models_runtime_live_idle_headline">Current runtime: Not loaded</string>
+    <string name="models_runtime_live_idle_detail">The live service does not currently have this model loaded.</string>
+    <string name="models_runtime_live_starting_headline">Current runtime: Starting</string>
+    <string name="models_runtime_live_starting_detail">The live service is starting this model.</string>
+    <string name="models_runtime_live_failed_headline">Current runtime: Failed</string>
+    <string name="models_runtime_live_failed_detail">The live service reports a startup failure. Use the available action below or retry from Tests.</string>
+    <string name="models_runtime_last_known_ready_headline">Last known runtime: Ready</string>
+    <string name="models_runtime_last_known_idle_headline">Last known runtime: Not loaded</string>
+    <string name="models_runtime_last_known_failed_headline">Last known runtime: Failed</string>
+    <string name="models_runtime_last_known_detail">Sampled %1$s. This is historical service evidence, not current readiness. Runtime status updates automatically when a fresh service sample arrives.</string>
+    <string name="models_runtime_unavailable_headline">Runtime status unavailable</string>
+    <string name="models_runtime_unavailable_detail">No service sample has been received. Runtime status updates automatically when a fresh service sample arrives.</string>
+    <string name="models_runtime_verification_running_headline">Verification in progress</string>
+    <string name="models_runtime_verification_running_detail">The Tests tab is exercising this model now. This does not mean it is currently loaded for service use.</string>
+    <string name="models_runtime_verification_passed_headline">Last verification passed</string>
+    <string name="models_runtime_verification_passed_detail">Completed %1$s. This is historical test evidence; it does not mean the model is currently loaded.</string>
+    <string name="models_runtime_verification_failed_headline">Last verification failed</string>
+    <string name="models_runtime_verification_failed_detail">Completed %1$s. Run this model’s verification again on the Tests tab.</string>
+    <string name="models_runtime_verification_not_run_headline">Last verification not run</string>
+    <string name="models_runtime_verification_not_run_detail">Run this model’s verification on the Tests tab. Verification results do not indicate current runtime loading.</string>
+    <string name="models_time_unknown">at an unknown time</string>
+
+    <string name="models_show_technical_details">Show technical details</string>
+    <string name="models_hide_technical_details">Hide technical details</string>
+    <string name="models_source_label">Source</string>
+    <string name="models_source_google_play">Google Play on-demand model delivery</string>
+    <string name="models_pack_names_label">Model pack names</string>
+    <string name="models_backend_label">Backend</string>
+    <string name="models_init_time_label">Initialization time</string>
+    <string name="models_last_verification_label">Last verification</string>
+    <string name="models_verification_not_run">Not run</string>
+
+    <string name="models_chat_display_name" translatable="false">Gemma 4 E2B (multimodal)</string>
+    <string name="models_embeddings_display_name" translatable="false">EmbeddingGemma</string>
+    <string name="models_ocr_display_name" translatable="false">PaddleOCR PP-OCRv5 mobile</string>
 
     <!-- Calm-IDLE first-time hint shown on the Status page when no engine
          test has ever been run. Replaces the use-site of

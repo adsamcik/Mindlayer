@@ -40,7 +40,7 @@ class DashboardUiStateTest {
     }
 
     @Test
-    fun `stale status keeps chat metadata as last known without claiming ready`() {
+    fun `stale status keeps sampled ready state as last known without claiming current readiness`() {
         val nowMs = 20_000L
         val chat = DashboardUiState(
             connectionState = DashboardConnectionState.CONNECTED,
@@ -55,10 +55,49 @@ class DashboardUiStateTest {
         ).modelSummaries(nowMs).single { it.role == ModelRole.CHAT_AND_VISION }
 
         assertEquals(ModelRuntimeEvidence.LAST_KNOWN_SERVICE, chat.evidence)
-        assertEquals(ModelLoadState.IDLE, chat.state)
+        assertEquals(ModelLoadState.READY, chat.state)
         assertEquals(ModelReadiness.DOWNLOADED_IDLE, chat.readiness)
         assertEquals("GPU", chat.backend)
         assertEquals("gemma", chat.modelDisplayName)
+        assertEquals(nowMs - 7_000L, chat.lastRuntimeStatusAtMs)
+    }
+
+    @Test
+    fun `stale status preserves sampled chat idle and failure states`() {
+        val nowMs = 20_000L
+        val idle = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 7_000L,
+            isEngineLoaded = false,
+            modelDelivery = mapOf(
+                ModelRole.CHAT_AND_VISION to ModelDeliveryState.Installed,
+            ),
+        ).modelSummaries(nowMs).single { it.role == ModelRole.CHAT_AND_VISION }
+        val failed = DashboardUiState(
+            connectionState = DashboardConnectionState.DISCONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000L,
+            isEngineLoaded = false,
+            lastInitFailure = InitFailure.ModelMissing,
+            modelDelivery = mapOf(
+                ModelRole.CHAT_AND_VISION to ModelDeliveryState.Installed,
+            ),
+        ).modelSummaries(nowMs).single { it.role == ModelRole.CHAT_AND_VISION }
+
+        assertEquals(ModelRuntimeEvidence.LAST_KNOWN_SERVICE, idle.evidence)
+        assertEquals(ModelLoadState.IDLE, idle.state)
+        assertEquals(ModelReadiness.DOWNLOADED_IDLE, idle.readiness)
+        assertEquals(nowMs - 7_000L, idle.lastRuntimeStatusAtMs)
+
+        assertEquals(ModelRuntimeEvidence.LAST_KNOWN_SERVICE, failed.evidence)
+        assertEquals(ModelLoadState.FAILED, failed.state)
+        assertEquals(ModelReadiness.DOWNLOADED_IDLE, failed.readiness)
+        assertEquals(
+            ModelRuntimeIssue.InitializationFailed(InitFailure.ModelMissing),
+            failed.runtimeIssue,
+        )
+        assertEquals(nowMs - 1_000L, failed.lastRuntimeStatusAtMs)
     }
 
     @Test

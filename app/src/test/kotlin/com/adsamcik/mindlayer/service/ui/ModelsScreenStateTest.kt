@@ -57,6 +57,27 @@ class ModelsScreenStateTest {
     }
 
     @Test
+    fun `fresh chat sample requires an active backend before claiming ready`() {
+        val nowMs = 20_000L
+        val chat = DashboardUiState(
+            connectionState = DashboardConnectionState.CONNECTED,
+            isStatusLoading = false,
+            lastStatusUpdateMs = nowMs - 1_000L,
+            isEngineLoaded = true,
+            backend = "NONE",
+            modelId = "gemma",
+            modelDelivery = mapOf(
+                ModelRole.CHAT_AND_VISION to ModelDeliveryState.Installed,
+            ),
+        ).modelSummaries(nowMs).single { it.role == ModelRole.CHAT_AND_VISION }
+
+        assertEquals(ModelRuntimeEvidence.LIVE_SERVICE, chat.evidence)
+        assertEquals(ModelLoadState.IDLE, chat.state)
+        assertEquals(ModelReadiness.DOWNLOADED_IDLE, chat.readiness)
+        assertNull(chat.backend)
+    }
+
+    @Test
     fun `chat role exposes typed init failure without user-facing failure copy`() {
         val nowMs = 20_000L
         val state = DashboardUiState(
@@ -81,7 +102,7 @@ class ModelsScreenStateTest {
     }
 
     @Test
-    fun `chat role never treats unavailable or stale status as live ready evidence`() {
+    fun `chat role never treats unavailable or stale status as current ready evidence`() {
         val nowMs = 20_000L
         val cases = listOf(
             DashboardUiState(
@@ -127,12 +148,19 @@ class ModelsScreenStateTest {
             ).modelSummaries(nowMs).single { it.role == ModelRole.CHAT_AND_VISION }
 
             assertEquals(expectedEvidence, chat.evidence)
-            assertEquals(ModelLoadState.IDLE.takeIf {
-                expectedEvidence == ModelRuntimeEvidence.LAST_KNOWN_SERVICE
-            } ?: ModelLoadState.NOT_VERIFIED, chat.state)
+            assertEquals(
+                ModelLoadState.READY.takeIf {
+                    expectedEvidence == ModelRuntimeEvidence.LAST_KNOWN_SERVICE
+                } ?: ModelLoadState.NOT_VERIFIED,
+                chat.state,
+            )
             assertEquals(ModelReadiness.DOWNLOADED_IDLE, chat.readiness)
             assertEquals("GPU", chat.backend)
             assertEquals("gemma", chat.modelDisplayName)
+            assertEquals(
+                baseState.lastStatusUpdateMs,
+                chat.lastRuntimeStatusAtMs,
+            )
         }
     }
 
@@ -312,4 +340,308 @@ class ModelsScreenStateTest {
         assertEquals(0, ModelDeliveryState.Downloading(25L, 0L).progressPercent)
         assertEquals(25, ModelDeliveryState.Downloading(25L, 100L).progressPercent)
     }
+
+    @Test
+    fun `overview prioritizes attention then model activity then downloaded count`() {
+        val attention = modelOverview(
+            listOf(
+                summary(
+                    deliveryState = ModelDeliveryState.Failed(ModelDeliveryIssue.PlayDeliveryFailed),
+                    readiness = ModelReadiness.NEEDS_ATTENTION,
+                ),
+                summary(
+                    role = ModelRole.EMBEDDINGS,
+                    deliveryState = ModelDeliveryState.Downloading(20L, 100L),
+                    readiness = ModelReadiness.DOWNLOADING,
+                ),
+                summary(
+                    role = ModelRole.OCR,
+                    deliveryState = ModelDeliveryState.Installed,
+                    readiness = ModelReadiness.DOWNLOADED_IDLE,
+                ),
+            ),
+        )
+        assertEquals(ModelOverviewKind.NEEDS_ATTENTION, attention.kind)
+        assertEquals(1, attention.affectedCount)
+
+        val progress = modelOverview(
+            listOf(
+                summary(
+                    deliveryState = ModelDeliveryState.Downloading(20L, 100L),
+                    readiness = ModelReadiness.DOWNLOADING,
+                ),
+                summary(
+                    role = ModelRole.EMBEDDINGS,
+                    deliveryState = ModelDeliveryState.Installed,
+                    readiness = ModelReadiness.DOWNLOADED_IDLE,
+                ),
+                summary(
+                    role = ModelRole.OCR,
+                    deliveryState = ModelDeliveryState.NotInstalled,
+                    readiness = ModelReadiness.DOWNLOAD_REQUIRED,
+                ),
+            ),
+        )
+        assertEquals(ModelOverviewKind.ACTIVITY_IN_PROGRESS, progress.kind)
+        assertEquals(1, progress.affectedCount)
+
+        val partial = modelOverview(
+            listOf(
+                summary(
+                    deliveryState = ModelDeliveryState.Installed,
+                    readiness = ModelReadiness.DOWNLOADED_IDLE,
+                ),
+                summary(
+                    role = ModelRole.EMBEDDINGS,
+                    deliveryState = ModelDeliveryState.NotInstalled,
+                    readiness = ModelReadiness.DOWNLOAD_REQUIRED,
+                ),
+                summary(
+                    role = ModelRole.OCR,
+                    deliveryState = ModelDeliveryState.NotInstalled,
+                    readiness = ModelReadiness.DOWNLOAD_REQUIRED,
+                ),
+            ),
+        )
+        assertEquals(ModelOverviewKind.DOWNLOADED_COUNT, partial.kind)
+        assertEquals(1, partial.downloadedCount)
+        assertEquals(3, partial.totalCount)
+
+        val available = modelOverview(
+            ModelRole.entries.map { role ->
+                summary(
+                    role = role,
+                    deliveryState = ModelDeliveryState.Installed,
+                    readiness = ModelReadiness.DOWNLOADED_IDLE,
+                )
+            },
+        )
+        assertEquals(ModelOverviewKind.ALL_AVAILABLE, available.kind)
+        assertEquals(3, available.downloadedCount)
+    }
+
+    @Test
+    fun `readiness maps to stable semantic tones`() {
+        val cases = mapOf(
+            ModelReadiness.CHECKING to DashboardMessageTone.INFO,
+            ModelReadiness.DOWNLOAD_REQUIRED to DashboardMessageTone.INFO,
+            ModelReadiness.WAITING to DashboardMessageTone.WARNING,
+            ModelReadiness.DOWNLOADING to DashboardMessageTone.INFO,
+            ModelReadiness.PREPARING to DashboardMessageTone.INFO,
+            ModelReadiness.DOWNLOADED_IDLE to DashboardMessageTone.SUCCESS,
+            ModelReadiness.STARTING to DashboardMessageTone.INFO,
+            ModelReadiness.READY to DashboardMessageTone.SUCCESS,
+            ModelReadiness.NEEDS_ATTENTION to DashboardMessageTone.ERROR,
+            ModelReadiness.REMOVING to DashboardMessageTone.INFO,
+            ModelReadiness.UNAVAILABLE to DashboardMessageTone.WARNING,
+        )
+
+        cases.forEach { (readiness, expectedTone) ->
+            assertEquals("readiness=$readiness", expectedTone, modelReadinessTone(readiness))
+        }
+    }
+
+    @Test
+    fun `download progress is determinate only when total bytes are known`() {
+        assertEquals(
+            ModelProgressPresentation(ModelProgressKind.DETERMINATE, 0.25f),
+            modelProgressPresentation(
+                summary(
+                    deliveryState = ModelDeliveryState.Downloading(25L, 100L),
+                    readiness = ModelReadiness.DOWNLOADING,
+                ),
+            ),
+        )
+        assertEquals(
+            ModelProgressPresentation(ModelProgressKind.INDETERMINATE),
+            modelProgressPresentation(
+                summary(
+                    deliveryState = ModelDeliveryState.Downloading(25L, 0L),
+                    readiness = ModelReadiness.DOWNLOADING,
+                ),
+            ),
+        )
+        assertEquals(
+            ModelProgressPresentation(ModelProgressKind.INDETERMINATE),
+            modelProgressPresentation(
+                summary(
+                    deliveryState = ModelDeliveryState.Installed,
+                    state = ModelLoadState.STARTING,
+                    readiness = ModelReadiness.STARTING,
+                ),
+            ),
+        )
+        assertEquals(
+            ModelProgressPresentation(ModelProgressKind.INDETERMINATE),
+            modelProgressPresentation(
+                summary(
+                    deliveryState = ModelDeliveryState.Pending,
+                    readiness = ModelReadiness.WAITING,
+                ),
+            ),
+        )
+        assertEquals(
+            ModelProgressPresentation(ModelProgressKind.NONE),
+            modelProgressPresentation(
+                summary(
+                    deliveryState = ModelDeliveryState.WaitingForWifi,
+                    readiness = ModelReadiness.WAITING,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `delivery phases select specific presentations`() {
+        val cases = listOf(
+            summary(
+                deliveryState = ModelDeliveryState.Pending,
+                readiness = ModelReadiness.WAITING,
+            ) to ModelPhasePresentation.PENDING,
+            summary(
+                deliveryState = ModelDeliveryState.WaitingForWifi,
+                readiness = ModelReadiness.WAITING,
+            ) to ModelPhasePresentation.WAITING_FOR_WIFI,
+            summary(
+                deliveryState = ModelDeliveryState.RequiresConfirmation,
+                readiness = ModelReadiness.WAITING,
+            ) to ModelPhasePresentation.CONFIRMATION_REQUIRED,
+            summary(
+                deliveryState = ModelDeliveryState.Failed(ModelDeliveryIssue.ConfirmationUnavailable),
+                readiness = ModelReadiness.NEEDS_ATTENTION,
+            ) to ModelPhasePresentation.CONFIRMATION_UNAVAILABLE,
+            summary(
+                deliveryState = ModelDeliveryState.Transferring,
+                readiness = ModelReadiness.PREPARING,
+            ) to ModelPhasePresentation.TRANSFERRING,
+            summary(
+                deliveryState = ModelDeliveryState.Provisioning,
+                readiness = ModelReadiness.PREPARING,
+            ) to ModelPhasePresentation.PROVISIONING_CHAT,
+            summary(
+                role = ModelRole.EMBEDDINGS,
+                deliveryState = ModelDeliveryState.Provisioning,
+                readiness = ModelReadiness.PREPARING,
+            ) to ModelPhasePresentation.PROVISIONING,
+            summary(
+                deliveryState = ModelDeliveryState.Quiescing,
+                readiness = ModelReadiness.REMOVING,
+            ) to ModelPhasePresentation.QUIESCING,
+            summary(
+                deliveryState = ModelDeliveryState.Removing,
+                readiness = ModelReadiness.REMOVING,
+            ) to ModelPhasePresentation.REMOVING,
+            summary(
+                role = ModelRole.EMBEDDINGS,
+                deliveryState = ModelDeliveryState.Installed,
+                state = ModelLoadState.STARTING,
+                evidence = ModelRuntimeEvidence.DASHBOARD_VERIFICATION,
+                readiness = ModelReadiness.STARTING,
+            ) to ModelPhasePresentation.VERIFICATION_RUNNING,
+        )
+
+        cases.forEach { (summary, expected) ->
+            assertEquals("delivery=${summary.deliveryState}", expected, modelPhasePresentation(summary))
+        }
+    }
+
+    @Test
+    fun `stale runtime evidence preserves state-specific historical categories`() {
+        val ready = summary(
+            state = ModelLoadState.READY,
+            evidence = ModelRuntimeEvidence.LAST_KNOWN_SERVICE,
+            readiness = ModelReadiness.DOWNLOADED_IDLE,
+        )
+        val idle = summary(
+            state = ModelLoadState.IDLE,
+            evidence = ModelRuntimeEvidence.LAST_KNOWN_SERVICE,
+            readiness = ModelReadiness.DOWNLOADED_IDLE,
+        )
+        val failed = summary(
+            state = ModelLoadState.FAILED,
+            evidence = ModelRuntimeEvidence.LAST_KNOWN_SERVICE,
+            readiness = ModelReadiness.DOWNLOADED_IDLE,
+        )
+        assertEquals(RuntimeSummaryCategory.LAST_KNOWN_READY, runtimeSummaryCategory(ready))
+        assertEquals(RuntimeSummaryCategory.LAST_KNOWN_NOT_LOADED, runtimeSummaryCategory(idle))
+        assertEquals(RuntimeSummaryCategory.LAST_KNOWN_FAILED, runtimeSummaryCategory(failed))
+
+        val passedVerification = summary(
+            role = ModelRole.EMBEDDINGS,
+            state = ModelLoadState.IDLE,
+            evidence = ModelRuntimeEvidence.DASHBOARD_VERIFICATION,
+            readiness = ModelReadiness.DOWNLOADED_IDLE,
+            lastVerificationPassed = true,
+        )
+        assertEquals(
+            RuntimeSummaryCategory.VERIFICATION_PASSED,
+            runtimeSummaryCategory(passedVerification),
+        )
+    }
+
+    @Test
+    fun `stale runtime failure stays historical rather than current readiness failure`() {
+        assertEquals(
+            ModelReadiness.DOWNLOADED_IDLE,
+            modelReadiness(
+                role = ModelRole.CHAT_AND_VISION,
+                deliveryState = ModelDeliveryState.Installed,
+                runtimeState = ModelLoadState.FAILED,
+                evidence = ModelRuntimeEvidence.LAST_KNOWN_SERVICE,
+            ),
+        )
+    }
+
+    @Test
+    fun `action availability keeps destructive remove secondary`() {
+        assertEquals(
+            ModelActionAvailability(
+                primary = ModelDeliveryAction.NONE,
+                secondary = ModelDeliveryAction.REMOVE,
+            ),
+            modelActionAvailability(ModelDeliveryState.Installed),
+        )
+        assertEquals(
+            ModelActionAvailability(
+                primary = ModelDeliveryAction.RETRY_ACTIVATION,
+                secondary = ModelDeliveryAction.REMOVE,
+            ),
+            modelActionAvailability(ModelDeliveryState.InstalledWithActivationError),
+        )
+        assertEquals(
+            ModelActionAvailability(primary = ModelDeliveryAction.RETRY_REMOVE),
+            modelActionAvailability(
+                ModelDeliveryState.RemovalFailed(ModelDeliveryIssue.RemovalInterrupted),
+            ),
+        )
+        assertEquals(
+            ModelActionAvailability(primary = ModelDeliveryAction.NONE),
+            modelActionAvailability(ModelDeliveryState.Removing),
+        )
+    }
+
+    private fun summary(
+        role: ModelRole = ModelRole.CHAT_AND_VISION,
+        deliveryState: ModelDeliveryState = ModelDeliveryState.Installed,
+        state: ModelLoadState = ModelLoadState.IDLE,
+        evidence: ModelRuntimeEvidence = ModelRuntimeEvidence.LIVE_SERVICE,
+        readiness: ModelReadiness = ModelReadiness.DOWNLOADED_IDLE,
+        runtimeIssue: ModelRuntimeIssue? = null,
+        lastVerificationPassed: Boolean? = null,
+        lastRuntimeStatusAtMs: Long? = null,
+    ): RoleModelSummary = RoleModelSummary(
+        role = role,
+        modelDisplayName = "Model",
+        deliveryPackNames = listOf("pack"),
+        state = state,
+        evidence = evidence,
+        readiness = readiness,
+        backend = null,
+        initTimeSeconds = null,
+        runtimeIssue = runtimeIssue,
+        lastRuntimeStatusAtMs = lastRuntimeStatusAtMs,
+        lastVerificationAtMs = if (lastVerificationPassed == null) null else 123L,
+        lastVerificationPassed = lastVerificationPassed,
+        deliveryState = deliveryState,
+    )
 }

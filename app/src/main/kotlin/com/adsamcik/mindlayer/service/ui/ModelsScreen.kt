@@ -1,5 +1,7 @@
 package com.adsamcik.mindlayer.service.ui
 
+import android.text.format.DateUtils
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -7,22 +9,23 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -35,14 +38,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import com.adsamcik.mindlayer.service.R
 import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryIssue
-import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryState
-import com.adsamcik.mindlayer.service.modeldelivery.issueOrNull
 
 @Composable
 fun ModelsScreen(
@@ -54,71 +60,53 @@ fun ModelsScreen(
     onConfirmDownload: () -> Unit,
 ) {
     var pendingRemoval: RoleModelSummary? by remember { mutableStateOf(null) }
+    val layoutDirection = LocalLayoutDirection.current
+    val safeInsets = WindowInsets.safeDrawing.asPaddingValues()
+    val summaries = state.modelSummaries()
+    val overview = modelOverview(summaries)
+
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
     ) {
-        val safeInsets = WindowInsets.safeDrawing.asPaddingValues()
-        val summaries = state.modelSummaries()
-
         LazyColumn(
             contentPadding = PaddingValues(
-                start = safeInsets.calculateLeftPadding(LayoutDirection.Ltr) + 16.dp,
-                end = safeInsets.calculateRightPadding(LayoutDirection.Ltr) + 16.dp,
+                start = safeInsets.calculateStartPadding(layoutDirection) + 16.dp,
+                end = safeInsets.calculateEndPadding(layoutDirection) + 16.dp,
                 top = safeInsets.calculateTopPadding() + 12.dp,
                 bottom = safeInsets.calculateBottomPadding() + 12.dp,
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
-                CardEnterAnimation(0) {
-                    Text(
-                        text = stringResource(R.string.models_title),
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onBackground,
+                ModelsHeader(
+                    isRefreshing = state.modelDeliveryRefresh.isRefreshing,
+                    lastSuccessfulRefreshAtMs =
+                        state.modelDeliveryRefresh.lastSuccessfulRefreshAtMs,
+                    onRefresh = onRefresh,
+                )
+            }
+            if (state.modelDeliveryRefresh.issue == ModelDeliveryIssue.RefreshFailed) {
+                item {
+                    RefreshWarning(
+                        enabled = !state.modelDeliveryRefresh.isRefreshing,
+                        onRefresh = onRefresh,
                     )
                 }
             }
-            item {
-                CardEnterAnimation(1) {
-                    OfflineBanner()
-                }
-            }
-            item {
-                OutlinedButton(
-                    onClick = onRefresh,
-                    enabled = !state.modelDeliveryRefresh.isRefreshing,
-                ) {
-                    Text(stringResource(R.string.models_refresh_action))
-                }
-            }
-            if (state.modelDeliveryRefresh.isRefreshing) {
-                item {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                }
-            }
-            state.modelDeliveryRefresh.issue?.let { issue ->
-                item {
-                    DiagnosticCallout(
-                        message = deliveryIssueMessage(issue),
-                        tone = DashboardMessageTone.ERROR,
-                    )
-                }
-            }
-            summaries.forEachIndexed { index, summary ->
+            item { ModelOverviewSurface(overview) }
+            summaries.forEach { summary ->
                 item(key = summary.role) {
-                    CardEnterAnimation(index + 2) {
-                        RoleModelCard(
-                            summary = summary,
-                            onDownload = { onDownload(summary.role) },
-                            onRemove = { pendingRemoval = summary },
-                            onRetryActivation = { onRetryActivation(summary.role) },
-                            onConfirmDownload = onConfirmDownload,
-                        )
-                    }
+                    RoleModelCard(
+                        summary = summary,
+                        onDownload = { onDownload(summary.role) },
+                        onRemove = { pendingRemoval = summary },
+                        onRetryActivation = { onRetryActivation(summary.role) },
+                        onConfirmDownload = onConfirmDownload,
+                    )
                 }
             }
+            item { OfflineBanner() }
             item { Spacer(Modifier.height(8.dp)) }
         }
         pendingRemoval?.let { summary ->
@@ -139,10 +127,14 @@ fun ModelsScreen(
                             onRemove(summary.role)
                             pendingRemoval = null
                         },
+                        modifier = Modifier.heightIn(min = 48.dp),
                     ) { Text(stringResource(R.string.models_remove_action)) }
                 },
                 dismissButton = {
-                    TextButton(onClick = { pendingRemoval = null }) {
+                    TextButton(
+                        onClick = { pendingRemoval = null },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) {
                         Text(stringResource(R.string.models_cancel_action))
                     }
                 },
@@ -152,301 +144,185 @@ fun ModelsScreen(
 }
 
 @Composable
-private fun OfflineBanner() {
+private fun ModelsHeader(
+    isRefreshing: Boolean,
+    lastSuccessfulRefreshAtMs: Long?,
+    onRefresh: () -> Unit,
+) {
+    val nowMs = System.currentTimeMillis()
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = stringResource(R.string.models_title),
+            modifier = Modifier.semantics { heading() },
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
+        Text(
+            text = lastSuccessfulRefreshAtMs?.let { timestamp ->
+                stringResource(
+                    R.string.models_delivery_checked,
+                    DateUtils.getRelativeTimeSpanString(
+                        timestamp,
+                        nowMs,
+                        DateUtils.SECOND_IN_MILLIS,
+                        DateUtils.FORMAT_ABBREV_RELATIVE,
+                    ),
+                )
+            } ?: stringResource(R.string.models_delivery_not_checked),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Button(
+            onClick = onRefresh,
+            enabled = !isRefreshing,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp),
+        ) {
+            if (isRefreshing) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    strokeWidth = 2.dp,
+                )
+                Spacer(Modifier.size(8.dp))
+                Text(stringResource(R.string.models_refreshing_action))
+            } else {
+                Text(stringResource(R.string.models_refresh_action))
+            }
+        }
+    }
+}
+
+@Composable
+private fun RefreshWarning(
+    enabled: Boolean,
+    onRefresh: () -> Unit,
+) {
+    val palette = modelsTonePalette(DashboardMessageTone.WARNING)
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics { liveRegion = LiveRegionMode.Polite },
+        shape = MaterialTheme.shapes.large,
+        color = palette.container,
+        contentColor = palette.content,
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.models_refresh_warning_title),
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = palette.content,
+            )
+            Text(
+                text = stringResource(R.string.models_refresh_failed_detail),
+                style = MaterialTheme.typography.bodyMedium,
+                color = palette.content,
+            )
+            OutlinedButton(
+                onClick = onRefresh,
+                enabled = enabled,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp),
+                border = BorderStroke(1.dp, palette.content),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = palette.content),
+            ) {
+                Text(stringResource(R.string.models_try_again_action))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModelOverviewSurface(overview: ModelOverview) {
+    val tone = when (overview.kind) {
+        ModelOverviewKind.NEEDS_ATTENTION -> DashboardMessageTone.WARNING
+        ModelOverviewKind.ACTIVITY_IN_PROGRESS -> DashboardMessageTone.INFO
+        ModelOverviewKind.DOWNLOADED_COUNT -> DashboardMessageTone.NEUTRAL
+        ModelOverviewKind.ALL_AVAILABLE -> DashboardMessageTone.SUCCESS
+    }
+    val palette = modelsTonePalette(tone)
+    val headline = when (overview.kind) {
+        ModelOverviewKind.NEEDS_ATTENTION -> pluralStringResource(
+            R.plurals.models_overview_attention,
+            overview.affectedCount,
+            overview.affectedCount,
+        )
+        ModelOverviewKind.ACTIVITY_IN_PROGRESS -> pluralStringResource(
+            R.plurals.models_overview_activity,
+            overview.affectedCount,
+            overview.affectedCount,
+        )
+        ModelOverviewKind.DOWNLOADED_COUNT -> pluralStringResource(
+            R.plurals.models_overview_downloaded_count,
+            overview.downloadedCount,
+            overview.downloadedCount,
+            overview.totalCount,
+        )
+        ModelOverviewKind.ALL_AVAILABLE -> pluralStringResource(
+            R.plurals.models_overview_all_available,
+            overview.totalCount,
+            overview.totalCount,
+        )
+    }
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = MaterialTheme.shapes.extraLarge,
+        color = palette.container,
+        contentColor = palette.content,
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.models_overview_title),
+                style = MaterialTheme.typography.labelLarge,
+                color = palette.content,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = headline,
+                style = MaterialTheme.typography.titleLarge,
+                color = palette.content,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun OfflineBanner() {
+    val palette = modelsTonePalette(DashboardMessageTone.INFO)
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = palette.container,
+        contentColor = palette.content,
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalAlignment = Alignment.Top,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Icon(
                 imageVector = Icons.Filled.Info,
                 contentDescription = null,
                 modifier = Modifier.size(20.dp),
-                tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                tint = palette.content,
             )
             Text(
                 text = stringResource(R.string.models_offline_banner),
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                color = palette.content,
                 fontWeight = FontWeight.Medium,
             )
         }
     }
-}
-
-@Composable
-private fun RoleModelCard(
-    summary: RoleModelSummary,
-    onDownload: () -> Unit,
-    onRemove: () -> Unit,
-    onRetryActivation: () -> Unit,
-    onConfirmDownload: () -> Unit,
-) {
-    val roleTitle = stringResource(roleTitleRes(summary.role))
-    val roleDescription = stringResource(roleDescriptionRes(summary.role))
-    val (badgeText, badgeTone) = stateBadge(summary.state)
-
-    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top,
-            ) {
-                Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Build,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                    Text(
-                        text = roleTitle,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-                Badge(text = badgeText, color = toneColor(badgeTone))
-            }
-
-            Text(
-                text = roleDescription,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            Text(
-                text = summary.modelDisplayName,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-
-            LabelValue(
-                stringResource(R.string.models_pack_label),
-                summary.deliveryPackNames.joinToString(" + "),
-            )
-            DeliveryStatus(
-                state = summary.deliveryState,
-                onDownload = onDownload,
-                onRemove = onRemove,
-                onRetryActivation = onRetryActivation,
-                onConfirmDownload = onConfirmDownload,
-            )
-
-            when (summary.evidence) {
-                ModelRuntimeEvidence.LAST_KNOWN_SERVICE -> Text(
-                    text = stringResource(R.string.models_evidence_last_known_service),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = FontWeight.Medium,
-                )
-                ModelRuntimeEvidence.SERVICE_STATUS_UNAVAILABLE -> Text(
-                    text = stringResource(R.string.models_evidence_service_status_unavailable),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = FontWeight.Medium,
-                )
-                ModelRuntimeEvidence.LIVE_SERVICE,
-                ModelRuntimeEvidence.DASHBOARD_VERIFICATION,
-                -> Unit
-            }
-
-            summary.backend?.takeIf { it.isNotBlank() }?.let { backend ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = stringResource(R.string.models_backend_label),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Badge(text = backend.uppercase(), color = backendColor(backend))
-                }
-
-            }
-
-            summary.initTimeSeconds?.takeIf { it > 0f }?.let { seconds ->
-                LabelValue(
-                    stringResource(R.string.models_init_time_label),
-                    stringResource(R.string.dashboard_init_time_seconds, seconds),
-                )
-            }
-
-            when (summary.state) {
-                ModelLoadState.NOT_VERIFIED -> {
-                    Text(
-                        text = stringResource(R.string.models_state_unknown_hint),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.Medium,
-                    )
-                }
-                ModelLoadState.FAILED -> {
-                    summary.runtimeIssue?.let { issue ->
-                        DiagnosticCallout(
-                            message = runtimeIssueMessage(issue),
-                            tone = DashboardMessageTone.ERROR,
-                        )
-                    }
-                }
-                else -> Unit
-            }
-        }
-    }
-}
-
-@Composable
-private fun DeliveryStatus(
-    state: ModelDeliveryState,
-    onDownload: () -> Unit,
-    onRemove: () -> Unit,
-    onRetryActivation: () -> Unit,
-    onConfirmDownload: () -> Unit,
-) {
-    val label = when (state) {
-        ModelDeliveryState.Checking -> stringResource(R.string.models_delivery_checking)
-        ModelDeliveryState.NotInstalled -> stringResource(R.string.models_delivery_not_installed)
-        ModelDeliveryState.Pending -> stringResource(R.string.models_delivery_pending)
-        is ModelDeliveryState.Downloading -> stringResource(R.string.models_delivery_downloading)
-        ModelDeliveryState.Transferring -> stringResource(R.string.models_delivery_transferring)
-        ModelDeliveryState.WaitingForWifi -> stringResource(R.string.models_delivery_waiting_wifi)
-        ModelDeliveryState.RequiresConfirmation -> stringResource(R.string.models_delivery_confirmation)
-        ModelDeliveryState.Provisioning -> stringResource(R.string.models_delivery_provisioning)
-        ModelDeliveryState.Installed -> stringResource(R.string.models_delivery_installed)
-        ModelDeliveryState.Activating -> stringResource(R.string.models_delivery_activating)
-        ModelDeliveryState.InstalledWithActivationError ->
-            stringResource(R.string.models_delivery_installed)
-        ModelDeliveryState.Removing -> stringResource(R.string.models_delivery_removing)
-        ModelDeliveryState.Quiescing -> stringResource(R.string.models_delivery_removing)
-        is ModelDeliveryState.RemovalFailed -> stringResource(R.string.models_delivery_removal_failed)
-        is ModelDeliveryState.Failed -> stringResource(R.string.models_delivery_failed)
-        ModelDeliveryState.Unsupported -> stringResource(R.string.models_delivery_unsupported)
-    }
-    Text(label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-    if (state is ModelDeliveryState.Downloading) {
-        LinearProgressIndicator(progress = { state.progressPercent / 100f }, modifier = Modifier.fillMaxWidth())
-        Text(
-            stringResource(
-                R.string.models_delivery_progress,
-                state.downloadedBytes / 1_000_000,
-                state.totalBytes / 1_000_000,
-                state.progressPercent,
-            ),
-            style = MaterialTheme.typography.bodySmall,
-        )
-    }
-    if (state == ModelDeliveryState.Activating) {
-        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-    }
-    state.issueOrNull()?.let { issue ->
-        DiagnosticCallout(
-            message = deliveryIssueMessage(issue),
-            tone = DashboardMessageTone.ERROR,
-        )
-    }
-    when (modelDeliveryAction(state)) {
-        ModelDeliveryAction.DOWNLOAD -> Button(onClick = onDownload) {
-            Text(stringResource(R.string.models_download_action))
-        }
-        ModelDeliveryAction.RETRY_DOWNLOAD -> Button(onClick = onDownload) {
-            Text(stringResource(R.string.models_retry_action))
-        }
-        ModelDeliveryAction.RETRY_REMOVE -> OutlinedButton(onClick = onRemove) {
-            Text(stringResource(R.string.models_retry_remove_action))
-        }
-        ModelDeliveryAction.CONFIRM -> Button(onClick = onConfirmDownload) {
-            Text(stringResource(R.string.models_confirm_action))
-        }
-        ModelDeliveryAction.REMOVE -> OutlinedButton(onClick = onRemove) {
-            Text(stringResource(R.string.models_remove_action))
-        }
-        ModelDeliveryAction.RETRY_ACTIVATION -> {
-            Button(onClick = onRetryActivation) {
-                Text(stringResource(R.string.models_retry_activation_action))
-            }
-            OutlinedButton(onClick = onRemove) {
-                Text(stringResource(R.string.models_remove_action))
-            }
-        }
-        ModelDeliveryAction.NONE -> Unit
-    }
-    if (
-        state == ModelDeliveryState.Installed ||
-        state == ModelDeliveryState.Activating ||
-        state == ModelDeliveryState.InstalledWithActivationError
-    ) {
-        Text(stringResource(R.string.models_loaded_separate_hint), style = MaterialTheme.typography.bodySmall)
-    }
-}
-
-@Composable
-private fun stateBadge(state: ModelLoadState): Pair<String, DashboardMessageTone> = when (state) {
-    ModelLoadState.READY ->
-        stringResource(R.string.models_state_ready) to DashboardMessageTone.SUCCESS
-    ModelLoadState.STARTING ->
-        stringResource(R.string.models_state_starting) to DashboardMessageTone.INFO
-    ModelLoadState.IDLE ->
-        stringResource(R.string.models_state_idle) to DashboardMessageTone.NEUTRAL
-    ModelLoadState.NOT_VERIFIED ->
-        stringResource(R.string.models_state_unknown) to DashboardMessageTone.NEUTRAL
-    ModelLoadState.FAILED ->
-        stringResource(R.string.models_state_failed) to DashboardMessageTone.ERROR
-}
-
-@Composable
-private fun deliveryIssueMessage(issue: ModelDeliveryIssue): String = when (issue) {
-    is ModelDeliveryIssue.InsufficientStorage -> stringResource(
-        R.string.models_issue_insufficient_storage,
-        issue.requiredBytes / 1_000_000L,
-        issue.availableBytes / 1_000_000L,
-    )
-    ModelDeliveryIssue.PlayDeliveryFailed ->
-        stringResource(R.string.models_issue_play_delivery_failed)
-    ModelDeliveryIssue.VerificationFailed ->
-        stringResource(R.string.models_issue_verification_failed)
-    ModelDeliveryIssue.RemovalInterrupted ->
-        stringResource(R.string.models_issue_removal_interrupted)
-    ModelDeliveryIssue.RemovalFailed ->
-        stringResource(R.string.models_issue_removal_failed)
-    ModelDeliveryIssue.ActivationFailed ->
-        stringResource(R.string.models_activation_failed_message)
-    ModelDeliveryIssue.RefreshFailed ->
-        stringResource(R.string.models_issue_refresh_failed)
-    ModelDeliveryIssue.ConfirmationUnavailable ->
-        stringResource(R.string.models_issue_confirmation_unavailable)
-}
-
-@Composable
-private fun runtimeIssueMessage(issue: ModelRuntimeIssue): String = when (issue) {
-    is ModelRuntimeIssue.InitializationFailed ->
-        stringResource(R.string.models_issue_runtime_initialization_failed)
-    ModelRuntimeIssue.VerificationFailed ->
-        stringResource(R.string.models_issue_runtime_verification_failed)
-}
-
-private fun roleTitleRes(role: ModelRole): Int = when (role) {
-    ModelRole.CHAT_AND_VISION -> R.string.models_role_chat
-    ModelRole.EMBEDDINGS -> R.string.models_role_embeddings
-    ModelRole.OCR -> R.string.models_role_ocr
-}
-
-private fun roleDescriptionRes(role: ModelRole): Int = when (role) {
-    ModelRole.CHAT_AND_VISION -> R.string.models_role_chat_description
-    ModelRole.EMBEDDINGS -> R.string.models_role_embeddings_description
-    ModelRole.OCR -> R.string.models_role_ocr_description
 }

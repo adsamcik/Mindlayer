@@ -603,6 +603,8 @@ data class LogUiItem(
  * with no Compose or Context dependencies — derived by
  * [DashboardUiState.modelSummaries] from delivery state plus either live
  * service evidence (chat) or the latest dashboard verification (embeddings/OCR).
+ * [lastRuntimeStatusAtMs] timestamps retained service evidence only; dashboard
+ * verification roles use [lastVerificationAtMs] instead.
  */
 data class RoleModelSummary(
     val role: ModelRole,
@@ -614,6 +616,7 @@ data class RoleModelSummary(
     val backend: String?,
     val initTimeSeconds: Float?,
     val runtimeIssue: ModelRuntimeIssue?,
+    val lastRuntimeStatusAtMs: Long?,
     val lastVerificationAtMs: Long?,
     val lastVerificationPassed: Boolean?,
     val deliveryState: ModelDeliveryState,
@@ -703,8 +706,12 @@ fun modelReadiness(
     -> ModelReadiness.NEEDS_ATTENTION
     ModelDeliveryState.Unsupported -> ModelReadiness.UNAVAILABLE
     ModelDeliveryState.Installed -> when {
-        runtimeState == ModelLoadState.FAILED -> ModelReadiness.NEEDS_ATTENTION
-        runtimeState == ModelLoadState.STARTING -> ModelReadiness.STARTING
+        runtimeState == ModelLoadState.FAILED &&
+            evidence != ModelRuntimeEvidence.LAST_KNOWN_SERVICE ->
+            ModelReadiness.NEEDS_ATTENTION
+        runtimeState == ModelLoadState.STARTING &&
+            evidence != ModelRuntimeEvidence.LAST_KNOWN_SERVICE ->
+            ModelReadiness.STARTING
         role == ModelRole.CHAT_AND_VISION &&
             runtimeState == ModelLoadState.READY &&
             evidence == ModelRuntimeEvidence.LIVE_SERVICE -> ModelReadiness.READY
@@ -727,9 +734,9 @@ private const val MODEL_DISPLAY_OCR = "PaddleOCR PP-OCRv5 mobile"
  * Does NOT touch Compose or Context — safe to unit-test.
  *
  * Chat only uses live service runtime state when the latest successful status
- * sample is current. Otherwise it retains useful last-known metadata without
- * claiming READY. Embeddings and OCR only have historical dashboard verification
- * evidence, so a successful test never claims READY.
+ * sample is current. Otherwise it retains the last sampled state and metadata
+ * without claiming current READY. Embeddings and OCR only have historical
+ * dashboard verification evidence, so a successful test never claims READY.
  */
 fun DashboardUiState.modelSummaries(
     nowMs: Long = System.currentTimeMillis(),
@@ -745,14 +752,13 @@ fun DashboardUiState.modelSummaries(
         lastStatusUpdateMs != null -> ModelRuntimeEvidence.LAST_KNOWN_SERVICE
         else -> ModelRuntimeEvidence.SERVICE_STATUS_UNAVAILABLE
     }
+    val chatBackend = backend.takeIf { it.isNotBlank() && !it.equals("NONE", ignoreCase = true) }
     val chatState = when {
-        !hasLiveChatEvidence && lastStatusUpdateMs == null -> ModelLoadState.NOT_VERIFIED
-        !hasLiveChatEvidence -> ModelLoadState.IDLE
-        isEngineLoaded -> ModelLoadState.READY
+        lastStatusUpdateMs == null -> ModelLoadState.NOT_VERIFIED
+        isEngineLoaded && chatBackend != null -> ModelLoadState.READY
         lastInitFailure != null -> ModelLoadState.FAILED
         else -> ModelLoadState.IDLE
     }
-    val chatBackend = backend.takeIf { it.isNotBlank() && !it.equals("NONE", ignoreCase = true) }
     val chatIssue = lastInitFailure
         ?.takeIf { chatState == ModelLoadState.FAILED }
         ?.let(ModelRuntimeIssue::InitializationFailed)
@@ -776,6 +782,7 @@ fun DashboardUiState.modelSummaries(
         backend = chatBackend,
         initTimeSeconds = initTimeSeconds.takeIf { it > 0f },
         runtimeIssue = chatIssue,
+        lastRuntimeStatusAtMs = lastStatusUpdateMs,
         lastVerificationAtMs = null,
         lastVerificationPassed = null,
         deliveryState = chatDelivery,
@@ -798,6 +805,7 @@ fun DashboardUiState.modelSummaries(
         backend = null,
         initTimeSeconds = null,
         runtimeIssue = embeddingsRuntime.issue,
+        lastRuntimeStatusAtMs = null,
         lastVerificationAtMs = embeddingTest.lastCompletedAtMs,
         lastVerificationPassed = embeddingsRuntime.passed,
         deliveryState = embeddingsDelivery,
@@ -820,6 +828,7 @@ fun DashboardUiState.modelSummaries(
         backend = null,
         initTimeSeconds = null,
         runtimeIssue = ocrRuntime.issue,
+        lastRuntimeStatusAtMs = null,
         lastVerificationAtMs = ocrTest.lastCompletedAtMs,
         lastVerificationPassed = ocrRuntime.passed,
         deliveryState = ocrDelivery,

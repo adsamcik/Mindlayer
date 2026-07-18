@@ -353,7 +353,7 @@ class LogDaoTest {
     }
 
     @Test
-    fun `recovered backend fallback remains visible until a later clean init`() = runTest {
+    fun `recovered backend fallback remains visible until clean init or shutdown`() = runTest {
         dao.insert(entry(
             timestampMs = 100,
             category = LogCategory.ENGINE,
@@ -376,6 +376,23 @@ class LogDaoTest {
 
         dao.insert(entry(
             timestampMs = 400,
+            category = LogCategory.ENGINE,
+            event = LogEvent.ENGINE_SHUTDOWN.key,
+        ))
+
+        assertNull(dao.latestInitFailureByFeature("chat"))
+
+        dao.insert(entry(
+            timestampMs = 500,
+            category = LogCategory.ENGINE,
+            event = LogEvent.INIT_FAILURE_CATEGORIZED.key,
+            extraJson = """{"failureCategory":"ModelMissing","feature":"chat"}""",
+        ))
+
+        assertEquals(500L, dao.latestInitFailureByFeature("chat")?.timestampMs)
+
+        dao.insert(entry(
+            timestampMs = 600,
             category = LogCategory.ENGINE,
             event = LogEvent.ENGINE_INIT_SUCCESS.key,
         ))
