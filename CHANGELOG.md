@@ -6,6 +6,16 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+- `versionCodeFor` (root `build.gradle.kts`) now reserves a 500-slot band per
+  `MAJOR.MINOR.PATCH` for prereleases (`alpha` 0-165, `beta` 166-331, `rc`
+  332-497, stable always 999), instead of one flat 0-99 counter shared by
+  every kind. Previously, moving from e.g. `1.0.0-alpha.6` to `1.0.0-beta.1`
+  would have *decreased* the derived `versionCode` (Play rejects that);
+  kind-based bands guarantee any `beta` outranks any `alpha` of the same
+  core version, and any `rc` outranks any `beta`, regardless of each kind's
+  own counter. No release has crossed a prerelease-kind boundary yet, so no
+  already-shipped `versionCode` is affected.
+
 ## [1.0.0-alpha.6] — 2026-07-19
 
 SDK Maven coordinate → `1.0.0-alpha.6` (`com.adsamcik.mindlayer:sdk:1.0.0-alpha.6`).
