@@ -431,7 +431,7 @@ val validateReleaseEmbeddingSha256 = tasks.register("validateReleaseEmbeddingSha
 // libraries it ships under jni/<abi>/, and fail the build if any required
 // ABI is missing.
 //
-// Update EXPECTED_LIBRARY_ABIS / ALLOWED_MISSING_LIBRARY_ABIS intentionally
+// Update expectedLibraryAbis / allowedMissingLibraryAbis intentionally
 // whenever the LiteRT-LM coordinate in libs.versions.toml is bumped — cross-
 // reference the upstream release notes for the new ABI matrix:
 //   https://github.com/google-ai-edge/LiteRT-LM/releases
@@ -442,13 +442,13 @@ val validateReleaseEmbeddingSha256 = tasks.register("validateReleaseEmbeddingSha
 // it here means a *future* regression that drops arm64-v8a or x86_64 would
 // be loud, not silent.
 
-val EXPECTED_LIBRARY_ABIS: Set<String> = setOf(
+val expectedLibraryAbis: Set<String> = setOf(
     "arm64-v8a",     // mandatory — shipping ABI for all real devices
     "armeabi-v7a",   // historic 32-bit ARM (currently allow-listed missing)
     "x86_64",        // mandatory — CI emulator runs on x86_64
 )
 
-val ALLOWED_MISSING_LIBRARY_ABIS: Set<String> = setOf(
+val allowedMissingLibraryAbis: Set<String> = setOf(
     "armeabi-v7a",   // intentionally absent in LiteRT-LM 0.10.0 — see comment above
 )
 
@@ -474,8 +474,8 @@ val validateLitertlmAbis = tasks.register("validateLitertlmAbis") {
         .withPropertyName("litertlmAar")
         .withPathSensitivity(PathSensitivity.RELATIVE)
 
-    val expectedAbis = EXPECTED_LIBRARY_ABIS
-    val allowedMissingAbis = ALLOWED_MISSING_LIBRARY_ABIS
+    val expectedAbis = expectedLibraryAbis
+    val allowedMissingAbis = allowedMissingLibraryAbis
     val markerFile = layout.buildDirectory.file("litertlm-abi-check/abis.txt")
     outputs.file(markerFile)
 
@@ -518,7 +518,7 @@ val validateLitertlmAbis = tasks.register("validateLitertlmAbis") {
         }
         if (unexpectedExtras.isNotEmpty()) {
             logger.lifecycle(
-                "  extra ABIs (consider adding to EXPECTED_LIBRARY_ABIS): $unexpectedExtras",
+                "  extra ABIs (consider adding to expectedLibraryAbis): $unexpectedExtras",
             )
         }
 
@@ -534,10 +534,10 @@ val validateLitertlmAbis = tasks.register("validateLitertlmAbis") {
                     appendLine("  Allowed missing : ${allowedMissingAbis.toSortedSet()}")
                     appendLine()
                     appendLine(
-                        "Either upgrade LiteRT-LM, drop the ABI from EXPECTED_LIBRARY_ABIS,",
+                        "Either upgrade LiteRT-LM, drop the ABI from expectedLibraryAbis,",
                     )
                     append(
-                        "or add it to ALLOWED_MISSING_LIBRARY_ABIS with a documented rationale.",
+                        "or add it to allowedMissingLibraryAbis with a documented rationale.",
                     )
                 },
             )
@@ -576,8 +576,8 @@ val validateLitertAbis = tasks.register("validateLitertAbis") {
         .withPropertyName("litertAar")
         .withPathSensitivity(PathSensitivity.RELATIVE)
 
-    val expectedAbis = EXPECTED_LIBRARY_ABIS
-    val allowedMissingAbis = ALLOWED_MISSING_LIBRARY_ABIS
+    val expectedAbis = expectedLibraryAbis
+    val allowedMissingAbis = allowedMissingLibraryAbis
     val markerFile = layout.buildDirectory.file("litert-abi-check/abis.txt")
     outputs.file(markerFile)
 
@@ -626,7 +626,7 @@ val validateLitertAbis = tasks.register("validateLitertAbis") {
         }
         if (unexpectedExtras.isNotEmpty()) {
             logger.lifecycle(
-                "  extra ABIs (consider adding to EXPECTED_LIBRARY_ABIS): $unexpectedExtras",
+                "  extra ABIs (consider adding to expectedLibraryAbis): $unexpectedExtras",
             )
         }
 
@@ -769,6 +769,7 @@ android {
 
         // Only bundle resources for the locales we actually ship.
         // Expand this list when translations are added.
+        @Suppress("UnstableApiUsage") // AGP's localeFilters is still @Incubating
         androidResources {
             localeFilters += listOf("en")
         }
@@ -1071,6 +1072,7 @@ dependencies {
     lintChecks(project(":lint-checks"))
 
     implementation(project(":shared"))
+    implementation(project(":sdk"))
     implementation(libs.litertlm.android)
     implementation(libs.litert) {
         exclude(group = "com.google.android.play", module = "ai-delivery")
@@ -1114,8 +1116,11 @@ dependencies {
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.turbine)
     testImplementation(libs.room.testing)
-    implementation(project(":sdk"))
 
+    // project(":sdk") is intentionally NOT redeclared here: AGP's androidTest
+    // variant automatically inherits the tested app's `implementation`
+    // classpath (see implementation(project(":sdk")) above), so redeclaring
+    // it under androidTestImplementation is a no-op duplicate.
     androidTestImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.test.runner)
@@ -1123,7 +1128,6 @@ dependencies {
     androidTestImplementation(libs.mockk.android)
     androidTestImplementation(libs.room.testing)
     androidTestImplementation(libs.kotlinx.coroutines.test)
-    androidTestImplementation(project(":sdk"))
 
     // OCR engine benchmark — Tesseract4Android. ANDROIDTEST ONLY. Never
     // shipped in :app or :sdk. The benchmark is `OcrEngineBenchmarkInstrumentedTest`
