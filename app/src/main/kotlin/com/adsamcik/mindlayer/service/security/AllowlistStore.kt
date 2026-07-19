@@ -448,12 +448,12 @@ class AllowlistStore(
             // FileLock, so skip the second kernel acquire (would throw
             // OverlappingFileLockException). This preserves the existing
             // fileLockDepth contract used by `loadOrCreateHmacKey`.
-            if (fileLockDepth.get() > 0) {
-                fileLockDepth.set(fileLockDepth.get() + 1)
+            if ((fileLockDepth.get() ?: 0) > 0) {
+                fileLockDepth.set((fileLockDepth.get() ?: 0) + 1)
                 try {
                     return block()
                 } finally {
-                    fileLockDepth.set((fileLockDepth.get() - 1).coerceAtLeast(0))
+                    fileLockDepth.set(((fileLockDepth.get() ?: 0) - 1).coerceAtLeast(0))
                 }
             }
             return RandomAccessFile(lockFile, "rw").use { raf ->

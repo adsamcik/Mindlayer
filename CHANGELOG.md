@@ -6,6 +6,26 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+- Cleaned up every `:app:compileReleaseKotlin` warning:
+  - Removed a non-existent `-opt-in=androidx.compose.material3.Material3ExpressiveApi`
+    compiler flag (only `ExperimentalMaterial3ExpressiveApi` is real; the other was an
+    unresolved no-op).
+  - Migrated `mediumTopAppBarColors` → `topAppBarColors` (Recent Logs, Session Detail,
+    Session History top bars) and both dashboard `ListItem`s to the non-deprecated
+    trailing-`content`-lambda overload (Status screen).
+  - Removed a dead `?: COOL_POLICY` Elvis fallback in `InferenceOrchestrator`
+    (`currentPolicy.value` is non-nullable) and a redundant `else` branch on an already-
+    exhaustive `when` in `EngineManager`.
+  - Removed an unnecessary safe call in `OcrSessionManager` (the compiler had already
+    proven `recognitionDispatcher` non-null at that point).
+  - Made `AllowlistStore`'s reentrant-lock-depth counter consistently null-defensive
+    (`fileLockDepth.get() ?: 0`) across all five read sites instead of only two,
+    matching the file's own established pattern.
+  - Replaced `ConsentChallengeStore`'s `optString(key, null)` (passing a null literal to
+    a Java-typed non-null parameter) with the behaviorally identical `opt(key)?.toString()`.
+  - Suppressed the unavoidable `Bundle.get(key)` deprecation in `DeferredStore` (there is
+    no typed replacement for "read whatever primitive type is stored here").
+
 ## [1.0.0-alpha.6] — 2026-07-19
 
 SDK Maven coordinate → `1.0.0-alpha.6` (`com.adsamcik.mindlayer:sdk:1.0.0-alpha.6`).

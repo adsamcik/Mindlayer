@@ -1086,6 +1086,5 @@ class EngineManager(
         is Backend.CPU -> "CPU"
         is Backend.GPU -> "GPU"
         is Backend.NPU -> "NPU"
-        else -> "UNKNOWN"
     }
 }
