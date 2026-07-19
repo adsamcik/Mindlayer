@@ -6,6 +6,57 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [1.0.0-alpha.6] — 2026-07-19
+
+SDK Maven coordinate → `1.0.0-alpha.6` (`com.adsamcik.mindlayer:sdk:1.0.0-alpha.6`).
+
+No SDK API changes in this release — model delivery, build tooling, and
+release/store-listing fixes only.
+
+### Added
+- **On-demand model delivery via Google Play Asset Delivery.** Chat (Gemma),
+  Embeddings, and OCR (PaddleOCR) models are now delivered through standard
+  on-demand Play Asset Delivery packs instead of shipping bundled in the app.
+  Includes verified materialization, crash-safe install/remove lifecycle
+  control that stays generation-safe across manager instances, typed delivery
+  issues, freshness checks, and evidence-aware runtime status. The dashboard's
+  Models screen was reworked to surface truthful readiness/action state for
+  long-running pack operations. Beta AI Delivery is excluded from release
+  artifacts and the Gemma pack identity is pinned stable across the rollout.
+
+### Fixed
+- **Local release builds now default to the standardized `.models` cache**
+  when no explicit model cache is configured, and always refresh staged
+  release assets from the selected cache so integrity manifests can never
+  describe stale same-size binaries.
+- **PaddleOCR placeholder SHA-256 hashes replaced with real integrity values**
+  for the det/rec/cls/dict model files.
+- Removed a redundant non-null assertion in the PaddleOCR backend
+  (`cooldownRecord` was already checked before use).
+- Gradle Kotlin DSL "Problems" panel cleanup in `:app`: renamed two
+  SCREAMING_SNAKE_CASE build-script properties to camelCase, suppressed AGP's
+  `androidResources.localeFilters` `@Incubating` warning, and removed a
+  redundant `androidTestImplementation(project(":sdk"))` declaration.
+
+### Changed
+- **Extracted shared Gradle config into `build-logic` convention plugins**
+  (`mindlayer.android.library[.published]`, `mindlayer.android.application`,
+  `mindlayer.jvm.library`, `mindlayer.assetpack`), removing ~271 duplicated
+  lines across module build scripts. Publication metadata now comes from a
+  small `mindlayerPublish { }` extension. No behavior change: publication
+  names, CI task names, and the release model/ABI validators are unchanged.
+- **Lint** `32.2.1` → `32.3.0`. (AGP and LiteRT were each trialed at a newer
+  version during this cycle — `9.3.0-rc02` and `2.1.6` respectively — and
+  reverted before release; both remain at `9.2.1` / `2.1.5`, unchanged from
+  `1.0.0-alpha.5`.)
+- **SQLCipher** (`sqlcipher-android`) `4.15.0` → `4.17.0`.
+- Enabled `org.gradle.tooling.parallel` for faster Gradle sync (9.4+).
+- Polished the Google Play store listing copy and screenshots, and aligned
+  listing claims (data retention, auth fallback) with actual runtime behavior.
+- Routine dependency bumps: BouncyCastle (`bcprov`/`bcpkix-jdk18on`)
+  `1.81.1` → `1.85`, `softprops/action-gh-release`, the Compose Material3 /
+  Kotlin-stack dependency groups, and other GitHub Actions.
+
 ## [1.0.0-alpha.5] — 2026-07-14
 
 SDK Maven coordinate → `1.0.0-alpha.5` (`com.adsamcik.mindlayer:sdk:1.0.0-alpha.5`).
