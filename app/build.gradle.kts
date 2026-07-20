@@ -151,27 +151,6 @@ val expectedReleaseAssetPackNames = setOf(
 )
 val releaseBundleFile = layout.buildDirectory.file("outputs/bundle/release/app-release.aab")
 
-fun verifyReleaseBundleAssetPackNames(bundle: File) {
-    if (!bundle.isFile) {
-        throw GradleException("Release bundle is missing: ${bundle.path}")
-    }
-    val manifestEntry = Regex("^[^/]+/manifest/AndroidManifest\\.xml$")
-    val actual = ZipFile(bundle).use { zip ->
-        zip.entries().asSequence()
-            .map { it.name }
-            .filter(manifestEntry::matches)
-            .map { it.substringBefore('/') }
-            .filterNot { it == "base" }
-            .toSortedSet()
-    }
-    if (actual != expectedReleaseAssetPackNames) {
-        throw GradleException(
-            "Release AAB asset-pack names differ from the stable Play contract. " +
-                "Expected ${expectedReleaseAssetPackNames.sorted()}, got ${actual.sorted()}.",
-        )
-    }
-}
-
 val validateReleaseAssetPackContents = tasks.register("validateReleaseAssetPackContents") {
     dependsOn(
         ":provisionGemmaFragments",
@@ -215,8 +194,38 @@ val validateReleaseBundleAssetPackNames = tasks.register("validateReleaseBundleA
     group = "verification"
     description = "Verifies the final AAB contains exactly the four stable on-demand pack names."
     inputs.file(releaseBundleFile)
+    // Config-cache safe: capture plain Strings via inputs.property at configuration
+    // time and read them back from inputs.properties in doLast. Referencing the
+    // script-level `expectedReleaseAssetPackNames` val (or a script-level fun)
+    // directly from inside doLast would capture the whole script object, which
+    // Gradle's configuration cache cannot serialize.
+    inputs.property("expectedAssetPackNames", expectedReleaseAssetPackNames.sorted().joinToString("|"))
+    inputs.property("bundlePath", releaseBundleFile.get().asFile.absolutePath)
     doLast {
-        verifyReleaseBundleAssetPackNames(releaseBundleFile.get().asFile)
+        val props = inputs.properties
+        val expected = (props["expectedAssetPackNames"] as String)
+            .split('|')
+            .filter(String::isNotEmpty)
+            .toSortedSet()
+        val bundle = File(props["bundlePath"] as String)
+        if (!bundle.isFile) {
+            throw GradleException("Release bundle is missing: ${bundle.path}")
+        }
+        val manifestEntry = Regex("^[^/]+/manifest/AndroidManifest\\.xml$")
+        val actual = ZipFile(bundle).use { zip ->
+            zip.entries().asSequence()
+                .map { it.name }
+                .filter(manifestEntry::matches)
+                .map { it.substringBefore('/') }
+                .filterNot { it == "base" }
+                .toSortedSet()
+        }
+        if (actual != expected) {
+            throw GradleException(
+                "Release AAB asset-pack names differ from the stable Play contract. " +
+                    "Expected ${expected.sorted()}, got ${actual.sorted()}.",
+            )
+        }
     }
 }
 
@@ -998,9 +1007,9 @@ tasks.configureEach {
         )
     }
     if (name == "bundleRelease") {
-        doLast {
-            verifyReleaseBundleAssetPackNames(releaseBundleFile.get().asFile)
-        }
+        // Runs after bundleRelease's own actions produce the AAB, so the file
+        // exists by the time validateReleaseBundleAssetPackNames inspects it.
+        finalizedBy(validateReleaseBundleAssetPackNames)
     }
     // F-079: every public APK/AAB packaging task must see the ABI validator.
     // assembleDebug + assembleRelease + bundleRelease are the lifecycle tasks
