@@ -15,6 +15,15 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   core version, and any `rc` outranks any `beta`, regardless of each kind's
   own counter. No release has crossed a prerelease-kind boundary yet, so no
   already-shipped `versionCode` is affected.
+- Fixed `--configuration-cache` failing to store for `:app:bundleRelease`
+  ("cannot serialize Gradle script object references"). The AAB asset-pack
+  name check that ran as an inline `doLast` on `bundleRelease` called a
+  top-level function/property of `app/build.gradle.kts`, which implicitly
+  captured an unserializable reference to the build script itself. The
+  check now runs entirely from the task's own `inputs` (same pattern
+  already used by the other release validators in this file) inside the
+  pre-existing `validateReleaseBundleAssetPackNames` task, wired via
+  `finalizedBy` instead of being duplicated inline.
 
 ## [1.0.0-alpha.6] — 2026-07-19
 
