@@ -63,33 +63,62 @@ keyPassword=<key-password>
 ```
 
 Under `Variant: release`, confirm the SHA-1/SHA-256 fingerprints match the
-key you just generated. If you see a warning that the `release` variant uses
-the **debug** signing config, your `keystore.properties` is missing or its
-`storeFile` path doesn't resolve — fix and re-run.
+key you configured. If no release signing configuration or fingerprints appear,
+`keystore.properties` is missing or its `storeFile` path does not resolve.
+
+### 1.4 Build through Android Studio
+
+After the one-time setup above, sync the project and run
+**Gradle > app > Tasks > build > bundleRelease**. Android Studio reads the
+gitignored `keystore.properties` through the regular Gradle project
+configuration, so subsequent signed AAB builds do not require entering
+credentials in the IDE or changing source files.
+
+If Android Studio was already open when you created or changed
+`keystore.properties`, use **File > Sync Project with Gradle Files** before
+building.
 
 ---
 
 ## 2. Cutting a release
 
-### 2.1 Bump the version
+### 2.1 Set the release version
 
-Edit `app/build.gradle.kts`:
+Edit `publishVersion` in the root `build.gradle.kts`:
 
 ```kotlin
-versionCode = 4       // monotonic; Play rejects re-uploads with the same code
-versionName = "0.4.0" // semver; shown in the Play listing + Settings > App info
+val publishVersion = findProperty("publishVersion")?.toString() ?: "1.0.0"
 ```
 
-Update `CHANGELOG.md` — move `Unreleased` entries under a new `[0.4.0] — YYYY-MM-DD`
-section.
+The app's `versionName` and monotonic `versionCode` derive from this value.
+Update `CHANGELOG.md` with the matching release version.
 
 Commit both changes with a message like:
 
 ```
-release: 0.4.0
+chore(release): prepare 1.0.0
 ```
 
-### 2.2 Build the release AAB
+### 2.2 Publish SDK artifacts
+
+After the release PR is merged, create and push its matching `v<semver>` tag:
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The tag workflow tests and publishes the Maven artifacts to GitHub Packages:
+
+- `com.adsamcik.mindlayer:shared`
+- `com.adsamcik.mindlayer:sdk`
+- `com.adsamcik.mindlayer:sdk-camerax`
+- `com.adsamcik.mindlayer:sdk-camera-launcher`
+
+All use the tag's version and must be consumed at the same version. See
+[`SDK_INTEGRATION.md`](../sdk/SDK_INTEGRATION.md) for client setup.
+
+### 2.3 Build the release AAB
 
 With the `keystore.properties` setup from section 1.2 in place, this produces
 the signed AAB for Play upload. Models for a local release live in a flat

@@ -44,10 +44,31 @@ In your client app's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.adsamcik.mindlayer:sdk:0.1.0")
+    implementation("com.adsamcik.mindlayer:sdk:1.0.0-alpha.6")
     // 'shared' types are included transitively via 'api' dependency
 }
 ```
+
+Use a published version from the
+[GitHub Packages page](https://github.com/adsamcik/Mindlayer/packages). Keep
+every optional Mindlayer module at the same version as `sdk`.
+
+### Optional SDK modules
+
+```kotlin
+dependencies {
+    // Bring-your-own CameraX ImageAnalysis.Analyzer integration.
+    implementation("com.adsamcik.mindlayer:sdk-camerax:<version>")
+
+    // Turn-key ActivityResult-based camera capture flow.
+    implementation("com.adsamcik.mindlayer:sdk-camera-launcher:<version>")
+}
+```
+
+`sdk-camerax` is `compileOnly` against CameraX, so its consumers choose their
+own compatible CameraX version. `sdk-camera-launcher` supplies its own CameraX
+capture UI. Both are published with the next `v<semver>` tag and use that tag's
+version.
 
 ### 3. No permission required
 
@@ -491,17 +512,21 @@ adb shell am force-stop com.adsamcik.mindlayer.debug
 ## Publishing (for Mindlayer maintainers)
 
 ```bash
-# Publish to GitHub Packages
+# Manually publish all SDK modules to GitHub Packages
 export GITHUB_OWNER=your-username
 export GITHUB_TOKEN=ghp_your_token
 ./gradlew :shared:publishReleasePublicationToGitHubPackagesRepository
 ./gradlew :sdk:publishReleasePublicationToGitHubPackagesRepository
+./gradlew :sdk-camerax:publishReleasePublicationToGitHubPackagesRepository
+./gradlew :sdk-camera-launcher:publishReleasePublicationToGitHubPackagesRepository
 
 # Publish to local Maven (for testing)
-./gradlew :shared:publishToMavenLocal :sdk:publishToMavenLocal
+./gradlew :shared:publishToMavenLocal :sdk:publishToMavenLocal \
+    :sdk-camerax:publishToMavenLocal :sdk-camera-launcher:publishToMavenLocal
 ```
 
-Bump version in `build.gradle.kts` root `publishVersion` before releasing.
+Release tags publish these same modules automatically. Set the root
+`publishVersion`, merge the release PR, then push its matching `v<semver>` tag.
 
 ---
 

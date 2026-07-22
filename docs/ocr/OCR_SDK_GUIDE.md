@@ -165,8 +165,8 @@ Add the launcher module:
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-    implementation("com.adsamcik.mindlayer:sdk:0.10.0")
-    implementation("com.adsamcik.mindlayer:sdk-camera-launcher:0.10.0")
+    implementation("com.adsamcik.mindlayer:sdk:<version>")
+    implementation("com.adsamcik.mindlayer:sdk-camera-launcher:<version>")
 }
 ```
 
