@@ -146,8 +146,10 @@ jobs:
 
           should_publish "shared" "com.adsamcik.mindlayer.shared" "publish-shared" publish_shared
           should_publish "sdk" "com.adsamcik.mindlayer.sdk" "publish-sdk" publish_sdk
+          should_publish "sdk-camerax" "com.adsamcik.mindlayer.sdk-camerax" "publish_sdk_camerax" publish_sdk_camerax
+          should_publish "sdk-camera-launcher" "com.adsamcik.mindlayer.sdk-camera-launcher" "publish_sdk_camera_launcher" publish_sdk_camera_launcher
 
-          if [[ "$publish_shared" == "false" && "$publish_sdk" == "false" ]]; then
+          if [[ "$publish_shared" == "false" && "$publish_sdk" == "false" && "$publish_sdk_camerax" == "false" && "$publish_sdk_camera_launcher" == "false" ]]; then
             echo "::notice::All SDK Maven packages for $PUBLISH_VERSION are already published — publish steps will be skipped"
           fi
         env:
@@ -166,6 +168,22 @@ jobs:
       - name: Publish SDK to GitHub Packages
         if: steps.probe-packages.outputs.publish-sdk == 'true'
         run: ./gradlew :sdk:publishReleasePublicationToGitHubPackagesRepository --no-daemon -PpublishVersion="$PUBLISH_VERSION"
+        env:
+          GITHUB_OWNER: ${{ github.repository_owner }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_VERSION: ${{ steps.version.outputs.version }}
+
+      - name: Publish SDK CameraX integration to GitHub Packages
+        if: steps.probe-packages.outputs.publish_sdk_camerax == 'true'
+        run: ./gradlew :sdk-camerax:publishReleasePublicationToGitHubPackagesRepository --no-daemon -PpublishVersion="$PUBLISH_VERSION"
+        env:
+          GITHUB_OWNER: ${{ github.repository_owner }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_VERSION: ${{ steps.version.outputs.version }}
+
+      - name: Publish SDK camera launcher to GitHub Packages
+        if: steps.probe-packages.outputs.publish_sdk_camera_launcher == 'true'
+        run: ./gradlew :sdk-camera-launcher:publishReleasePublicationToGitHubPackagesRepository --no-daemon -PpublishVersion="$PUBLISH_VERSION"
         env:
           GITHUB_OWNER: ${{ github.repository_owner }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

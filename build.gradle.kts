@@ -59,9 +59,22 @@ require(productMajorVersion == contractMajorVersion) {
 /**
  * Deterministic Android `versionCode` derived from a semver-with-prerelease
  * string like `"1.0.0-alpha.4"` or `"1.2.3"`. Encodes
- * `MAJOR*1_000_000 + MINOR*10_000 + PATCH*100 + PRERELEASE_NUM`, where a
- * stable release (no prerelease suffix) sorts after any alpha/beta/rc of
- * the same MAJOR.MINOR.PATCH (`PRERELEASE_NUM = 99`).
+ * `MAJOR*10_000_000 + MINOR*100_000 + PATCH*1_000 + PRERELEASE_SLOT`.
+ *
+ * `PRERELEASE_SLOT` reserves a 500-wide band (`0..499`) shared across the
+ * three recognized prerelease kinds, so that ANY `beta` of a given
+ * `MAJOR.MINOR.PATCH` always outranks ANY `alpha` of that same
+ * `MAJOR.MINOR.PATCH` (and `rc` always outranks `beta`), regardless of how
+ * far each kind's own counter has climbed — a plain trailing-number scheme
+ * can't guarantee that, since e.g. `beta.1` would otherwise sort below
+ * `alpha.6`:
+ * - `alpha.N` → `N` in `0..165`
+ * - `beta.N`  → `166 + N` in `166..331`
+ * - `rc.N`    → `332 + N` in `332..497`
+ *
+ * A stable release (no prerelease suffix) always sorts last, at slot `999`.
+ * Slots `498..998` are intentionally unused headroom for a future
+ * prerelease kind without needing another multiplier bump.
  *
  * Introduced because `:app`'s own `versionCode`/`versionName` had drifted
  * from `publishVersion` for multiple releases (both were bumped by hand,
@@ -73,13 +86,33 @@ fun versionCodeFor(semverWithPrerelease: String): Int {
     val (core, prerelease) = semverWithPrerelease.split("-", limit = 2)
         .let { it[0] to it.getOrNull(1) }
     val (major, minor, patch) = core.split(".").map { it.trim().toInt() }
-    val prereleaseNum = prerelease?.substringAfterLast(".")?.toIntOrNull() ?: 99
-    return major * 1_000_000 + minor * 10_000 + patch * 100 + prereleaseNum
+    val prereleaseSlot = if (prerelease == null) {
+        999
+    } else {
+        val kind = prerelease.substringBefore(".")
+        val num = prerelease.substringAfter(".", missingDelimiterValue = "0").toIntOrNull() ?: 0
+        val kindBase = when (kind) {
+            "alpha" -> 0
+            "beta" -> 166
+            "rc" -> 332
+            else -> error(
+                "Unrecognized prerelease kind '$kind' in '$semverWithPrerelease' (expected " +
+                    "alpha/beta/rc) — versionCodeFor doesn't know how to rank it against the others",
+            )
+        }
+        require(num in 0..165) {
+            "Prerelease number $num for '$kind' in '$semverWithPrerelease' must be 0..165 (the " +
+                "500-slot prerelease band is split ~166/166/166 across alpha/beta/rc) — bump " +
+                "PATCH instead of exceeding this within a single prerelease kind"
+        }
+        kindBase + num
+    }
+    return major * 10_000_000 + minor * 100_000 + patch * 1_000 + prereleaseSlot
 }
 
 // versionCode 5 ("1.0.0-alpha.2") already shipped under the old manual
 // scheme; every publishVersion from "1.0.0-alpha.3" onward already yields
-// >= 1_000_003 under the new scheme, but this guards against a future
+// >= 10_000_003 under the current scheme, but this guards against a future
 // rescoping of the function silently producing a lower/duplicate code.
 extra["productVersionCode"] = versionCodeFor(publishVersion).also { code ->
     require(code >= 6) {
