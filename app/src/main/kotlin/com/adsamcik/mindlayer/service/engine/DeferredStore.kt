@@ -368,6 +368,10 @@ class DeferredStore(
 
     private fun metricsToJson(metrics: Bundle): String = buildJsonObject {
         for (key in metrics.keySet()) {
+            // Bundle.get(key) is deprecated in favor of typed getters, but there is no typed
+            // accessor for "give me whatever primitive is stored here" — that's the whole point
+            // of this loop, since callers may stash Int/Long/Float/Double/Boolean metrics.
+            @Suppress("DEPRECATION")
             when (val value = metrics.get(key)) {
                 is Int -> put(key, value)
                 is Long -> put(key, value)

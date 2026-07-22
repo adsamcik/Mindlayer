@@ -205,7 +205,7 @@ class OcrSessionManager(
                 val writer = session.eventWriter as? com.adsamcik.mindlayer.service.ipc.OcrTokenStreamWriter
                 val pageEnabled = recognitionDispatcher?.pageBoundariesConfig(sessionId)?.enabled == true
                 val job = if (pageEnabled) {
-                    recognitionDispatcher?.submitWithMeta(
+                    recognitionDispatcher.submitWithMeta(
                         sessionId = sessionId,
                         frameId = meta.frameId,
                         yPlane = transformed.yPlane,

@@ -962,13 +962,6 @@ private fun ActivityNavigationCard(
     ) {
         Column {
             ListItem(
-                headlineContent = {
-                    Text(
-                        text = stringResource(R.string.dashboard_session_history),
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                    )
-                },
                 supportingContent = {
                     Text(
                         text = stringResource(R.string.dashboard_session_history_body),
@@ -991,19 +984,18 @@ private fun ActivityNavigationCard(
                 },
                 colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                 modifier = Modifier.clickable { onNavigateToHistory() },
-            )
+            ) {
+                Text(
+                    text = stringResource(R.string.dashboard_session_history),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
             HorizontalDivider(
                 modifier = Modifier.padding(horizontal = 16.dp),
                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
             )
             ListItem(
-                headlineContent = {
-                    Text(
-                        text = stringResource(R.string.dashboard_recent_logs),
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                    )
-                },
                 supportingContent = {
                     Text(
                         text = stringResource(R.string.dashboard_recent_logs_body),
@@ -1026,7 +1018,13 @@ private fun ActivityNavigationCard(
                 },
                 colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                 modifier = Modifier.clickable { onNavigateToLogs() },
-            )
+            ) {
+                Text(
+                    text = stringResource(R.string.dashboard_recent_logs),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
         }
     }
 }

@@ -1043,8 +1043,10 @@ kotlin {
     compilerOptions {
         // jvmTarget is set by the mindlayer.android.application convention.
         freeCompilerArgs.addAll(
+            // NOTE: only `ExperimentalMaterial3ExpressiveApi` actually exists in Material3;
+            // a plain `Material3ExpressiveApi` marker was never a real annotation and only
+            // produced an "unresolved opt-in marker" warning on every compile.
             "-opt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi",
-            "-opt-in=androidx.compose.material3.Material3ExpressiveApi",
         )
     }
 }

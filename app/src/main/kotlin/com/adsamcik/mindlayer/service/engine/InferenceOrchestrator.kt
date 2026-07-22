@@ -75,7 +75,7 @@ class InferenceOrchestrator(
      * inference with `thermal_critical`.
      */
     private val thermalPolicy: () -> ThermalPolicy = {
-        try { service.thermalMonitor.currentPolicy.value ?: COOL_POLICY }
+        try { service.thermalMonitor.currentPolicy.value }
         catch (_: Throwable) { COOL_POLICY }
     },
     /**

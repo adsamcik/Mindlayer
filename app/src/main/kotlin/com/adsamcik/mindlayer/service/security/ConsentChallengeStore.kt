@@ -332,7 +332,7 @@ class ConsentChallengeStore(
     }
 
     private fun JSONObject.optNullableString(key: String): String? =
-        if (!has(key) || isNull(key)) null else optString(key, null)
+        if (!has(key) || isNull(key)) null else opt(key)?.toString()
 
     private fun atomicWrite(target: File, content: String) {
         val tmp = File(target.parentFile, target.name + ".tmp")
