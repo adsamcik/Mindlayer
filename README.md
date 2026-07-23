@@ -75,8 +75,9 @@ handle.events.collect { event ->
 # Build debug APK
 ./gradlew :app:assembleDebug
 
-# Build a signed AAB with on-demand Play Asset Delivery packs (for Play Store)
-# Requires keystore.properties and the vetted model cache.
+# Build a signed AAB with on-demand Play Asset Delivery packs (for Play Store).
+# Use Android Studio's Generate Signed App Bundle wizard, or configure
+# keystore.properties for this direct Gradle command. Both need the model cache.
 ./gradlew :app:bundleRelease --no-configuration-cache
 
 # Run tests

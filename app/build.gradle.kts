@@ -11,10 +11,10 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-// ── Release signing (local-only) ──────────────────────────────────────────────
-// If keystore.properties is present at the repo root, wire a release signing
-// config that reads from it. Play-bound release packaging fails without a key;
-// an explicit local-only override exists for bundle diagnostics.
+// ── Release signing ───────────────────────────────────────────────────────────
+// Direct Gradle builds can use keystore.properties or CI environment variables.
+// Android Studio's Generate Signed App Bundle / APK wizard injects signing
+// properties for that invocation, so it needs no project-local credentials.
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 val keystoreProperties = Properties().apply {
     if (keystorePropertiesFile.exists()) {
@@ -36,20 +36,29 @@ val ciReleaseKeystore = ciKeystoreBase64?.let { encoded ->
 val hasCiReleaseKeystore =
     ciReleaseKeystore != null && ciKeystorePassword != null && ciKeyAlias != null && ciKeyPassword != null
 val hasReleaseKeystore = hasLocalReleaseKeystore || hasCiReleaseKeystore
+val hasInjectedReleaseSigning = listOf(
+    "android.injected.signing.store.file",
+    "android.injected.signing.store.password",
+    "android.injected.signing.key.alias",
+    "android.injected.signing.key.password",
+).all { propertyName ->
+    providers.gradleProperty(propertyName).orNull?.isNotBlank() == true
+}
 val allowUnsignedRelease = providers.gradleProperty("mindlayer.allowUnsignedRelease")
     .orNull
     ?.equals("true", ignoreCase = true) == true
 val validateReleaseSigning = tasks.register("validateReleaseSigning") {
     group = "verification"
     description = "Requires signing credentials for Play-bound release packaging."
-    inputs.property("hasReleaseKeystore", hasReleaseKeystore)
+    inputs.property("hasReleaseSigning", hasReleaseKeystore || hasInjectedReleaseSigning)
     inputs.property("allowUnsignedRelease", allowUnsignedRelease)
     doLast {
-        val signingConfigured = inputs.properties["hasReleaseKeystore"] == true
+        val signingConfigured = inputs.properties["hasReleaseSigning"] == true
         val unsignedAllowed = inputs.properties["allowUnsignedRelease"] == true
         if (!signingConfigured && !unsignedAllowed) {
             throw GradleException(
-                "Release packaging requires keystore.properties or ANDROID_KEYSTORE_* credentials. " +
+                "Release packaging requires Android Studio's Generate Signed App Bundle / APK flow, " +
+                    "keystore.properties, or ANDROID_KEYSTORE_* credentials. " +
                     "For local bundle diagnostics only, pass -Pmindlayer.allowUnsignedRelease=true; " +
                     "never upload that unsigned AAB to Play.",
             )
