@@ -14,6 +14,10 @@ limit, so hosted CI does not build or publish the Play bundle.
 Do this **once**, store the resulting `.jks` somewhere safe (encrypted backup,
 password manager, hardware token), and **never commit it**.
 
+Android Studio can create the keystore during **Build > Generate Signed App
+Bundle or APK** by selecting **Create new**. The equivalent command-line setup
+is:
+
 ```powershell
 # Windows / PowerShell — run from the repo root.
 keytool -genkey -v `
@@ -36,9 +40,13 @@ Placing the `.jks` **outside the repo** avoids ever accidentally committing
 it. A `.gitignore` rule still catches `*.jks` / `*.keystore` inside the repo
 as belt-and-braces.
 
-### 1.2 Wire `keystore.properties`
+### 1.2 Configure direct Gradle signing (optional)
 
-Copy the template and fill in the real values:
+Skip this section when using Android Studio's **Generate Signed App Bundle or
+APK** wizard; the IDE securely injects the selected credentials for that build.
+
+To run `:app:bundleRelease` directly from a terminal or the Gradle tool window,
+copy the template and fill in the real values:
 
 ```powershell
 Copy-Item keystore.properties.example keystore.properties
@@ -56,7 +64,7 @@ keyPassword=<key-password>
 
 `storeFile` is resolved relative to the **repo root**.
 
-### 1.3 Verify the wiring
+### 1.3 Verify direct Gradle signing
 
 ```powershell
 ./gradlew.bat :app:signingReport
@@ -66,17 +74,21 @@ Under `Variant: release`, confirm the SHA-1/SHA-256 fingerprints match the
 key you configured. If no release signing configuration or fingerprints appear,
 `keystore.properties` is missing or its `storeFile` path does not resolve.
 
-### 1.4 Build through Android Studio
+### 1.4 Build through Android Studio (recommended)
 
-After the one-time setup above, sync the project and run
-**Gradle > app > Tasks > build > bundleRelease**. Android Studio reads the
-gitignored `keystore.properties` through the regular Gradle project
-configuration, so subsequent signed AAB builds do not require entering
-credentials in the IDE or changing source files.
+1. Select **Build > Generate Signed App Bundle or APK**.
+2. Choose **Android App Bundle**, select the `app` module, and continue.
+3. Select the release keystore and alias (or create them in the wizard).
+4. Choose the `release` build variant and finish.
 
-If Android Studio was already open when you created or changed
-`keystore.properties`, use **File > Sync Project with Gradle Files** before
-building.
+No `keystore.properties` file is required for this path. The release signing
+guard recognizes Android Studio's injected credentials while still rejecting
+unsigned Play-bound builds. Android Studio writes the AAB to the destination
+selected in the wizard.
+
+If you prefer the Gradle tool window's `bundleRelease` task, complete section
+1.2 first and sync the project after creating or changing
+`keystore.properties`.
 
 ---
 
@@ -120,8 +132,9 @@ All use the tag's version and must be consumed at the same version. See
 
 ### 2.3 Build the release AAB
 
-With the `keystore.properties` setup from section 1.2 in place, this produces
-the signed AAB for Play upload. Models for a local release live in a flat
+Use Android Studio's signed-bundle wizard from section 1.4, or use the
+`keystore.properties` setup from section 1.2 with the command below. Models for
+a local release live in a flat
 **cache directory** — by default, the
 standardized, gitignored `<repo-root>\.models` directory that
 `tools/dev-models/push-models.*` uses. Override it with
@@ -166,8 +179,9 @@ app/build/outputs/bundle/release/app-release.aab
 
 This is the file you upload to Play. It is:
 
-* **Signed** with your release key. `bundleRelease` fails when signing
-  credentials are absent. For local packaging diagnostics only, the explicit
+* **Signed** with the key selected in Android Studio, `keystore.properties`, or
+  CI credentials. Direct `bundleRelease` fails when signing credentials are
+  absent. For local packaging diagnostics only, the explicit
   `-Pmindlayer.allowUnsignedRelease=true` override permits an unsigned bundle;
   never upload that output to Play.
 * **Minified and shrunk** via R8 using `app/proguard-rules.pro`.
@@ -220,9 +234,9 @@ Output:
 app/build/outputs/apk/release/app-release.apk
 ```
 
-This APK is signed **only if** `keystore.properties` resolves. Without a
-keystore, you'll get `app-release-unsigned.apk` instead (this is also what
-CI produces — useful as a smoke-test artifact, not shippable).
+For a signed APK, use **Build > Generate Signed App Bundle or APK** and select
+**APK**, or configure `keystore.properties` before running the command above.
+The unsigned override is for local diagnostics only and must not be distributed.
 
 ### 2.4 Sanity checks before uploading
 
@@ -274,7 +288,7 @@ bundletool dump manifest --bundle app\build\outputs\bundle\release\app-release.a
 | `:app:connectedDebugAndroidTest`| ✅ every push (API 33 AVD)    | ✅ with connected device                  |
 | `lintDebug`                     | ✅ every push                 | ✅                                        |
 | `:app:bundleRelease` (unsigned) | ❌ not built in hosted CI | ✅ for local packaging diagnostics only; never upload to Play |
-| `:app:bundleRelease` (signed)   | ❌ model payload and upload key are intentionally local/private | ✅ when `keystore.properties` is set |
+| `:app:bundleRelease` (signed)   | ❌ model payload and upload key are intentionally local/private | ✅ through Android Studio's signing wizard or `keystore.properties` |
 | **`v*` tag → attached AAB on GitHub Release** | ❌ the PAD bundle exceeds GitHub's 2 GiB release-asset limit | Upload the signed AAB directly to Play Console |
 | **`v*` tag → attached debug APK on GitHub Release** | ✅ on every release tag — `publish.yml`'s `release-apk` job builds a code-only **debug** APK (AI packs excluded via `-Pmindlayer.bundle*=false`) and attaches `mindlayer-service-debug-<tag>.apk` (~78 MB) to the Release. Debug-signed by the in-repo keystore; needs no model artefacts or signing secrets. Testers sideload it and push models with `tools/dev-models/push-models.*`. A *release* code-only APK is deliberately **not** built: its integrity manifests ship inside the excluded AI-pack modules, so a non-debuggable build rejects sideloaded models. A full APK with models (~2.5 GB) exceeds GitHub's 2 GiB asset cap. | — |
 

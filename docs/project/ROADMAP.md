@@ -57,7 +57,7 @@ workflow (not in the repo, by design).
   HMAC-SHA256-sealed allowlist envelope.
 
 ### Engine fleet
-- **Chat (LiteRT-LM 0.12.0)** — full lifecycle, structured-output
+- **Chat (LiteRT-LM 0.14.0)** — full lifecycle, structured-output
   fail-closed, tool-call routing, thermal/memory-band policy, init queue
   with bounded timeout, EMERGENCY teardown ordering.
 - **Embeddings (base LiteRT 2.1.5)** — `LiteRtEmbeddingBackend` with
@@ -108,7 +108,7 @@ workflow (not in the repo, by design).
   and OCR. Gemma is application-split into two verified fragments, materialized
   privately after a ~6 GB free-space preflight; internal-track/bundletool
   validation remains required. Debug `dev-install` remains sideload-only.
-- Gradle 9.5 with AGP 9.2.1, Kotlin 2.3.21, JDK 17 source / JBR 21
+- Gradle 9.6 with AGP 9.3.0, Kotlin 2.4.10, JDK 17 source / JBR 21
   runtime (CI's "Set up JDK 17" intentionally installs Java 21).
 - Parallel + caching + Kotlin incremental enabled; 4 GiB heap.
 - Five-gate CI: `:shared:testDebugUnitTest`, `:sdk:testDebugUnitTest`,

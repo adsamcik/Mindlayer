@@ -6,6 +6,12 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+- Android Studio's standard **Generate Signed App Bundle or APK** flow now
+  passes the release-signing guard without requiring `keystore.properties`.
+  Direct Gradle builds still support the gitignored properties file and CI
+  credentials, and still fail closed when no signing method is configured.
+- Android Gradle Plugin `9.2.1` → `9.3.0`, removing AGP's seven
+  `Project`-as-dependency deprecation warnings under Gradle 9.6.
 - Cleaned up every `:app:compileReleaseKotlin` warning:
   - Removed a non-existent `-opt-in=androidx.compose.material3.Material3ExpressiveApi`
     compiler flag (only `ExperimentalMaterial3ExpressiveApi` is real; the other was an
@@ -83,10 +89,8 @@ release/store-listing fixes only.
   lines across module build scripts. Publication metadata now comes from a
   small `mindlayerPublish { }` extension. No behavior change: publication
   names, CI task names, and the release model/ABI validators are unchanged.
-- **Lint** `32.2.1` → `32.3.0`. (AGP and LiteRT were each trialed at a newer
-  version during this cycle — `9.3.0-rc02` and `2.1.6` respectively — and
-  reverted before release; both remain at `9.2.1` / `2.1.5`, unchanged from
-  `1.0.0-alpha.5`.)
+- **Lint** `32.2.1` → `32.3.0`. AGP later moved from `9.2.1` to stable `9.3.0`;
+  LiteRT remains at `2.1.5`.
 - **SQLCipher** (`sqlcipher-android`) `4.15.0` → `4.17.0`.
 - Enabled `org.gradle.tooling.parallel` for faster Gradle sync (9.4+).
 - Polished the Google Play store listing copy and screenshots, and aligned

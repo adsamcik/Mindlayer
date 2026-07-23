@@ -7,12 +7,12 @@
 
 | Tool | Version | Notes |
 |---|---|---|
-| JDK | 17 (build) — but tests run on 21 in CI, see [Java 21 gotcha](#%EF%B8%8F-the-java-21-test-runtime-gotcha) | `compileOptions { sourceCompatibility/targetCompatibility = VERSION_17 }` and `kotlin { jvmTarget = JVM_17 }` |
-| Android SDK | `compileSdk 37`, `minSdk 26`, `targetSdk 37` | `compileSdk 37` required by Compose BOM 2026.05.01 alpha (1.12.0-alpha03 / material3 1.5.0-alpha20); `targetSdk 37` = Android 17 / API 37 |
-| Gradle | wrapper-managed (`gradlew`) | Plugin: AGP 9.2.1 |
-| Kotlin | 2.3.21 (KSP 2.3.8) | `kotlin.code.style=official` |
-| Compose | BOM 2026.04.01, Material3 1.5.0-alpha18 | |
-| LiteRT-LM | 0.12.0 (`com.google.ai.edge.litertlm:litertlm-android`) + LiteRT 2.1.5 | |
+| JDK | 21 for Gradle and Android Studio; app bytecode targets 17 | See [Java 21 gotcha](#%EF%B8%8F-the-java-21-test-runtime-gotcha); `compileOptions` and Kotlin `jvmTarget` remain 17 |
+| Android SDK | `compileSdk 37`, `minSdk 26`, `targetSdk 37` | `targetSdk 37` = Android 17 / API 37 |
+| Gradle | 9.6.1 (wrapper-managed) | Plugin: AGP 9.3.0 |
+| Kotlin | 2.4.10 (KSP 2.3.10) | `kotlin.code.style=official` |
+| Compose | BOM 2026.06.01, Material3 1.5.0-alpha24 | |
+| LiteRT-LM | 0.14.0 (`com.google.ai.edge.litertlm:litertlm-android`) + LiteRT 2.1.5 | |
 | Model files | Gemma `.litertlm`, EmbeddingGemma `.tflite` + tokenizer, PaddleOCR PP-OCRv5 assets | **NOT in git.** Delivered through standard on-demand PAD packs or staged manually for development. |
 | Emulator/device | API 26+, GPU recommended (Vulkan/OpenCL); Robolectric covers `:test` | Native libs `libvndksupport.so`, `libOpenCL.so` declared `required="false"`. |
 
@@ -40,7 +40,8 @@
 # Instrumented tests (needs an emulator/device on `adb`)
 ./gradlew :app:connectedDebugAndroidTest :sdk:connectedDebugAndroidTest
 
-# Signed release AAB (requires keystore.properties and the model cache)
+# Signed release AAB (Android Studio signing wizard, or keystore.properties
+# for this direct Gradle command; both require the model cache)
 ./gradlew :app:bundleRelease --no-configuration-cache
 ```
 
@@ -68,7 +69,7 @@ dashboard. Standard PAD packs are `:gemma_model` + `:gemma_model_part_2`,
 | `GITHUB_TOKEN` | env or gradle property | GitHub Packages auth (needs `read:packages` to consume, `write:packages` to publish) | empty |
 | `GITHUB_REPO` | gradle property | Publish target repo | `Mindlayer` |
 | `publishVersion` | `-PpublishVersion=X.Y.Z` or CI from `v*` tag | SDK/shared artifact version | `0.1.0` |
-| `keystore.properties` | repo root (gitignored) | Local-only release signing — see `docs/project/RELEASE.md` | absent → release packaging fails |
+| `keystore.properties` | repo root (gitignored) | Optional direct-Gradle release signing — see `docs/project/RELEASE.md`; Android Studio injects wizard credentials instead | absent → direct release packaging fails |
 
 ## ⚠️ The Java 21 test-runtime gotcha
 
@@ -109,9 +110,9 @@ Dependabot is enabled for Gradle and GitHub Actions; PRs land regularly.
 
 Production builds are signed locally — see `docs/project/RELEASE.md` for the keystore and model-cache flow. Quick summary:
 
-1. Drop `keystore.properties` (with `storeFile`, `storePassword`, `keyAlias`, `keyPassword`) at the repo root.
-2. Populate the flat `.models` cache (or set `MINDLAYER_MODEL_CACHE`).
-3. `./gradlew :app:bundleRelease --no-configuration-cache` produces `app/build/outputs/bundle/release/app-release.aab`.
+1. Populate the flat `.models` cache (or set `MINDLAYER_MODEL_CACHE`).
+2. Use Android Studio's **Build > Generate Signed App Bundle or APK** wizard, or create `keystore.properties` for direct Gradle signing.
+3. The wizard writes to its selected destination; direct `./gradlew :app:bundleRelease --no-configuration-cache` writes `app/build/outputs/bundle/release/app-release.aab`.
 4. Upload to Play Console with all four on-demand asset packs.
 5. Upload the signed AAB directly to Play Console, then tag `vX.Y.Z` to publish the SDK and code-only debug APK.
 
