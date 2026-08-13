@@ -14,7 +14,8 @@ SDK Maven coordinate → `1.0.0-alpha.7` (`com.adsamcik.mindlayer:sdk:1.0.0-alph
 - **Task-aware model readiness.** SDK clients can query a small CHAT/OCR
   readiness snapshot and, when setup is required, request a Mindlayer-owned
   `PendingIntent` that opens the Models screen. Older services degrade to an
-  explicit unsupported snapshot through capability gating.
+  explicit unsupported snapshot through capability gating; custom `Mindlayer`
+  implementations inherit the same safe fallback without source changes.
 - **Explicit inference cancellation.** `InferenceHandle.cancel()` now offers a
   public, idempotent cancellation path, while abandoning collection of
   `events` automatically requests native cancellation as well.

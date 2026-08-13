@@ -101,12 +101,13 @@ interface Mindlayer {
     ): com.adsamcik.mindlayer.ServiceCapabilities
 
     /** Coarse CHAT/OCR readiness for deciding whether a task can start. */
-    suspend fun getModelReadiness(): com.adsamcik.mindlayer.ModelReadinessSnapshot
+    suspend fun getModelReadiness(): com.adsamcik.mindlayer.ModelReadinessSnapshot =
+        com.adsamcik.mindlayer.ModelReadinessSnapshot.unsupported()
 
     /** Mindlayer-owned action that opens setup for [family], when supported. */
     suspend fun getModelSetupAction(
         family: String,
-    ): com.adsamcik.mindlayer.ModelSetupAction?
+    ): com.adsamcik.mindlayer.ModelSetupAction? = null
 
     /** Lightweight service status snapshot (lighter than [getEngineInfo]). */
     suspend fun getStatus(): com.adsamcik.mindlayer.ServiceStatus
