@@ -2168,11 +2168,78 @@ internal class MindlayerImpl(
         }
     }
 
+    /**
+     * Best-effort cancellation against the currently connected binder. This
+     * intentionally does not wait for reconnection: if the service process is
+     * gone, the native request is already gone with it.
+     */
+    private fun cancelInferenceNow(requestId: String): com.adsamcik.mindlayer.CancelResult {
+        val service = connection.getService() ?: return com.adsamcik.mindlayer.CancelResult(
+            outcome = com.adsamcik.mindlayer.CancelResult.UNKNOWN,
+        )
+        val detailed = cachedCapabilities
+            ?.supports(com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL)
+            ?: true
+        if (detailed) {
+            try {
+                return service.cancelInferenceV2(requestId)
+            } catch (_: NoSuchMethodError) {
+                // Fall through to the legacy endpoint.
+            } catch (_: AbstractMethodError) {
+                // Fall through to the legacy endpoint.
+            } catch (_: Exception) {
+                return com.adsamcik.mindlayer.CancelResult(
+                    outcome = com.adsamcik.mindlayer.CancelResult.UNKNOWN,
+                )
+            }
+        }
+        return try {
+            service.cancelInference(requestId)
+            com.adsamcik.mindlayer.CancelResult(
+                outcome = com.adsamcik.mindlayer.CancelResult.UNKNOWN,
+            )
+        } catch (_: Exception) {
+            com.adsamcik.mindlayer.CancelResult(
+                outcome = com.adsamcik.mindlayer.CancelResult.UNKNOWN,
+            )
+        }
+    }
+
     // -- Service status -------------------------------------------------------
 
     /** Get the current service status (engine loaded, thermals, etc.). */
     override suspend fun getStatus(): ServiceStatus {
         return withTypedErrors(retryOnServiceDeath = true) { it.status }
+    }
+
+    override suspend fun getModelReadiness(): com.adsamcik.mindlayer.ModelReadinessSnapshot {
+        val caps = getCapabilities()
+        if (!caps.supports(com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_MODEL_READINESS)) {
+            return com.adsamcik.mindlayer.ModelReadinessSnapshot.unsupported()
+        }
+        return try {
+            withTypedErrors(retryOnServiceDeath = true) { it.modelReadiness }
+        } catch (_: NoSuchMethodError) {
+            com.adsamcik.mindlayer.ModelReadinessSnapshot.unsupported()
+        } catch (_: AbstractMethodError) {
+            com.adsamcik.mindlayer.ModelReadinessSnapshot.unsupported()
+        }
+    }
+
+    override suspend fun getModelSetupAction(
+        family: String,
+    ): com.adsamcik.mindlayer.ModelSetupAction? {
+        val caps = getCapabilities()
+        if (!caps.supports(com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_MODEL_READINESS)) {
+            return null
+        }
+        return try {
+            withTypedErrors { it.getModelSetupAction(family) }
+        } catch (_: NoSuchMethodError) {
+            null
+        } catch (_: AbstractMethodError) {
+            null
+        }
     }
 
     /**
@@ -2615,12 +2682,11 @@ internal class MindlayerImpl(
      */
     private fun buildHandle(requestId: String, flow: Flow<InferenceEvent>): InferenceHandle {
         return InferenceHandleImpl(requestId, flow).also { handle ->
+            handle.setCancelCallback {
+                withContext(Dispatchers.IO) { cancelInferenceNow(requestId) }
+            }
             handle.setSyncCancelCallback {
-                try {
-                    connection.getService()?.cancelInference(requestId)
-                } catch (_: Exception) {
-                    // Best-effort cancel — service died or rejected the call
-                }
+                cancelInferenceNow(requestId)
             }
         }
     }

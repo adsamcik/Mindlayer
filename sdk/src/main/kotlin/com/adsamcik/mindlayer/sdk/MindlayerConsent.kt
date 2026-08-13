@@ -9,10 +9,11 @@ import android.os.IBinder
 import com.adsamcik.mindlayer.IMindlayerService
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
 
 /**
  * Result of [MindlayerConsent.requestConsent].
@@ -127,36 +128,67 @@ object MindlayerConsent {
             component = ComponentName(resolvedPkg, SERVICE_CLS)
         }
         var conn: ServiceConnection? = null
+        val bound = AtomicBoolean(false)
+        val releaseWhenBound = AtomicBoolean(false)
+
+        fun releaseBinding() {
+            val c = conn ?: return
+            if (bound.compareAndSet(true, false)) {
+                try { context.unbindService(c) } catch (_: Throwable) {}
+            } else {
+                releaseWhenBound.set(true)
+            }
+        }
+
         val service = withTimeoutOrNull(BIND_TIMEOUT_MS) {
-            suspendCoroutine<IMindlayerService?> { cont ->
-                val c = object : ServiceConnection {
-                    private var resumed = false
-                    override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-                        if (resumed) return
-                        resumed = true
-                        cont.resume(IMindlayerService.Stub.asInterface(binder))
+            suspendCancellableCoroutine<IMindlayerService?> { cont ->
+                val completed = AtomicBoolean(false)
+
+                fun complete(value: IMindlayerService?) {
+                    if (completed.compareAndSet(false, true)) {
+                        cont.resume(value)
                     }
-                    override fun onServiceDisconnected(name: ComponentName?) {}
+                }
+
+                val c = object : ServiceConnection {
+                    override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                        complete(binder?.let(IMindlayerService.Stub::asInterface))
+                        if (binder == null) releaseBinding()
+                    }
+                    override fun onServiceDisconnected(name: ComponentName?) {
+                        complete(null)
+                        releaseBinding()
+                    }
+                    override fun onBindingDied(name: ComponentName?) {
+                        complete(null)
+                        releaseBinding()
+                    }
                     override fun onNullBinding(name: ComponentName?) {
-                        if (resumed) return
-                        resumed = true
-                        cont.resume(null)
+                        complete(null)
+                        releaseBinding()
                     }
                 }
                 conn = c
+                cont.invokeOnCancellation {
+                    completed.set(true)
+                    releaseBinding()
+                }
                 val ok = try {
                     context.bindService(intent, c, Context.BIND_AUTO_CREATE)
                 } catch (_: Throwable) {
                     false
                 }
                 if (!ok) {
-                    cont.resume(null)
+                    complete(null)
+                } else {
+                    bound.set(true)
+                    if (releaseWhenBound.get()) releaseBinding()
                 }
             }
         }
         val c = conn
         if (service == null || c == null) {
-            if (c != null) try { context.unbindService(c) } catch (_: Throwable) {}
+            releaseBinding()
             return null
         }
         return service to c

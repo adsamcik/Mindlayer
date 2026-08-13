@@ -92,16 +92,13 @@ class MindlayerException @JvmOverloads constructor(
         }
 
     /**
-     * F-076: when [code] is [MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED],
-     * the service embeds `retryAfterMs=N` in the wire message body — the
-     * minimum delay the SDK should wait before retrying the staging-bound
-     * request. Returns `null` for any other code or if the service did not
-     * include the marker (e.g. an old service binary), in which case
-     * callers should fall back to a generic exponential backoff.
+     * Transient resource and busy errors may embed `retryAfterMs=N` in the
+     * wire message body. Returns `null` for non-retryable codes or when an old
+     * service omitted the hint.
      */
     val retryAfterMs: Long?
         get() {
-            if (code != MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED) return null
+            if (code !in RETRY_HINT_CODES) return null
             val raw = message ?: return null
             val match = RETRY_AFTER_MS_PATTERN.find(raw) ?: return null
             return match.groupValues[1].toLongOrNull()
@@ -131,6 +128,12 @@ class MindlayerException @JvmOverloads constructor(
          * SDK parsers.
          */
         private val RETRY_AFTER_MS_PATTERN: Regex = Regex("""retryAfterMs=(\d+)""")
+
+        private val RETRY_HINT_CODES: Set<Int> = setOf(
+            MindlayerErrorCode.ENGINE_BUSY,
+            MindlayerErrorCode.FRAME_DROPPED_BUSY,
+            MindlayerErrorCode.TRANSIENT_RESOURCE_EXHAUSTED,
+        )
 
         /**
          * Parse a wire-prefixed [SecurityException] message into a

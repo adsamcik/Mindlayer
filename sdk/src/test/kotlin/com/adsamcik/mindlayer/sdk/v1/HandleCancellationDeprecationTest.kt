@@ -11,12 +11,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Guards the C3 cancellation cleanup (D3.2). The deprecated public
- * `InferenceHandle.cancel()` / `isCancelled` were removed — cancellation now
- * flows through structured concurrency. The SDK still carries an internal
- * non-suspend teardown ([InferenceHandleImpl.cancelSync]) used by cleanup
- * paths such as [com.adsamcik.mindlayer.sdk.Conversation.close]. This test
- * pins that the surviving sync path flips state and fires its callback once.
+ * Guards explicit and cleanup-path cancellation. Both paths are idempotent and
+ * share one state flag, so native cancellation can never be sent repeatedly.
  */
 class HandleCancellationDeprecationTest {
 
@@ -36,6 +32,25 @@ class HandleCancellationDeprecationTest {
 
         // Idempotent: a second cancel must not re-fire the teardown.
         handle.cancelSync()
+        assertEquals(1, cancels)
+    }
+
+    @Test
+    fun `public cancel returns detailed result and fires once`() = runTest {
+        val handle = InferenceHandleImpl(requestId = "req-2", events = noEvents)
+        var cancels = 0
+        handle.setCancelCallback {
+            cancels++
+            com.adsamcik.mindlayer.CancelResult(
+                outcome = com.adsamcik.mindlayer.CancelResult.CANCELLED,
+            )
+        }
+
+        val first = handle.cancel()
+        val second = handle.cancel()
+
+        assertEquals(com.adsamcik.mindlayer.CancelResult.CANCELLED, first.outcome)
+        assertEquals(com.adsamcik.mindlayer.CancelResult.ALREADY_FINISHED, second.outcome)
         assertEquals(1, cancels)
     }
 }

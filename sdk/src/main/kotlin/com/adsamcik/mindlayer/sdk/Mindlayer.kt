@@ -100,6 +100,14 @@ interface Mindlayer {
         forceRefresh: Boolean = false,
     ): com.adsamcik.mindlayer.ServiceCapabilities
 
+    /** Coarse CHAT/OCR readiness for deciding whether a task can start. */
+    suspend fun getModelReadiness(): com.adsamcik.mindlayer.ModelReadinessSnapshot
+
+    /** Mindlayer-owned action that opens setup for [family], when supported. */
+    suspend fun getModelSetupAction(
+        family: String,
+    ): com.adsamcik.mindlayer.ModelSetupAction?
+
     /** Lightweight service status snapshot (lighter than [getEngineInfo]). */
     suspend fun getStatus(): com.adsamcik.mindlayer.ServiceStatus
 

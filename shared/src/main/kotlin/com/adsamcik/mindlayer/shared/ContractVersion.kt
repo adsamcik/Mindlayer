@@ -66,11 +66,11 @@ object ContractVersion {
      * in code comments/docs) shipped after the "v1.0" audio-input
      * baseline this MAJOR was cut at.
      */
-    const val MINOR: Int = 1
+    const val MINOR: Int = 2
 
     /** Bumped for wire-invisible fixes. Independent of the product's patch. */
-    const val PATCH: Int = 1
+    const val PATCH: Int = 0
 
-    /** `"$MAJOR.$MINOR.$PATCH"`, e.g. `"1.1.1"`. */
+    /** `"$MAJOR.$MINOR.$PATCH"`, e.g. `"1.2.0"`. */
     const val VERSION: String = "$MAJOR.$MINOR.$PATCH"
 }

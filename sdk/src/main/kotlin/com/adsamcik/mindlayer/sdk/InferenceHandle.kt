@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.sdk
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import java.util.concurrent.atomic.AtomicBoolean
@@ -13,13 +14,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * tool-calling. The canonical [Mindlayer.infer] returns the matching subtype
  * so common call sites avoid a cast.
  *
- * ## Cancellation (Spike-E §8.4)
- *
- * There is no `cancel()` on the handle. Cancellation flows through structured
- * concurrency: cancel the coroutine collecting [events] and the AIDL request is
- * torn down via the stream's `awaitClose`. Cleanup paths internal to the SDK
- * (notably [Conversation.close]) tear an in-flight request down through the
- * impl's package-private sync-cancel machinery.
+ * Cancelling the coroutine collecting [events] automatically requests native
+ * cancellation. [cancel] is also available for explicit user actions.
  */
 sealed interface InferenceHandle {
     /** Unique request ID, available immediately (before collection starts). */
@@ -30,6 +26,9 @@ sealed interface InferenceHandle {
 
     /** Cold flow of inference events. Collect exactly once. */
     val events: Flow<InferenceEvent>
+
+    /** Stop native inference. Idempotent and non-blocking on reconnection. */
+    suspend fun cancel(): com.adsamcik.mindlayer.CancelResult
 
     /** Plain text generation. */
     interface Text : InferenceHandle {
@@ -58,12 +57,26 @@ sealed interface InferenceHandle {
  */
 internal class InferenceHandleImpl(
     override val requestId: String,
-    override val events: Flow<InferenceEvent>,
+    events: Flow<InferenceEvent>,
     override val sessionId: String = "",
 ) : InferenceHandle, InferenceHandle.Text, InferenceHandle.Structured, InferenceHandle.Tools {
 
     private val cancelled = AtomicBoolean(false)
+    private val sourceEvents = events
     private var syncCancelCallback: (() -> Unit)? = null
+    private var cancelCallback: (suspend () -> com.adsamcik.mindlayer.CancelResult)? = null
+
+    override val events: Flow<InferenceEvent> = flow {
+        var terminal = false
+        try {
+            sourceEvents.collect { event ->
+                if (event is InferenceEvent.Done || event is InferenceEvent.Error) terminal = true
+                emit(event)
+            }
+        } finally {
+            if (!terminal) cancel()
+        }
+    }
 
     /** Read-only cancellation state for internal callers and the test suite. */
     internal val isCancelled: Boolean get() = cancelled.get()
@@ -76,6 +89,21 @@ internal class InferenceHandleImpl(
      */
     internal fun setSyncCancelCallback(cb: () -> Unit) {
         syncCancelCallback = cb
+    }
+
+    internal fun setCancelCallback(cb: suspend () -> com.adsamcik.mindlayer.CancelResult) {
+        cancelCallback = cb
+    }
+
+    override suspend fun cancel(): com.adsamcik.mindlayer.CancelResult {
+        if (cancelled.getAndSet(true)) {
+            return com.adsamcik.mindlayer.CancelResult(
+                outcome = com.adsamcik.mindlayer.CancelResult.ALREADY_FINISHED,
+            )
+        }
+        return cancelCallback?.invoke() ?: com.adsamcik.mindlayer.CancelResult(
+            outcome = com.adsamcik.mindlayer.CancelResult.UNKNOWN,
+        )
     }
 
     /** Non-suspend teardown for synchronous cleanup paths. Idempotent. */

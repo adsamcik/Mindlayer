@@ -43,16 +43,24 @@ class MindlayerExceptionTransientResourceExhaustedTest {
 
     @Test
     fun `retryAfterMs is null when code is not TRANSIENT_RESOURCE_EXHAUSTED`() {
-        // Even if the message contains `retryAfterMs=...`, the parser only
-        // exposes it when the code is the TRANSIENT_RESOURCE_EXHAUSTED one
-        // — prevents accidental parsing of unrelated wire payloads (like
-        // a future ENGINE_INITIALIZING message that happens to embed a
-        // delay hint).
+        // Only documented transient codes expose the marker.
         val mle = MindlayerException(
             message = "engine_initializing retryAfterMs=999",
             code = MindlayerErrorCode.ENGINE_INITIALIZING,
         )
         assertNull(mle.retryAfterMs)
+    }
+
+    @Test
+    fun `ENGINE_BUSY exposes its retry hint and registry metadata`() {
+        val mle = MindlayerException(
+            message = "engine_busy retryAfterMs=500",
+            code = MindlayerErrorCode.ENGINE_BUSY,
+        )
+
+        assertEquals(500L, mle.retryAfterMs)
+        assertEquals("ENGINE_BUSY", mle.codeName)
+        assertEquals(MindlayerErrorCode.Category.ENGINE, mle.category)
     }
 
     @Test

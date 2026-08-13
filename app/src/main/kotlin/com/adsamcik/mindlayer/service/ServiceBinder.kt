@@ -114,6 +114,12 @@ class ServiceBinder(
      * delegate.
      */
     private val paddleOcrEngine: com.adsamcik.mindlayer.service.engine.PaddleOcrEngine? = null,
+    private val modelReadinessSnapshot: () -> com.adsamcik.mindlayer.ModelReadinessSnapshot = {
+        RuntimeModelReadiness.snapshot(
+            chat = engineManager.state.value,
+            ocr = paddleOcrEngine?.state?.value,
+        )
+    },
     /**
      * Structured-extraction extractor used when the caller sets
      * [com.adsamcik.mindlayer.OcrImageOptions.runLlmExtraction] = true.
@@ -275,7 +281,7 @@ class ServiceBinder(
          * [submitToolResultV2]; v5 added [getDiagnosticsTyped]; v6 added
          * [subscribeEvictionNotices] + [unsubscribeEvictionNotices].
          */
-        const val CURRENT_API_VERSION = 8
+        const val CURRENT_API_VERSION = 9
 
         /**
          * How long after termination a scoped key remains in
@@ -370,6 +376,7 @@ class ServiceBinder(
             // gate and charges zero rate-limit cost; unconsented peers can
             // use it for liveness probes.
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_HEALTH_CHECK,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_MODEL_READINESS,
             // Single-clip audio input. The transport (FEATURE_SHARED_MEMORY_MEDIA)
             // and the multi-attachment shape (FEATURE_MEDIA_LIST) are
             // already advertised above; FEATURE_AUDIO_INPUT specifically
@@ -3492,6 +3499,54 @@ class ServiceBinder(
         val uid = Binder.getCallingUid()
         if (callback == null) return
         evictionRegistry.unregister(uid, callback)
+    }
+
+    override fun getModelReadiness(): com.adsamcik.mindlayer.ModelReadinessSnapshot {
+        authorizeCall(cost = 0.25)
+        return modelReadinessSnapshot()
+    }
+
+    override fun getModelSetupAction(family: String?): com.adsamcik.mindlayer.ModelSetupAction? {
+        authorizeCall(cost = 0.25)
+        val requestedFamily = family?.uppercase() ?: throw typedBinderException(
+            com.adsamcik.mindlayer.shared.MindlayerErrorCode.INVALID_REQUEST,
+            "Model family is required",
+        )
+        if (requestedFamily !in setOf(
+                com.adsamcik.mindlayer.ModelReadinessItem.FAMILY_CHAT,
+                com.adsamcik.mindlayer.ModelReadinessItem.FAMILY_OCR,
+            )
+        ) {
+            throw typedBinderException(
+                com.adsamcik.mindlayer.shared.MindlayerErrorCode.INVALID_REQUEST,
+                "Unsupported model family",
+            )
+        }
+        val intent = android.content.Intent().apply {
+            component = android.content.ComponentName(
+                context.packageName,
+                "com.adsamcik.mindlayer.service.ui.MainActivity",
+            )
+            putExtra(
+                com.adsamcik.mindlayer.service.ui.MainActivity.EXTRA_START_DESTINATION,
+                com.adsamcik.mindlayer.service.ui.MindlayerNavigation.ModelsRoute,
+            )
+            addFlags(
+                android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                    android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP,
+            )
+        }
+        val pendingIntent = android.app.PendingIntent.getActivity(
+            context,
+            requestedFamily.hashCode(),
+            intent,
+            android.app.PendingIntent.FLAG_IMMUTABLE or
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        return com.adsamcik.mindlayer.ModelSetupAction(
+            family = requestedFamily,
+            setupIntent = pendingIntent,
+        )
     }
 }
 

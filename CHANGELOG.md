@@ -6,6 +6,28 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [1.0.0-alpha.7] — 2026-08-13
+
+SDK Maven coordinate → `1.0.0-alpha.7` (`com.adsamcik.mindlayer:sdk:1.0.0-alpha.7`).
+
+### Added
+- **Task-aware model readiness.** SDK clients can query a small CHAT/OCR
+  readiness snapshot and, when setup is required, request a Mindlayer-owned
+  `PendingIntent` that opens the Models screen. Older services degrade to an
+  explicit unsupported snapshot through capability gating.
+- **Explicit inference cancellation.** `InferenceHandle.cancel()` now offers a
+  public, idempotent cancellation path, while abandoning collection of
+  `events` automatically requests native cancellation as well.
+
+### Changed
+- Contract version `1.1.1` → `1.2.0` for the additive readiness parcelables
+  and AIDL methods.
+- `ENGINE_BUSY` is now a typed transient engine error, and retry hints may be
+  carried by all retryable busy/resource-exhaustion errors.
+
+### Fixed
+- Cancelling or timing out the SDK consent bind now unbinds reliably, and all
+  service-connection callbacks complete the suspended request at most once.
 - Cleaned up every `:app:compileReleaseKotlin` warning:
   - Removed a non-existent `-opt-in=androidx.compose.material3.Material3ExpressiveApi`
     compiler flag (only `ExperimentalMaterial3ExpressiveApi` is real; the other was an

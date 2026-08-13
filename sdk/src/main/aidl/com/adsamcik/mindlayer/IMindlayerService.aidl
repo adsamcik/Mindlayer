@@ -31,6 +31,8 @@ import com.adsamcik.mindlayer.HealthCheck;
 import com.adsamcik.mindlayer.ConsentChallenge;
 import com.adsamcik.mindlayer.ConsentIdentity;
 import com.adsamcik.mindlayer.ConsentDecision;
+import com.adsamcik.mindlayer.ModelReadinessSnapshot;
+import com.adsamcik.mindlayer.ModelSetupAction;
 import com.adsamcik.mindlayer.IClientCallback;
 
 interface IMindlayerService {
@@ -215,6 +217,12 @@ interface IMindlayerService {
     ConsentChallenge requestConsentChallenge();
     @nullable ConsentIdentity lookupChallenge(String nonce);
     void completeConsent(String nonce, in ConsentDecision decision);
+
+    // v1.2 model readiness. Coarse task-facing state for CHAT/OCR; model
+    // delivery details and corrective UI remain owned by Mindlayer.
+    // Capability-gated via ServiceCapabilities.FEATURE_MODEL_READINESS.
+    ModelReadinessSnapshot getModelReadiness();
+    @nullable ModelSetupAction getModelSetupAction(String family);
 }
 
 

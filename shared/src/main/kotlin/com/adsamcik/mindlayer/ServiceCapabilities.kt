@@ -287,6 +287,9 @@ data class ServiceCapabilities(
          */
         const val FEATURE_HEALTH_CHECK: String = "health_check"
 
+        /** v1.2: coarse CHAT/OCR readiness plus a Mindlayer-owned setup action. */
+        const val FEATURE_MODEL_READINESS: String = "model_readiness"
+
         /**
          * v1.0: single-clip audio input accepted via `infer(...)` /
          * `inferMulti(...)` with one [com.adsamcik.mindlayer.MediaPart]

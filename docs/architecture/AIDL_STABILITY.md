@@ -59,6 +59,7 @@ Every public AIDL Parcelable lives in `:shared` and crosses process boundaries v
 | `SessionInfo` | 10 fields incl. `expirationMs`, `expiresAtMs` | These two were added post-v0 with defaults; pre-1.0 audience accepted the wire break. **Do not repeat this pattern.** |
 | `ServiceCapabilities` (v0.2, schema v2 today) | `schemaVersion: Int = CURRENT_SCHEMA_VERSION` first; protocol/limit fields plus embedding limit/model metadata fields | First parcelable to follow the schemaVersion convention. Current schema is `2`; see capability gating and embeddings notes below. |
 | `MediaPart` (v0.4) | `schemaVersion: Int = 1` first; tagged-union kind + image/audio/video/document fields | Carries an ordered list via `inferMulti`. Wire reserves `KIND_VIDEO`/`KIND_DOCUMENT` for engines that aren't here yet. |
+| `ModelReadinessItem`, `ModelReadinessSnapshot`, `ModelSetupAction` (v1.2) | Each starts with `schemaVersion: Int = 1`; item/snapshot carry coarse CHAT/OCR state and action carries a `PendingIntent` | Keeps delivery details in Mindlayer while clients can avoid starting work that needs a missing model. |
 
 ### 3. Pipe stream protocol (`mindlayer.stream.v1` / `mindlayer.stream.v2`)
 
@@ -150,10 +151,20 @@ Stable feature-flag strings allocated:
 | `"ocr_barcode_anchor"` | OCR evidence/events include ZXing barcode anchors. |
 | `"ocr_bounding_boxes"` | OCR field events can include per-line bounding-box geometry. |
 | `"health_check"` | Lightweight `ping()` health check returning `HealthCheck` is implemented. |
+| `"model_readiness"` | Task-aware CHAT/OCR readiness and a Mindlayer-owned setup action are available. |
 
 Old SDKs that don't probe capabilities should call new methods inside a `try/catch (e: AbstractMethodError)` (or `NoSuchMethodError`) and fall back. New SDKs that probe should consult `supportedFeatures` first.
 
 Feature flag strings are **wire-stable** in the same sense as error codes: append-only, never repurposed.
+
+### Model-readiness surface (v1.2)
+
+`getModelReadiness()` and `getModelSetupAction(family)` are appended to
+`IMindlayerService` and gated by `FEATURE_MODEL_READINESS`
+(`"model_readiness"`). The snapshot intentionally exposes only CHAT/OCR task
+readiness; model-pack delivery, diagnosis details, and corrective UI remain
+owned by Mindlayer. New SDKs return an unsupported snapshot or `null` setup
+action when paired with an older service.
 
 ## What goes wrong if you ignore this document
 
@@ -166,7 +177,7 @@ Real failure modes observed when AIDL discipline lapses:
 
 ## Contract version and compatibility policy
 
-`com.adsamcik.mindlayer.shared.ContractVersion` (`shared/src/main/kotlin/com/adsamcik/mindlayer/shared/ContractVersion.kt`) is the formal, semver-numbered successor to the informal "(vX.Y)" labels used throughout this document and the codebase's comments (§ "Deferred inference surface (v0.6)" below, `"v1.1: ..."` comments in `SessionManager.kt`, etc.). Those labels tracked the same thing this object now tracks explicitly — the shape of the AIDL/wire contract — just without a single source of truth. Current value: `1.1.1`.
+`com.adsamcik.mindlayer.shared.ContractVersion` (`shared/src/main/kotlin/com/adsamcik/mindlayer/shared/ContractVersion.kt`) is the formal, semver-numbered successor to the informal "(vX.Y)" labels used throughout this document and the codebase's comments (§ "Deferred inference surface (v0.6)" below, `"v1.1: ..."` comments in `SessionManager.kt`, etc.). Those labels tracked the same thing this object now tracks explicitly — the shape of the AIDL/wire contract — just without a single source of truth. Current value: `1.2.0`.
 
 **Relationship to the product version.** `ContractVersion` is a deliberately separate number from the product/SDK version (`publishVersion` in the root `build.gradle.kts`, e.g. `"1.0.0-alpha.5"`) — most product releases ship zero AIDL changes, so forcing them to share a full version would be misleading. They are linked at exactly one level:
 

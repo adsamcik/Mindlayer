@@ -82,6 +82,13 @@ class MainActivity : ComponentActivity() {
 
         val authenticator: SensitiveActionAuthenticator =
             BiometricSensitiveActionAuthenticator(this)
+        val startDestination = if (
+            intent.getStringExtra(EXTRA_START_DESTINATION) == MindlayerNavigation.ModelsRoute
+        ) {
+            MindlayerNavigation.ModelsRoute
+        } else {
+            MindlayerNavigation.StatusRoute
+        }
 
         setContent {
             MindlayerTheme {
@@ -99,7 +106,7 @@ class MainActivity : ComponentActivity() {
                     ) { innerPadding ->
                         NavHost(
                             navController = navController,
-                            startDestination = MindlayerNavigation.StatusRoute,
+                            startDestination = startDestination,
                             modifier = Modifier.padding(innerPadding),
                         ) {
                             composable(MindlayerNavigation.StatusRoute) {
@@ -223,6 +230,11 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         dashboardViewModel.unbindService(this)
+    }
+
+    companion object {
+        const val EXTRA_START_DESTINATION =
+            "com.adsamcik.mindlayer.extra.START_DESTINATION"
     }
 }
 
