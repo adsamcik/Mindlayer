@@ -6,7 +6,7 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
-## [1.0.0-alpha.7] — 2026-08-13
+## [1.0.0-alpha.7] — 2026-08-16
 
 SDK Maven coordinate → `1.0.0-alpha.7` (`com.adsamcik.mindlayer:sdk:1.0.0-alpha.7`).
 
