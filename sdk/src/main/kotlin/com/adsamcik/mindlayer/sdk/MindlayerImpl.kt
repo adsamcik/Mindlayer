@@ -2179,7 +2179,7 @@ internal class MindlayerImpl(
         )
         val detailed = cachedCapabilities
             ?.supports(com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL)
-            ?: true
+            ?: false
         if (detailed) {
             try {
                 return service.cancelInferenceV2(requestId)
