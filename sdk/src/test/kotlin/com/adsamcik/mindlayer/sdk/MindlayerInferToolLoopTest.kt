@@ -202,8 +202,9 @@ class MindlayerInferToolLoopTest {
         val ex = runCatching { (handle as InferenceHandle.Text).awaitText() }.exceptionOrNull()
         assertTrue("expected a MindlayerException, got $ex", ex is MindlayerException)
         assertEquals("TOOL_HANDLER_FAILED", (ex as MindlayerException).codeName)
-        // The inference was asked to stop.
-        verify(exactly = 1) { mockService.cancelInference(any()) }
+        // The inference was asked to stop. Handle cleanup may issue another
+        // idempotent cancellation after the terminal error is observed.
+        verify(atLeast = 1) { mockService.cancelInference(any()) }
         // No result was submitted for the failed call.
         verify(exactly = 0) { mockService.submitToolResult(any(), any()) }
     }
