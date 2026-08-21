@@ -4,7 +4,7 @@ import com.google.ai.edge.litert.Accelerator
 import com.google.ai.edge.litert.CompiledModel
 
 /**
- * Production PP-OCRv5 mobile runner backed by LiteRT 2.1.5 `CompiledModel`.
+ * Production PP-OCRv5 mobile runner backed by LiteRT 2.2.0 `CompiledModel`.
  *
  * Kept out of [LiteRtPaddleOcrBackend] so Robolectric tests can exercise the
  * Kotlin pipeline without touching LiteRT native class initializers.

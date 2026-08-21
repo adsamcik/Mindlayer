@@ -6,6 +6,25 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+### Changed
+- **Paired LiteRT stack update:** `litertlm-android` 0.14.0 → 0.16.1 and
+  base LiteRT 2.1.5 → 2.2.0. LiteRT-LM 0.16.1 pins LiteRT commit `0ff2811`
+  from the 2.2 development line (40 commits before the 2.2.0 tag), making
+  2.2.0 the nearest published standalone Maven release. The resolved AARs
+  remain free of native-library collisions. On an API 36 x86_64 emulator,
+  base LiteRT successfully ran EmbeddingGemma while remaining active through
+  LiteRT-LM initialization and two consecutive Gemma vision inferences.
+  Real-device GPU/NPU coexistence validation is still required.
+- Added handling and regression coverage for LiteRT-LM 0.16.1's new
+  `Backend.GOOGLE_TENSOR` API variant.
+
+### Fixed
+- Worked around upstream LiteRT issue #8474, which still publishes
+  `litert:2.2.0` and its required `litert-api:2.2.0` dependency with the same
+  Android namespace. AGP's global uniqueness check is relaxed, while the new
+  `validateAndroidAarNamespaces` task scans the full release AAR graph and
+  fails unless the only duplicate is the exact, byte-identical LiteRT pair.
+
 ## [1.0.0-alpha.7] — 2026-08-16
 
 SDK Maven coordinate → `1.0.0-alpha.7` (`com.adsamcik.mindlayer:sdk:1.0.0-alpha.7`).

@@ -666,8 +666,8 @@ val validateLitertAbis = tasks.register("validateLitertAbis") {
 // 2.1.5 used to both bundle libLiteRt.so / libLiteRtClGlAccelerator.so under the
 // same SONAME but from different, mismatched builds -- `pickFirsts` silently
 // resolved the packaging conflict but non-deterministically kept the WRONG copy
-// for a long time before that was caught. litertlm 0.14.0 no longer bundles
-// either file, so there is currently no collision and `pickFirsts` has been
+// for a long time before that was caught. litertlm 0.14.0 removed both files,
+// and 0.16.1 still bundles neither, so there is currently no collision and `pickFirsts` has been
 // removed from the packaging block below. This task re-checks that on every
 // build so a future dependency bump that reintroduces the collision fails loud
 // and early -- with an actionable message -- instead of resolving silently again.
@@ -915,8 +915,8 @@ android {
         // source/target levels are applied by the mindlayer.android.application
         // convention.
         //
-        // No jniLibs { pickFirsts } rule here on purpose: litertlm 0.14.0 no
-        // longer bundles libLiteRt*.so at all, so litert:2.1.5 is the sole
+        // No jniLibs { pickFirsts } rule here on purpose: litertlm 0.16.1 no
+        // longer bundles libLiteRt*.so at all, so litert:2.2.0 is the sole
         // provider and there's no AAR-vs-AAR collision to silence. If a future
         // dependency bump reintroduces one, AGP's native packaging merge fails
         // loudly on its own (duplicate same-path entries with no merge rule),
@@ -960,6 +960,105 @@ val releaseRuntimeComponents = providers.provider {
             }
         }
         .sorted()
+}
+
+// LiteRT 2.2.0's `litert` and `litert-api` AARs have byte-identical manifests
+// with the same package/namespace (upstream #8474). AGP's namespace uniqueness
+// switch is global, so `android.uniquePackageNames=false` would otherwise hide
+// unrelated future collisions too. Re-scan every external runtime AAR and
+// allow exactly this known, content-identical pair; fail closed on everything
+// else until Google fixes the published metadata and the workaround is removed.
+val releaseRuntimeAars: FileCollection = files(
+    providers.provider {
+        configurations.getByName("releaseRuntimeClasspath")
+            .incoming
+            .artifactView {
+                isLenient = true
+                componentFilter { id ->
+                    id is org.gradle.api.artifacts.component.ModuleComponentIdentifier
+                }
+                attributes.attribute(
+                    org.gradle.api.attributes.Attribute.of("artifactType", String::class.java),
+                    "aar",
+                )
+            }
+            .files
+    },
+)
+
+val validateAndroidAarNamespaces = tasks.register("validateAndroidAarNamespaces") {
+    group = "verification"
+    description = "Rejects duplicate external AAR namespaces except LiteRT 2.2.0's known identical pair."
+
+    val aarFiles = releaseRuntimeAars
+    inputs.files(aarFiles)
+        .withPropertyName("releaseRuntimeAars")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    val liteRtVersion = libs.versions.litert.get()
+    inputs.property("liteRtVersion", liteRtVersion)
+    val markerFile = layout.buildDirectory.file("android-aar-namespace-check/result.txt")
+    outputs.file(markerFile)
+
+    doLast {
+        val resolvedAars = aarFiles.files.filter { it.extension == "aar" }
+        val manifests = resolvedAars.mapNotNull { aar ->
+            val manifestBytes = ZipFile(aar).use { zip ->
+                zip.getEntry("AndroidManifest.xml")?.let { entry ->
+                    zip.getInputStream(entry).use { it.readBytes() }
+                }
+            } ?: return@mapNotNull null
+            val manifest = manifestBytes.toString(Charsets.UTF_8)
+            val namespace = Regex("""\bpackage\s*=\s*["']([^"']+)["']""")
+                .find(manifest)
+                ?.groupValues
+                ?.get(1)
+                ?: return@mapNotNull null
+            Triple(namespace, aar.name, manifestBytes)
+        }
+        val duplicateNamespaces = manifests
+            .groupBy { it.first }
+            .filterValues { entries -> entries.size > 1 }
+        val expectedVersion = inputs.properties["liteRtVersion"] as String
+        val expectedLiteRtAars = setOf(
+            "litert-$expectedVersion.aar",
+            "litert-api-$expectedVersion.aar",
+        )
+
+        duplicateNamespaces.forEach { (namespace, entries) ->
+            val names = entries.map { it.second }.toSet()
+            val manifestsAreIdentical = entries
+                .drop(1)
+                .all { it.third.contentEquals(entries.first().third) }
+            if (
+                namespace != "com.google.ai.edge.litert" ||
+                names != expectedLiteRtAars ||
+                !manifestsAreIdentical
+            ) {
+                throw GradleException(
+                    "Duplicate Android AAR namespace '$namespace' is not the exact allow-listed " +
+                        "LiteRT pair: files=${names.sorted()}, manifestsIdentical=$manifestsAreIdentical. " +
+                        "Do not rely on android.uniquePackageNames=false for unreviewed collisions.",
+                )
+            }
+        }
+
+        val liteRtEntries = manifests.filter { it.first == "com.google.ai.edge.litert" }
+        if (liteRtEntries.map { it.second }.toSet() != expectedLiteRtAars) {
+            throw GradleException(
+                "Expected the LiteRT namespace workaround to cover exactly $expectedLiteRtAars; got " +
+                    liteRtEntries.map { it.second }.sorted(),
+            )
+        }
+
+        markerFile.get().asFile.apply { parentFile.mkdirs() }.writeText(
+            buildString {
+                appendLine("scannedAars=${resolvedAars.size}")
+                appendLine("duplicateNamespace=com.google.ai.edge.litert")
+                appendLine("allowedFiles=${expectedLiteRtAars.sorted().joinToString(",")}")
+                appendLine("manifestsIdentical=true")
+            },
+        )
+    }
 }
 
 val validateNoAiDeliveryDependency = tasks.register("validateNoAiDeliveryDependency") {
@@ -1015,7 +1114,12 @@ tasks.configureEach {
     // assembleDebug + assembleRelease + bundleRelease are the lifecycle tasks
     // CI invokes; the validator's <200 ms warm cost makes blanket wiring safe.
     if (name == "assembleDebug" || name == "assembleRelease" || name == "bundleRelease") {
-        dependsOn(validateLitertlmAbis, validateLitertAbis, validateNoLiteRtNativeLibCollision)
+        dependsOn(
+            validateLitertlmAbis,
+            validateLitertAbis,
+            validateNoLiteRtNativeLibCollision,
+            validateAndroidAarNamespaces,
+        )
     }
 
     // The release Asset Pack staging tasks read each pack module's

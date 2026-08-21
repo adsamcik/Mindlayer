@@ -901,6 +901,12 @@ class EngineManagerTest {
         assertEquals("NPU", invokeBackendName(mgr, Backend.NPU(nativeLibraryDir = "/fake")))
     }
 
+    @Test
+    fun `backendName - Google Tensor returns GOOGLE_TENSOR`() {
+        val mgr = EngineManager(context)
+        assertEquals("GOOGLE_TENSOR", invokeBackendName(mgr, Backend.GOOGLE_TENSOR()))
+    }
+
     // ---- DEFAULT_MODEL_FILENAME constant ------------------------------------
 
     @Test

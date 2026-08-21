@@ -1086,5 +1086,6 @@ class EngineManager(
         is Backend.CPU -> "CPU"
         is Backend.GPU -> "GPU"
         is Backend.NPU -> "NPU"
+        is Backend.GOOGLE_TENSOR -> "GOOGLE_TENSOR"
     }
 }

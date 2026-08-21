@@ -1,14 +1,43 @@
 # LiteRT + LiteRT-LM same-process coexistence risk
 
-> **Status: the 2026-07-09 packaging-collision fix was superseded and REMOVED
-> on 2026-07-13 — litertlm 0.14.0 no longer bundles either colliding library.**
-> Last updated: 2026-07-13.
+> **Status: LiteRT-LM 0.16.1 and base LiteRT 2.2.0 are now upgraded as a
+> pair. LiteRT-LM still bundles neither colliding library, and the
+> native-collision guard passes. Real-device GPU/NPU coexistence remains
+> unverified.**
+> Last updated: 2026-08-20.
 >
 > The Mindlayer service loads **two distinct LiteRT-family runtimes**
 > in the same Android process: ``com.google.ai.edge.litertlm:litertlm-android``
-> for the Gemma chat path, and ``com.google.ai.edge.litert:litert:2.1.5``
+> for the Gemma chat path, and ``com.google.ai.edge.litert:litert:2.2.0``
 > for the embedding (EmbeddingGemma) and OCR (PaddleOCR PP-OCRv5
 > mobile) paths.
+>
+> **2026-08-20 paired-version update:** LiteRT-LM 0.16.1 pins upstream
+> LiteRT commit `0ff28117f1cb5556d0e015bf80b773f74e2bee51` (2026-08-04).
+> That revision is 366 commits after LiteRT 2.1.6 and 40 commits before
+> the LiteRT 2.2.0 tag, making 2.2.0 the nearest published standalone
+> Maven release. This is source-line alignment, not bit-identical runtime
+> alignment: no standalone artifact exists for the exact embedded commit.
+> The 0.16.1 AAR contains only `liblitertlm_jni.so`; base LiteRT remains
+> the sole provider of `libLiteRt.so` and `libLiteRtClGlAccelerator.so`.
+>
+> **2026-08-21 emulator validation:** on the API 36 x86_64 emulator, base
+> LiteRT 2.2.0 created a CPU `CompiledModel` and completed one real
+> EmbeddingGemma inference. With that model still active, LiteRT-LM 0.16.1
+> initialized Gemma 4 E2B on CPU and completed two consecutive multimodal
+> vision inferences (144 output characters each). The instrumentation runner
+> reported `OK (1 test)`, and logcat contained no native crash, unresolved
+> symbol, or linker failure. This validates CPU coexistence only; the
+> real-device GPU/NPU matrix remains required.
+>
+> **2026-08-19 update:** LiteRT 2.2.0 still has upstream issue #8474:
+> its required `litert-api` dependency publishes the same Android namespace
+> as `litert`. The two AAR manifests are byte-identical, so the project uses
+> `android.uniquePackageNames=false` and restores fail-closed behavior with
+> `validateAndroidAarNamespaces`. That task scans the full release AAR graph
+> and permits only this exact pair; any other duplicate namespace or any
+> change to either LiteRT manifest fails packaging. This is an Android
+> publishing-metadata workaround, not evidence of runtime coexistence.
 >
 > **2026-07-09 update (now superseded, see below):** litertlm 0.13.1 bundled
 > its own `libLiteRt.so` + `libLiteRtClGlAccelerator.so` under the same
@@ -124,9 +153,12 @@ investigated and ruled out:
 litertlm-android 0.14.0's public API surface (`Engine`, `Conversation`,
 `Session`, `Message`, `Tool`, `Backend`, ...) is decompiled-confirmed to be
 entirely LLM-chat-oriented — no generic `CompiledModel`/tensor-runner
-equivalent exists, so it cannot host Embedding/PaddleOCR. (a) remains blocked
-on upstream shipping a version-aligned pair; litertlm 0.13.1/0.14.0's bundled
-core still matches no published standalone `litert` release.
+equivalent exists, so it cannot host Embedding/PaddleOCR. (a) is now as close
+as the published artifacts allow: LiteRT-LM 0.16.1 embeds a pre-release 2.2
+revision and Mindlayer pairs it with standalone LiteRT 2.2.0. The revisions
+are still not bit-identical, so real-device accelerator validation remains
+required.
+
 ### litertlm version-bump note (0.13.1 → 0.14.0)
 
 Bumped again; builds and passes the full `:app`/`:sdk` unit test suite on
@@ -149,15 +181,23 @@ without re-extracting, and 0.14.0's AAR has nothing to re-extract — see the
 status banner at the top of this doc for the full analysis and fix (the
 override was deleted, not refreshed).
 
+### litertlm/base-LiteRT paired bump (0.14.0/2.1.5 → 0.16.1/2.2.0)
+
+The versions now move as a reviewed pair. LiteRT-LM 0.16.1 embeds LiteRT
+commit `0ff2811`, which belongs to the 2.2 development line and is 40 commits
+behind the 2.2.0 release tag. The resolved 0.16.1 Android AAR contains only
+`liblitertlm_jni.so` for arm64-v8a and x86_64; the existing missing-armeabi-v7a
+allow-list remains in force. The native-collision and AAR-namespace validators
+both pass. LiteRT-LM also adds `Backend.GOOGLE_TENSOR`; Mindlayer handles the
+new sealed subtype in backend naming but does not select it automatically.
+
 ## What we actually know
 
 > The three subsections below reflect a point-in-time analysis done against
-> litertlm-android **0.13.1** and have not been individually re-verified
-> against 0.14.0 (only the specific claims re-checked in the status banner
-> and version-bump notes above have been). The API surfaces described
-> (Maven deps, `CompiledModel` vs. `Interpreter`, `Backend.CPU()/GPU()/NPU()`)
-> are not expected to have changed across this bump, but treat them as
-> historical unless re-confirmed.
+> litertlm-android **0.13.1** and are retained as history. Only the claims
+> explicitly re-checked in the status banner and version-bump notes are
+> current. In particular, 0.16.1 adds `Backend.GOOGLE_TENSOR` to the earlier
+> CPU/GPU/NPU API surface.
 
 ### Two distinct Android artifacts
 - **LiteRT 2.1.5** (`com.google.ai.edge.litert:litert:2.1.5`,
@@ -213,10 +253,10 @@ strictly more complex.
 
 | Component | Runtime | Backend usage | Status |
 |---|---|---|---|
-| Gemma chat | LiteRT-LM 0.14.0 | NPU → GPU → CPU chain in `EngineManager` | Production |
-| EmbeddingGemma | Base LiteRT 2.1.5 | GPU/CPU via `CompiledModel` (`LiteRtEmbeddingBackend`) | Scaffold — verify-on-device markers |
-| PaddleOCR PP-OCRv5 | Base LiteRT 2.1.5 | GPU default via `LiteRtAcceleratorResolver` (mirrors chat: `null` → GPU; explicit `NPU` probed + GPU-fallback; explicit `CPU`/`GPU` honored); three sequential `CompiledModel`s (det + rec + cls) | Prototype — same-process coexistence unverified |
-| Chat + embeddings + OCR together | LiteRT-LM 0.14.0 + base LiteRT 2.1.5 (embeddings) + base LiteRT 2.1.5 (OCR) | Chat owns LiteRT-LM backend chain; embeddings and OCR resolve through the shared `LiteRtAcceleratorResolver` | Three-stack Phase 4 validation matrix |
+| Gemma chat | LiteRT-LM 0.16.1 | NPU → GPU → CPU chain in `EngineManager` | Production |
+| EmbeddingGemma | Base LiteRT 2.2.0 | GPU/CPU via `CompiledModel` (`LiteRtEmbeddingBackend`) | Scaffold — verify-on-device markers |
+| PaddleOCR PP-OCRv5 | Base LiteRT 2.2.0 | GPU default via `LiteRtAcceleratorResolver` (mirrors chat: `null` → GPU; explicit `NPU` probed + GPU-fallback; explicit `CPU`/`GPU` honored); three sequential `CompiledModel`s (det + rec + cls) | Prototype — same-process coexistence unverified |
+| Chat + embeddings + OCR together | LiteRT-LM 0.16.1 + base LiteRT 2.2.0 (embeddings) + base LiteRT 2.2.0 (OCR) | Chat owns LiteRT-LM backend chain; embeddings and OCR resolve through the shared `LiteRtAcceleratorResolver` | Three-stack Phase 4 validation matrix |
 
 All three stacks share the service process. The OCR path is the
 **newest** and so the highest-risk for surfacing coexistence
@@ -228,8 +268,8 @@ active simultaneously.
 
 Copy this into PR bodies + ADRs that touch the inline LiteRT path:
 
-> **Unverified same-process coexistence risk:** Base LiteRT 2.1.5
-> using GPU/NPU acceleration and LiteRT-LM 0.14.0 have not yet
+> **Unverified same-process coexistence risk:** Base LiteRT 2.2.0
+> using GPU/NPU acceleration and LiteRT-LM 0.16.1 have not yet
 > been validated together in one Android process. No confirmed
 > incompatibility is known, but both stacks may interact through
 > shared LiteRT runtime components, accelerator delegates, native
@@ -306,8 +346,10 @@ LiteRT issue #5264 is directly relevant to every site that calls `CompiledModel.
 
 ## References
 
-- [`com.google.ai.edge.litert:litert:2.1.5` on Maven Central](https://mvnrepository.com/artifact/com.google.ai.edge.litert/litert/2.1.5)
-- [`com.google.ai.edge.litertlm:litertlm-android:0.12.0` on Maven Central](https://mvnrepository.com/artifact/com.google.ai.edge.litertlm/litertlm-android/0.12.0)
+- [LiteRT 2.2.0 release](https://github.com/google-ai-edge/LiteRT/releases/tag/v2.2.0)
+- [LiteRT issue #8474](https://github.com/google-ai-edge/LiteRT/issues/8474) — duplicate `litert` / `litert-api` Android namespace.
+- [LiteRT-LM 0.16.1 release](https://github.com/google-ai-edge/LiteRT-LM/releases/tag/v0.16.1)
+- [LiteRT-LM 0.16.1 LiteRT pin](https://github.com/google-ai-edge/LiteRT-LM/blob/v0.16.1/WORKSPACE)
 - [LiteRT migration docs (Google AI for Developers)](https://ai.google.dev/edge/litert/migration) — V1 vs V2 + Interpreter vs CompiledModel split.
 - [LiteRT-LM Kotlin getting-started](https://github.com/google-ai-edge/LiteRT-LM/blob/main/docs/api/kotlin/getting_started.md) — Backend API + native-library manifest requirements.
 - [LiteRT issue #5264](https://github.com/google-ai-edge/LiteRT/issues/5264) — same-process GPU model coexistence within base LiteRT.

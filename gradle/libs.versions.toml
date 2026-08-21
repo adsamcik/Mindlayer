@@ -7,10 +7,11 @@ coreKtx = "1.19.0"
 coroutines = "1.11.0"
 serialization = "1.11.0"
 room = "2.8.4"
-litertlm = "0.14.0"
-# 2.1.6 is blocked by upstream issue #8474: litert and litert-api publish the
-# same Android namespace, and excluding litert-api causes runtime failures.
-litert = "2.1.5"
+# Keep these together. LiteRT-LM 0.16.1 embeds LiteRT commit 0ff2811
+# (2026-08-04), 40 commits before v2.2.0; 2.2.0 is the nearest published
+# standalone Maven release. Re-check the upstream pin before either bump.
+litertlm = "0.16.1"
+litert = "2.2.0"
 junit = "4.13.2"
 mockk = "1.14.11"
 robolectric = "4.16.1"

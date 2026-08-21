@@ -10,6 +10,27 @@ import org.junit.Test
 class OnDemandAssetPackStructureTest {
 
     @Test
+    fun `litert namespace workaround remains narrowly fail closed`() {
+        val root = repoRoot()
+        val appBuild = root.resolve("app/build.gradle.kts").readText()
+        val gradleProperties = root.resolve("gradle.properties").readText()
+        val versions = root.resolve("gradle/libs.versions.toml").readText()
+
+        assertTrue(versions.contains("litertlm = \"0.16.1\""))
+        assertTrue(versions.contains("litert = \"2.2.0\""))
+        assertTrue(gradleProperties.contains("android.uniquePackageNames=false"))
+        assertTrue(appBuild.contains("validateAndroidAarNamespaces"))
+        assertTrue(appBuild.contains("manifestsAreIdentical"))
+        assertTrue(appBuild.contains("expectedLiteRtAars"))
+        assertTrue(
+            appBuild.contains(
+                """validateNoLiteRtNativeLibCollision,
+            validateAndroidAarNamespaces,""",
+            ),
+        )
+    }
+
+    @Test
     fun `all model delivery uses standard on-demand PAD without app network permissions`() {
         val root = repoRoot()
         val appBuild = root.resolve("app/build.gradle.kts").readText()

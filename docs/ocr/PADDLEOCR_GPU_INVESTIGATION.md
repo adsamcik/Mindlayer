@@ -153,7 +153,7 @@ LiteRT 2.1.5's GPU delegate is pinned at v3.
 
 | Option | Viability today | Notes |
 |---|---|---|
-| 1. Bump LiteRT to a release with the missing kernels (`RELU_0_TO_1`, `TRANSPOSE_CONV v4`, `STRIDED_SLICE v4`, **5D RESHAPE/TRANSPOSE**) | ❌ NOT VIABLE | `com.google.ai.edge.litert:litert` latest GA on Google Maven is **2.1.5** (the version we already use). The companion `litert-gpu` artifact is stuck at 1.4.2 (legacy delegate path superseded by the GPU support baked into `litert:2.x`). Until Google publishes ≥ 2.2.x there is no newer LiteRT to bump to. Periodically re-check `https://dl.google.com/android/maven2/com/google/ai/edge/litert/litert/maven-metadata.xml`. |
+| 1. Bump LiteRT to a release with the missing kernels (`RELU_0_TO_1`, `TRANSPOSE_CONV v4`, `STRIDED_SLICE v4`, **5D RESHAPE/TRANSPOSE**) | ⚠️ **2.2.0 SHIPPED; DEVICE VALIDATION PENDING** | Mindlayer now builds and packages with LiteRT 2.2.0. Upstream's release notes mention GPU/memory optimizations but do not claim all four PP-OCRv5 blockers are fixed, so keep the model surgery and CPU fallback until the exact models pass on target GPUs. The Android AAR also needs the guarded namespace workaround described in `docs/architecture/LITERT_COEXISTENCE.md`. |
 | 2. Downgrade onnx2tf to a version before the clamp canonicalisation pass landed | ✅ Now redundant | Post-conversion surgery (option 3) fixes the same problem without a version move. |
 | 3. Post-conversion `.tflite` surgery | ✅ **SHIPPED for the opcode-level blockers** | See `scripts/build-paddleocr-models/tflite_gpu_fixup.py`. det fully fixed; rec partially (5D blockers remain). |
 | 4. Live with CPU | ✅ Current effective state | Engine still routes to CPU because of (5). |
@@ -161,9 +161,10 @@ LiteRT 2.1.5's GPU delegate is pinned at v3.
 | 6. rec 5D model surgery | ⚠️ Risky | Rewrite the QKV unpack `[B, T, 3*H*D] → [B, T, 3, H, D]` into a chain of 4D ops. Needs careful numerical equivalence testing. |
 | 7. File upstream LiteRT issue requesting 5D RESHAPE/TRANSPOSE support | ✅ Free | Doesn't block anything; helps a future LiteRT bump cover this without per-model surgery. |
 
-**Recommended next steps**: option 5 (per-model GPU/CPU in the
-backend) for the actual speedup, plus option 7 (file the upstream
-issue) so a future LiteRT bump can pick up the rest naturally.
+**Recommended next steps**: probe the exact det/rec/cls models against
+LiteRT 2.2.0 on target GPUs first. If rec still hits the 5D blockers,
+continue with option 5 (per-model GPU/CPU) for the actual speedup and
+option 7 so a future runtime can remove the split naturally.
 
 ## Why the conversion workflow still uses `-ofgd` and `-cgdc`
 
@@ -215,9 +216,10 @@ dry-runs are byte-identical to CI.
 
 ## Open questions / future work
 
-* When Google publishes LiteRT ≥ 2.2.x, validate whether its GPU
-  delegate kernel registry includes `RELU_0_TO_1` + `TRANSPOSE_CONV v4`
-  before scheduling the runtime bump. Until then, no bump is possible.
+* Validate LiteRT 2.2.0's GPU delegate against the exact det/rec/cls
+  artifacts, including `RELU_0_TO_1`, `TRANSPOSE_CONV v4`, and the rec
+  model's 5D RESHAPE/TRANSPOSE path. Do not remove surgery/fallbacks from
+  release builds based on the version bump alone.
 * Sandbox `onnx2tf 2.2.x` to confirm whether disabling the
   canonicalisation alone unlocks GPU on PP-OCRv5 (fallback to option 2
   if option 3 hits unexpected blockers).

@@ -72,7 +72,7 @@ internal typealias LiteRtRunnerFactory = (String, String) -> LiteRtRunner
  * # Coexistence with chat (LiteRT-LM) + OCR (LiteRT) backends
  *
  * The three LiteRT runtimes share a single `:ml` process. As of
- * LiteRT 2.1.5 + LiteRT-LM 0.11.0 the explicit coexistence story is
+ * LiteRT 2.2.0 + LiteRT-LM 0.16.1 the explicit coexistence story is
  * unproven on real devices — see `docs/architecture/LITERT_COEXISTENCE.md` for the
  * validation checklist that must be run before this backend is enabled
  * in production. [EmbeddingFeatureFlags.IS_PRODUCTION_READY] gates the

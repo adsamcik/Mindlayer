@@ -4,7 +4,7 @@ import com.google.ai.edge.litert.Accelerator
 import com.google.ai.edge.litert.CompiledModel
 
 /**
- * Production [LiteRtRunner] backed by the LiteRT 2.1.5 `CompiledModel`
+ * Production [LiteRtRunner] backed by the LiteRT 2.2.0 `CompiledModel`
  * API. Kept in a separate file from [LiteRtEmbeddingBackend] so the
  * backend's pure-Kotlin logic stays unit-testable without triggering
  * `System.loadLibrary("litert")` at class-init time.

@@ -57,14 +57,14 @@ workflow (not in the repo, by design).
   HMAC-SHA256-sealed allowlist envelope.
 
 ### Engine fleet
-- **Chat (LiteRT-LM 0.12.0)** — full lifecycle, structured-output
+- **Chat (LiteRT-LM 0.16.1)** — full lifecycle, structured-output
   fail-closed, tool-call routing, thermal/memory-band policy, init queue
   with bounded timeout, EMERGENCY teardown ordering.
-- **Embeddings (base LiteRT 2.1.5)** — `LiteRtEmbeddingBackend` with
+- **Embeddings (base LiteRT 2.2.0)** — `LiteRtEmbeddingBackend` with
   real `CompiledModel` wiring, pure-Kotlin SentencePiece Unigram
   tokenizer (no JNI), SHM batch transport, deferred fetch/cancel/ack,
   per-UID HKDF-derived AES-GCM encryption of deferred blobs.
-- **OCR (base LiteRT 2.1.5)** — `LiteRtPaddleOcrBackend` with bilinear
+- **OCR (base LiteRT 2.2.0)** — `LiteRtPaddleOcrBackend` with bilinear
   sampler, aspect-preserved rec preprocessing with right-pad, pure-Kotlin
   Suzuki-Abe DB postprocessor (`minAreaRect` + unclip + NMS), Y-plane and
   encoded JPEG/PNG/WEBP transport, per-session `Mutex`, finalization
