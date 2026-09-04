@@ -47,27 +47,27 @@ import java.util.concurrent.atomic.AtomicReference
  *    prior `Conversation` is closed, the prior handle is marked cold
  *    (its `conversation` field set to `null`), and `handle` becomes the
  *    new warm session via the factory.
- *  * **Cross-session swap blocked**: if the prior warm session is mid-
- *    stream (its per-handle `Mutex` is held by the orchestrator), the
- *    lease throws [EngineBusyException]. The caller retries after the
- *    `retryAfterMs` hint.
+ *  * **Cross-session swap blocked**: normally impossible between inference
+ *    requests because the scheduler admits one lease at a time and owns the
+ *    target handle mutex. If another lifecycle operation externally holds the
+ *    prior handle mutex, the lease throws [EngineBusyException].
  *
  * The slot's [Mutex] is held for the entire block — this means
- * **at most one inference is in flight globally**. v1 trades multi-
- * inference throughput for correctness against the native invariant; a
- * future iteration can add per-session inference queueing once the
- * tool-loop / structured-output state-machine is provably restartable
- * across swaps.
+ * **at most one inference is in flight globally**. The adaptive queue orders
+ * pending work between leases without preempting tool loops, structured-output
+ * retries, or native streaming.
  *
  * # Locking order (canonical)
  *
- * 1. `slotMutex.withLock { ... }` (inside [lease])
- * 2. `priorHandle.mutex.tryLock()` (eviction safety check, non-blocking)
- * 3. `handle.mutex.withLock { ... }` (caller's per-session serialisation;
- *    acquired by [InferenceOrchestrator] AFTER lease has returned the
- *    Conversation — but the lease holds the slot mutex for the full block,
- *    so the orchestrator's per-handle mutex is effectively nested INSIDE
- *    the slot mutex).
+ * 1. scheduler admission (inside [lease]);
+ * 2. `handle.mutex.withLock { ... }` for per-session serialisation;
+ * 3. `slotMutex.withLock { ... }` for the native conversation slot;
+ * 4. `priorHandle.mutex.tryLock()` during cross-session eviction.
+ *
+ * Putting the target handle mutex inside scheduler admission is essential:
+ * concurrent work for the current warm session must be visible to the queue so
+ * affinity ordering can select it. It also guarantees the prior request has
+ * released its handle mutex before the scheduler admits a cross-session swap.
  *
  * Destroy/cancel paths that need to close a Conversation outside an
  * active lease MUST go through [tryEvictIdle] (non-blocking) or
@@ -79,6 +79,15 @@ internal class WarmConversationSlot {
 
     private val slotMutex = Mutex()
     private val warmSessionId = AtomicReference<String?>(null)
+    private val scheduler = AdaptiveWorkloadScheduler(
+        loadedAffinity = { warmSessionId.get() },
+    )
+
+    /** Bounded hints used only to order already-admitted inference work. */
+    data class SchedulingHint(
+        val priority: Int = 0,
+        val estimatedCost: Int = 1,
+    )
 
     /** ID of the session that currently owns the native engine slot, or null. */
     val currentWarmSessionId: String? get() = warmSessionId.get()
@@ -100,43 +109,60 @@ internal class WarmConversationSlot {
      * @param block the user code that uses the warm `Conversation`. The
      *   slot stays acquired for the block's entire suspension lifetime.
      *
-     * @throws EngineBusyException if the prior warm session is mid-stream
-     *   and cannot be safely evicted.
+     * @throws EngineBusyException if another lifecycle operation has the prior
+     *   warm session locked and it cannot be safely evicted.
      */
     suspend fun <R> lease(
         handle: SessionManager.SessionHandle,
         sessions: Map<String, SessionManager.SessionHandle>,
         createConversation: suspend () -> Conversation,
+        schedulingHint: SchedulingHint = SchedulingHint(),
         block: suspend (Conversation) -> R,
-    ): R = slotMutex.withLock {
-        val priorId = warmSessionId.get()
-
-        // Path 1: re-entry on the same warm session.
-        if (priorId == handle.sessionId && handle.conversation != null) {
-            return@withLock block(handle.conversation!!)
-        }
-
-        // Path 2: a different session is warm — evict it (or refuse if it's busy).
-        if (priorId != null && priorId != handle.sessionId) {
-            evictPriorWarmUnderLock(priorId, handle.sessionId, sessions)
-        }
-
-        // Path 3: handle is cold — materialise its Conversation via factory.
-        if (handle.conversation == null) {
-            val newConv = try {
-                createConversation()
-            } catch (t: Throwable) {
-                // Factory failure leaves the slot empty so the next lease
-                // attempt can retry without inheriting stale state.
-                warmSessionId.set(null)
-                throw t
+    ): R = scheduler.run(
+        AdaptiveWorkloadScheduler.Request(
+            affinityKey = handle.sessionId,
+            priority = schedulingHint.priority,
+            estimatedCost = schedulingHint.estimatedCost,
+        ),
+    ) {
+        handle.mutex.withLock {
+            if (handle.destroyed) {
+                throw SessionDestroyedBeforeLeaseException(handle.sessionId)
             }
-            handle.conversation = newConv
-        }
-        warmSessionId.set(handle.sessionId)
+            slotMutex.withLock {
+                val priorId = warmSessionId.get()
 
-        block(handle.conversation!!)
+                // Path 1: re-entry on the same warm session.
+                if (priorId == handle.sessionId && handle.conversation != null) {
+                    return@withLock block(handle.conversation!!)
+                }
+
+                // Path 2: a different session is warm — evict it (or refuse if it's busy).
+                if (priorId != null && priorId != handle.sessionId) {
+                    evictPriorWarmUnderLock(priorId, handle.sessionId, sessions)
+                }
+
+                // Path 3: handle is cold — materialise its Conversation via factory.
+                if (handle.conversation == null) {
+                    val newConv = try {
+                        createConversation()
+                    } catch (t: Throwable) {
+                        // Factory failure leaves the slot empty so the next lease
+                        // attempt can retry without inheriting stale state.
+                        warmSessionId.set(null)
+                        throw t
+                    }
+                    handle.conversation = newConv
+                }
+                warmSessionId.set(handle.sessionId)
+
+                block(handle.conversation!!)
+            }
+        }
     }
+
+    suspend fun schedulingSnapshot(): AdaptiveWorkloadScheduler.Snapshot =
+        scheduler.snapshot()
 
     /**
      * Close + null the warm Conversation IF the warm session is idle
@@ -276,6 +302,11 @@ internal class WarmConversationSlot {
         const val ENGINE_BUSY_RETRY_MS: Long = 500L
     }
 }
+
+/** The session was destroyed after request staging but before queue admission. */
+internal class SessionDestroyedBeforeLeaseException(
+    val sessionId: String,
+) : IllegalStateException("Session '$sessionId' was destroyed before inference admission")
 
 /**
  * Thrown by [WarmConversationSlot.lease] when the engine's single native

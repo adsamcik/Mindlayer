@@ -99,6 +99,16 @@ class InferenceOrchestrator(
          */
         const val MAX_TOOL_ROUNDS = 25
 
+        // Queue-ordering heuristics only. They deliberately do not alter
+        // token budgets or generation settings; their role is to put likely
+        // short work ahead of likely long work within the same affinity and
+        // priority band.
+        private const val IMAGE_SCHEDULING_PENALTY = 1_024
+        private const val UNKNOWN_AUDIO_SCHEDULING_PENALTY = 1_024
+        private const val THINKING_SCHEDULING_PENALTY = 2_048
+        private const val TOOL_LOOP_SCHEDULING_PENALTY = 1_024
+        private const val MAX_SCHEDULING_COST = 1_000_000
+
         /**
          * F-041: fallback policy applied when the live ThermalMonitor read
          * fails (typically: a test using a relaxed `service` mock). COOL
@@ -341,13 +351,13 @@ class InferenceOrchestrator(
         // When the session is unknown / expired (peekTokenBudget == null),
         // skip the gate and let `runInference` produce the standard
         // SESSION_NOT_FOUND_OR_NOT_OWNED pipe error.
+        val estimatedInputTokens = estimateInputTokens(
+            text = meta.textContent,
+            image = image,
+            audio = audio,
+        )
         val budget = sessionManager.peekTokenBudget(meta.sessionId)
         if (budget != null) {
-            val estimatedInputTokens = estimateInputTokens(
-                text = meta.textContent,
-                image = image,
-                audio = audio,
-            )
             if (budget.reservedTokens + estimatedInputTokens > budget.effectiveMaxTokens) {
                 throw ContextOverflowException(
                     reservedTokens = budget.reservedTokens,
@@ -383,7 +393,14 @@ class InferenceOrchestrator(
             if (mockGen != null) {
                 runMockInference(scopedKey, meta, image, audio, pipeWriteEnd, mockGen)
             } else {
-                runInference(scopedKey, meta, image, audio, pipeWriteEnd)
+                runInference(
+                    scopedKey = scopedKey,
+                    meta = meta,
+                    image = image,
+                    audio = audio,
+                    pipeWriteEnd = pipeWriteEnd,
+                    estimatedInputTokens = estimatedInputTokens,
+                )
             }
         }
         activeJobs[scopedKey] = job
@@ -685,6 +702,7 @@ class InferenceOrchestrator(
         image: ImageTransfer?,
         audio: AudioTransfer?,
         pipeWriteEnd: ParcelFileDescriptor,
+        estimatedInputTokens: Int,
     ) {
         val handle = sessionManager.getSession(meta.sessionId) ?: run {
             val writer = writerFactory(pipeWriteEnd)
@@ -731,60 +749,56 @@ class InferenceOrchestrator(
         }
 
         val deadlineNs = System.nanoTime() + INFERENCE_DEADLINE_MS * 1_000_000L
-        // Single-writer: serialize sends for this session
-        handle.mutex.withLock {
-            // R-TOCTOU: a destroySession() may have closed this handle while we
-            // were staging media outside the lock. If so, abort instead of
-            // re-warming a fresh Conversation on a destroyed/removed session
-            // (which would stream tokens for a dead session and leak the warm
-            // slot). The destroy path sets `destroyed` under this same mutex.
-            if (handle.destroyed) {
-                MindlayerLog.w(
-                    TAG,
-                    "Session destroyed during media staging; aborting inference",
-                    requestId = meta.requestId,
-                    sessionId = meta.sessionId,
-                )
-                sharedMemoryPool.cleanup(scopedKey)
-                writerFactory(pipeWriteEnd).closeWithError(
-                    0,
-                    "Session destroyed",
-                    MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
-                )
-                return
-            }
-            handle.activeRequestId = scopedKey
-            handle.isStreaming = true
-            val writer = writerFactory(pipeWriteEnd)
-            // v0.5 / v1.1: opt the writer into TOKEN_DELTA_BATCH coalescing
-            // and/or v3 thinking stream protocol BEFORE writeHeader so the
-            // header advertises the right wire version.
-            if (handle.preferBatchedDeltas) {
-                writer.enableBatching()
-            }
-            if (handle.preferThinking) {
-                writer.enableThinking()
-            }
-            var foregroundEntered = false
-            val inferenceStartNs = System.nanoTime()
-            try {
+        // R-TOCTOU fast path: a destroySession() may have closed this handle while we
+        // were staging media outside the lock. If so, abort instead of re-warming a
+        // fresh Conversation on a destroyed/removed session slot. WarmConversationSlot
+        // repeats this check under handle.mutex so
+        // a destroy racing this fast path still cannot recreate native state.
+        if (handle.destroyed) {
+            MindlayerLog.w(
+                TAG,
+                "Session destroyed during media staging; aborting inference",
+                requestId = meta.requestId,
+                sessionId = meta.sessionId,
+            )
+            sharedMemoryPool.cleanup(scopedKey)
+            writerFactory(pipeWriteEnd).closeWithError(
+                0,
+                "Session destroyed",
+                MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+            )
+            return
+        }
+        val writer = writerFactory(pipeWriteEnd)
+        var foregroundEntered = false
+        var leaseEntered = false
+        val inferenceStartNs = System.nanoTime()
+        try {
                 // Hot-swap: acquire the engine's warm slot for the full
-                // inference + its cleanup. The lease either uses the
-                // already-warm Conversation, or closes the prior
-                // session's Conversation and creates a fresh one for
-                // `handle` seeded with its recordedTurns. Throws
-                // EngineBusyException if another session is mid-stream
-                // — caught below and translated to an ENGINE_BUSY
-                // terminal frame. The inner try/finally (and all
-                // exception handlers that touch native Conversation
-                // state) live INSIDE the lease so the slot stays held
-                // until handle.mutex.withLock is ready to release. If
-                // cleanup ran AFTER the lease, B's lease could grab
-                // the slot, see A's handle.mutex still held by A's
-                // cleanup, and incorrectly throw EngineBusy at B even
-                // though A is no longer streaming.
-                sessionManager.withWarmConversation(handle) { conv ->
-                  try {
+                // inference + its cleanup. The scheduler admits work before
+                // taking any session mutex, so all queued sessions remain visible
+                // for loaded-model affinity and cost ordering. The lease then uses
+                // the already-warm Conversation or swaps to `handle` and replays
+                // its recorded turns. The inner try/finally (and every native
+                // Conversation cleanup path) stays inside the lease.
+                sessionManager.withWarmConversation(
+                    handle = handle,
+                    schedulingHint = schedulingHintFor(
+                        handle = handle,
+                        meta = meta,
+                        estimatedInputTokens = estimatedInputTokens,
+                        image = image,
+                        audio = audio,
+                    ),
+                ) { conv ->
+                    leaseEntered = true
+                    handle.activeRequestId = scopedKey
+                    handle.isStreaming = true
+                    // v0.5 / v1.1: opt the writer into TOKEN_DELTA_BATCH
+                    // coalescing and/or v3 thinking protocol before the header.
+                    if (handle.preferBatchedDeltas) writer.enableBatching()
+                    if (handle.preferThinking) writer.enableThinking()
+                    try {
                 service.enterForeground()
                 foregroundEntered = true
                 logRepository?.logInferenceStart(
@@ -1397,16 +1411,24 @@ class InferenceOrchestrator(
                 sharedMemoryPool.cleanup(scopedKey)
             }
                 } // end withWarmConversation lease
+            } catch (destroyed: SessionDestroyedBeforeLeaseException) {
+                trace.markError("session_destroyed_before_admission")
+                withContext(NonCancellable) {
+                    try {
+                        writer.closeWithError(
+                            0,
+                            "Session destroyed",
+                            MindlayerErrorCode.SESSION_NOT_FOUND_OR_NOT_OWNED,
+                        )
+                    } catch (_: Throwable) { }
+                    try { writer.close() } catch (_: Throwable) { }
+                }
+                sharedMemoryPool.cleanup(scopedKey)
             } catch (busy: EngineBusyException) {
-                // Hot-swap: a different session is mid-stream and we
-                // cannot swap it out without truncating its inference.
-                // The slot lock saw a tryLock() failure on the prior
-                // session's per-handle Mutex and threw. Surface a
-                // typed ENGINE_BUSY frame so the SDK can retry after
-                // the hinted backoff. The lease was never entered so
-                // we run a mini cleanup here that mirrors the inner
-                // finally — writer close + flag reset + per-request
-                // media cleanup. (foreground was not entered either.)
+                // A lifecycle operation still owns the selected session mutex.
+                // Surface a typed ENGINE_BUSY frame so the SDK can retry after
+                // the hinted backoff. The lease was never entered, so run the
+                // small writer/media cleanup path here.
                 trace.markError("engine_busy")
                 MindlayerLog.w(
                     TAG,
@@ -1431,8 +1453,53 @@ class InferenceOrchestrator(
                 handle.activeRequestId = null
                 handle.isStreaming = false
                 sharedMemoryPool.cleanup(scopedKey)
+            } catch (cancelled: CancellationException) {
+                // Cancellation may happen while the adaptive scheduler is
+                // still holding this request in its queue. In that case the
+                // lease block (and therefore its normal cleanup envelope)
+                // never ran. Close every transferred resource here; once the
+                // lease has started, the inner CancellationException path
+                // already performed this cleanup before rethrowing.
+                if (!leaseEntered) {
+                    typedCancellationReasons.remove(scopedKey)
+                    withContext(NonCancellable) {
+                        try { writer.writeDone(0, "cancelled") } catch (_: Throwable) { }
+                        try { writer.close() } catch (_: Throwable) { }
+                    }
+                    handle.activeRequestId = null
+                    handle.isStreaming = false
+                    sharedMemoryPool.cleanup(scopedKey)
+                }
+                throw cancelled
             }
+    }
+
+    /**
+     * Estimate relative wall-clock work for queue ordering. This is not a
+     * billing/token count and never changes an inference result. Input tokens
+     * are the strongest known signal. Vision setup, unknown-duration audio,
+     * thinking, and tool loops receive conservative penalties because each can
+     * turn a short prompt into a materially longer resident-engine lease.
+     */
+    private fun schedulingHintFor(
+        handle: SessionManager.SessionHandle,
+        meta: RequestMeta,
+        estimatedInputTokens: Int,
+        image: ImageTransfer?,
+        audio: AudioTransfer?,
+    ): WarmConversationSlot.SchedulingHint {
+        var cost = estimatedInputTokens.coerceAtLeast(1)
+        if (image != null) cost += IMAGE_SCHEDULING_PENALTY
+        if (audio != null) {
+            cost += estimateTokensForAudio(audio.durationMs)
+                .coerceAtLeast(UNKNOWN_AUDIO_SCHEDULING_PENALTY)
         }
+        if (handle.preferThinking) cost += THINKING_SCHEDULING_PENALTY
+        if (handle.allowedToolNames.isNotEmpty()) cost += TOOL_LOOP_SCHEDULING_PENALTY
+        return WarmConversationSlot.SchedulingHint(
+            priority = meta.priority,
+            estimatedCost = cost.coerceAtMost(MAX_SCHEDULING_COST),
+        )
     }
 
     private suspend fun closeStructuredOutputFailClosed(

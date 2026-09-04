@@ -24,6 +24,9 @@ import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.After
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -34,6 +37,7 @@ import org.robolectric.annotation.Config
 @Config(sdk = [33])
 class ServiceBinderLifecycleCleanupTest {
     private lateinit var binder: ServiceBinder
+    private lateinit var service: MindlayerMlService
     private lateinit var orchestrator: InferenceOrchestrator
     private lateinit var ocr: OcrSessionManager
     private lateinit var embedding: EmbeddingCoordinator
@@ -41,7 +45,7 @@ class ServiceBinderLifecycleCleanupTest {
     @Before fun setUp() {
         mockkStatic(Binder::class)
         every { Binder.getCallingUid() } returns UID
-        val service = mockk<MindlayerMlService>(relaxed = true)
+        service = mockk(relaxed = true)
         every { service.sessionManager } returns mockk<SessionManager>(relaxed = true)
         every { service.packageName } returns "com.adsamcik.mindlayer"
         val allow = mockk<AllowlistStore>(relaxed = true) {
@@ -117,6 +121,30 @@ class ServiceBinderLifecycleCleanupTest {
 
         // Only the first registration links a recipient; the rest short-circuit.
         verify(exactly = 1) { token.linkToDeath(any(), 0) }
+    }
+
+    @Test fun `registered client visibility is explicit and gates idle disconnect`() {
+        val token = mockk<IBinder>(relaxed = true) {
+            every { interfaceDescriptor } returns "android.os.IBinder"
+            every { linkToDeath(any(), 0) } just Runs
+        }
+        every { service.tryGrantIdleDisconnect() } returns true
+
+        binder.registerClient(token)
+        assertTrue(binder.hasVisibleClients())
+        assertFalse(binder.requestIdleDisconnect(token))
+        verify(exactly = 0) { service.tryGrantIdleDisconnect() }
+
+        binder.setClientVisible(token, false)
+        assertFalse(binder.hasVisibleClients())
+        assertTrue(binder.requestIdleDisconnect(token))
+        verify(exactly = 1) { service.tryGrantIdleDisconnect() }
+    }
+
+    @Test fun `lifecycle update rejects an unregistered token`() {
+        assertThrows(SecurityException::class.java) {
+            binder.setClientVisible(mockk(relaxed = true), false)
+        }
     }
 
     @Test fun `re-registering a different token keeps the prior registration independent (R-19a)`() {

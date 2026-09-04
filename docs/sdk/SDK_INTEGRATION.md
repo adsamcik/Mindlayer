@@ -107,10 +107,13 @@ val mindlayer = Mindlayer.shared(context)
 mindlayer.awaitConnected()
 ```
 
-- The shared client lives for the **process**. Tear it down only at app shutdown
-  or in tests via `Mindlayer.disconnectShared()` — do **not** call `disconnect()`
-  on it. The `historyPolicy` is fixed on first use; a later `shared()` with a
-  *different* policy throws (it is privacy-sensitive, never silently ignored).
+- The shared client object lives for the **process**. Its service binding may be
+  suspended after five minutes with no visible activity or active Mindlayer
+  work; visibility or the next API call reconnects automatically. Tear the
+  object down only at app shutdown or in tests via
+  `Mindlayer.disconnectShared()` — do **not** call `disconnect()` on it. The
+  `historyPolicy` is fixed on first use; a later `shared()` with a *different*
+  policy throws (it is privacy-sensitive, never silently ignored).
 - Use `Mindlayer.connect(context, historyPolicy, observer)` instead only when you
   genuinely need an **isolated** client (a distinct history policy / observer, or
   an independent disconnect lifetime). `connect()` opens a fresh binding on every
@@ -364,12 +367,59 @@ session.delete()
 
 ```kotlin
 val caps = mindlayer.getCapabilities()
-if (caps.supports(ServiceCapabilities.FEATURE_PREWARM_AWAIT)) {
-    val backend = mindlayer.prewarmAndAwait(timeoutMs = 15_000)
+if (caps.supports(ServiceCapabilities.FEATURE_CONTEXT_AWARE_PREWARM)) {
+    // Match the maxTokens the next session will request.
+    mindlayer.prewarmForContext(maxTokens = 8_192)
 }
 ```
 
-Use `prewarm()` for fire-and-forget warmup; use `prewarmAndAwait()` when UI needs a ready/failure signal before enabling chat.
+Use `prewarm()` only when a conservative best-effort warmup is sufficient. It
+uses a fixed 76 MiB KV-cache budget (currently 8,192 tokens) and skips
+speculative loading on devices with at most 4 GiB RAM or while memory pressure
+is elevated. Prefer `prewarmForContext(maxTokens)` when the app knows its next
+session size (128-32,768 tokens); this is also the explicit opt-in path on
+low-RAM devices.
+
+If the requested session later exceeds the loaded engine's context, Mindlayer
+quiesces inference and restarts the `:ml` process with the larger budget. The
+SDK reconnects and retries session creation. This makes underestimating the
+prewarm size a cold-start cost, not an unsafe native-engine mismatch.
+
+`prewarmAndAwait()` retains the conservative automatic policy when UI needs a
+ready/failure signal before enabling chat.
+
+### Queue priority
+
+Mindlayer schedules queued LLM requests around the state already warm in the
+native engine, then by explicit priority and estimated cost. Apps can describe
+user intent without implementing their own global queue:
+
+```kotlin
+val handle = mindlayer.infer {
+    session(sessionId)
+    text(prompt)
+    priority(InferencePriority.INTERACTIVE)
+}
+```
+
+`BACKGROUND`, `NORMAL`, `INTERACTIVE`, and `URGENT` map to bounded wire hints.
+They do not preempt active inference or bypass per-client/global quotas, and
+starvation protection eventually advances old work. Keep ordinary requests at
+`NORMAL`; reserve `URGENT` for genuinely time-critical user-visible work.
+
+### Idle memory release
+
+The SDK automatically reports process visibility. When all clients are hidden
+and no inference or prewarm remains active, the service closes EmbeddingGemma
+and PaddleOCR after 30 seconds. After five minutes the SDK requests an atomic
+idle-disconnect grant and unbinds; the isolated `:ml` process then exits so
+LiteRT-LM's native allocations are reclaimed without unsafe in-process engine
+recreation. A foreground transition or any subsequent SDK call reconnects and
+reloads engines as needed.
+
+This behavior requires `ServiceCapabilities.FEATURE_IDLE_RELEASE`. With an
+older service the SDK conservatively remains bound. Apps do not need to mirror
+Activity callbacks or call `disconnect()` during normal backgrounding.
 
 ### Eviction notices
 

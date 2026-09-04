@@ -223,6 +223,21 @@ interface IMindlayerService {
     // Capability-gated via ServiceCapabilities.FEATURE_MODEL_READINESS.
     ModelReadinessSnapshot getModelReadiness();
     @nullable ModelSetupAction getModelSetupAction(String family);
+
+    // v1.3 context-aware LLM prewarm. The caller supplies the total session
+    // context it expects (input + output KV budget). The service clamps it to
+    // current memory policy and safely process-restarts an undersized live
+    // engine instead of attempting LiteRT-LM close/recreate in-process.
+    // Capability-gated via FEATURE_CONTEXT_AWARE_PREWARM.
+    oneway void prewarmForContext(String backend, int maxTokens);
+
+    // v1.4 client-visibility and idle-release coordination. The stable
+    // liveness token identifies one registered SDK client. Invisible clients
+    // remain bound during the short auxiliary-engine idle window; after the
+    // SDK's longer idle deadline it asks permission to unbind. The service
+    // grants only when every registered client is invisible and no native
+    // inference is active, preventing a process exit from racing live work.
+    // Capability-gated via FEATURE_IDLE_RELEASE.
+    void setClientVisible(IBinder clientToken, boolean visible);
+    boolean requestIdleDisconnect(IBinder clientToken);
 }
-
-

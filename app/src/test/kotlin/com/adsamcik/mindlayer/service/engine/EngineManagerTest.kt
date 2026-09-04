@@ -528,6 +528,7 @@ class EngineManagerTest {
         val second = mgr.initialize(preferredBackend = "CPU", maxTokens = 8192)
 
         assertSame(first, second)
+        assertEquals(4096, mgr.maxTokens)
         verify {
             MindlayerLog.w(
                 any(),

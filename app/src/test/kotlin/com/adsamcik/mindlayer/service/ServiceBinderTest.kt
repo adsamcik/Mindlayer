@@ -138,10 +138,12 @@ class ServiceBinderTest {
         service = mockk(relaxed = true) {
             every { activeInferenceCount } returns 2
             every { createdAtMs } returns 100_000L
+            every { beginIdleProtectedWork() } returns true
         }
         engineManager = mockk(relaxed = true) {
             every { isInitialized } returns true
             every { currentBackend } returns "GPU"
+            every { maxTokens } returns 32_768
             every { initTimeSeconds } returns 1.5f
         }
         orchestrator = mockk(relaxed = true) {
@@ -285,21 +287,15 @@ class ServiceBinderTest {
     }
 
     @Test
-    fun `prewarm initializes engine with the memory-derived maxTokens ceiling, not a hardcoded value`() {
-        // Regression test for the root cause of a multi-turn liblitertlm_jni.so
-        // SIGSEGV: prewarm() used to hardcode maxTokens=4096 regardless of what
-        // a real session actually needed, and EngineManager.initialize's
-        // fast-path silently discards a later session's larger request once
-        // the engine is already loaded — so the native KV-cache ceiling stayed
-        // wrong for the engine's entire lifetime. prewarm must derive the same
-        // ceiling SessionManager.createSession would use
-        // (defaultMemSnapshot.recommendedMaxTokens=16384, coerced at most to
-        // defaultTier.maxMaxTokens=32768 -> 16384).
+    fun `prewarm initializes engine with the bounded practical context`() {
+        // 76 MiB at the conservative 9.5 KiB/token estimate is 8192 tokens.
+        // The tier can support 32768, but speculative prewarm must not reserve
+        // the maximum merely because it is available.
         every { engineManager.isInitialized } returns false
         coEvery {
             engineManager.initialize(
                 preferredBackend = "CPU",
-                maxTokens = 16384,
+                maxTokens = 8192,
             )
         } returns mockk(relaxed = true)
 
@@ -308,9 +304,58 @@ class ServiceBinderTest {
         coVerify(timeout = 1_000) {
             engineManager.initialize(
                 preferredBackend = "CPU",
-                maxTokens = 16384,
+                maxTokens = 8192,
             )
         }
+    }
+
+    @Test
+    fun `legacy prewarm skips speculative engine load on a 4 GiB device`() {
+        every { engineManager.isInitialized } returns false
+        every { memoryBudget.deviceTier } returns defaultTier.copy(deviceRamMb = 4096L)
+
+        binder.prewarm("CPU")
+
+        coVerify(exactly = 0) { engineManager.initialize(any(), any()) }
+    }
+
+    @Test
+    fun `explicit context prewarm remains available on a 4 GiB device`() {
+        every { engineManager.isInitialized } returns false
+        every { memoryBudget.deviceTier } returns defaultTier.copy(deviceRamMb = 4096L)
+        coEvery {
+            engineManager.initialize(
+                preferredBackend = "CPU",
+                maxTokens = 8192,
+            )
+        } returns mockk(relaxed = true)
+
+        binder.prewarmForContext("CPU", 8192)
+
+        coVerify(timeout = 1_000) {
+            engineManager.initialize(
+                preferredBackend = "CPU",
+                maxTokens = 8192,
+            )
+        }
+    }
+
+    @Test
+    fun `larger session requests safe process resize before session creation`() {
+        every { engineManager.isInitialized } returns true
+        every { engineManager.maxTokens } returns 8192
+        every { service.requestEngineContextResize(16_384) } returns Unit
+
+        val error = assertThrows(SecurityException::class.java) {
+            binder.createSession(SessionConfig(maxTokens = 16_384))
+        }
+
+        assertEquals(
+            MindlayerErrorCode.ENGINE_INITIALIZING,
+            MindlayerErrorCode.codeFromWireMessage(error.message),
+        )
+        verify(exactly = 1) { service.requestEngineContextResize(16_384) }
+        verify(exactly = 0) { orchestrator.createSession(any(), any()) }
     }
 
     @Test
@@ -767,13 +812,14 @@ class ServiceBinderTest {
             isDefault = true,
         )
         every { engineManager.currentModel } returns loadedModel
+        every { engineManager.maxTokens } returns 16_384
 
         val info = binder.getEngineInfo()
 
         assertEquals("gemma-4-E2B-it", info.modelId)
         assertEquals(2_400_000_000L, info.modelSizeBytes)
         assertEquals("GPU", info.backend)
-        assertEquals(4096, info.maxTokens)
+        assertEquals(16_384, info.maxTokens)
         assertEquals(1.5f, info.initTimeSeconds, 0.001f)
         assertEquals(0f, info.lastPrefillToksPerSec, 0.001f)
         assertEquals(0f, info.lastDecodeToksPerSec, 0.001f)

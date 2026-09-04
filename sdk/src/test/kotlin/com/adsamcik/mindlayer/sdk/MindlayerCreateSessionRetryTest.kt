@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.sdk
 
 import android.content.Context
+import android.os.DeadObjectException
 import android.util.Log
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
@@ -34,7 +35,7 @@ import org.robolectric.annotation.Config
  * — measured up to ~14s on a Gemma 4 E2B (~2.5GB) model on real hardware. The
  * SDK must not surface this to user code on first launch — instead retry with
  * exponential backoff up to `DEFAULT_CREATE_SESSION_INIT_RETRY_TIMEOUT_MS`
- * (60s) total. Other typed errors propagate immediately wrapped as
+ * (120s) total. Other typed errors propagate immediately wrapped as
  * [MindlayerException].
  */
 @RunWith(RobolectricTestRunner::class)
@@ -91,16 +92,16 @@ class MindlayerCreateSessionRetryTest {
     // ---- Tests --------------------------------------------------------------
 
     @Test
-    fun `default createSessionInitRetryTimeoutMs is 60 seconds`() {
+    fun `default createSessionInitRetryTimeoutMs covers drain and cold restart`() {
         // setUp() overrides the shared `mindlayer` instance's timeout for
         // every other test in this class, so build a SEPARATE fresh instance
         // here to pin the actual production default
         // (DEFAULT_CREATE_SESSION_INIT_RETRY_TIMEOUT_MS) against accidental
         // future changes — this constant was silently untested before (it
-        // was raised from 10s to 60s because a real cold-start init measured
-        // ~14s, past the old 10s budget).
+        // was raised from 10s to 60s for measured ~14s cold init, then to
+        // 120s to cover a safe context-resize drain plus cold restart).
         val freshMindlayer = buildMindlayer(mockConnection, null)
-        assertEquals(60_000L, freshMindlayer.createSessionInitRetryTimeoutMs)
+        assertEquals(120_000L, freshMindlayer.createSessionInitRetryTimeoutMs)
     }
 
     @Test
@@ -123,6 +124,22 @@ class MindlayerCreateSessionRetryTest {
         assertEquals("session-ready", id)
         assertEquals("Should retry once after engine_initializing", 2, attempts)
         verify(exactly = 2) { mockService.createSession(any()) }
+    }
+
+    @Test
+    fun `reconnects and retries when context resize kills service process`() = runTest {
+        var attempts = 0
+        every { mockService.createSession(any()) } answers {
+            attempts++
+            if (attempts == 1) throw DeadObjectException()
+            "session-after-restart"
+        }
+
+        val id = mindlayer.createSessionInternal { maxTokens(16_384) }
+
+        assertEquals("session-after-restart", id)
+        assertEquals(2, attempts)
+        verify(exactly = 1) { mockConnection.reportBinderDeath(mockService) }
     }
 
     @Test

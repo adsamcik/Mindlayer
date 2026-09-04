@@ -27,6 +27,7 @@ dependencies {
 
     api(project(":shared"))  // 'api' so consumers get shared types transitively
     implementation(libs.androidx.core.ktx)
+    implementation(libs.lifecycle.process)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.room.runtime)

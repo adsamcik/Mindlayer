@@ -1,8 +1,16 @@
 # Model SHA-256 reference
 
-> Canonical hashes for every binary artifact shipped via Play Asset
-> Delivery. Maintained by hand. Update whenever the underlying model
-> file changes (new release, re-quantisation, re-conversion).
+> Canonical runtime-integrity hashes for every artifact shipped via Play Asset
+> Delivery. Maintained by hand. Update whenever the underlying model file
+> changes (new release, re-quantisation, re-conversion).
+
+Hashes prove artifact identity, not provenance, conversion reproducibility, or
+redistribution rights. The machine-readable
+[`model-artifact-provenance.json`](model-artifact-provenance.json) records those
+separate gates honestly; run `scripts/validate-model-provenance.ps1` to verify
+that its pins agree with the delivery manifests. A release-quality provenance
+gate additionally uses `-RequireComplete` and intentionally fails while any
+required evidence remains unverified.
 
 This file is the single source of truth that:
 
@@ -115,9 +123,9 @@ EmbeddingGemma, re-converted PaddleOCR):
 1. Compute the new SHA with `Get-FileHash <path> -Algorithm SHA256`
    (PowerShell) or `sha256sum <path>` (bash). The value MUST be 64
    lowercase hex chars.
-2. Update the table above + the per-module `*_integrity.json`
-   (Gemma + EmbedGemma only — PaddleOCR's manifest stays all-zeros
-   per `PaddleOcrAssetPackTest`).
+2. Update the table above, `model-artifact-provenance.json`, and the relevant
+   per-module `*_integrity.json`. The committed PaddleOCR manifest contains the
+   vetted production pins; it must not be replaced with placeholder zeroes.
 3. Update the corresponding GitHub repository variable so CI uses
    the new value.
 4. Update the Play Asset Delivery bundle with the new artifact.

@@ -41,6 +41,7 @@ import com.adsamcik.mindlayer.service.engine.SessionQuotaExceededException
 import com.adsamcik.mindlayer.service.engine.SessionResourceExhaustedException
 import com.adsamcik.mindlayer.service.engine.InferenceOrchestrator
 import com.adsamcik.mindlayer.service.engine.MemoryBudget
+import com.adsamcik.mindlayer.service.engine.PrewarmContextPolicy
 import com.adsamcik.mindlayer.service.engine.SessionManager
 import com.adsamcik.mindlayer.service.engine.SessionOwnerToken
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
@@ -279,9 +280,11 @@ class ServiceBinder(
          * `inferMulti` surface; v2 added [inferMulti]; v3 added
          * [prewarmAndAwait]; v4 added [cancelInferenceV2] +
          * [submitToolResultV2]; v5 added [getDiagnosticsTyped]; v6 added
-         * [subscribeEvictionNotices] + [unsubscribeEvictionNotices].
+         * [subscribeEvictionNotices] + [unsubscribeEvictionNotices]. v10
+         * added context-aware prewarming; v11 added client visibility and
+         * safe idle-disconnect coordination.
          */
-        const val CURRENT_API_VERSION = 9
+        const val CURRENT_API_VERSION = 11
 
         /**
          * How long after termination a scoped key remains in
@@ -346,6 +349,8 @@ class ServiceBinder(
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_STRUCTURED_OUTPUT,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_MEDIA_LIST,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_PREWARM_AWAIT,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_CONTEXT_AWARE_PREWARM,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_IDLE_RELEASE,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DETAILED_CANCEL,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_TOKEN_BATCH,
@@ -407,7 +412,11 @@ class ServiceBinder(
     private data class ClientRegistration(
         override val ownerUid: Int,
         val registrationId: String,
-    ) : SessionOwnerToken
+    ) : SessionOwnerToken {
+        /** Conservative default keeps old SDK clients resident. */
+        @Volatile
+        var visible: Boolean = true
+    }
 
     init {
         // v0.4 eviction-callback: route every involuntary session retirement
@@ -819,6 +828,7 @@ class ServiceBinder(
             // per-UID cap above bounds accumulation; promoteRegistrationForUid
             // re-elects a survivor when the current registration dies.
             currentRegistrationByUid[uid] = registration
+            service.onClientVisibilityChanged()
         } catch (e: RemoteException) {
             // Token already dead — run cleanup immediately. Don't disturb
             // any existing live recipient for this UID.
@@ -850,6 +860,47 @@ class ServiceBinder(
         }
         ocrSessionManager.closeAllForUid(registration.ownerUid)
         embeddingCoordinator?.cancelAllForUid(registration.ownerUid)
+        service.onClientVisibilityChanged()
+    }
+
+    /** True when any live registered client reports a started app process. */
+    internal fun hasVisibleClients(): Boolean =
+        clientDeathRecipients.keys.any { it.visible }
+
+    /**
+     * The framework calls service [android.app.Service.onUnbind] only after the
+     * final binding disappears. Mark retained liveness registrations hidden so
+     * they cannot pin auxiliary engines if their Binder token remains alive.
+     */
+    internal fun markAllClientsInvisible() {
+        clientDeathRecipients.keys.forEach { it.visible = false }
+    }
+
+    private fun requireRegistrationForToken(clientToken: IBinder?): ClientRegistration {
+        val token = requireNotNull(clientToken) { "clientToken must not be null" }
+        val uid = Binder.getCallingUid()
+        return clientDeathRecipients.entries.firstOrNull { (registration, tokenAndRecipient) ->
+            registration.ownerUid == uid && tokenAndRecipient.first === token
+        }?.key ?: throw SecurityException("Client must call registerClient before lifecycle updates")
+    }
+
+    override fun setClientVisible(clientToken: IBinder?, visible: Boolean) {
+        authorizeCall(cost = 0.25)
+        val registration = requireRegistrationForToken(clientToken)
+        if (registration.visible == visible) return
+        registration.visible = visible
+        MindlayerLog.i(
+            TAG,
+            "Client visibility changed: uid=${registration.ownerUid}, visible=$visible",
+        )
+        service.onClientVisibilityChanged()
+    }
+
+    override fun requestIdleDisconnect(clientToken: IBinder?): Boolean {
+        authorizeCall(cost = 0.25)
+        val registration = requireRegistrationForToken(clientToken)
+        if (registration.visible) return false
+        return service.tryGrantIdleDisconnect()
     }
 
     /**
@@ -935,11 +986,27 @@ class ServiceBinder(
             config
         }
         MindlayerLog.d(TAG, "createSession from ${identity.packageName}")
+        val effectiveMaxTokens = effectiveContextTokens(safeConfig.maxTokens)
+        if (!mockEngineMode && engineManager.isInitialized) {
+            val loadedMaxTokens = engineManager.maxTokens
+            if (loadedMaxTokens != null && effectiveMaxTokens > loadedMaxTokens) {
+                MindlayerLog.i(
+                    TAG,
+                    "createSession needs context growth: loaded=$loadedMaxTokens, " +
+                        "requested=$effectiveMaxTokens",
+                )
+                service.requestEngineContextResize(effectiveMaxTokens)
+                throw typedBinderException(
+                    MindlayerErrorCode.ENGINE_INITIALIZING,
+                    "engine_context_resize",
+                )
+            }
+        }
         if (!mockEngineMode && !engineManager.isInitialized) {
             runBlocking {
                 startEngineWarmup(
                     preferredBackend = safeConfig.backend,
-                    maxTokens = safeConfig.maxTokens,
+                    maxTokens = effectiveMaxTokens,
                 )
                 // R-17: bound the binder-thread wait. Pre-fix this blocked for
                 // up to ~30 s (DEFAULT_AWAIT_READY_TIMEOUT_MS) on a cold start,
@@ -2162,6 +2229,11 @@ class ServiceBinder(
         }
         try {
             return block()
+        } catch (e: com.adsamcik.mindlayer.service.engine.EngineNotReadyException) {
+            throw typedBinderException(
+                MindlayerErrorCode.ENGINE_INITIALIZING,
+                "engine_initializing",
+            )
         } finally {
             rateLimiter.endInference(uid)
         }
@@ -2197,33 +2269,76 @@ class ServiceBinder(
             return
         }
         MindlayerLog.d(TAG, "prewarm: backend=$safeBackend")
+        val maxTokens = automaticPrewarmContextTokens()
+        if (maxTokens == null) {
+            MindlayerLog.i(
+                TAG,
+                "Skipping speculative prewarm on a low-RAM device or under memory pressure",
+            )
+            return
+        }
         startEngineWarmup(
             preferredBackend = safeBackend,
-            maxTokens = runtimeMaxTokensCeiling(),
+            maxTokens = maxTokens,
         )
     }
 
     /**
-     * The same `maxTokens` ceiling [SessionManager.createSession] would
-     * compute for a brand-new session under current memory conditions
-     * (`recommendedMaxTokens` clamped to the device tier's `maxMaxTokens`).
-     *
-     * `prewarm()`/`prewarmAndAwait()` used to hardcode `maxTokens = 4096`
-     * for the FIRST cold engine init. `EngineManager.initializeLocked` has
-     * a fast path that returns an already-initialized [Engine] unchanged —
-     * so once prewarm locked the native KV-cache ceiling at 4096, any
-     * later session's real (larger) `maxTokens` request was silently
-     * discarded; the engine kept running at the smaller ceiling for its
-     * entire lifetime. That mismatch was root-caused as the trigger for a
-     * `liblitertlm_jni.so` SIGSEGV (`memmove` `SEGV_ACCERR`) reproducing
-     * reliably in a genuine multi-turn, multi-image conversation once
-     * cumulative context approached the too-small 4096 ceiling (see
-     * StarlitCoffee's `.incomplete.md`, "ROOT CAUSE FOUND" section).
-     * Computing the same ceiling here means prewarm's warm-up almost never
-     * under-provisions relative to what a real session will actually need.
+     * Context-aware, fire-and-forget prewarm. Unlike legacy [prewarm], an app
+     * opts into the allocation and names the session context it expects.
+     * Low-RAM devices may use this API deliberately even though speculative
+     * no-budget prewarming is disabled there.
      */
-    private fun runtimeMaxTokensCeiling(): Int =
-        memoryBudget.currentSnapshot().recommendedMaxTokens.coerceAtMost(memoryBudget.deviceTier.maxMaxTokens)
+    override fun prewarmForContext(backend: String?, maxTokens: Int) {
+        val identity = try {
+            authorizeCall()
+        } catch (e: SecurityException) {
+            MindlayerLog.w(TAG, "prewarmForContext rejected at authz gate: ${e.message}")
+            return
+        }
+        val safeBackend = try {
+            IpcInputValidator.validateBackendName(backend)
+        } catch (e: IllegalArgumentException) {
+            MindlayerLog.w(
+                TAG,
+                "Rejecting prewarmForContext with invalid backend from " +
+                    "${identity.packageName}: ${e.message}",
+            )
+            return
+        }
+        if (maxTokens !in PrewarmContextPolicy.MIN_CONTEXT_TOKENS..
+            PrewarmContextPolicy.MAX_AIDL_CONTEXT_TOKENS
+        ) {
+            MindlayerLog.w(
+                TAG,
+                "Rejecting prewarmForContext with invalid token budget from ${identity.packageName}",
+            )
+            return
+        }
+
+        val effectiveMaxTokens = effectiveContextTokens(maxTokens)
+        if (engineManager.isInitialized) {
+            val loadedMaxTokens = engineManager.maxTokens
+            if (loadedMaxTokens != null && effectiveMaxTokens > loadedMaxTokens) {
+                service.requestEngineContextResize(effectiveMaxTokens)
+            }
+            return
+        }
+        startEngineWarmup(safeBackend, effectiveMaxTokens)
+    }
+
+    private fun automaticPrewarmContextTokens(): Int? =
+        PrewarmContextPolicy.automaticContextTokens(
+            tier = memoryBudget.deviceTier,
+            snapshot = memoryBudget.currentSnapshot(),
+        )
+
+    private fun effectiveContextTokens(requestedTokens: Int): Int =
+        PrewarmContextPolicy.effectiveRequestedContextTokens(
+            requestedTokens = requestedTokens,
+            tier = memoryBudget.deviceTier,
+            snapshot = memoryBudget.currentSnapshot(),
+        )
 
     private fun startEngineWarmup(preferredBackend: String, maxTokens: Int) {
         if (engineManager.isInitialized) return
@@ -2231,6 +2346,11 @@ class ServiceBinder(
         // launcher per process at a time. EngineManager.initialize is mutex-
         // protected internally as additional defense.
         if (!engineWarmupInFlight.compareAndSet(false, true)) return
+        if (!service.beginIdleProtectedWork()) {
+            engineWarmupInFlight.set(false)
+            MindlayerLog.i(TAG, "Skipping prewarm while idle process release is committed")
+            return
+        }
         scope.launch(Dispatchers.IO) {
             try {
                 // LiteRT-LM #2028 process-restart workaround: if a prior
@@ -2239,16 +2359,15 @@ class ServiceBinder(
                 // backend instead of the caller's preferredBackend. The
                 // intent represents the state the prior process WANTED
                 // to switch to but couldn't (because in-process Engine
-                // recreate SIGSEGVs). EngineRestartStore enforces the
-                // attempt cap so a wedged target backend can't loop us
-                // forever; once the cap is hit, consume() returns null
-                // and we fall through to the caller's preferredBackend.
+                // recreate SIGSEGVs). beginPendingRestartAttempt keeps the
+                // bumped attempt persisted until initialization succeeds, so
+                // the crash-loop cap still works if native init kills us.
                 //
                 // The `attemptCount > 0` guard rejects relaxed-mock
                 // RestartIntent instances that some tests' mockk(relaxed)
                 // EngineManager would auto-generate instead of null
                 // (real persisted intents always have attemptCount >= 1).
-                val intent = engineManager.consumePendingRestartIntent()
+                val intent = engineManager.beginPendingRestartAttempt()
                     ?.takeIf { it.attemptCount > 0 }
                 val backend = intent?.targetBackend ?: preferredBackend
                 val tokens = intent?.maxTokens ?: maxTokens
@@ -2272,6 +2391,7 @@ class ServiceBinder(
                 MindlayerLog.w(TAG, "Engine warmup failed: ${e.safeLabel()}")
             } finally {
                 engineWarmupInFlight.set(false)
+                service.endIdleProtectedWork()
             }
         }
     }
@@ -2313,13 +2433,27 @@ class ServiceBinder(
             return engineManager.currentBackend
         }
 
+        val automaticMaxTokens = automaticPrewarmContextTokens()
+        if (automaticMaxTokens == null) {
+            MindlayerLog.i(
+                TAG,
+                "Skipping speculative prewarmAndAwait on a low-RAM device or under memory pressure",
+            )
+            return engineManager.currentBackend
+        }
+
         MindlayerLog.d(
             TAG,
             "prewarmAndAwait from ${identity.packageName} backend=$safeBackend timeout=${cappedTimeout}ms",
         )
-        return try {
-            runBlocking {
-                kotlinx.coroutines.withTimeout(cappedTimeout) {
+        if (!service.beginIdleProtectedWork()) {
+            MindlayerLog.i(TAG, "Skipping prewarmAndAwait while idle process release is committed")
+            return engineManager.currentBackend
+        }
+        try {
+            return try {
+                runBlocking {
+                    kotlinx.coroutines.withTimeout(cappedTimeout) {
                     // LiteRT-LM #2028 process-restart workaround: see the
                     // matching block in startEngineWarmup() for the full
                     // rationale. Honour a persisted restart intent over
@@ -2327,10 +2461,10 @@ class ServiceBinder(
                     // lands on the backend the prior process requested
                     // (not the caller's possibly-stale preference).
                     // attemptCount > 0 guard rejects relaxed-mock instances.
-                    val intent = engineManager.consumePendingRestartIntent()
+                    val intent = engineManager.beginPendingRestartAttempt()
                         ?.takeIf { it.attemptCount > 0 }
                     val backend = intent?.targetBackend ?: safeBackend
-                    val tokens = intent?.maxTokens ?: runtimeMaxTokensCeiling()
+                    val tokens = intent?.maxTokens ?: automaticMaxTokens
                     if (intent != null) {
                         MindlayerLog.i(
                             TAG,
@@ -2345,33 +2479,36 @@ class ServiceBinder(
                     )
                     if (intent != null) engineManager.clearPendingRestartIntent()
                     engineManager.currentBackend
+                    }
                 }
+            } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+                // Timed out before init completed — return the current backend
+                // (could still be "NONE" if init is mid-flight; caller polls
+                // getStatus.isEngineLoaded to confirm).
+                MindlayerLog.w(TAG, "prewarmAndAwait timed out after ${cappedTimeout}ms")
+                engineManager.currentBackend
+            } catch (e: com.adsamcik.mindlayer.service.engine.LowMemoryException) {
+                // F-071: surface the typed LOW_MEMORY code from the
+                // synchronous prewarm path too, otherwise an explicit
+                // prewarmAndAwait caller would receive ENGINE_LOAD_FAILED
+                // and lose the avail/required diagnostic numbers.
+                MindlayerLog.w(
+                    TAG,
+                    "prewarmAndAwait refused: availMb=${e.availMb} requiredMb=${e.requiredMb}",
+                )
+                throw typedBinderException(
+                    MindlayerErrorCode.LOW_MEMORY,
+                    "Insufficient memory: availMb=${e.availMb} requiredMb=${e.requiredMb}",
+                )
+            } catch (e: Exception) {
+                MindlayerLog.w(TAG, "prewarmAndAwait failed: ${e.message}")
+                throw typedBinderException(
+                    MindlayerErrorCode.ENGINE_LOAD_FAILED,
+                    "Engine init failed: ${e.javaClass.simpleName}",
+                )
             }
-        } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
-            // Timed out before init completed — return the current backend
-            // (could still be "NONE" if init is mid-flight; caller polls
-            // getStatus.isEngineLoaded to confirm).
-            MindlayerLog.w(TAG, "prewarmAndAwait timed out after ${cappedTimeout}ms")
-            engineManager.currentBackend
-        } catch (e: com.adsamcik.mindlayer.service.engine.LowMemoryException) {
-            // F-071: surface the typed LOW_MEMORY code from the
-            // synchronous prewarm path too, otherwise an explicit
-            // prewarmAndAwait caller would receive ENGINE_LOAD_FAILED
-            // and lose the avail/required diagnostic numbers.
-            MindlayerLog.w(
-                TAG,
-                "prewarmAndAwait refused: availMb=${e.availMb} requiredMb=${e.requiredMb}",
-            )
-            throw typedBinderException(
-                MindlayerErrorCode.LOW_MEMORY,
-                "Insufficient memory: availMb=${e.availMb} requiredMb=${e.requiredMb}",
-            )
-        } catch (e: Exception) {
-            MindlayerLog.w(TAG, "prewarmAndAwait failed: ${e.message}")
-            throw typedBinderException(
-                MindlayerErrorCode.ENGINE_LOAD_FAILED,
-                "Engine init failed: ${e.javaClass.simpleName}",
-            )
+        } finally {
+            service.endIdleProtectedWork()
         }
     }
 
@@ -2500,7 +2637,7 @@ class ServiceBinder(
             modelId = modelId,
             modelSizeBytes = modelSize,
             backend = engineManager.currentBackend,
-            maxTokens = 4096,
+            maxTokens = engineManager.maxTokens ?: 4096,
             initTimeSeconds = engineManager.initTimeSeconds,
             lastPrefillToksPerSec = latestThroughput.first,
             lastDecodeToksPerSec = latestThroughput.second,
@@ -2927,7 +3064,10 @@ class ServiceBinder(
                 "Concurrent inference limit exceeded",
             )
         }
+        var foregroundEntered = false
         try {
+        service.enterForeground()
+        foregroundEntered = true
         val ocrOutput = try {
             runBlocking {
                 engine.recognise(
@@ -3027,8 +3167,14 @@ class ServiceBinder(
             llmDurationMs = llmDurationMs,
             totalDurationMs = totalDurationMs,
         )
+        } catch (e: com.adsamcik.mindlayer.service.engine.EngineNotReadyException) {
+            throw typedBinderException(
+                MindlayerErrorCode.ENGINE_INITIALIZING,
+                "engine_initializing",
+            )
         } finally {
             // S-4: release the concurrency slot acquired before recognise.
+            if (foregroundEntered) service.exitForeground()
             rateLimiter.endInference(uid)
         }
     }
@@ -3549,7 +3695,3 @@ class ServiceBinder(
         )
     }
 }
-
-
-
-

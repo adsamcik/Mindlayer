@@ -7,6 +7,38 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 ## [Unreleased]
 
 ### Changed
+- LLM prewarming now derives an 8,192-token context from an explicit 76 MiB
+  KV-cache budget instead of allocating the device tier's maximum context.
+  Speculative no-budget prewarm is skipped on devices with at most 4 GiB RAM
+  and under elevated memory pressure. The SDK adds capability-gated
+  `prewarmForContext(maxTokens, backend)` for app-directed warmup; a session
+  that exceeds a loaded engine's context safely drains and process-restarts
+  the `:ml` service with the larger allocation. SDK session/prewarm validation
+  now permits 128-32,768 tokens so callers can actually request growth beyond
+  the 8K default.
+- When every registered client is hidden and no inference or engine
+  initialization remains active, Mindlayer now releases EmbeddingGemma and
+  PaddleOCR after a 30-second grace. After five hidden minutes the SDK asks the
+  service for an atomic idle-disconnect grant, drops its application-context
+  binding, and lets the isolated `:ml` process exit so LiteRT-LM native state is
+  fully reclaimed. Visibility or a subsequent API call reconnects lazily; old
+  SDK/service pairs retain the previous always-bound behavior. Contract version
+  is now `1.4.0` and service API version is `11`.
+- Queued native work is now ordered by an adaptive, starvation-safe scheduler.
+  LLM requests prefer the currently warm conversation, then bounded SDK
+  priority and estimated work; a four-request affinity burst cap and 30-second
+  age override guarantee progress for other sessions. Embedding retrieval
+  queries outrank background document indexing before shorter inputs, and OCR
+  orders queued frames by pixel cost while all three engines retain independent
+  coexistence. `InferenceRequest.Builder.priority(...)` exposes typed
+  `BACKGROUND`, `NORMAL`, `INTERACTIVE`, and `URGENT` intent without bypassing
+  quotas or preempting active native work.
+- Added a Play-oriented physical-device benchmark that records per-process
+  `RssAnon + VmSwap`, file/shared RSS, PSS, native heap, bitmap, graphics,
+  DMA-BUF, backend identity, context-growth process replacement, and the TOP →
+  FGS → background → cached lifecycle. The model portfolio now also has a
+  machine-readable provenance ledger whose strict gate remains intentionally
+  blocked until source, conversion, and redistribution evidence is complete.
 - **Paired LiteRT stack update:** `litertlm-android` 0.14.0 → 0.16.1 and
   base LiteRT 2.1.5 → 2.2.0. LiteRT-LM 0.16.1 pins LiteRT commit `0ff2811`
   from the 2.2 development line (40 commits before the 2.2.0 tag), making

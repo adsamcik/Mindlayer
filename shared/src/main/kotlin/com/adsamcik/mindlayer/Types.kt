@@ -57,10 +57,9 @@ data class RequestMeta(
      */
     val role: String = "user",
     /**
-     * Vestigial — declared on the wire but not consumed anywhere in the
-     * service. Reserved for a future per-request priority hint; until
-     * then the field is wire-stable and should be left at the default.
-     * Frozen; do not repurpose.
+     * Bounded -10..10 scheduling hint. It orders already-admitted requests
+     * between native inference leases; it cannot bypass quotas, preempt active
+     * work, or override starvation protection. The field remains wire-stable.
      */
     val priority: Int = 0,
 ) : Parcelable {

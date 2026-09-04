@@ -7,6 +7,18 @@ import com.adsamcik.mindlayer.MediaPart
 import java.io.File
 
 /**
+ * Coarse queueing intent for an inference request. This never preempts active
+ * model work and never bypasses service quotas; it only orders requests that
+ * are already waiting for the single LiteRT-LM conversation slot.
+ */
+enum class InferencePriority(internal val wireValue: Int) {
+    BACKGROUND(-5),
+    NORMAL(0),
+    INTERACTIVE(5),
+    URGENT(10),
+}
+
+/**
  * Declarative description of a single inference call, assembled through
  * [Builder] inside [Mindlayer.infer].
  *
@@ -80,6 +92,25 @@ class InferenceRequest private constructor() {
             samplerConfigure = configure
         }
 
+        /**
+         * Hint how this request should be ordered against other queued LLM
+         * work. Warm-session reuse and starvation protection still apply.
+         */
+        fun priority(priority: InferencePriority) {
+            priorityHint = priority.wireValue
+        }
+
+        /**
+         * Advanced queue hint in the wire-stable -10..10 range. Prefer the
+         * typed [InferencePriority] overload for ordinary application code.
+         */
+        fun priority(value: Int) {
+            require(value in MIN_PRIORITY..MAX_PRIORITY) {
+                "priority must be between $MIN_PRIORITY and $MAX_PRIORITY, got $value"
+            }
+            priorityHint = value
+        }
+
         // ---- Tool follow-ups (only valid after outputTools) -----------------
 
         /**
@@ -110,6 +141,12 @@ class InferenceRequest private constructor() {
         internal var outputMode: OutputMode = OutputMode.Text
         internal var samplerConfigure: (SamplerScope.() -> Unit)? = null
         internal var toolHandler: (suspend (ToolCall) -> String)? = null
+        internal var priorityHint: Int = InferencePriority.NORMAL.wireValue
+
+        private companion object {
+            const val MIN_PRIORITY = -10
+            const val MAX_PRIORITY = 10
+        }
     }
 
     /** Recorded output mode for an in-flight [Builder]. */

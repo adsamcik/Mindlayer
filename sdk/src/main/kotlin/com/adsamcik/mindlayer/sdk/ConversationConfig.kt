@@ -40,9 +40,9 @@ class ConversationBuilder {
     /** System instruction defining the model's behavior. */
     fun systemPrompt(prompt: String) { systemPrompt = prompt }
 
-    /** Maximum context window in tokens. Default: 4096. */
+    /** Maximum context window in tokens. Valid range: 128-32768. Default: 4096. */
     fun maxTokens(n: Int) {
-        require(n in 128..8192) { "maxTokens must be 128-8192" }
+        require(n in 128..32_768) { "maxTokens must be 128-32768" }
         maxTokens = n
     }
 

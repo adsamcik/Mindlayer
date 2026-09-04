@@ -101,7 +101,7 @@ class ConnectionManagerRejectionRecheckTest {
             every { applicationContext } returns mockAppContext
         }
 
-        mgr = ConnectionManager()
+        mgr = ConnectionManager { TestClientVisibilityMonitor() }
         mgr.clockMillis = { nowMs }
     }
 

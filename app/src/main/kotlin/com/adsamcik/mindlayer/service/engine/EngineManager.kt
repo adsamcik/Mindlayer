@@ -163,6 +163,10 @@ class EngineManager(
     @Volatile
     private var currentMaxTokens: Int? = null
 
+    /** Context budget used to initialize the live engine, or `null` while unloaded. */
+    val maxTokens: Int?
+        get() = currentMaxTokens
+
     @Volatile
     var initTimeSeconds: Float = 0f
         private set

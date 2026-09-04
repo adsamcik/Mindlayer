@@ -111,6 +111,7 @@ import java.util.UUID
  * | [chatDeferred] / [fetchDeferredResult] / [cancelDeferred] / [acknowledgeDeferred] / [awaitDeferred] | [ServiceCapabilities.FEATURE_DEFERRED_INFERENCE] | None — throws [MindlayerException] with `NOT_SUPPORTED` |
  * | [submitToolResultDetailed] / [cancelInferenceDetailed] | [ServiceCapabilities.FEATURE_DETAILED_CANCEL] | Transparent — routes through the v0.1 surface and reports the synthesized result |
  * | [prewarmAndAwait] | [ServiceCapabilities.FEATURE_PREWARM_AWAIT] | Transparent — issues fire-and-forget [prewarm] and returns the requested backend |
+ * | [prewarmForContext] | [ServiceCapabilities.FEATURE_CONTEXT_AWARE_PREWARM] | Safe no-op; the first session cold-starts with its requested context |
  * | [getDiagnosticsTyped] | [ServiceCapabilities.FEATURE_TYPED_DIAGNOSTICS] | Returns `null` |
  * | [ping] | [ServiceCapabilities.FEATURE_HEALTH_CHECK] | Synthesizes a [com.adsamcik.mindlayer.HealthCheck] from [getStatus] + cached caps |
  * | [evictionNotices] | [ServiceCapabilities.FEATURE_EVICTION_CALLBACK] | Empty flow (never emits) |
@@ -179,11 +180,11 @@ internal class MindlayerImpl(
         // F-018 follow-up: the original 10s budget assumed a "~5-10s"
         // cold-start init, but real-device measurement on a Gemma 4 E2B
         // (~2.5GB) model logged "Engine initialized: ... time=14.100324s" —
-        // already past the old deadline before accounting for slower devices
-        // or larger models. Raised to 60s so createSession() callers who
-        // don't prewarm() aren't handed a hard ENGINE_INITIALIZING failure
-        // mid-init on realistic hardware/model sizes.
-        private const val DEFAULT_CREATE_SESSION_INIT_RETRY_TIMEOUT_MS = 60_000L
+        // already past the old deadline. Context growth can now safely wait up
+        // to 60s for an existing decode to drain before process restart, then
+        // pay the same cold-init cost. 120s covers both phases without forcing
+        // an unsafe mid-inference engine teardown.
+        private const val DEFAULT_CREATE_SESSION_INIT_RETRY_TIMEOUT_MS = 120_000L
         private val DEFAULT_CREATE_SESSION_INIT_RETRY_BACKOFF_MS = listOf(50L, 200L, 800L)
 
         /**
@@ -292,6 +293,7 @@ internal class MindlayerImpl(
                 "images" to request.imageInputs.size.toString(),
                 "hasAudio" to CallParams.has(request.audioFile),
                 "session" to CallParams.idPrefix(request.sessionId),
+                "priority" to request.priorityHint.toString(),
             ),
         ) {
             runInferRequest(request, overrideSessionId = null)
@@ -359,6 +361,7 @@ internal class MindlayerImpl(
                 audioFile = request.audioFile,
                 mediaParts = request.mediaParts,
                 requestId = requestId,
+                priority = request.priorityHint,
             )
             if (toolHandler == null) return handle
             return buildHandle(requestId, wireToolHandler(handle.events, requestId, toolHandler))
@@ -375,6 +378,7 @@ internal class MindlayerImpl(
             audioFile = request.audioFile,
             mediaParts = request.mediaParts,
             requestId = requestId,
+            priority = request.priorityHint,
         )
 
         // Run the tool-handler loop (if any) before wrapping with cleanup so the
@@ -1336,6 +1340,34 @@ internal class MindlayerImpl(
         }
     }
 
+    override suspend fun prewarmForContext(
+        maxTokens: Int,
+        backend: InferenceBackend,
+    ) {
+        require(maxTokens in 128..32_768) {
+            "maxTokens must be between 128 and 32768, got $maxTokens"
+        }
+        val caps = getCapabilities()
+        if (!caps.supports(ServiceCapabilities.FEATURE_CONTEXT_AWARE_PREWARM)) {
+            // Do not fall back to legacy prewarm: an old service may interpret
+            // that call as "allocate the tier maximum", which is precisely the
+            // unsafe behavior this API avoids. Session creation remains the
+            // reliable cold-start fallback.
+            return
+        }
+        withContext(Dispatchers.IO) {
+            val service = connection.awaitConnected()
+            try {
+                service.prewarmForContext(backend.value, maxTokens)
+            } catch (_: NoSuchMethodError) {
+                // Capability drift between independently-updated packages:
+                // safe no-op, then let createSession cold-start.
+            } catch (_: AbstractMethodError) {
+                // Same fallback on Android versions using this linkage error.
+            }
+        }
+    }
+
     /**
      * Synchronously pre-warm the engine and return the actually-active
      * [InferenceBackend]. Suspends until either init completes or the
@@ -1403,7 +1435,7 @@ internal class MindlayerImpl(
         // the engine is doing its cold-start init on a dedicated background
         // slot — measured up to ~14s on a Gemma 4 E2B (~2.5GB) model on real
         // hardware. Retry with exponential backoff up to
-        // DEFAULT_CREATE_SESSION_INIT_RETRY_TIMEOUT_MS (60s) total before
+        // DEFAULT_CREATE_SESSION_INIT_RETRY_TIMEOUT_MS (120s) total before
         // giving up, so callers who skip prewarm() aren't handed a spurious
         // failure while the engine is still legitimately loading.
         val sessionId = try {
@@ -1434,8 +1466,9 @@ internal class MindlayerImpl(
         val deadline = createSessionInitRetryClockMs() +
             createSessionInitRetryTimeoutMs.coerceAtLeast(0L)
         while (true) {
+            val service = connection.awaitConnected()
             try {
-                return connection.awaitConnected().createSession(configWithId)
+                return service.createSession(configWithId)
             } catch (e: SecurityException) {
                 val typed = MindlayerException.fromAidlSecurityException(
                     e,
@@ -1455,6 +1488,23 @@ internal class MindlayerImpl(
                     }
                 }
                 throw typed
+            } catch (e: android.os.DeadObjectException) {
+                // Context growth intentionally kills the :ml process after it
+                // returns ENGINE_INITIALIZING. A dead binder also guarantees
+                // that any partially-created remote session is gone, so this
+                // particular non-idempotent call is safe to repeat against the
+                // fresh service process using the same tentative session id.
+                connection.reportBinderDeath(service)
+                val remainingMs = deadline - createSessionInitRetryClockMs()
+                if (remainingMs > 0L) {
+                    val backoffMs = retryBackoffMs[
+                        attempt.coerceAtMost(retryBackoffMs.lastIndex)
+                    ].coerceAtLeast(1L)
+                    delay(backoffMs.coerceAtMost(remainingMs))
+                    attempt++
+                    continue
+                }
+                throw serviceDied(e, sessionId = configWithId.sessionId, requestId = null)
             }
         }
     }
@@ -2575,11 +2625,13 @@ internal class MindlayerImpl(
         audioFile: File? = null,
         mediaParts: List<com.adsamcik.mindlayer.MediaPart> = emptyList(),
         requestId: String = UUID.randomUUID().toString(),
+        priority: Int = InferencePriority.NORMAL.wireValue,
     ): InferenceHandle {
         val meta = RequestMeta(
             requestId = requestId,
             sessionId = sessionId,
             textContent = text,
+            priority = priority,
         )
 
         // Determine if we need the multi-media path
@@ -3238,10 +3290,10 @@ class SessionConfigBuilder {
     /**
      * Maximum number of tokens (input + output) for this session's KV cache.
      * Higher values allow longer conversations but consume more memory.
-     * Valid range: 128–8192. Default: 4096.
+     * Valid range: 128–32768. Default: 4096.
      */
     fun maxTokens(n: Int) {
-        require(n in 128..8192) { "maxTokens must be between 128 and 8192, got $n" }
+        require(n in 128..32_768) { "maxTokens must be between 128 and 32768, got $n" }
         maxTokens = n
     }
 

@@ -39,7 +39,7 @@ class ConnectionManagerUnsupportedAndroidVersionTest {
         context = mockk(relaxed = true) {
             every { applicationContext } returns appContext
         }
-        mgr = ConnectionManager()
+        mgr = ConnectionManager { TestClientVisibilityMonitor() }
     }
 
     @After

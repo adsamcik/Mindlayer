@@ -10,8 +10,6 @@ import com.adsamcik.mindlayer.service.modeldelivery.ModelFamily
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import java.util.Objects
@@ -42,16 +40,20 @@ data class EmbeddingOutput(
     override fun hashCode(): Int = Objects.hash(dim, modelId, tokenCount, truncated, backend, durationMs)
 }
 
-/** Owns lazy embedding model discovery, backend init, and single-writer inference. */
+/** Owns lazy embedding model discovery, backend init, and adaptively ordered single-writer inference. */
 class EmbeddingEngine(
     private val context: Context,
     private val backendFactory: () -> EmbeddingBackend = { LiteRtEmbeddingBackend(context) },
     private val logRepository: LogRepository? = null,
 ) {
 
-    private val mutex = Mutex()
     private val backend: EmbeddingBackend by lazy(backendFactory)
     private val _state = MutableStateFlow<EmbeddingEngineState>(EmbeddingEngineState.Idle)
+    private val scheduler = AdaptiveWorkloadScheduler(
+        loadedAffinity = {
+            if (_state.value is EmbeddingEngineState.Ready) EMBEDDING_AFFINITY else null
+        },
+    )
 
     val state: StateFlow<EmbeddingEngineState> = _state.asStateFlow()
 
@@ -61,16 +63,15 @@ class EmbeddingEngine(
     @Volatile
     private var lastInitThrowable: Throwable? = null
 
-    suspend fun initialize(preferredBackend: String? = null): EmbeddingModelInfo = mutex.withLock {
-        initializeLocked(preferredBackend)
-    }
+    suspend fun initialize(preferredBackend: String? = null): EmbeddingModelInfo =
+        scheduler.run(lifecycleRequest()) { initializeLocked(preferredBackend) }
 
     suspend fun embed(
         text: String,
         task: Int = EmbeddingTask.RETRIEVAL_DOCUMENT,
         outputDim: Int? = null,
         normalize: Boolean = true,
-    ): EmbeddingOutput = mutex.withLock {
+    ): EmbeddingOutput = scheduler.run(embeddingRequest(text, task)) {
         embedLocked(text, task, outputDim, normalize)
     }
 
@@ -79,11 +80,13 @@ class EmbeddingEngine(
         task: Int = EmbeddingTask.RETRIEVAL_DOCUMENT,
         outputDim: Int? = null,
         normalize: Boolean = true,
-    ): List<EmbeddingOutput> = mutex.withLock {
+    ): List<EmbeddingOutput> = scheduler.run(
+        embeddingRequest(texts.sumOf(String::length), task),
+    ) {
         texts.map { text -> embedLocked(text, task, outputDim, normalize) }
     }
 
-    suspend fun unloadForMemoryPressure() = mutex.withLock {
+    suspend fun unloadForMemoryPressure() = scheduler.run(lifecycleRequest()) {
         backend.shutdown()
         lastInitFailure = null
         lastInitThrowable = null
@@ -91,7 +94,7 @@ class EmbeddingEngine(
         MindlayerLog.i(TAG, "Embedding backend unloaded for memory pressure")
     }
 
-    suspend fun shutdown() = mutex.withLock {
+    suspend fun shutdown() = scheduler.run(lifecycleRequest()) {
         backend.shutdown()
         lastInitFailure = null
         lastInitThrowable = null
@@ -216,7 +219,30 @@ class EmbeddingEngine(
             "No embedding model files found. Download EmbeddingGemma from the Models screen.",
         )
 
+    private fun embeddingRequest(text: String, task: Int): AdaptiveWorkloadScheduler.Request =
+        embeddingRequest(text.length, task)
+
+    private fun embeddingRequest(characterCount: Int, task: Int): AdaptiveWorkloadScheduler.Request =
+        AdaptiveWorkloadScheduler.Request(
+            affinityKey = EMBEDDING_AFFINITY,
+            priority = when (task) {
+                EmbeddingTask.RETRIEVAL_QUERY -> INTERACTIVE_PRIORITY
+                EmbeddingTask.RETRIEVAL_DOCUMENT -> BACKGROUND_PRIORITY
+                else -> 0
+            },
+            estimatedCost = characterCount.coerceAtLeast(1),
+        )
+
+    private fun lifecycleRequest() = AdaptiveWorkloadScheduler.Request(
+        affinityKey = EMBEDDING_AFFINITY,
+        priority = AdaptiveWorkloadScheduler.MAX_PRIORITY,
+        estimatedCost = 1,
+    )
+
     private companion object {
         private const val TAG = "EmbeddingEngine"
+        private const val EMBEDDING_AFFINITY = "embedding-gemma-300m-v1"
+        private const val INTERACTIVE_PRIORITY = 5
+        private const val BACKGROUND_PRIORITY = -5
     }
 }

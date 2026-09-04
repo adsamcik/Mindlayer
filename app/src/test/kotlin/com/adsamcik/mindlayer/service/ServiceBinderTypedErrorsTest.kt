@@ -59,6 +59,7 @@ class ServiceBinderTypedErrorsTest {
             // reach orchestrator.createSession (which the tests stub to
             // throw the typed exceptions they're verifying).
             every { isInitialized } returns true
+            every { maxTokens } returns 32_768
         }
         // Explicit method stubs in the constructor lambda — matches the
         // ServiceBinderTest pattern. With just `relaxed = true` the

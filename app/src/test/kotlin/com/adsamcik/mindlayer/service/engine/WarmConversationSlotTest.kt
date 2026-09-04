@@ -14,7 +14,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -162,6 +164,61 @@ class WarmConversationSlotTest {
         assertEquals("prior Conversation closed exactly once", 1, fake.closeCount)
         assertEquals("two Conversations created total", 2, fake.openCount)
         assertEquals("only B's Conversation is active now", 1, fake.activeCount)
+    }
+
+    @Test
+    fun `queued warm session stays visible and runs before cheaper cold swap`() = runBlocking {
+        val fake = FakeEngine.create()
+        val handleA = newHandle("session-a")
+        val handleB = newHandle("session-b")
+        val slot = WarmConversationSlot()
+        val sessions = ConcurrentHashMap<String, SessionManager.SessionHandle>()
+        sessions["session-a"] = handleA
+        sessions["session-b"] = handleB
+        val factory: suspend () -> Conversation = {
+            fake.engine.createConversation(ConversationConfig())
+        }
+
+        slot.lease(handleA, sessions, factory) { }
+
+        val activeEntered = CompletableDeferred<Unit>()
+        val releaseActive = CompletableDeferred<Unit>()
+        val order = mutableListOf<String>()
+        val active = async(Dispatchers.Default) {
+            slot.lease(handleA, sessions, factory) {
+                activeEntered.complete(Unit)
+                releaseActive.await()
+            }
+        }
+        activeEntered.await()
+
+        val cold = async(Dispatchers.Default) {
+            slot.lease(
+                handle = handleB,
+                sessions = sessions,
+                createConversation = factory,
+                schedulingHint = WarmConversationSlot.SchedulingHint(estimatedCost = 1),
+            ) { order += "cold-b" }
+        }
+        awaitQueued(slot, 1)
+        val warm = async(Dispatchers.Default) {
+            slot.lease(
+                handle = handleA,
+                sessions = sessions,
+                createConversation = factory,
+                schedulingHint = WarmConversationSlot.SchedulingHint(estimatedCost = 10_000),
+            ) { order += "warm-a" }
+        }
+        awaitQueued(slot, 2)
+
+        releaseActive.complete(Unit)
+        active.await()
+        warm.await()
+        cold.await()
+
+        assertEquals(listOf("warm-a", "cold-b"), order)
+        assertEquals("session-b", slot.currentWarmSessionId)
+        assertEquals("only the eventual cold swap should close A", 1, fake.closeCount)
     }
 
     @Test
@@ -375,5 +432,11 @@ class WarmConversationSlotTest {
         assertTrue("message should mention busy id", msg.contains("old"))
         assertTrue("message should mention requested id", msg.contains("new"))
         assertTrue("message should mention retry-after", msg.contains("500"))
+    }
+
+    private suspend fun awaitQueued(slot: WarmConversationSlot, expected: Int) {
+        withTimeout(2_000) {
+            while (slot.schedulingSnapshot().queuedCount != expected) yield()
+        }
     }
 }

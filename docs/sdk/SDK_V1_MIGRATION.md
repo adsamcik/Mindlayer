@@ -94,7 +94,8 @@ handled internally by `Conversation.close()` and session teardown. There is no
 consumer-facing replacement in alpha.
 
 ### 4. `prewarm` / `getEngineInfo` promoted to the interface
-`connect()` returns the `Mindlayer` interface. `prewarm(backend)` and
+`connect()` returns the `Mindlayer` interface. `prewarm(backend)`,
+`prewarmForContext(maxTokens, backend)`, and
 `getEngineInfo()` are now declared on that interface (previously only on the
 implementation), so consumers can call them on the connected handle.
 

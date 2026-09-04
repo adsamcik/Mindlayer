@@ -1,0 +1,267 @@
+{
+  "schemaVersion": 1,
+  "portfolioId": "mindlayer-production-baseline",
+  "releaseReady": false,
+  "releaseBlockers": [
+    "Pin the exact upstream source URI and immutable revision for every artifact.",
+    "Record conversion tool versions, commands, flags, quantization, and calibration inputs.",
+    "Attach redistribution evidence for every model, tokenizer, dictionary, and derivative artifact.",
+    "Record and verify the Gemma tokenizer and chat-template identity embedded in the LiteRT-LM artifact."
+  ],
+  "runtimes": [
+    {
+      "id": "litert-lm",
+      "version": "0.16.1"
+    },
+    {
+      "id": "litert",
+      "version": "2.2.0"
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "chat-gemma-4-e2b-runtime",
+      "family": "chat",
+      "deliveryRole": "materialized-runtime",
+      "filename": "gemma-4-E2B-it.litertlm",
+      "byteSize": 2588147712,
+      "sha256": "181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c",
+      "runtime": "litert-lm",
+      "source": {
+        "status": "unverified",
+        "uri": null,
+        "revision": null
+      },
+      "conversion": {
+        "status": "unverified",
+        "toolchain": null,
+        "command": null,
+        "quantization": null,
+        "calibration": null
+      },
+      "license": {
+        "status": "unverified",
+        "spdx": null,
+        "redistributionEvidence": null
+      },
+      "embeddedMetadata": {
+        "tokenizer": "unverified",
+        "chatTemplate": "unverified",
+        "contextSignature": "unverified"
+      }
+    },
+    {
+      "id": "chat-gemma-4-e2b-part1",
+      "family": "chat",
+      "deliveryRole": "play-asset-fragment",
+      "filename": "gemma-4-E2B-it.litertlm.part1",
+      "byteSize": 1350000000,
+      "sha256": "01bbab94556c0ddcec2f3a71922bbf40217e903b04e13b0b7db9fa90cefe9e9d",
+      "derivedFrom": "chat-gemma-4-e2b-runtime",
+      "source": {
+        "status": "unverified",
+        "uri": null,
+        "revision": null
+      },
+      "conversion": {
+        "status": "unverified",
+        "toolchain": null,
+        "command": null,
+        "quantization": null,
+        "calibration": null
+      },
+      "license": {
+        "status": "unverified",
+        "spdx": null,
+        "redistributionEvidence": null
+      }
+    },
+    {
+      "id": "chat-gemma-4-e2b-part2",
+      "family": "chat",
+      "deliveryRole": "play-asset-fragment",
+      "filename": "gemma-4-E2B-it.litertlm.part2",
+      "byteSize": 1238147712,
+      "sha256": "e973cff428a9975d344d539d58b61843c8a6a078d37e39020c98144d5812d7aa",
+      "derivedFrom": "chat-gemma-4-e2b-runtime",
+      "source": {
+        "status": "unverified",
+        "uri": null,
+        "revision": null
+      },
+      "conversion": {
+        "status": "unverified",
+        "toolchain": null,
+        "command": null,
+        "quantization": null,
+        "calibration": null
+      },
+      "license": {
+        "status": "unverified",
+        "spdx": null,
+        "redistributionEvidence": null
+      }
+    },
+    {
+      "id": "embedding-weights",
+      "family": "embedding",
+      "deliveryRole": "play-asset",
+      "filename": "embedding-gemma-300m-v1.tflite",
+      "byteSize": 195912440,
+      "sha256": "d39b0bb3346bfb4f884f3bbce3196b261895aeece7e7ac02ffb44ed6e0f39381",
+      "runtime": "litert",
+      "source": {
+        "status": "unverified",
+        "uri": null,
+        "revision": null
+      },
+      "conversion": {
+        "status": "unverified",
+        "toolchain": null,
+        "command": null,
+        "quantization": null,
+        "calibration": null
+      },
+      "license": {
+        "status": "unverified",
+        "spdx": null,
+        "redistributionEvidence": null
+      },
+      "knownRuntimeContract": {
+        "nativeDimensions": 768,
+        "supportedOutputDimensions": [768, 512, 256, 128],
+        "maximumInputTokens": 2048
+      }
+    },
+    {
+      "id": "embedding-tokenizer",
+      "family": "embedding",
+      "deliveryRole": "play-asset",
+      "filename": "embedding-gemma-300m-v1.spm.model",
+      "byteSize": 4683319,
+      "sha256": "d6daa52d93d7aad10e8388bd526c4e501d914b47177398d1d9621f1fe48438c7",
+      "runtime": "litert",
+      "source": {
+        "status": "unverified",
+        "uri": null,
+        "revision": null
+      },
+      "conversion": {
+        "status": "unverified",
+        "toolchain": null,
+        "command": null,
+        "quantization": null,
+        "calibration": null
+      },
+      "license": {
+        "status": "unverified",
+        "spdx": null,
+        "redistributionEvidence": null
+      }
+    },
+    {
+      "id": "ocr-detection",
+      "family": "ocr",
+      "deliveryRole": "play-asset",
+      "filename": "paddleocr-ppocrv5-mobile-det.tflite",
+      "byteSize": 4765560,
+      "sha256": "497da16bd4559fae8ba04c699379aaf74999646ebb1f2cbc1cfcba8b5fcbd21b",
+      "runtime": "litert",
+      "source": {
+        "status": "unverified",
+        "uri": null,
+        "revision": null
+      },
+      "conversion": {
+        "status": "unverified",
+        "toolchain": ["paddle2onnx 2.1.0", "onnx2tf 2.4.0"],
+        "command": null,
+        "quantization": null,
+        "calibration": null
+      },
+      "license": {
+        "status": "unverified",
+        "spdx": null,
+        "redistributionEvidence": null
+      }
+    },
+    {
+      "id": "ocr-recognition",
+      "family": "ocr",
+      "deliveryRole": "play-asset",
+      "filename": "paddleocr-ppocrv5-mobile-rec.tflite",
+      "byteSize": 16528048,
+      "sha256": "5968e0dacda329f27ae7c7820d6bfece90ddfddd907728078a6493034800fae9",
+      "runtime": "litert",
+      "source": {
+        "status": "unverified",
+        "uri": null,
+        "revision": null
+      },
+      "conversion": {
+        "status": "unverified",
+        "toolchain": ["paddle2onnx 2.1.0", "onnx2tf 2.4.0"],
+        "command": null,
+        "quantization": null,
+        "calibration": null
+      },
+      "license": {
+        "status": "unverified",
+        "spdx": null,
+        "redistributionEvidence": null
+      }
+    },
+    {
+      "id": "ocr-orientation",
+      "family": "ocr",
+      "deliveryRole": "play-asset",
+      "filename": "paddleocr-ppocrv5-mobile-cls.tflite",
+      "byteSize": 994632,
+      "sha256": "5f56f02d24175cd582a2ca94c6895fd173f99d01d37c17806cc38e16392333df",
+      "runtime": "litert",
+      "source": {
+        "status": "unverified",
+        "uri": null,
+        "revision": null
+      },
+      "conversion": {
+        "status": "unverified",
+        "toolchain": ["paddle2onnx 2.1.0", "onnx2tf 2.4.0"],
+        "command": null,
+        "quantization": null,
+        "calibration": null
+      },
+      "license": {
+        "status": "unverified",
+        "spdx": null,
+        "redistributionEvidence": null
+      }
+    },
+    {
+      "id": "ocr-dictionary",
+      "family": "ocr",
+      "deliveryRole": "play-asset",
+      "filename": "paddleocr-ppocrv5-mobile-dict.txt",
+      "byteSize": 74014,
+      "sha256": "e5f8ca61ba03d3a247d06b013119982fa6de2bd48a846018b67bca57ffc56de1",
+      "runtime": "litert",
+      "source": {
+        "status": "unverified",
+        "uri": null,
+        "revision": null
+      },
+      "conversion": {
+        "status": "unverified",
+        "toolchain": null,
+        "command": null,
+        "quantization": null,
+        "calibration": null
+      },
+      "license": {
+        "status": "unverified",
+        "spdx": null,
+        "redistributionEvidence": null
+      }
+    }
+  ]
+}

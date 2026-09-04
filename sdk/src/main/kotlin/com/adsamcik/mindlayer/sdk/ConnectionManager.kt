@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import com.adsamcik.mindlayer.IMindlayerService
+import com.adsamcik.mindlayer.ServiceCapabilities
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -62,6 +63,14 @@ enum class ConnectionState {
      * Call [ConnectionManager.connect] to reset the counter and try again.
      */
     BIND_GAVE_UP,
+
+    /**
+     * The app process has remained invisible long enough for Mindlayer to
+     * release native state, and the service confirmed that no inference was
+     * active before this SDK deliberately unbound. A visible transition or
+     * the next API call reconnects automatically.
+     */
+    SUSPENDED_IDLE,
 }
 
 /**
@@ -82,7 +91,12 @@ enum class ConnectionState {
  *     kernel via `linkToDeath`. Used to eagerly invalidate the cached
  *     binder so no stale RPCs are attempted.
  */
-class ConnectionManager {
+class ConnectionManager internal constructor(
+    private val visibilityMonitorFactory: () -> ClientVisibilityMonitor,
+) {
+
+    /** Public production constructor; the visibility source is internal-only. */
+    constructor() : this({ ProcessClientVisibilityMonitor() })
 
     companion object {
         private const val TAG = "ConnectionManager"
@@ -104,6 +118,12 @@ class ConnectionManager {
         private const val INITIAL_BACKOFF_MS = 250L
         private const val MAX_BACKOFF_MS = 5_000L
         private const val BACKOFF_MULTIPLIER = 2.0
+
+        /** Hidden-process grace before asking the service to release `:ml`. */
+        const val DEFAULT_IDLE_DISCONNECT_DELAY_MS = 5L * 60L * 1_000L
+
+        /** Retry floor while a background inference is still draining. */
+        const val DEFAULT_IDLE_DISCONNECT_RETRY_MS = 15_000L
 
         const val DEFAULT_CONNECT_TIMEOUT_MS = 15_000L
 
@@ -171,6 +191,24 @@ class ConnectionManager {
     private var currentConnection: ServiceConnection? = null
     private var deathRecipient: IBinder.DeathRecipient? = null
     private var terminalBindFailure: MindlayerException? = null
+
+    private var visibilityMonitor: ClientVisibilityMonitor? = null
+    private var visibilityJob: Job? = null
+    private var idleDisconnectJob: Job? = null
+
+    @Volatile
+    private var clientVisible = true
+
+    @Volatile
+    private var idleReleaseSupported = false
+
+    @Volatile
+    internal var idleSuspended = false
+        private set
+
+    /** Test seams; production keeps the documented five-minute/15-second policy. */
+    internal var idleDisconnectDelayMs = DEFAULT_IDLE_DISCONNECT_DELAY_MS
+    internal var idleDisconnectRetryMs = DEFAULT_IDLE_DISCONNECT_RETRY_MS
 
     /**
      * Stable Binder token passed to [IMindlayerService.registerClient] so the
@@ -260,12 +298,22 @@ class ConnectionManager {
         // as a fresh attempt rather than a debounced recheck.
         lastRejectionRecheckAt = 0L
         boundContext = context.applicationContext
+        ensureVisibilityMonitoring()
+        idleSuspended = false
         doBind()
     }
 
     /** Unbind and release all resources. */
     fun disconnect() {
+        publishClientVisibility(false)
         _state.value = ConnectionState.DISCONNECTED
+        idleSuspended = false
+        idleDisconnectJob?.cancel()
+        idleDisconnectJob = null
+        visibilityJob?.cancel()
+        visibilityJob = null
+        visibilityMonitor?.close()
+        visibilityMonitor = null
         reconnectJob?.cancel()
         reconnectJob = null
         doUnbind()
@@ -341,10 +389,18 @@ class ConnectionManager {
             var rejectionRebindAttempted = false
 
             while (true) {
+                if (_state.value == ConnectionState.SUSPENDED_IDLE) {
+                    resumeBindingFromIdle("API call")
+                }
                 _state.first {
                     it == ConnectionState.CONNECTED ||
                     it == ConnectionState.REJECTED_NOT_APPROVED ||
-                    it == ConnectionState.BIND_GAVE_UP
+                    it == ConnectionState.BIND_GAVE_UP ||
+                    it == ConnectionState.SUSPENDED_IDLE
+                }
+                if (_state.value == ConnectionState.SUSPENDED_IDLE) {
+                    resumeBindingFromIdle("API call")
+                    continue
                 }
                 if (_state.value == ConnectionState.REJECTED_NOT_APPROVED) {
                     // The most common reason we land here is that the user
@@ -521,11 +577,25 @@ class ConnectionManager {
                     return
                 }
 
+                idleReleaseSupported = try {
+                    service.capabilities.supports(ServiceCapabilities.FEATURE_IDLE_RELEASE)
+                } catch (_: NoSuchMethodError) {
+                    false
+                } catch (_: AbstractMethodError) {
+                    false
+                } catch (_: Throwable) {
+                    false
+                }
+                if (idleReleaseSupported) {
+                    publishClientVisibility(service, clientVisible)
+                }
+
                 // R-19: registration succeeded — cancel any pending reconnect
                 // so a stale delayed doBind() can't tear down this live binding.
                 reconnectJob?.cancel()
                 reconnectJob = null
                 _state.value = ConnectionState.CONNECTED
+                if (!clientVisible) scheduleIdleDisconnect()
                 // Successful registration — reset the rejection-recheck floor
                 // so a future REJECTED_NOT_APPROVED (e.g. user revokes approval
                 // after a hot restart) gets a fresh recheck window rather than
@@ -537,16 +607,24 @@ class ConnectionManager {
                 // Signal 1: transient disconnect — system may reconnect automatically
                 Log.w(TAG, "onServiceDisconnected (transient)")
                 invalidateBinder()
-                _state.value = ConnectionState.RECOVERING
+                if (clientVisible) {
+                    _state.value = ConnectionState.RECOVERING
+                } else {
+                    suspendBindingForIdle("service disconnected while client invisible")
+                }
             }
 
             override fun onBindingDied(name: ComponentName?) {
                 // Signal 2: binding dead forever — must unbind + fresh rebind
                 Log.w(TAG, "onBindingDied — scheduling fresh rebind")
                 invalidateBinder()
-                _state.value = ConnectionState.RECOVERING
-                doUnbind()
-                scheduleReconnect()
+                if (clientVisible) {
+                    _state.value = ConnectionState.RECOVERING
+                    doUnbind()
+                    scheduleReconnect()
+                } else {
+                    suspendBindingForIdle("binding died while client invisible")
+                }
             }
         }
 
@@ -643,11 +721,16 @@ class ConnectionManager {
         Log.w(TAG, "binderDied — binder invalidated")
         invalidateBinder()
         if (_state.value != ConnectionState.DISCONNECTED) {
-            _state.value = ConnectionState.RECOVERING
+            if (clientVisible) {
+                _state.value = ConnectionState.RECOVERING
+            } else {
+                suspendBindingForIdle("binder died while client invisible")
+            }
         }
     }
 
     private fun invalidateBinder() {
+        idleReleaseSupported = false
         val old = binderRef.getAndSet(null)
         if (old != null) {
             val recipient = deathRecipient
@@ -658,6 +741,97 @@ class ConnectionManager {
                 deathRecipient = null
             }
         }
+    }
+
+    private fun ensureVisibilityMonitoring() {
+        if (visibilityMonitor != null) return
+        val monitor = visibilityMonitorFactory()
+        visibilityMonitor = monitor
+        clientVisible = monitor.visible.value
+        visibilityJob = scope.launch {
+            monitor.visible.collect { visible ->
+                if (clientVisible == visible) return@collect
+                clientVisible = visible
+                if (visible) {
+                    idleDisconnectJob?.cancel()
+                    idleDisconnectJob = null
+                    if (idleSuspended || _state.value == ConnectionState.SUSPENDED_IDLE) {
+                        resumeBindingFromIdle("client became visible")
+                    } else {
+                        publishClientVisibility(true)
+                    }
+                } else {
+                    publishClientVisibility(false)
+                    scheduleIdleDisconnect()
+                }
+            }
+        }
+    }
+
+    private fun publishClientVisibility(visible: Boolean) {
+        val service = binderRef.get() ?: return
+        publishClientVisibility(service, visible)
+    }
+
+    private fun publishClientVisibility(service: IMindlayerService, visible: Boolean) {
+        if (!idleReleaseSupported) return
+        try {
+            service.setClientVisible(livenessToken, visible)
+        } catch (_: NoSuchMethodError) {
+            idleReleaseSupported = false
+        } catch (_: AbstractMethodError) {
+            idleReleaseSupported = false
+        } catch (t: Throwable) {
+            Log.w(TAG, "Unable to publish Mindlayer client visibility", t)
+        }
+    }
+
+    private fun scheduleIdleDisconnect() {
+        if (clientVisible || !idleReleaseSupported || idleSuspended) return
+        if (idleDisconnectJob?.isActive == true) return
+        idleDisconnectJob = scope.launch {
+            delay(idleDisconnectDelayMs)
+            while (!clientVisible && idleReleaseSupported && !idleSuspended) {
+                val service = binderRef.get() ?: return@launch
+                val approved = try {
+                    service.requestIdleDisconnect(livenessToken)
+                } catch (_: NoSuchMethodError) {
+                    idleReleaseSupported = false
+                    false
+                } catch (_: AbstractMethodError) {
+                    idleReleaseSupported = false
+                    false
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Idle disconnect request failed", t)
+                    false
+                }
+                if (approved && !clientVisible && binderRef.get() === service) {
+                    suspendBindingForIdle("service granted idle disconnect")
+                    return@launch
+                }
+                delay(idleDisconnectRetryMs)
+            }
+        }
+    }
+
+    private fun suspendBindingForIdle(reason: String) {
+        if (clientVisible || _state.value == ConnectionState.DISCONNECTED) return
+        Log.i(TAG, "Suspending Mindlayer binding: $reason")
+        reconnectJob?.cancel()
+        reconnectJob = null
+        idleDisconnectJob?.cancel()
+        idleDisconnectJob = null
+        idleSuspended = true
+        _state.value = ConnectionState.SUSPENDED_IDLE
+        doUnbind()
+    }
+
+    private fun resumeBindingFromIdle(reason: String) {
+        if (!idleSuspended && _state.value != ConnectionState.SUSPENDED_IDLE) return
+        Log.i(TAG, "Resuming Mindlayer binding: $reason")
+        idleSuspended = false
+        _state.value = ConnectionState.CONNECTING
+        doBind()
     }
 
     private fun scheduleReconnect() {

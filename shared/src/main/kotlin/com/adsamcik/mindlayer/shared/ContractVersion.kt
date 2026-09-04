@@ -62,15 +62,14 @@ object ContractVersion {
     /**
      * Bumped on additive AIDL changes (new method, parcelable, or
      * capability flag). Independent of the product version's minor.
-     * `1` reflects the Gemma 4 thinking-mode surface (informally "v1.1"
-     * in code comments/docs) shipped after the "v1.0" audio-input
-     * baseline this MAJOR was cut at.
+     * `4` includes additive client-visibility and safe idle-disconnect methods
+     * after the v1.3 context-aware prewarm surface.
      */
-    const val MINOR: Int = 2
+    const val MINOR: Int = 4
 
     /** Bumped for wire-invisible fixes. Independent of the product's patch. */
     const val PATCH: Int = 0
 
-    /** `"$MAJOR.$MINOR.$PATCH"`, e.g. `"1.2.0"`. */
+    /** `"$MAJOR.$MINOR.$PATCH"`, e.g. `"1.4.0"`. */
     const val VERSION: String = "$MAJOR.$MINOR.$PATCH"
 }

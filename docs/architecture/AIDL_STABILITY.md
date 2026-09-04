@@ -140,6 +140,8 @@ Stable feature-flag strings allocated:
 | `"media_list"` | `inferMulti(...)` and `MediaPart` are available. |
 | `"detailed_cancel"` | `cancelInferenceV2` / `submitToolResultV2` return tri-state results. |
 | `"prewarm_await"` | `prewarmAndAwait(...)` is non-`oneway` and waits for engine init. |
+| `"context_aware_prewarm"` | `prewarmForContext(...)` lets an app request a bounded warm KV context; undersized live engines restart safely. |
+| `"idle_release"` | Client visibility reporting and atomic idle-disconnect coordination are available. |
 | `"typed_diagnostics"` | `getDiagnosticsTyped()` returns a typed snapshot. |
 | `"eviction_callback"` | `subscribeEvictionNotices(...)` is implemented. |
 | `"token_batch"` | Pipe emits `mindlayer.stream.v2` with `TOKEN_DELTA_BATCH`. |
@@ -177,7 +179,7 @@ Real failure modes observed when AIDL discipline lapses:
 
 ## Contract version and compatibility policy
 
-`com.adsamcik.mindlayer.shared.ContractVersion` (`shared/src/main/kotlin/com/adsamcik/mindlayer/shared/ContractVersion.kt`) is the formal, semver-numbered successor to the informal "(vX.Y)" labels used throughout this document and the codebase's comments (§ "Deferred inference surface (v0.6)" below, `"v1.1: ..."` comments in `SessionManager.kt`, etc.). Those labels tracked the same thing this object now tracks explicitly — the shape of the AIDL/wire contract — just without a single source of truth. Current value: `1.2.0`.
+`com.adsamcik.mindlayer.shared.ContractVersion` (`shared/src/main/kotlin/com/adsamcik/mindlayer/shared/ContractVersion.kt`) is the formal, semver-numbered successor to the informal "(vX.Y)" labels used throughout this document and the codebase's comments (§ "Deferred inference surface (v0.6)" below, `"v1.1: ..."` comments in `SessionManager.kt`, etc.). Those labels tracked the same thing this object now tracks explicitly — the shape of the AIDL/wire contract — just without a single source of truth. Current value: `1.4.0`.
 
 **Relationship to the product version.** `ContractVersion` is a deliberately separate number from the product/SDK version (`publishVersion` in the root `build.gradle.kts`, e.g. `"1.0.0-alpha.5"`) — most product releases ship zero AIDL changes, so forcing them to share a full version would be misleading. They are linked at exactly one level:
 
@@ -200,6 +202,33 @@ When changing the AIDL surface:
 6. **Bump `ContractVersion.MINOR`** (or `PATCH` for a wire-invisible fix) in `shared/.../ContractVersion.kt`. Bump `MAJOR` there — and `contractMajorVersion` in the root `build.gradle.kts`, together — only for an intentionally wire-breaking change, and only in lockstep with a product major bump. See "Contract version and compatibility policy" above.
 
 If this document is wrong, **fix the document in the same PR as the code change**. Don't let the docs drift silently.
+
+## Context-aware prewarm surface (v1.3)
+
+`IMindlayerService` appends the `oneway prewarmForContext(backend, maxTokens)`
+method after the v1.2 model-readiness methods. It is gated by
+`FEATURE_CONTEXT_AWARE_PREWARM` (`"context_aware_prewarm"`). New SDKs treat a
+missing capability or missing old-service method as a safe no-op; the real
+session request then performs cold initialization with its own context budget.
+
+The existing `prewarm` and `prewarmAndAwait` transactions keep their original
+positions and signatures. Their service implementation now uses a bounded
+memory-derived default and can skip speculative warmup on low-RAM devices.
+
+## Visibility-aware idle release surface (v1.4)
+
+`IMindlayerService` appends `setClientVisible(clientToken, visible)` and
+`requestIdleDisconnect(clientToken)` after `prewarmForContext`. Both calls are
+gated by `FEATURE_IDLE_RELEASE` (`"idle_release"`) and require the same stable,
+registered liveness token used by `registerClient`.
+
+Visibility is a process-level lifecycle signal, not an inference lock. The
+service grants `requestIdleDisconnect` only while every registered client is
+hidden and there is no active inference, prewarm, context resize, restart
+quiesce, or auxiliary-engine teardown. Granting and rejecting new native work
+share the service state lock, closing the race between the check and the
+client's final unbind. Old services do not advertise the flag, so a new SDK
+keeps its binding and never calls the appended transactions.
 
 ## Deferred inference surface (v0.6)
 

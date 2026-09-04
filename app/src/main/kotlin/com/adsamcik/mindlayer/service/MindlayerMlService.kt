@@ -24,6 +24,7 @@ import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.MemoryPressure
 import com.adsamcik.mindlayer.service.engine.OcrSessionManager
 import com.adsamcik.mindlayer.service.engine.PaddleOcrEngine
+import com.adsamcik.mindlayer.service.engine.PrewarmContextPolicy
 import com.adsamcik.mindlayer.service.engine.SessionManager
 import com.adsamcik.mindlayer.service.engine.ThermalBand
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
@@ -43,6 +44,7 @@ import com.adsamcik.mindlayer.service.modeldelivery.ModelFamily
 import com.adsamcik.mindlayer.service.modeldelivery.ModelRuntimeControlRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -69,6 +71,9 @@ class MindlayerMlService : Service() {
         private const val EMERGENCY_DRAIN_TIMEOUT_MS = 2_000L
         private const val MODEL_RELEASE_DRAIN_TIMEOUT_MS = 5_000L
 
+        /** Hidden-client grace before closing the independently reloadable engines. */
+        const val AUXILIARY_IDLE_RELEASE_DELAY_MS = 30_000L
+
         /**
          * R-3: how long a thermal-driven GPU→CPU downshift may be deferred
          * (because inference is in flight) before it is FORCED under a
@@ -82,6 +87,13 @@ class MindlayerMlService : Service() {
 
         /** R-3: bounded wait for cancelled jobs to unwind before a forced restart. */
         private const val FORCED_SWITCH_DRAIN_TIMEOUT_MS = 3_000L
+
+        /**
+         * Context growth is not urgent enough to tear down an active decode.
+         * Give existing work a full minute to finish, then abort the resize
+         * and let the requesting SDK retry instead of killing mid-inference.
+         */
+        private const val CONTEXT_RESIZE_DRAIN_TIMEOUT_MS = 60_000L
 
         const val STATE_IDLE = "idle"
         const val STATE_LOADING = "loading"
@@ -160,6 +172,37 @@ class MindlayerMlService : Service() {
      */
     @Volatile
     private var quiescingForRestart = false
+
+    /** Largest context requested while a context-resize restart is draining. */
+    private var pendingContextResizeTokens: Int? = null
+
+    /** Guarded by [stateLock]; distinguishes context resize from other restarts. */
+    private var contextResizeInFlight = false
+
+    /** Work such as async prewarm that must block idle teardown but is not inference/FGS. */
+    private var idleProtectedWorkCount = 0
+
+    /** True from the last framework bind until the final client unbinds. */
+    private var clientsBound = false
+
+    /** Set after the service atomically approves hidden SDK clients to unbind. */
+    private var idleDisconnectGranted = false
+
+    /** Prevents native requests from racing an auxiliary-engine shutdown. */
+    private var auxiliaryReleaseInProgress = false
+
+    /** Causes OCR to rearm when a visible client returns; embeddings rearm lazily. */
+    private var auxiliaryReleasedForIdle = false
+
+    private var auxiliaryIdleJob: Job? = null
+
+    /** Test seam. Production exits the isolated `:ml` process without a warm restart intent. */
+    internal var idleProcessKiller: () -> Unit = {
+        android.os.Process.killProcess(android.os.Process.myPid())
+    }
+
+    /** Test seam; production uses [AUXILIARY_IDLE_RELEASE_DELAY_MS]. */
+    internal var auxiliaryIdleReleaseDelayMs: Long = AUXILIARY_IDLE_RELEASE_DELAY_MS
 
     var activeInferenceCount = 0
         private set
@@ -376,17 +419,29 @@ class MindlayerMlService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder {
+        synchronized(stateLock) {
+            clientsBound = true
+            idleDisconnectGranted = false
+        }
         MindlayerLog.i(TAG, "Client bound: ${intent?.`package`}")
         return binder
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
+        synchronized(stateLock) { clientsBound = false }
+        binder.markAllClientsInvisible()
         MindlayerLog.i(TAG, "Client unbound: ${intent?.`package`}")
+        reevaluateIdleRelease()
         return true
     }
 
     override fun onRebind(intent: Intent?) {
+        synchronized(stateLock) {
+            clientsBound = true
+            idleDisconnectGranted = false
+        }
         MindlayerLog.i(TAG, "Client rebound: ${intent?.`package`}")
+        reevaluateIdleRelease()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -481,6 +536,10 @@ class MindlayerMlService : Service() {
 
     override fun onDestroy() {
         MindlayerLog.i(TAG, "Service destroyed")
+        synchronized(stateLock) {
+            auxiliaryIdleJob?.cancel()
+            auxiliaryIdleJob = null
+        }
         if (::modelRuntimeController.isInitialized) {
             ModelRuntimeControlRegistry.clear(modelRuntimeController)
         }
@@ -835,6 +894,9 @@ class MindlayerMlService : Service() {
     private fun applyPendingBackendSwitch(force: Boolean = false) {
         val target: String
         synchronized(stateLock) {
+            // A context-growth restart is already draining. Keep the thermal
+            // target queued; the fresh process will re-evaluate policy.
+            if (quiescingForRestart) return
             target = pendingBackend ?: return
             // Re-check idleness under the same lock that enterForeground uses.
             // If an inference just started, exitForeground() will retry — UNLESS
@@ -914,6 +976,280 @@ class MindlayerMlService : Service() {
         }
     }
 
+    /**
+     * Recreate the LLM engine in a fresh `:ml` process with a larger KV cache.
+     *
+     * LiteRT-LM #2028 makes in-process Engine close/recreate unsafe, so this
+     * follows the same persisted process-restart path as thermal switching.
+     * Requests coalesce to the largest context while current inference drains.
+     * New inference is rejected during the drain and retried by the SDK.
+     */
+    internal fun requestEngineContextResize(maxTokens: Int) {
+        val shouldLaunch = synchronized(stateLock) {
+            if (quiescingForRestart && !contextResizeInFlight) {
+                // A thermal or memory restart is already committed. The SDK's
+                // post-restart createSession retry will reassess capacity.
+                return
+            }
+            pendingContextResizeTokens = maxOf(pendingContextResizeTokens ?: 0, maxTokens)
+            if (contextResizeInFlight) {
+                false
+            } else {
+                contextResizeInFlight = true
+                quiescingForRestart = true
+                true
+            }
+        }
+        if (!shouldLaunch) return
+
+        val targetBackend = engineManager.currentBackend.takeUnless { it == "NONE" }
+        MindlayerLog.i(
+            TAG,
+            "Scheduling engine context resize to at least $maxTokens tokens " +
+                "(backend=${targetBackend ?: "<default>"})",
+        )
+        serviceScope.launch {
+            try {
+                val drained = orchestrator.awaitAllJobs(CONTEXT_RESIZE_DRAIN_TIMEOUT_MS)
+                if (!drained) {
+                    MindlayerLog.w(
+                        TAG,
+                        "Context resize deferred: inference did not drain within " +
+                            "${CONTEXT_RESIZE_DRAIN_TIMEOUT_MS}ms",
+                    )
+                    clearContextResizeState()
+                    return@launch
+                }
+
+                val tier = memoryBudget.deviceTier
+                val snapshot = memoryBudget.currentSnapshot()
+                val requestedTokens = synchronized(stateLock) {
+                    val requested = pendingContextResizeTokens ?: maxTokens
+                    // Commit the coalesced target. A request racing after this
+                    // point sees quiescing=true/contextResizeInFlight=false and
+                    // retries after the imminent process restart instead of
+                    // being silently merged too late for the persisted intent.
+                    pendingContextResizeTokens = null
+                    contextResizeInFlight = false
+                    requested
+                }
+                val targetTokens = PrewarmContextPolicy.effectiveRequestedContextTokens(
+                    requestedTokens = requestedTokens,
+                    tier = tier,
+                    snapshot = snapshot,
+                )
+                val loadedTokens = engineManager.maxTokens
+                if (loadedTokens != null && targetTokens <= loadedTokens) {
+                    MindlayerLog.i(
+                        TAG,
+                        "Context resize no longer needed after memory-policy refresh " +
+                            "(loaded=$loadedTokens, effective=$targetTokens)",
+                    )
+                    clearContextResizeState()
+                    return@launch
+                }
+                sessionManager.invalidateIdleSessionsForBackendSwitch()
+                engineManager.shutdownAndRestart(
+                    reason = "context_resize",
+                    targetBackend = targetBackend,
+                    maxTokens = targetTokens,
+                )
+
+                // Production never reaches this because shutdownAndRestart
+                // kills the process. Keep tests/no-op process killers usable.
+                clearContextResizeState()
+            } catch (t: Throwable) {
+                clearContextResizeState()
+                MindlayerLog.e(TAG, "Engine context resize failed: ${t.safeLabel()}")
+            }
+        }
+    }
+
+    private fun clearContextResizeState() {
+        synchronized(stateLock) {
+            pendingContextResizeTokens = null
+            contextResizeInFlight = false
+            quiescingForRestart = false
+        }
+    }
+
+    // --- Visibility-aware idle release -------------------------------------
+
+    /** Called by [ServiceBinder] after a registered client's visibility changes. */
+    internal fun onClientVisibilityChanged() {
+        val hasVisibleClients = ::binder.isInitialized && binder.hasVisibleClients()
+        synchronized(stateLock) {
+            if (hasVisibleClients) {
+                idleDisconnectGranted = false
+                auxiliaryIdleJob?.cancel()
+                auxiliaryIdleJob = null
+            }
+        }
+        if (hasVisibleClients) {
+            rearmOcrAfterIdleReleaseIfNeeded()
+        } else {
+            reevaluateIdleRelease()
+        }
+    }
+
+    /**
+     * Atomically grant a hidden SDK client permission to drop its long-lived
+     * application-context binding. Once granted, new native work is rejected
+     * briefly so it cannot race the final unbind/process exit. A visible client
+     * cancels the grant before starting new work.
+     */
+    internal fun tryGrantIdleDisconnect(): Boolean = synchronized(stateLock) {
+        val noVisibleClients = ::binder.isInitialized && !binder.hasVisibleClients()
+        if (
+            !noVisibleClients ||
+            activeInferenceCount > 0 ||
+            idleProtectedWorkCount > 0 ||
+            auxiliaryReleaseInProgress ||
+            quiescingForRestart ||
+            contextResizeInFlight
+        ) {
+            return@synchronized false
+        }
+        idleDisconnectGranted = true
+        true
+    }
+
+    /** Keep async engine initialization out of the idle teardown window. */
+    internal fun beginIdleProtectedWork(): Boolean = synchronized(stateLock) {
+        if (idleDisconnectGranted || auxiliaryReleaseInProgress || quiescingForRestart) {
+            return@synchronized false
+        }
+        idleProtectedWorkCount++
+        auxiliaryIdleJob?.cancel()
+        auxiliaryIdleJob = null
+        true
+    }
+
+    internal fun endIdleProtectedWork() {
+        synchronized(stateLock) {
+            idleProtectedWorkCount = (idleProtectedWorkCount - 1).coerceAtLeast(0)
+        }
+        reevaluateIdleRelease()
+    }
+
+    private fun reevaluateIdleRelease() {
+        var terminateProcess = false
+        synchronized(stateLock) {
+            val idle = isIdleReleaseEligibleLocked()
+            if (!idle) {
+                auxiliaryIdleJob?.cancel()
+                auxiliaryIdleJob = null
+                return
+            }
+            if (!clientsBound) {
+                auxiliaryIdleJob?.cancel()
+                auxiliaryIdleJob = null
+                idleDisconnectGranted = true
+                terminateProcess = true
+            } else if (
+                auxiliaryIdleJob?.isActive != true &&
+                !auxiliaryReleaseInProgress &&
+                !auxiliaryReleasedForIdle
+            ) {
+                auxiliaryIdleJob = serviceScope.launch {
+                    delay(auxiliaryIdleReleaseDelayMs)
+                    releaseAuxiliaryEnginesAfterIdle()
+                }
+            }
+        }
+        if (terminateProcess) terminateIdleProcess()
+    }
+
+    private fun isIdleReleaseEligibleLocked(): Boolean =
+        activeInferenceCount == 0 &&
+            idleProtectedWorkCount == 0 &&
+            !quiescingForRestart &&
+            !contextResizeInFlight &&
+            (::binder.isInitialized && !binder.hasVisibleClients())
+
+    private suspend fun releaseAuxiliaryEnginesAfterIdle() {
+        val claimed = synchronized(stateLock) {
+            auxiliaryIdleJob = null
+            if (!isIdleReleaseEligibleLocked() || !clientsBound || auxiliaryReleaseInProgress) {
+                false
+            } else {
+                auxiliaryReleaseInProgress = true
+                true
+            }
+        }
+        if (!claimed) {
+            reevaluateIdleRelease()
+            return
+        }
+
+        MindlayerLog.i(TAG, "Idle timeout reached; releasing embedding and OCR engines")
+        var releasedSuccessfully = false
+        try {
+            if (::embeddingCoordinator.isInitialized) {
+                check(embeddingCoordinator.awaitAllJobs(MODEL_RELEASE_DRAIN_TIMEOUT_MS)) {
+                    "Embedding runtime did not drain during idle release"
+                }
+            }
+            if (::ocrSessionManager.isInitialized) {
+                ocrSessionManager.drainForMemoryPressure()
+            }
+            if (::embeddingEngine.isInitialized) {
+                embeddingEngine.shutdown()
+            }
+            if (::paddleOcrEngine.isInitialized) {
+                paddleOcrEngine.shutdown()
+            }
+            releasedSuccessfully = true
+            MindlayerLog.i(TAG, "Idle auxiliary-engine release complete")
+        } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "Idle auxiliary-engine release failed: ${t.safeLabel()}")
+        } finally {
+            val shouldRearm = synchronized(stateLock) {
+                auxiliaryReleaseInProgress = false
+                // A partial/failed shutdown is not a stable released state.
+                // Leave it eligible for another delayed attempt while hidden.
+                auxiliaryReleasedForIdle = releasedSuccessfully
+                ::binder.isInitialized && binder.hasVisibleClients()
+            }
+            if (shouldRearm) rearmOcrAfterIdleReleaseIfNeeded()
+            reevaluateIdleRelease()
+        }
+    }
+
+    private fun rearmOcrAfterIdleReleaseIfNeeded() {
+        val shouldRearm = synchronized(stateLock) {
+            if (!auxiliaryReleasedForIdle || auxiliaryReleaseInProgress) {
+                false
+            } else {
+                auxiliaryReleasedForIdle = false
+                true
+            }
+        }
+        if (!shouldRearm || !::paddleOcrEngine.isInitialized) return
+        serviceScope.launch(Dispatchers.IO) {
+            runCatching { paddleOcrEngine.initialize() }
+                .onFailure {
+                    MindlayerLog.i(
+                        TAG,
+                        "PaddleOCR rearm after idle release did not complete: ${it.safeLabel()}",
+                    )
+                }
+        }
+    }
+
+    private fun terminateIdleProcess() {
+        val shouldTerminate = synchronized(stateLock) {
+            !clientsBound && isIdleReleaseEligibleLocked()
+        }
+        if (!shouldTerminate) return
+        MindlayerLog.i(TAG, "Final client unbound while idle; terminating isolated ML process")
+        if (::mlHealthRecorder.isInitialized) {
+            runCatching { mlHealthRecorder.recordCleanShutdown() }
+                .onFailure { MindlayerLog.w(TAG, "Unable to record clean idle shutdown: ${it.safeLabel()}") }
+        }
+        idleProcessKiller()
+    }
+
     // --- Foreground state management ---
 
     /**
@@ -929,12 +1265,15 @@ class MindlayerMlService : Service() {
             // so the switch deferred to it) or AFTER (and is rejected here).
             // The thrown error is the retryable ENGINE_RESTARTING the SDK
             // backs off on; the process restarts within seconds.
-            if (quiescingForRestart) {
+            if (quiescingForRestart || idleDisconnectGranted || auxiliaryReleaseInProgress) {
                 throw com.adsamcik.mindlayer.service.engine.EngineNotReadyException(
                     retryAfterMs = 2_000L,
                 )
             }
             activeInferenceCount++
+            auxiliaryReleasedForIdle = false
+            auxiliaryIdleJob?.cancel()
+            auxiliaryIdleJob = null
             if (activeInferenceCount == 1) {
                 val notification = buildNotification("Processing inference request...")
                 val fgsType = if (Build.VERSION.SDK_INT >= 34) {
@@ -979,6 +1318,7 @@ class MindlayerMlService : Service() {
      * Drop foreground when no active inferences remain.
      */
     fun exitForeground() {
+        var becameIdle = false
         synchronized(stateLock) {
             activeInferenceCount = (activeInferenceCount - 1).coerceAtLeast(0)
             if (activeInferenceCount == 0) {
@@ -987,9 +1327,11 @@ class MindlayerMlService : Service() {
                 MindlayerLog.i(TAG, "Exited foreground")
                 // Apply pending backend switch when idle
                 applyPendingBackendSwitch()
+                becameIdle = true
             }
         }
         updateNotification()
+        if (becameIdle) reevaluateIdleRelease()
     }
 
     fun updateServiceState(newState: String) {

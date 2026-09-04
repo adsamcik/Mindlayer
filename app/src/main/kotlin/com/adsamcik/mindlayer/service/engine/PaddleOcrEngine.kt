@@ -9,8 +9,6 @@ import com.adsamcik.mindlayer.service.modeldelivery.ModelFamily
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 
@@ -43,8 +41,8 @@ sealed class PaddleOcrEngineState {
  *
  * # Threading model
  *
- * A single [Mutex] serialises every public method. Inference calls
- * therefore queue per-engine; the higher-level [OcrSessionManager]
+ * A single adaptive scheduler serialises every public method. Inference calls
+ * queue shortest-frame-first once admitted; the higher-level [OcrSessionManager]
  * enforces single-flight per session and surfaces backpressure as
  * `OcrFrameAck.STATUS_DROPPED_BUSY` when the queue would grow.
  *
@@ -63,9 +61,13 @@ class PaddleOcrEngine(
     },
 ) {
 
-    private val mutex = Mutex()
     private val backend: PaddleOcrBackend by lazy(backendFactory)
     private val _state = MutableStateFlow<PaddleOcrEngineState>(PaddleOcrEngineState.Idle)
+    private val scheduler = AdaptiveWorkloadScheduler(
+        loadedAffinity = {
+            if (_state.value is PaddleOcrEngineState.Ready) OCR_AFFINITY else null
+        },
+    )
 
     val state: StateFlow<PaddleOcrEngineState> = _state.asStateFlow()
 
@@ -80,9 +82,8 @@ class PaddleOcrEngine(
      * Used by the service to advertise [com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_OCR_SESSION]
      * only after the engine is confirmed ready (PR C3).
      */
-    suspend fun initialize(preferredBackend: String? = null): PaddleOcrModelInfo = mutex.withLock {
-        initializeLocked(preferredBackend)
-    }
+    suspend fun initialize(preferredBackend: String? = null): PaddleOcrModelInfo =
+        scheduler.run(lifecycleRequest()) { initializeLocked(preferredBackend) }
 
     /**
      * Retry a sticky native/backend initialization failure.
@@ -91,7 +92,8 @@ class PaddleOcrEngine(
      * concurrent retry that arrives after the first succeeds observes the
      * initialized fast path instead of tearing the backend down again.
      */
-    suspend fun retryInitialize(preferredBackend: String? = null): PaddleOcrModelInfo = mutex.withLock {
+    suspend fun retryInitialize(preferredBackend: String? = null): PaddleOcrModelInfo =
+        scheduler.run(lifecycleRequest()) {
         try {
             ModelDeliveryFileLock.withLockSuspending(context.filesDir, ModelFamily.OCR) {
                 ModelDeliveryFileLock.requireAvailable(
@@ -116,7 +118,7 @@ class PaddleOcrEngine(
             _state.value = PaddleOcrEngineState.Idle
             throw cancellation
         }
-    }
+        }
 
     /**
      * Recognise a single Y-plane frame.
@@ -129,7 +131,12 @@ class PaddleOcrEngine(
         width: Int,
         height: Int,
         config: OcrEngineConfig = OcrEngineConfig(),
-    ): OcrEngineOutput = mutex.withLock {
+    ): OcrEngineOutput = scheduler.run(
+        AdaptiveWorkloadScheduler.Request(
+            affinityKey = OCR_AFFINITY,
+            estimatedCost = safePixelCost(width, height),
+        ),
+    ) {
         ModelDeliveryFileLock.requireAvailable(context.filesDir, ModelFamily.OCR)
         require(width > 0 && height > 0) {
             "width and height must be positive (got $width x $height)"
@@ -142,7 +149,7 @@ class PaddleOcrEngine(
     }
 
     /** Release native resources and reset initialization state. */
-    suspend fun unloadForMemoryPressure() = mutex.withLock {
+    suspend fun unloadForMemoryPressure() = scheduler.run(lifecycleRequest()) {
         backend.shutdown()
         lastInitFailure = null
         lastInitThrowable = null
@@ -151,7 +158,7 @@ class PaddleOcrEngine(
     }
 
     /** Full shutdown — release native resources + reset state. */
-    suspend fun shutdown() = mutex.withLock {
+    suspend fun shutdown() = scheduler.run(lifecycleRequest()) {
         backend.shutdown()
         lastInitFailure = null
         lastInitThrowable = null
@@ -237,7 +244,19 @@ class PaddleOcrEngine(
                 "or sideload PP-OCRv5 mobile artifacts for development.",
         )
 
+    private fun lifecycleRequest() = AdaptiveWorkloadScheduler.Request(
+        affinityKey = OCR_AFFINITY,
+        priority = AdaptiveWorkloadScheduler.MAX_PRIORITY,
+        estimatedCost = 1,
+    )
+
+    private fun safePixelCost(width: Int, height: Int): Int =
+        (width.toLong() * height.toLong())
+            .coerceIn(1L, Int.MAX_VALUE.toLong())
+            .toInt()
+
     private companion object {
         private const val TAG = "PaddleOcrEngine"
+        private const val OCR_AFFINITY = "paddleocr-ppocrv5-mobile"
     }
 }

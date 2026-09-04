@@ -128,6 +128,35 @@ class MindlayerApiTest {
     }
 
     // ═════════════════════════════════════════════════════════════════════
+    //  Prewarming
+    // ═════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `prewarmForContext calls capability-gated AIDL with explicit context`() = runTest {
+        every { mockService.capabilities } returns
+            com.adsamcik.mindlayer.ServiceCapabilities.v0Baseline().copy(
+                supportedFeatures = setOf(
+                    com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_CONTEXT_AWARE_PREWARM,
+                ),
+            )
+
+        mindlayer.prewarmForContext(16_384, InferenceBackend.CPU)
+
+        verify(exactly = 1) { mockService.prewarmForContext("CPU", 16_384) }
+    }
+
+    @Test
+    fun `prewarmForContext is a safe no-op against an older service`() = runTest {
+        every { mockService.capabilities } returns
+            com.adsamcik.mindlayer.ServiceCapabilities.v0Baseline()
+
+        mindlayer.prewarmForContext(8192, InferenceBackend.CPU)
+
+        verify(exactly = 0) { mockService.prewarmForContext(any(), any()) }
+        verify(exactly = 0) { mockService.prewarm(any()) }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
     //  Session management
     // ═════════════════════════════════════════════════════════════════════
 
@@ -181,6 +210,16 @@ class MindlayerApiTest {
         assertEquals(1.0f, cfg.samplerTemperature)
         assertEquals(toolsDef, cfg.toolsJson)
         assertEquals("""{"key":"value"}""", cfg.extraContextJson)
+    }
+
+    @Test
+    fun `createSession accepts context larger than automatic prewarm budget`() = runTest {
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "session-large"
+
+        mindlayer.createSessionInternal { maxTokens(16_384) }
+
+        assertEquals(16_384, configSlot.captured.maxTokens)
     }
 
     @Test

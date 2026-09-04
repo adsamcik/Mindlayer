@@ -251,8 +251,9 @@ class ConversationTest {
             ConversationBuilder().apply { maxTokens(50) }
         }
         assertThrows(IllegalArgumentException::class.java) {
-            ConversationBuilder().apply { maxTokens(10000) }
+            ConversationBuilder().apply { maxTokens(32_769) }
         }
+        assertEquals(16_384, ConversationBuilder().apply { maxTokens(16_384) }.build().maxTokens)
     }
 
     @Test

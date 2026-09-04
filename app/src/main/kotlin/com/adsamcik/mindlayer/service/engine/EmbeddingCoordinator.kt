@@ -197,7 +197,7 @@ class EmbeddingCoordinator(
             ?: throw typed(MindlayerErrorCode.DEFERRED_QUOTA_EXHAUSTED, "deferred quota exhausted")
         val job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             activeCount.incrementAndGet()
-            enterForeground()
+            var foregroundEntered = false
             // Track the blob file separately from the local `val file` so the
             // catch / finally cleanup paths can delete an orphaned blob that
             // was atomically renamed to its final path BEFORE the deferred
@@ -207,6 +207,11 @@ class EmbeddingCoordinator(
             // pruneExpired() removes it via TTL (24h by default).
             var blobFile: File? = null
             try {
+                // May reject while an idle disconnect/process exit is already
+                // committed. Keep this inside the cleanup envelope so the
+                // pre-registered lazy job cannot leak counters or ownership.
+                enterForeground()
+                foregroundEntered = true
                 val started = System.nanoTime()
                 val results = reqs.map { req ->
                     val out = engine.embed(req.text, req.taskType, req.outputDim, req.normalize)
@@ -241,6 +246,15 @@ class EmbeddingCoordinator(
                 blobFile = null
                 deferredStore.completeEmbeddingCancelled(requestId, uid)
                 throw ce
+            } catch (e: EngineNotReadyException) {
+                deleteOrphanBlobQuietly(blobFile)
+                blobFile = null
+                deferredStore.failEmbeddingBatch(
+                    requestId,
+                    uid,
+                    MindlayerErrorCode.ENGINE_INITIALIZING,
+                    MindlayerErrorCode.nameOf(MindlayerErrorCode.ENGINE_INITIALIZING),
+                )
             } catch (t: Throwable) {
                 MindlayerLog.w(TAG, "Deferred embedding failed: ${t.safeLabel()}", requestId = requestId, throwable = null)
                 deleteOrphanBlobQuietly(blobFile)
@@ -254,7 +268,7 @@ class EmbeddingCoordinator(
             } finally {
                 deleteOrphanBlobQuietly(blobFile)
                 activeJobs.remove(key(uid, requestId))
-                exitForeground()
+                if (foregroundEntered) exitForeground()
                 activeCount.decrementAndGet()
                 callbackBroker.notifyEmbeddingBatchComplete(uid, requestId)
             }
@@ -355,12 +369,16 @@ class EmbeddingCoordinator(
             throw typed(MindlayerErrorCode.DUPLICATE_REQUEST, "duplicate requestId")
         }
         activeCount.incrementAndGet()
-        enterForeground()
+        var foregroundEntered = false
         return try {
+            // Keep foreground acquisition inside the finally envelope. An idle
+            // disconnect grant can reject here before native work starts.
+            enterForeground()
+            foregroundEntered = true
             block()
         } finally {
             activeJobs.remove(scoped, job)
-            exitForeground()
+            if (foregroundEntered) exitForeground()
             activeCount.decrementAndGet()
         }
     }

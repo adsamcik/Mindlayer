@@ -8,6 +8,7 @@ import android.os.IBinder
 import android.util.Log
 import app.cash.turbine.test
 import com.adsamcik.mindlayer.IMindlayerService
+import com.adsamcik.mindlayer.ServiceCapabilities
 import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import io.mockk.Runs
 import io.mockk.every
@@ -42,6 +43,7 @@ class ConnectionManagerTest {
     private lateinit var mgr: ConnectionManager
     private lateinit var mockContext: Context
     private lateinit var mockAppContext: Context
+    private lateinit var visibilityMonitor: TestClientVisibilityMonitor
 
     private val connSlot = slot<ServiceConnection>()
 
@@ -65,7 +67,8 @@ class ConnectionManagerTest {
             every { applicationContext } returns mockAppContext
         }
 
-        mgr = ConnectionManager()
+        visibilityMonitor = TestClientVisibilityMonitor()
+        mgr = ConnectionManager { visibilityMonitor }
     }
 
     @After
@@ -135,6 +138,47 @@ class ConnectionManagerTest {
         mgr.disconnect()
         assertEquals(ConnectionState.DISCONNECTED, mgr.state.value)
         verify { mockAppContext.unbindService(any()) }
+    }
+
+    @Test
+    fun `hidden idle client unbinds after service grant and visible transition reconnects`() {
+        mgr.idleDisconnectDelayMs = 0L
+        mgr.idleDisconnectRetryMs = 10L
+        val service = mockk<IMindlayerService>(relaxed = true) {
+            every { registerClient(any()) } just Runs
+            every { capabilities } returns ServiceCapabilities.v0Baseline().copy(
+                supportedFeatures = setOf(ServiceCapabilities.FEATURE_IDLE_RELEASE),
+            )
+            every { setClientVisible(any(), any()) } just Runs
+            every { requestIdleDisconnect(any()) } returns true
+        }
+        val rawBinder = mockk<IBinder>(relaxed = true) {
+            every { linkToDeath(any(), any()) } just Runs
+            every { unlinkToDeath(any(), any()) } returns true
+            every { queryLocalInterface(IMindlayerService.DESCRIPTOR) } returns service
+        }
+
+        mgr.connect(mockContext)
+        connSlot.captured.onServiceConnected(stubComponent(), rawBinder)
+        assertEquals(ConnectionState.CONNECTED, mgr.state.value)
+
+        visibilityMonitor.setVisible(false)
+        verify(timeout = 1_000) { service.setClientVisible(any(), false) }
+        verify(timeout = 1_000) { service.requestIdleDisconnect(any()) }
+        awaitState(ConnectionState.SUSPENDED_IDLE)
+        assertNull(mgr.getService())
+        verify(atLeast = 1) { mockAppContext.unbindService(any()) }
+
+        visibilityMonitor.setVisible(true)
+        awaitState(ConnectionState.CONNECTING)
+        verify(atLeast = 2) {
+            mockAppContext.bindService(any<Intent>(), any(), any<Int>())
+        }
+
+        connSlot.captured.onServiceConnected(stubComponent(), rawBinder)
+        assertEquals(ConnectionState.CONNECTED, mgr.state.value)
+        verify(timeout = 1_000) { service.setClientVisible(any(), true) }
+        mgr.disconnect()
     }
 
     // -- getService / requireService ------------------------------------------
@@ -647,5 +691,13 @@ class ConnectionManagerTest {
             every { queryLocalInterface(any()) } returns null
         }
         connSlot.captured.onServiceConnected(stubComponent(), rawBinder)
+    }
+
+    private fun awaitState(expected: ConnectionState) {
+        val deadlineNs = System.nanoTime() + 2_000_000_000L
+        while (mgr.state.value != expected && System.nanoTime() < deadlineNs) {
+            Thread.sleep(10L)
+        }
+        assertEquals(expected, mgr.state.value)
     }
 }

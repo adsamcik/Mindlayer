@@ -30,11 +30,15 @@ contributor setup see [CONTRIBUTING](../CONTRIBUTING.md).
 - [THERMAL_POLICY_ON_UNAVAILABLE](engine/THERMAL_POLICY_ON_UNAVAILABLE.md) — thermal policy when telemetry is unavailable.
 - [THINKING](engine/THINKING.md) — thinking-mode behavior.
 - [MEMORY_TIERS_EMPIRICS](engine/MEMORY_TIERS_EMPIRICS.md) — memory-tier empirical measurements.
+- [PLAY_MEMORY_BENCHMARK](engine/PLAY_MEMORY_BENCHMARK.md) — single-device real-service memory, workload, and TOP → FGS → background → cached lifecycle benchmark.
+- [PREWARM_CONTEXT_BUDGET](engine/PREWARM_CONTEXT_BUDGET.md) — workload-derived automatic prewarm budget and safe context growth.
+- [ADAPTIVE_WORKLOAD_SCHEDULING](engine/ADAPTIVE_WORKLOAD_SCHEDULING.md) — warm-affinity, priority, cost, and starvation-safe queue ordering.
 - [AUDIO](engine/AUDIO.md) — audio input handling.
 
 ## Models & dev tooling
 
 - [MODEL_SHAS](models/MODEL_SHAS.md) — pinned model SHA-256 digests.
+- [model-artifact-provenance.json](models/model-artifact-provenance.json) — machine-readable source, conversion, licence, and artifact evidence gate.
 - [DEV_MODELS](models/DEV_MODELS.md) — sideloading models for local development.
 
 ## Project

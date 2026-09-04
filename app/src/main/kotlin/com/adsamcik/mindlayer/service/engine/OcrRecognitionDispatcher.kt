@@ -198,8 +198,15 @@ class OcrRecognitionDispatcher(
         val state = perSession.computeIfAbsent(sessionId) { SessionState() }
         val pageConfig = pageConfigs[sessionId] ?: PageBoundariesConfig.DISABLED
         val job = scope.launch(start = CoroutineStart.LAZY) {
-            foregroundTracker?.enterForeground()
+            var foregroundEntered = false
             try {
+                // An idle process-exit grant may win after this lazy job is
+                // registered but before it starts. Run acquisition inside the
+                // cleanup envelope so a rejection never emits a false exit.
+                foregroundTracker?.let {
+                    it.enterForeground()
+                    foregroundEntered = true
+                }
                 withWriterLock(writerMutex) {
                     writer?.runCatching { writeFrameProcessing(frameId) }
                 }
@@ -250,7 +257,7 @@ class OcrRecognitionDispatcher(
                     }
                 }
             } finally {
-                foregroundTracker?.exitForeground()
+                if (foregroundEntered) foregroundTracker?.exitForeground()
             }
         }
         state.activeJobs.add(job)

@@ -651,39 +651,39 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
      * the *cold* state (handles in the map with `conversation == null`),
      * but only one inference can be in flight at a time.
      *
-     * Caller MUST also hold [handle.mutex.withLock] if multiple infers
-     * could race on the SAME session — the lease serialises across
-     * sessions, the per-handle mutex still serialises within one session.
-     * The canonical pattern in [InferenceOrchestrator] is
-     * `handle.mutex.withLock { sessionManager.withWarmConversation(handle) { conv -> ... } }`.
+     * The lease owns both scheduler admission and [handle.mutex] for the whole
+     * block. Callers MUST NOT acquire the handle mutex first: queued work for
+     * the warm session must remain visible to affinity ordering.
      *
      * @throws EngineBusyException if the prior warm session is mid-stream.
      * @throws IllegalStateException if the engine is not yet initialised.
      */
-    suspend fun <R> withWarmConversation(
+    internal suspend fun <R> withWarmConversation(
         handle: SessionHandle,
+        schedulingHint: WarmConversationSlot.SchedulingHint = WarmConversationSlot.SchedulingHint(),
         block: suspend (Conversation) -> R,
     ): R {
         engineManager.requireModelAvailable()
         return warmSlot.lease(
-        handle = handle,
-        sessions = sessions,
-        createConversation = {
-            // Seed the fresh Conversation with current recorded turns —
-            // for a brand-new session this matches the original
-            // initialHistory; for a swapped-back session this carries the
-            // accumulated turn buffer so context is preserved.
-            val replay = handle.messagesForReplay()
-            val effectiveConfig = handle.baseConversationConfig.copy(initialMessages = replay)
-            val engine = engineManager.requireEngine()
-            MindlayerLog.i(
-                TAG,
-                "Warming session: replaying ${replay.size} turn(s)",
-                sessionId = handle.sessionId,
-            )
-            engine.createConversation(effectiveConfig)
-        },
-        block = block,
+            handle = handle,
+            sessions = sessions,
+            createConversation = {
+                // Seed the fresh Conversation with current recorded turns —
+                // for a brand-new session this matches the original
+                // initialHistory; for a swapped-back session this carries the
+                // accumulated turn buffer so context is preserved.
+                val replay = handle.messagesForReplay()
+                val effectiveConfig = handle.baseConversationConfig.copy(initialMessages = replay)
+                val engine = engineManager.requireEngine()
+                MindlayerLog.i(
+                    TAG,
+                    "Warming session: replaying ${replay.size} turn(s)",
+                    sessionId = handle.sessionId,
+                )
+                engine.createConversation(effectiveConfig)
+            },
+            schedulingHint = schedulingHint,
+            block = block,
         )
     }
 

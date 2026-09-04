@@ -156,6 +156,12 @@ data class ServiceCapabilities(
         /** v0.4: `prewarmAndAwait(backend)` is non-`oneway` and waits for engine init. */
         const val FEATURE_PREWARM_AWAIT: String = "prewarm_await"
 
+        /** v1.3: app-selected context budget for fire-and-forget LLM prewarming. */
+        const val FEATURE_CONTEXT_AWARE_PREWARM: String = "context_aware_prewarm"
+
+        /** v1.4: process visibility and safe idle disconnect/release coordination. */
+        const val FEATURE_IDLE_RELEASE: String = "idle_release"
+
         /** v0.4: `getDiagnosticsTyped()` returns a typed snapshot parcelable. */
         const val FEATURE_TYPED_DIAGNOSTICS: String = "typed_diagnostics"
 

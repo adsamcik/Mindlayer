@@ -5,6 +5,12 @@ Source-of-truth document for the `DeviceTier` table in
 The values there are not hand-tuned guesses — they come from the
 instrumented benchmark + spike runs documented below.
 
+> Historical metric boundary: this 2025-era derivation used direct-engine PSS
+> on an x86_64 emulator. It remains the provenance for the current tier table,
+> but PSS is not Google Play's Anonymous RSS + Swap metric. Use
+> [PLAY_MEMORY_BENCHMARK.md](PLAY_MEMORY_BENCHMARK.md) for current real-service,
+> per-process `RssAnon + VmSwap`, bitmap, graphics, and DMA-BUF measurement.
+
 ## TL;DR
 
 | Metric | Value (95% CI) |

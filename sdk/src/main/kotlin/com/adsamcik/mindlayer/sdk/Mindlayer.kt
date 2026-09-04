@@ -78,9 +78,32 @@ interface Mindlayer {
 
     /**
      * Pre-warm the inference engine on [backend]. Returns immediately,
-     * regardless of whether engine init has finished.
+     * regardless of whether engine init has finished. The service chooses a
+     * conservative context from its fixed prewarm memory budget and may skip
+     * speculative warmup on low-RAM devices or under memory pressure.
      */
     suspend fun prewarm(backend: InferenceBackend = InferenceBackend.GPU)
+
+    /**
+     * Pre-warm for a known total session context (input + output tokens).
+     *
+     * This is the opt-in path for an app that knows it will soon create a
+     * larger session, including on low-RAM devices where [prewarm] may skip.
+     * The service still clamps the request to live memory policy. If a smaller
+     * engine is already loaded it is replaced via a safe process restart.
+     *
+     * Valid range: 128–32768, matching [SessionScope.maxTokens]. On an older
+     * service without context-aware prewarming this is a safe no-op; the first
+     * session request performs the cold initialization instead.
+     */
+    suspend fun prewarmForContext(
+        maxTokens: Int,
+        backend: InferenceBackend = InferenceBackend.GPU,
+    ) {
+        require(maxTokens in 128..32_768) {
+            "maxTokens must be between 128 and 32768, got $maxTokens"
+        }
+    }
 
     /** Engine introspection: selected model, perf stats, backend, etc. */
     suspend fun getEngineInfo(): com.adsamcik.mindlayer.EngineInfo
@@ -298,9 +321,11 @@ interface Mindlayer {
          * consent/resume flow.
          *
          * Lifecycle:
-         * - The shared client lives for the **process** (it is *not* reference
-         *   counted), bound to the application context. Tear it down only at app
-         *   shutdown or in tests via [disconnectShared] — do **not** call
+         * - The shared client object lives for the **process** (it is *not*
+         *   reference counted). Its application-context service binding may be
+         *   suspended after an invisible idle grace; process visibility or the
+         *   next API call reconnects automatically. Tear the object down only at
+         *   app shutdown or in tests via [disconnectShared] — do **not** call
          *   [disconnect] on it (that would strand the singleton; as a safety net
          *   the next [shared] call rebuilds a disconnected one).
          * - [historyPolicy] is honored on the **first** call that creates the

@@ -161,6 +161,14 @@ class ServiceBinderPingTest {
         )
     }
 
+    @Test fun `FEATURE_CONTEXT_AWARE_PREWARM is advertised in capabilities`() {
+        val caps = binder.getCapabilities()
+        assertTrue(
+            "FEATURE_CONTEXT_AWARE_PREWARM must be advertised",
+            caps.supports(ServiceCapabilities.FEATURE_CONTEXT_AWARE_PREWARM),
+        )
+    }
+
     @Test fun `engine-state fields default to IDLE when service fields uninitialized`() {
         val health = binder.ping()
         assertEquals(HealthCheck.ENGINE_STATE_IDLE, health.embeddingEngineState)

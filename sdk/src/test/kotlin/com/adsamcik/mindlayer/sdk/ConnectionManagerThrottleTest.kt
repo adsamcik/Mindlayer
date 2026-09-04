@@ -71,7 +71,7 @@ class ConnectionManagerThrottleTest {
             every { applicationContext } returns mockAppContext
         }
 
-        mgr = ConnectionManager()
+        mgr = ConnectionManager { TestClientVisibilityMonitor() }
     }
 
     @After
