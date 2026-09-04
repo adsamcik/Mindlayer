@@ -39,6 +39,22 @@ If you don't want to think about it, use the wrapper:
 ./scripts/dev-install.sh
 ```
 
+### Android Studio (Windows)
+
+The repository includes two shared run configurations in `.run/`:
+
+- **Mindlayer - Deploy app + all models** builds and installs the code-only
+  debug APK, then deploys all three model families from `.models`.
+- **Mindlayer - Deploy all models only** skips the build and APK install and
+  refreshes missing or size-mismatched model files on an already-installed
+  debug app.
+
+Select the target device in Android Studio as usual, but keep only that device
+connected when running these configurations. The scripts use `adb`'s sole
+connected device automatically; if multiple devices are attached, copy the
+configuration and add `-Device <serial>` to **Script options**. Android Studio's
+SDK from `local.properties` is used automatically when `adb` is not on PATH.
+
 If your cache lives elsewhere (e.g. shared across multiple repo
 checkouts), point `$env:MINDLAYER_MODEL_CACHE` / `MINDLAYER_MODEL_CACHE`
 at it instead — it always takes priority over `.models`:

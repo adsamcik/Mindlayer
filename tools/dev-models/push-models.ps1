@@ -14,7 +14,7 @@
     The script detects whether ``com.adsamcik.mindlayer.debug``
     or ``com.adsamcik.mindlayer`` is installed and uses the
     matching externalFilesDir. If neither is installed yet, it falls
-    back to ``/data/local/tmp/`` with a loud warning — that path used
+    back to ``/data/local/tmp/`` with a loud warning - that path used
     to work historically but apps cannot list it on Android 12+ (API
     31+), so push-before-install only works on older devices.
 
@@ -59,7 +59,7 @@
     Skip the "remote already has a file of the same size" optimization
     and push every file unconditionally. Useful when a model file has
     been re-built locally with the same name + size but different
-    content (rare — model versions normally bump filenames). Without
+    content (rare - model versions normally bump filenames). Without
     this flag the script `adb shell stat -c %s`-checks the remote and
     skips the multi-GB push when sizes match.
 
@@ -89,7 +89,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------------------
-# Constants — must stay in sync with the registries under
+# Constants - must stay in sync with the registries under
 # app/src/main/kotlin/com/adsamcik/mindlayer/service/engine/.
 # ---------------------------------------------------------------------------
 $LegacyRemoteDir = '/data/local/tmp'
@@ -188,8 +188,8 @@ function Assert-DebuggableDevice {
 
          1. The DEVICE is debuggable
             (`ro.debuggable=1` or `ro.build.type in {userdebug, eng}`).
-            On such a device, every installed app — even release
-            builds — is `Debug.isDebuggable() == true`, so the
+            On such a device, every installed app - even release
+            builds - is `Debug.isDebuggable() == true`, so the
             runtime registries' `BuildConfig.DEBUG` gate would pass.
 
          2. The MINDLAYER SERVICE installed is the debug variant
@@ -197,7 +197,7 @@ function Assert-DebuggableDevice {
             package suffix is only produced by Gradle's `debug`
             buildType, which sets `BuildConfig.DEBUG = true`. Whether
             the device itself is a Play Store user-build is
-            irrelevant — the runtime gate is satisfied because the
+            irrelevant - the runtime gate is satisfied because the
             APK was built debug.
 
         Either condition is sufficient. The strict device-only check
@@ -242,8 +242,8 @@ function Resolve-RemoteDir {
     <#
         Resolve the on-device push target:
 
-        1. -PreferLegacyTmp → /data/local/tmp/ (no device query).
-        2. -DryRun without -PreferLegacyTmp → assume the debug variant
+        1. -PreferLegacyTmp -> /data/local/tmp/ (no device query).
+        2. -DryRun without -PreferLegacyTmp -> assume the debug variant
            is installed (most common dev case) and use its externalFilesDir.
         3. Otherwise: query 'pm list packages' for the debug variant
            first, then release. First match wins. If neither is found,
@@ -277,7 +277,7 @@ function Resolve-RemoteDir {
     }
     Write-Warning ("Mindlayer service not installed on device " +
         "($ServicePkgDebug / $ServicePkgRelease). Falling back to " +
-        "$LegacyRemoteDir — this MAY FAIL on Android 12+ (API 31+) because " +
+        "$LegacyRemoteDir - this MAY FAIL on Android 12+ (API 31+) because " +
         "apps can no longer list /data/local/tmp/ even when files inside " +
         "are world-readable. Install a debug build of :app first, then re-run.")
     return [pscustomobject]@{
@@ -340,7 +340,7 @@ function Test-ShaAdvisory {
         [Parameter(Mandatory)][hashtable]$ManifestMap
     )
     if (-not $ManifestMap.ContainsKey($Filename)) {
-        Write-Host "  sha: no manifest entry for $Filename — skipping verification."
+        Write-Host "  sha: no manifest entry for $Filename - skipping verification."
         return $true
     }
     $expected = $ManifestMap[$Filename]
@@ -392,7 +392,7 @@ function Push-OneFile {
     }
 
     # Skip already-pushed files whose size matches the local cache.
-    # `adb push` is roughly 80 MB/s on a good USB-3 link — pushing a
+    # `adb push` is roughly 80 MB/s on a good USB-3 link - pushing a
     # 2.4 GB Gemma model is 30+ seconds you can avoid every iteration.
     # `stat -c %s` is the Android toybox stat invocation; missing-file
     # exits non-zero, which we treat as "needs pushing".
@@ -504,7 +504,7 @@ if ([string]::IsNullOrWhiteSpace($Cache)) {
     }
 }
 if ([string]::IsNullOrWhiteSpace($Cache)) {
-    throw "No cache directory. Pass -Cache <path>, set `$env:MINDLAYER_MODEL_CACHE, or populate the default $repoRoot\.models (gitignored) — see docs/models/DEV_MODELS.md."
+    throw "No cache directory. Pass -Cache <path>, set `$env:MINDLAYER_MODEL_CACHE, or populate the default $repoRoot\.models (gitignored) - see docs/models/DEV_MODELS.md."
 }
 if (-not (Test-Path -LiteralPath $Cache -PathType Container)) {
     throw "Cache directory does not exist: $Cache"
@@ -529,7 +529,7 @@ $resolved = Resolve-RemoteDir
 $script:RemoteDir = $resolved.Dir
 $script:UsingLegacyRemoteDir = $resolved.UsingLegacy
 $remoteLabel = if ($resolved.UsingLegacy) {
-    "$($resolved.Dir)  (LEGACY — /data/local/tmp is unlistable on API 31+)"
+    "$($resolved.Dir)  (LEGACY - /data/local/tmp is unlistable on API 31+)"
 } else {
     "$($resolved.Dir)  (service pkg: $($resolved.Pkg))"
 }
@@ -564,4 +564,3 @@ if ($failures.Count -eq 0) {
     foreach ($f in $failures) { Write-Host "  - $f" }
     exit 1
 }
-

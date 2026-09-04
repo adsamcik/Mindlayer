@@ -24,7 +24,9 @@
     uninstall deletes externalFilesDir).
 
     Requires:
-      - ``adb`` on PATH (Android platform-tools)
+      - Android platform-tools. ``adb`` may be on PATH, or the Android SDK may
+        be discoverable through ``ANDROID_SDK_ROOT``, ``ANDROID_HOME``, or the
+        repo's ``local.properties`` (the normal Android Studio setup).
       - JDK 21 on PATH for ``./gradlew`` (see
         ``.github/context/DEVELOPMENT.md`` for the JDK 21 gotcha)
       - A populated model cache: the standardized ``<repo-root>\.models``
@@ -93,8 +95,55 @@ $repoRoot = (Resolve-Path (Join-Path $scriptDir '..')).Path
 $pushScript = Join-Path $repoRoot 'tools\dev-models\push-models.ps1'
 $apkPath = Join-Path $repoRoot 'app\build\outputs\apk\debug\app-debug.apk'
 
+# Android Studio knows the SDK from local.properties but does not necessarily
+# put platform-tools on the environment inherited by a Shell Script run
+# configuration. Resolve that normal IDE setup before invoking adb here or in
+# the child push-models script. Dry runs intentionally remain device-free.
+function Add-AdbToPathFromAndroidSdk {
+    if (Get-Command adb -ErrorAction SilentlyContinue) {
+        return
+    }
+
+    $sdkCandidates = [System.Collections.Generic.List[string]]::new()
+    foreach ($environmentSdk in @($env:ANDROID_SDK_ROOT, $env:ANDROID_HOME)) {
+        if (-not [string]::IsNullOrWhiteSpace($environmentSdk)) {
+            $sdkCandidates.Add($environmentSdk)
+        }
+    }
+
+    $localProperties = Join-Path $repoRoot 'local.properties'
+    if (Test-Path -LiteralPath $localProperties) {
+        $sdkProperty = Get-Content -LiteralPath $localProperties |
+            Where-Object { $_ -match '^sdk\.dir=(.+)$' } |
+            Select-Object -First 1
+        if ($sdkProperty -match '^sdk\.dir=(.+)$') {
+            # Android's properties writer escapes both the drive colon and
+            # Windows separators (C\:/path or C\:\\path).
+            $sdkDir = $Matches[1].Replace('\:', ':').Replace('\\', '\')
+            if (-not [string]::IsNullOrWhiteSpace($sdkDir)) {
+                $sdkCandidates.Add($sdkDir)
+            }
+        }
+    }
+
+    foreach ($sdkDir in $sdkCandidates | Select-Object -Unique) {
+        $adbPath = Join-Path $sdkDir 'platform-tools\adb.exe'
+        if (Test-Path -LiteralPath $adbPath) {
+            $env:PATH = "$(Split-Path -Parent $adbPath);$env:PATH"
+            Write-Verbose "Resolved adb from Android SDK: $adbPath"
+            return
+        }
+    }
+
+    throw "'adb' was not found on PATH or in the Android SDK configured by ANDROID_SDK_ROOT, ANDROID_HOME, or local.properties."
+}
+
+if (-not $DryRun) {
+    Add-AdbToPathFromAndroidSdk
+}
+
 # ---------------------------------------------------------------------------
-# Phase 1 — build (code-only APK, AI Packs excluded)
+# Phase 1 - build (code-only APK, AI Packs excluded)
 # ---------------------------------------------------------------------------
 if ($SkipBuild -or $DryRun) {
     if ($DryRun) {
@@ -121,11 +170,11 @@ if ($SkipBuild -or $DryRun) {
 }
 
 if (-not $SkipInstall -and -not $DryRun -and -not (Test-Path -LiteralPath $apkPath)) {
-    throw "APK not found at $apkPath — pass -SkipBuild only when one already exists."
+    throw "APK not found at $apkPath - pass -SkipBuild only when one already exists."
 }
 
 # ---------------------------------------------------------------------------
-# Phase 2 — install (preserves externalFilesDir; never `adb uninstall`)
+# Phase 2 - install (preserves externalFilesDir; never `adb uninstall`)
 # ---------------------------------------------------------------------------
 function Invoke-AdbCapture {
     param([Parameter(Mandatory)][string[]]$AdbArgs)
@@ -155,7 +204,7 @@ if ($SkipInstall -or $DryRun) {
     # Launch the dashboard once so the OS creates the service's externalFilesDir
     # under the right UID. Without this, push-models writes to a FUSE phantom
     # directory that the app's own `context.getExternalFilesDir(null)` never
-    # sees — pushes report success and the registries report `Discovered 0
+    # sees - pushes report success and the registries report `Discovered 0
     # bundles` because they're looking at a different inode.
     # Order of pkg probes mirrors ConnectionManager's debug-suffix fallback.
     Write-Host '== Launching dashboard once so the OS creates externalFilesDir ==' -ForegroundColor Cyan
@@ -190,12 +239,12 @@ if ($SkipInstall -or $DryRun) {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 3 — push models (no-op when already on device + sizes match)
+# Phase 3 - push models (no-op when already on device + sizes match)
 # ---------------------------------------------------------------------------
 Write-Host '== Pushing missing model files (skips already-present, size-matched files) ==' -ForegroundColor Cyan
 
 if (-not (Test-Path -LiteralPath $pushScript)) {
-    throw "Expected $pushScript to exist — did the repo layout change?"
+    throw "Expected $pushScript to exist - did the repo layout change?"
 }
 
 $pushParams = @{ All = $true }
@@ -212,6 +261,6 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ''
 Write-Host 'Dev install loop complete.' -ForegroundColor Green
-Write-Host 'Reminder: NEVER use ''adb uninstall com.adsamcik.mindlayer.debug'' —'
+Write-Host 'Reminder: NEVER use ''adb uninstall com.adsamcik.mindlayer.debug'' -'
 Write-Host '          uninstall wipes externalFilesDir and you will lose ~3 GB of pushed models.'
 Write-Host '          Use ''.\scripts\dev-install.ps1'' or ''adb install -r'' instead.'
