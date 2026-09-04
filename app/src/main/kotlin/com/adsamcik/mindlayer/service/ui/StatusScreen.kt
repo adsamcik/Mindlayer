@@ -2,25 +2,19 @@ package com.adsamcik.mindlayer.service.ui
 
 import android.app.Activity
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,19 +24,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.ListItem
-import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -53,12 +44,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
@@ -68,14 +59,11 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.adsamcik.mindlayer.service.R
 import com.adsamcik.mindlayer.service.logging.LogRepository
-import com.adsamcik.mindlayer.service.ui.theme.MindlayerType
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -115,30 +103,27 @@ fun StatusScreen(
             },
             state = pullState,
         ) {
-            val safeInsets = WindowInsets.safeDrawing.asPaddingValues()
             LazyColumn(
-                contentPadding = PaddingValues(
-                    start = safeInsets.calculateLeftPadding(LayoutDirection.Ltr) + 16.dp,
-                    end = safeInsets.calculateRightPadding(LayoutDirection.Ltr) + 16.dp,
-                    top = safeInsets.calculateTopPadding() + 12.dp,
-                    bottom = safeInsets.calculateBottomPadding() + 12.dp,
-                ),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = MindlayerScreenDefaults.ContentPadding,
+                verticalArrangement = Arrangement.spacedBy(MindlayerScreenDefaults.ItemSpacing),
             ) {
-                item { CardEnterAnimation(0) { DashboardHero(state) } }
-                item { CardEnterAnimation(1) { StatusSection(state) } }
-                item { CardEnterAnimation(2) { ThermalMemoryRow(state) } }
-                item { CardEnterAnimation(3) { ActiveSessionsCard(state) } }
+                item { CardEnterAnimation(0) { DashboardHero() } }
+                item { CardEnterAnimation(1) { StatusOverviewCard(state) } }
+                item { CardEnterAnimation(2) { DeviceStatusRow(state) } }
+                if (state.activeSessions.isNotEmpty()) {
+                    item { CardEnterAnimation(3) { ActiveSessionsCard(state) } }
+                }
                 item { CardEnterAnimation(4) { ActivityNavigationCard(onNavigateToHistory, onNavigateToLogs) } }
+                item { CardEnterAnimation(5) { RuntimeDetailsCard(state) } }
                 item {
-                    CardEnterAnimation(5) {
+                    CardEnterAnimation(6) {
                         AllowedAppsCard(
                             logRepository = logRepository,
                             onRevokeAidl = onRevokeApp,
                         )
                     }
                 }
-                item { Spacer(Modifier.height(8.dp)) }
+                item { Spacer(Modifier.height(MindlayerScreenDefaults.BottomSpacerHeight)) }
             }
         }
     }
@@ -147,117 +132,17 @@ fun StatusScreen(
 // ── Hero ─────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun DashboardHero(state: DashboardUiState) {
-    val nowMs = System.currentTimeMillis()
-    val health = state.serviceHealth(nowMs)
-    val healthTint = healthColor(health)
-    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.3f
-    val showBanner = health == DashboardHealthLevel.DEGRADED || health == DashboardHealthLevel.ERROR
-    val serviceHealthLabel = stringResource(R.string.dashboard_a11y_service_health)
-
-    Column(
-        modifier = Modifier
+private fun DashboardHero() {
+    DashboardWordmark(
+        Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            DashboardWordmark(Modifier.weight(1f, fill = false))
-            if (!showBanner) {
-                Row(
-                    modifier = Modifier.semantics(mergeDescendants = true) {
-                        contentDescription = serviceHealthLabel
-                        stateDescription = accessibilityBandLabel(health.name)
-                    },
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        text = health.name,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = healthTint,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    StatusDot(healthTint, description = stringResource(R.string.dashboard_a11y_service_health_state, health.name.lowercase()))
-                }
-            }
-        }
-
-        if (showBanner) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                color = healthTint.copy(alpha = if (darkTheme) 0.15f else 0.10f),
-                border = BorderStroke(
-                    width = 1.dp,
-                    color = healthTint.copy(alpha = 0.25f),
-                ),
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Warning,
-                        contentDescription = stringResource(R.string.dashboard_a11y_service_health_alert),
-                        modifier = Modifier.size(20.dp),
-                        tint = healthTint,
-                    )
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                    ) {
-                        Text(
-                            text = health.name,
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = healthTint,
-                        )
-                        Text(
-                            text = healthHeadline(state, health),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = healthTint,
-                        )
-                    }
-                    StatusDot(
-                        color = healthTint,
-                        pulse = true,
-                        description = stringResource(R.string.dashboard_a11y_service_health_state, health.name.lowercase()),
-                    )
-                }
-            }
-        }
-
-        if (state.modelId.isNotBlank()) {
-            AssistChip(
-                onClick = {},
-                label = {
-                    Text(
-                        text = modelDisplayName(state.modelId),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                },
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Filled.Build,
-                        contentDescription = stringResource(R.string.dashboard_a11y_loaded_model),
-                        modifier = Modifier.size(AssistChipDefaults.IconSize),
-                    )
-                },
-            )
-        }
-    }
+            .padding(vertical = 2.dp),
+    )
 }
 
 @Composable
 private fun DashboardWordmark(modifier: Modifier = Modifier) {
-    val headlineStyle = MaterialTheme.typography.headlineLarge.copy(
+    val headlineStyle = MaterialTheme.typography.headlineMedium.copy(
         letterSpacing = 0.sp,
     )
     val separatorHeight = with(LocalDensity.current) { headlineStyle.fontSize.toDp() }
@@ -296,75 +181,127 @@ private fun DashboardWordmark(modifier: Modifier = Modifier) {
     }
 }
 
-// ── Status section (Service Health + Engine Details merged) ──────────────────
+// ── At-a-glance status ───────────────────────────────────────────────────────
 
 @Composable
-private fun StatusSection(state: DashboardUiState) {
+private fun StatusOverviewCard(state: DashboardUiState) {
     val nowMs = System.currentTimeMillis()
     val health = state.serviceHealth(nowMs)
     val healthTint = healthColor(health)
-    val freshness = state.statusFreshness(nowMs)
-    val engineTone = when {
-        state.isEngineLoaded -> DashboardMessageTone.SUCCESS
-        state.connectionState == DashboardConnectionState.DISCONNECTED -> DashboardMessageTone.ERROR
-        health == DashboardHealthLevel.IDLE -> DashboardMessageTone.NEUTRAL
-        else -> DashboardMessageTone.WARNING
+    val containerColor = when (health) {
+        DashboardHealthLevel.HEALTHY -> MaterialTheme.colorScheme.primaryContainer
+        DashboardHealthLevel.IDLE -> MaterialTheme.colorScheme.secondaryContainer
+        DashboardHealthLevel.CONNECTING -> MaterialTheme.colorScheme.surfaceContainerHigh
+        DashboardHealthLevel.DEGRADED -> MaterialTheme.colorScheme.tertiaryContainer
+        DashboardHealthLevel.ERROR -> MaterialTheme.colorScheme.errorContainer
     }
+    val statusLabel = stringResource(
+        when (health) {
+            DashboardHealthLevel.HEALTHY -> R.string.dashboard_overview_ready
+            DashboardHealthLevel.IDLE -> R.string.dashboard_overview_available
+            DashboardHealthLevel.CONNECTING -> R.string.dashboard_overview_starting
+            DashboardHealthLevel.DEGRADED -> R.string.dashboard_overview_check_needed
+            DashboardHealthLevel.ERROR -> R.string.dashboard_overview_attention
+        },
+    )
+    val serviceHealthLabel = stringResource(R.string.dashboard_a11y_service_health)
 
-    DashboardCard(title = stringResource(R.string.dashboard_card_service_status_title), icon = Icons.Filled.Info) {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            val serviceHealthLabel = stringResource(R.string.dashboard_a11y_service_health)
-            // Health headline row
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics(mergeDescendants = true) {
+                contentDescription = serviceHealthLabel
+                stateDescription = accessibilityBandLabel(health.name)
+            },
+        shape = MaterialTheme.shapes.extraLarge,
+        color = containerColor,
+        tonalElevation = 2.dp,
+    ) {
+        Column(
+            modifier = Modifier.padding(MindlayerScreenDefaults.CardContentPadding),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .semantics(mergeDescendants = true) {
-                        contentDescription = serviceHealthLabel
-                        stateDescription = accessibilityBandLabel(health.name)
-                    },
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalAlignment = Alignment.Top,
             ) {
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .clip(CircleShape)
+                        .background(healthTint.copy(alpha = 0.14f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = when (health) {
+                            DashboardHealthLevel.HEALTHY,
+                            DashboardHealthLevel.IDLE,
+                            -> Icons.Filled.CheckCircle
+                            DashboardHealthLevel.CONNECTING -> Icons.Filled.Info
+                            DashboardHealthLevel.DEGRADED,
+                            DashboardHealthLevel.ERROR,
+                            -> Icons.Filled.Warning
+                        },
+                        contentDescription = null,
+                        modifier = Modifier.size(26.dp),
+                        tint = healthTint,
+                    )
+                }
                 Column(
                     modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
+                    Badge(statusLabel, healthTint)
                     Text(
                         text = healthHeadline(state, health),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = healthTint,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
                         text = healthDetail(state, nowMs, health),
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Spacer(Modifier.width(12.dp))
-                StatusDot(
-                    healthTint,
-                    pulse = health == DashboardHealthLevel.DEGRADED || health == DashboardHealthLevel.ERROR,
-                    description = stringResource(R.string.dashboard_a11y_service_health_state, health.name.lowercase()),
-                )
             }
 
-            // Key badges — only show what adds information; suppress redundant ones
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            Surface(
                 modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.large,
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.56f),
             ) {
-                Badge(stringResource(connectionLabel(state.connectionState)), connectionColor(state.connectionState))
-                Badge(
-                    text = when {
-                        state.isEngineLoaded -> stringResource(R.string.dashboard_engine_loaded)
-                        health == DashboardHealthLevel.IDLE -> stringResource(R.string.dashboard_engine_idle_badge)
-                        else -> stringResource(R.string.dashboard_engine_not_ready_badge)
-                    },
-                    color = toneColor(engineTone),
-                )
-                if (freshness == DashboardFreshness.STALE) {
-                    Badge(stringResource(R.string.dashboard_freshness_stale_label), freshnessColor(freshness))
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Person,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = healthTint,
+                    )
+                    Text(
+                        text = pluralStringResource(
+                            R.plurals.dashboard_apps_using_now,
+                            state.activeSessions.size,
+                            state.activeSessions.size,
+                        ),
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    state.lastStatusUpdateMs?.let { sampledAt ->
+                        Text(
+                            text = stringResource(
+                                R.string.dashboard_updated_short,
+                                formatRelativeTimestamp(sampledAt, nowMs),
+                            ),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
 
@@ -374,39 +311,107 @@ private fun StatusSection(state: DashboardUiState) {
                 DiagnosticCallout(message = state.statusErrorMessage, tone = DashboardMessageTone.ERROR)
             }
 
-            // F-074: surface the crash-loop watchdog throttle banner.
             if (state.serviceThrottled) {
-                val secs = state.throttleCooldownSecondsRemaining
+                val seconds = state.throttleCooldownSecondsRemaining
                 val deathCount = state.recentDeathCount
-                val message = if (secs > 0) {
-                    pluralStringResource(
-                        R.plurals.dashboard_throttle_cooldown,
-                        deathCount,
-                        secs,
-                        deathCount,
-                    )
-                } else {
-                    pluralStringResource(
-                        R.plurals.dashboard_throttle_retrying,
-                        deathCount,
-                        deathCount,
-                    )
-                }
                 DiagnosticCallout(
-                    message = message,
+                    message = if (seconds > 0) {
+                        pluralStringResource(
+                            R.plurals.dashboard_throttle_cooldown,
+                            deathCount,
+                            seconds,
+                            deathCount,
+                        )
+                    } else {
+                        pluralStringResource(
+                            R.plurals.dashboard_throttle_retrying,
+                            deathCount,
+                            deathCount,
+                        )
+                    },
                     tone = DashboardMessageTone.ERROR,
                 )
             }
 
-            // Engine detail grid — 2 columns to save vertical space
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            val initFailure = state.lastInitFailure
+            if (initFailure != null) {
+                val (tone, message) = describeInitFailure(initFailure, state.backend)
+                DiagnosticCallout(message = message, tone = tone)
+            } else if (
+                state.gpuFailureReason != null &&
+                state.backend.equals("CPU", ignoreCase = true)
             ) {
-                Column(
+                DiagnosticCallout(
+                    message = stringResource(R.string.dashboard_acceleration_fallback),
+                    tone = DashboardMessageTone.WARNING,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RuntimeDetailsCard(state: DashboardUiState) {
+    val nowMs = System.currentTimeMillis()
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val expansionState = stringResource(
+        if (expanded) R.string.dashboard_details_expanded else R.string.dashboard_details_collapsed,
+    )
+    val acceleratorDecisions = state.acceleratorDecisions.ifEmpty {
+        state.acceleratorDecision?.let(::listOf).orEmpty()
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.extraLarge,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .semantics(mergeDescendants = true) {
+                        stateDescription = expansionState
+                    }
+                    .padding(horizontal = 18.dp, vertical = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Build,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = stringResource(R.string.dashboard_technical_details),
                     modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    modifier = Modifier
+                        .size(22.dp)
+                        .rotate(if (expanded) 90f else 0f),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    modifier = Modifier.padding(start = 18.dp, end = 18.dp, bottom = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    if (state.modelId.isNotBlank()) {
+                        LabelValue(
+                            stringResource(R.string.dashboard_label_model),
+                            modelDisplayName(state.modelId),
+                        )
+                    }
                     LabelValue(
                         stringResource(R.string.dashboard_label_backend),
                         state.backend.ifBlank { stringResource(R.string.dashboard_backend_none) },
@@ -419,134 +424,40 @@ private fun StatusSection(state: DashboardUiState) {
                             stringResource(R.string.dashboard_value_dash)
                         },
                     )
-                }
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
                     LabelValue(stringResource(R.string.dashboard_label_uptime), formatUptime(state.uptimeMs))
                     LabelValue(
                         stringResource(R.string.dashboard_label_sampled),
-                        formatSampleTime(state.lastStatusUpdateMs, nowMs, stringResource(R.string.dashboard_sampled_never)),
-                    )
-                }
-            }
-
-            val acceleratorDecisions = state.acceleratorDecisions.ifEmpty {
-                state.acceleratorDecision?.let(::listOf).orEmpty()
-            }
-            if (acceleratorDecisions.isNotEmpty()) {
-                var showAdvanced by remember { mutableStateOf(false) }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { showAdvanced = !showAdvanced }
-                        .padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = stringResource(
-                            if (showAdvanced) R.string.dashboard_advanced_hide
-                            else R.string.dashboard_advanced_show,
+                        formatSampleTime(
+                            state.lastStatusUpdateMs,
+                            nowMs,
+                            stringResource(R.string.dashboard_sampled_never),
                         ),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Medium,
                     )
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp),
+                    LabelValue(
+                        stringResource(R.string.dashboard_label_session_limit),
+                        state.maxSessions.toString(),
                     )
-                }
-                AnimatedVisibility(visible = showAdvanced) {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        acceleratorDecisions.forEach { decision ->
-                            val attempts = decision.attemptedSummary.takeIf { it.isNotBlank() }
-                            DiagnosticCallout(
-                                message = if (attempts != null) {
-                                    stringResource(
-                                        R.string.dashboard_accelerator_decision_with_attempts,
-                                        decision.featureName,
-                                        decision.backend,
-                                        decision.reason,
-                                        attempts,
-                                    )
-                                } else {
-                                    stringResource(
-                                        R.string.dashboard_accelerator_decision,
-                                        decision.featureName,
-                                        decision.backend,
-                                        decision.reason,
-                                    )
-                                },
-                                tone = DashboardMessageTone.INFO,
-                            )
-                        }
-                    }
-                }
-            }
 
-            // Calm-IDLE UX: when the engine simply has not loaded yet but
-            // there is no failure, no throttle, no staleness, and the
-            // service is connected, suppress the WARNING runtime-no-model
-            // callout entirely. Only emit a single INFO hint *once* (when
-            // no engine test has ever been run) so first-time users have
-            // a breadcrumb to the Tests tab without permanently nagging
-            // returning users.
-            if (!state.isEngineLoaded || state.backend.equals("NONE", ignoreCase = true)) {
-                val isCalmIdle = state.lastInitFailure == null &&
-                    state.connectionState == DashboardConnectionState.CONNECTED &&
-                    state.statusFreshness(nowMs) != DashboardFreshness.STALE &&
-                    !state.serviceThrottled
-                val hasAnyCompletedTest = state.lastTestCompletedAtMs != null ||
-                    state.embeddingTest.lastCompletedAtMs != null ||
-                    state.ocrTest.lastCompletedAtMs != null ||
-                    state.imageInferenceTest.lastCompletedAtMs != null ||
-                    state.sdkInferAsyncTest.lastCompletedAtMs != null ||
-                    state.sdkInferRealtimeTest.lastCompletedAtMs != null ||
-                    state.sdkGenerateWithImageTest.lastCompletedAtMs != null ||
-                    state.ocrLlmExtractionTest.lastCompletedAtMs != null
-                when {
-                    isCalmIdle && !hasAnyCompletedTest -> {
+                    acceleratorDecisions.forEach { decision ->
+                        val attempts = decision.attemptedSummary.takeIf { it.isNotBlank() }
                         DiagnosticCallout(
-                            message = stringResource(R.string.status_idle_no_test_hint),
+                            message = if (attempts != null) {
+                                stringResource(
+                                    R.string.dashboard_accelerator_decision_with_attempts,
+                                    decision.featureName,
+                                    decision.backend,
+                                    decision.reason,
+                                    attempts,
+                                )
+                            } else {
+                                stringResource(
+                                    R.string.dashboard_accelerator_decision,
+                                    decision.featureName,
+                                    decision.backend,
+                                    decision.reason,
+                                )
+                            },
                             tone = DashboardMessageTone.INFO,
-                        )
-                    }
-                    isCalmIdle -> Unit
-                    else -> {
-                        val isIdle = state.lastInitFailure == null
-                        DiagnosticCallout(
-                            message = stringResource(
-                                if (isIdle) R.string.dashboard_callout_runtime_idle
-                                else R.string.dashboard_callout_runtime_no_model,
-                            ),
-                            tone = if (isIdle) DashboardMessageTone.INFO else DashboardMessageTone.WARNING,
-                        )
-                    }
-                }
-            }
-
-            // F-077: typed init-failure rendering. Each variant gets a
-            // specific message + suggested remediation. When the typed
-            // signal is absent (e.g. legacy `engine_fallback` rows from
-            // before this build) fall through to the GPU-only string
-            // shim so existing dashboards don't go silent during the
-            // upgrade window.
-            val initFailure = state.lastInitFailure
-            if (initFailure != null) {
-                val (tone, message) = describeInitFailure(initFailure, state.backend)
-                DiagnosticCallout(message = message, tone = tone)
-            } else {
-                state.gpuFailureReason?.let { reason ->
-                    if (state.backend.equals("CPU", ignoreCase = true)) {
-                        Text(
-                            text = stringResource(R.string.dashboard_gpu_init_failed, reason),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
                         )
                     }
                 }
@@ -555,26 +466,31 @@ private fun StatusSection(state: DashboardUiState) {
     }
 }
 
-// ── Thermal + Memory 2-column row ─────────────────────────────────────────────
+// ── Device status ─────────────────────────────────────────────────────────────
 
 @Composable
-private fun ThermalMemoryRow(state: DashboardUiState) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(IntrinsicSize.Min),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        ThermalMiniCard(state, modifier = Modifier.weight(1f).fillMaxHeight())
-        MemoryMiniCard(state, modifier = Modifier.weight(1f).fillMaxHeight())
+private fun DeviceStatusRow(state: DashboardUiState) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = stringResource(R.string.dashboard_device_title),
+            modifier = Modifier.padding(horizontal = 4.dp),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            ThermalMiniCard(state, modifier = Modifier.weight(1f))
+            MemoryMiniCard(state, modifier = Modifier.weight(1f))
+        }
     }
 }
 
 @Composable
 private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifier) {
     val tint = thermalColor(state.thermalBand)
-    val isHot = state.thermalBand.equals("HOT", ignoreCase = true) ||
-        state.thermalBand.equals("CRITICAL", ignoreCase = true)
     val telemetryBlind = !state.thermalTelemetryAvailable
     val headroomDescription = state.headroom?.let {
         stringResource(R.string.dashboard_a11y_headroom_percent, "%.0f".format(it * 100))
@@ -590,22 +506,50 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
         accessibilityBandLabel(state.thermalBand),
         headroomDescription,
     )
+    val temperatureLabel = when (state.thermalBand.uppercase()) {
+        "COOL" -> stringResource(R.string.dashboard_temperature_cool)
+        "WARM" -> stringResource(R.string.dashboard_temperature_warm)
+        "HOT" -> stringResource(R.string.dashboard_temperature_hot)
+        "CRITICAL" -> stringResource(R.string.dashboard_temperature_critical)
+        else -> stringResource(R.string.dashboard_metric_unavailable)
+    }
+    val supportingText = when {
+        telemetryBlind -> stringResource(R.string.dashboard_temperature_not_reported)
+        state.thermalBand.equals("HOT", ignoreCase = true) ->
+            stringResource(R.string.dashboard_temperature_hot_support)
+        state.thermalBand.equals("CRITICAL", ignoreCase = true) ->
+            stringResource(R.string.dashboard_temperature_critical_support)
+        else -> stringResource(R.string.dashboard_temperature_ok_support)
+    }
 
-    ElevatedCard(modifier = modifier) {
+    ElevatedCard(
+        modifier = modifier,
+        shape = RoundedCornerShape(
+            topStart = 28.dp,
+            topEnd = 12.dp,
+            bottomEnd = 28.dp,
+            bottomStart = 12.dp,
+        ),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ),
+    ) {
         Column(
             modifier = Modifier
-                .padding(12.dp)
+                .fillMaxWidth()
+                .heightIn(min = 124.dp)
+                .padding(MindlayerScreenDefaults.CardContentPadding)
                 .semantics(mergeDescendants = true) {
                     contentDescription = thermalStatusLabel
                     stateDescription = thermalCombined
                 },
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = stringResource(R.string.dashboard_thermal),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontWeight = FontWeight.SemiBold,
+                text = stringResource(R.string.dashboard_temperature),
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.Bold,
             )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -613,63 +557,19 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
             ) {
                 StatusDot(tint, description = stringResource(R.string.dashboard_a11y_thermal_band_state, state.thermalBand.lowercase()))
                 Text(
-                    text = state.thermalBand.uppercase(),
-                    style = MaterialTheme.typography.titleSmall,
+                    text = temperatureLabel,
+                    style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                     color = tint,
                 )
             }
-            state.headroom?.let {
-                val headroomFraction = it.coerceIn(0f, 1f)
-                Text(
-                    text = stringResource(R.string.dashboard_headroom),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                LinearProgressIndicator(
-                    progress = { headroomFraction },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp)),
-                    color = tint,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                )
-                Text(
-                    text = "%.0f%%".format(it * 100),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Medium,
-                    color = tint,
-                )
-            } ?: run {
-                // F-073: telemetry-blind devices (Android 8 / 8.1) have
-                // no headroom readout AND no current/10s thermal status.
-                Text(
-                    text = if (telemetryBlind) {
-                        stringResource(R.string.dashboard_thermal_telemetry_unavailable)
-                    } else {
-                        stringResource(R.string.dashboard_thermal_headroom_not_reported)
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                )
-            }
-            if (telemetryBlind) {
-                Text(
-                    text = stringResource(R.string.dashboard_conservative_policy_active),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = FontWeight.Medium,
-                )
-            }
-            if (isHot) {
-                Text(
-                    text = stringResource(R.string.dashboard_throttling_active),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = tint,
-                    fontWeight = FontWeight.Medium,
-                )
-            }
+            Text(
+                text = supportingText,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -677,205 +577,154 @@ private fun ThermalMiniCard(state: DashboardUiState, modifier: Modifier = Modifi
 @Composable
 private fun MemoryMiniCard(state: DashboardUiState, modifier: Modifier = Modifier) {
     val tint = pressureColor(state.memoryPressure)
-    val usedMb = (state.totalRamMb - state.availableRamMb).coerceAtLeast(0)
-    val usedFraction = if (state.totalRamMb > 0) {
-        usedMb.toFloat() / state.totalRamMb.toFloat()
-    } else {
-        0f
-    }
-    val isElevated = state.memoryPressure.equals("CRITICAL", ignoreCase = true) ||
-        state.memoryPressure.equals("EMERGENCY", ignoreCase = true)
     val memoryPressureLabel = stringResource(R.string.dashboard_a11y_memory_pressure)
     val memoryStateDescription = stringResource(
         R.string.dashboard_a11y_memory_pressure_available_mb,
         accessibilityBandLabel(state.memoryPressure),
         formatWholeNumber(state.availableRamMb),
     )
+    val memoryLabel = when (state.memoryPressure.uppercase()) {
+        "NORMAL" -> stringResource(R.string.dashboard_memory_plenty)
+        "WARNING" -> stringResource(R.string.dashboard_memory_getting_low)
+        "CRITICAL" -> stringResource(R.string.dashboard_memory_low)
+        "EMERGENCY" -> stringResource(R.string.dashboard_memory_very_low)
+        else -> stringResource(R.string.dashboard_metric_unavailable)
+    }
+    val availableLabel = if (state.totalRamMb > 0) {
+        stringResource(
+            R.string.dashboard_memory_available_short,
+            formatMemoryAmount(state.availableRamMb),
+        )
+    } else {
+        stringResource(R.string.dashboard_memory_not_reported)
+    }
 
-    ElevatedCard(modifier = modifier) {
+    ElevatedCard(
+        modifier = modifier,
+        shape = RoundedCornerShape(
+            topStart = 12.dp,
+            topEnd = 28.dp,
+            bottomEnd = 12.dp,
+            bottomStart = 28.dp,
+        ),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ),
+    ) {
         Column(
             modifier = Modifier
-                .padding(12.dp)
+                .fillMaxWidth()
+                .heightIn(min = 124.dp)
+                .padding(MindlayerScreenDefaults.CardContentPadding)
                 .semantics(mergeDescendants = true) {
                     contentDescription = memoryPressureLabel
                     stateDescription = memoryStateDescription
                 },
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = stringResource(R.string.dashboard_memory),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = stringResource(R.string.dashboard_max_sessions, state.maxSessions),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            Text(
+                text = stringResource(R.string.dashboard_memory),
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.Bold,
+            )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 StatusDot(tint, description = stringResource(R.string.dashboard_a11y_memory_pressure_state, state.memoryPressure.lowercase()))
                 Text(
-                    text = state.memoryPressure.uppercase(),
-                    style = MaterialTheme.typography.titleSmall,
+                    text = memoryLabel,
+                    style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                     color = tint,
                 )
             }
-            if (state.totalRamMb > 0) {
-                val usedPct = (usedFraction * 100).toInt()
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    LinearProgressIndicator(
-                        progress = { usedFraction.coerceIn(0f, 1f) },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(4.dp)
-                            .clip(RoundedCornerShape(2.dp)),
-                        color = tint,
-                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = "$usedPct%",
-                        style = MindlayerType.Mono.LabelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = tint,
-                    )
-                }
-                Text(
-                    text = stringResource(R.string.dashboard_available_mb, formatWholeNumber(state.availableRamMb)),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    text = stringResource(R.string.dashboard_used_mb, formatWholeNumber(usedMb), formatWholeNumber(state.totalRamMb)),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            if (isElevated) {
-                Text(
-                    text = stringResource(R.string.dashboard_low_headroom),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = tint,
-                    fontWeight = FontWeight.Medium,
-                )
-            }
+            Text(
+                text = availableLabel,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
+}
+
+private fun formatMemoryAmount(megabytes: Long): String = when {
+    megabytes >= 1_024L -> "%.1f GB".format(megabytes / 1_024f)
+    megabytes > 0L -> "${formatWholeNumber(megabytes)} MB"
+    else -> "0 MB"
 }
 
 // ── Active Sessions ───────────────────────────────────────────────────────────
 
 @Composable
 private fun ActiveSessionsCard(state: DashboardUiState) {
-    val nowMs = System.currentTimeMillis()
-
-    DashboardCard(
-        title = stringResource(R.string.dashboard_card_active_sessions_title, state.activeSessions.size),
-        icon = Icons.Filled.Person,
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.extraLarge,
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            when {
-                state.connectionState == DashboardConnectionState.CONNECTING &&
-                    state.activeSessions.isEmpty() -> {
-                    DiagnosticCallout(
-                        message = stringResource(R.string.dashboard_active_sessions_waiting),
-                        tone = DashboardMessageTone.INFO,
+        Column(
+            modifier = Modifier.padding(MindlayerScreenDefaults.CardContentPadding),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Person,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = stringResource(R.string.dashboard_active_now),
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+                Badge(
+                    text = state.activeSessions.size.toString(),
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            state.activeSessions.forEachIndexed { index, session ->
+                if (index > 0) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 2.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
                     )
                 }
-
-                state.connectionState == DashboardConnectionState.DISCONNECTED &&
-                    state.activeSessions.isEmpty() -> {
-                    DiagnosticCallout(
-                        message = stringResource(R.string.dashboard_active_sessions_disconnected),
-                        tone = DashboardMessageTone.WARNING,
-                    )
-                }
-
-                state.activeSessions.isEmpty() -> {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 12.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Info,
-                            contentDescription = stringResource(R.string.dashboard_a11y_no_active_sessions),
-                            modifier = Modifier.size(28.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                        )
-                        Text(
-                            text = stringResource(R.string.dashboard_no_active_sessions),
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
-                        )
-                        Text(
-                            text = stringResource(R.string.dashboard_no_active_sessions_body),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                            textAlign = TextAlign.Center,
-                        )
-                        Text(
-                            text = stringResource(R.string.dashboard_last_sampled, formatSampleTime(state.lastStatusUpdateMs, nowMs, stringResource(R.string.dashboard_sampled_never))),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                            textAlign = TextAlign.Center,
-                        )
-                    }
-                }
-
-                else -> {
-                    state.activeSessions.forEachIndexed { index, session ->
-                        if (index > 0) {
-                            HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 4.dp),
-                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
-                            )
-                        }
-                        SessionRow(session)
-                    }
-                }
+                SessionRow(session, index + 1)
             }
         }
     }
 }
 
 @Composable
-private fun SessionRow(session: SessionUiItem) {
-    val tokenFraction = if (session.maxTokens > 0) {
-        session.tokenCount.toFloat() / session.maxTokens.toFloat()
-    } else {
-        0f
-    }
+private fun SessionRow(session: SessionUiItem, ordinal: Int) {
     val backendTint = backendColor(session.backend)
+    val sessionDescription = stringResource(
+        R.string.dashboard_a11y_active_session,
+        ordinal,
+        session.backend,
+        session.tokenCount,
+        session.maxTokens,
+    )
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
+            .padding(vertical = 3.dp)
+            .semantics(mergeDescendants = true) {
+                contentDescription = sessionDescription
+            },
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Backend avatar
         Box(
             modifier = Modifier
                 .size(40.dp)
@@ -884,8 +733,8 @@ private fun SessionRow(session: SessionUiItem) {
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                text = session.backend.take(1).uppercase(),
-                style = MindlayerType.Mono.LabelMedium,
+                text = ordinal.toString(),
+                style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.Bold,
                 color = backendTint,
             )
@@ -901,10 +750,10 @@ private fun SessionRow(session: SessionUiItem) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = session.sessionId,
+                    text = stringResource(R.string.dashboard_session_number, ordinal),
                     modifier = Modifier.weight(1f),
-                    style = MindlayerType.Mono.LabelMedium,
-                    fontWeight = FontWeight.Medium,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -913,34 +762,10 @@ private fun SessionRow(session: SessionUiItem) {
                     Badge(text = stringResource(R.string.dashboard_live), color = CategoryInference)
                 }
             }
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = session.lastAccessedLabel,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    text = "·",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    text = stringResource(R.string.dashboard_token_count, session.tokenCount, session.maxTokens),
-                    style = MindlayerType.Mono.LabelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            LinearProgressIndicator(
-                progress = { tokenFraction.coerceIn(0f, 1f) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(3.dp)
-                    .clip(RoundedCornerShape(2.dp)),
-                color = backendTint,
-                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+            Text(
+                text = stringResource(R.string.dashboard_last_active_short, session.lastAccessedLabel),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -953,76 +778,79 @@ private fun ActivityNavigationCard(
     onNavigateToHistory: () -> Unit,
     onNavigateToLogs: () -> Unit,
 ) {
-    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.3f
-
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (darkTheme) 0.45f else 0.35f),
-    ) {
-        Column {
-            ListItem(
-                supportingContent = {
-                    Text(
-                        text = stringResource(R.string.dashboard_session_history_body),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                },
-                leadingContent = {
-                    Icon(
-                        imageVector = Icons.Filled.DateRange,
-                        contentDescription = stringResource(R.string.dashboard_a11y_session_history),
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                },
-                trailingContent = {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = stringResource(R.string.dashboard_a11y_navigate_to_session_history),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                },
-                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                modifier = Modifier.clickable { onNavigateToHistory() },
-            ) {
-                Text(
-                    text = stringResource(R.string.dashboard_session_history),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                )
-            }
-            HorizontalDivider(
-                modifier = Modifier.padding(horizontal = 16.dp),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = stringResource(R.string.dashboard_more_title),
+            modifier = Modifier.padding(horizontal = 4.dp),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            DashboardShortcut(
+                title = stringResource(R.string.dashboard_session_history),
+                icon = Icons.Filled.DateRange,
+                contentDescription = stringResource(R.string.dashboard_a11y_navigate_to_session_history),
+                onClick = onNavigateToHistory,
+                modifier = Modifier.weight(1f),
             )
-            ListItem(
-                supportingContent = {
-                    Text(
-                        text = stringResource(R.string.dashboard_recent_logs_body),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                },
-                leadingContent = {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.List,
-                        contentDescription = stringResource(R.string.dashboard_a11y_recent_logs),
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                },
-                trailingContent = {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = stringResource(R.string.dashboard_a11y_navigate_to_recent_logs),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                },
-                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                modifier = Modifier.clickable { onNavigateToLogs() },
+            DashboardShortcut(
+                title = stringResource(R.string.dashboard_recent_logs),
+                icon = Icons.AutoMirrored.Filled.List,
+                contentDescription = stringResource(R.string.dashboard_a11y_navigate_to_recent_logs),
+                onClick = onNavigateToLogs,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun DashboardShortcut(
+    title: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier
+            .heightIn(min = 88.dp)
+            .clickable(onClick = onClick)
+            .semantics(mergeDescendants = true) {
+                this.contentDescription = contentDescription
+            },
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                modifier = Modifier.size(22.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = stringResource(R.string.dashboard_recent_logs),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
+                    text = title,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

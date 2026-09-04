@@ -5,6 +5,7 @@ import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryState
 
 internal enum class ModelOverviewKind {
     NEEDS_ATTENTION,
+    CHECKING,
     ACTIVITY_IN_PROGRESS,
     DOWNLOADED_COUNT,
     ALL_AVAILABLE,
@@ -83,6 +84,7 @@ internal fun modelOverview(summaries: List<RoleModelSummary>): ModelOverview {
         it.readiness == ModelReadiness.NEEDS_ATTENTION ||
             it.readiness == ModelReadiness.UNAVAILABLE
     }
+    val checkingCount = summaries.count { it.readiness == ModelReadiness.CHECKING }
     val inProgressCount = summaries.count {
         it.readiness in setOf(
             ModelReadiness.CHECKING,
@@ -100,12 +102,14 @@ internal fun modelOverview(summaries: List<RoleModelSummary>): ModelOverview {
     val totalCount = summaries.size
     val kind = when {
         attentionCount > 0 -> ModelOverviewKind.NEEDS_ATTENTION
+        inProgressCount > 0 && checkingCount == inProgressCount -> ModelOverviewKind.CHECKING
         inProgressCount > 0 -> ModelOverviewKind.ACTIVITY_IN_PROGRESS
         totalCount > 0 && downloadedCount == totalCount -> ModelOverviewKind.ALL_AVAILABLE
         else -> ModelOverviewKind.DOWNLOADED_COUNT
     }
     val affectedCount = when (kind) {
         ModelOverviewKind.NEEDS_ATTENTION -> attentionCount
+        ModelOverviewKind.CHECKING,
         ModelOverviewKind.ACTIVITY_IN_PROGRESS -> inProgressCount
         ModelOverviewKind.DOWNLOADED_COUNT,
         ModelOverviewKind.ALL_AVAILABLE,

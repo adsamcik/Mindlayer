@@ -4,16 +4,12 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -35,7 +31,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import com.adsamcik.mindlayer.service.R
 import com.adsamcik.mindlayer.service.engine.OcrAcceleratorFailureCache
@@ -61,31 +56,16 @@ fun TestsScreen(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
     ) {
-        val safeInsets = WindowInsets.safeDrawing.asPaddingValues()
         LazyColumn(
-            contentPadding = PaddingValues(
-                start = safeInsets.calculateLeftPadding(LayoutDirection.Ltr) + 16.dp,
-                end = safeInsets.calculateRightPadding(LayoutDirection.Ltr) + 16.dp,
-                top = safeInsets.calculateTopPadding() + 12.dp,
-                bottom = safeInsets.calculateBottomPadding() + 12.dp,
-            ),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = MindlayerScreenDefaults.ContentPadding,
+            verticalArrangement = Arrangement.spacedBy(MindlayerScreenDefaults.ItemSpacing),
         ) {
             item {
                 CardEnterAnimation(0) {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(
-                            text = stringResource(R.string.tests_title),
-                            style = MaterialTheme.typography.headlineMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onBackground,
-                        )
-                        Text(
-                            text = stringResource(R.string.tests_subtitle),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    MindlayerPageHeader(
+                        title = stringResource(R.string.tests_title),
+                        subtitle = stringResource(R.string.tests_subtitle),
+                    )
                 }
             }
             item { CardEnterAnimation(1) { WelcomeCard(state, onRunAllVerifications) } }
@@ -105,7 +85,7 @@ fun TestsScreen(
                     )
                 }
             }
-            item { Spacer(Modifier.height(8.dp)) }
+            item { Spacer(Modifier.height(MindlayerScreenDefaults.BottomSpacerHeight)) }
         }
     }
 }

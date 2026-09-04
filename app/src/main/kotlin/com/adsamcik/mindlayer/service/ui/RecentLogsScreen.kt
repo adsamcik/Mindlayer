@@ -2,44 +2,31 @@ package com.adsamcik.mindlayer.service.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MediumTopAppBar
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -72,7 +59,6 @@ private fun logCategoryIcon(category: String): ImageVector = when (category.uppe
     else        -> Icons.Filled.Info
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RecentLogsScreen(
     state: RecentLogsUiState,
@@ -81,40 +67,21 @@ fun RecentLogsScreen(
 ) {
     Scaffold(
         topBar = {
-            MediumTopAppBar(
-                title = {
-                    Column {
-                        Text(stringResource(R.string.recent_logs_title))
-                        val subtitle = when {
-                            state.isLoading -> stringResource(R.string.recent_logs_subtitle_loading)
-                            state.errorMessage != null -> stringResource(R.string.recent_logs_subtitle_load_failure)
-                            else -> stringResource(R.string.recent_logs_subtitle_count, formatWholeNumber(state.logs.size))
-                        }
-                        Text(
-                            text = subtitle,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+            MindlayerSecondaryTopBar(
+                title = stringResource(R.string.recent_logs_title),
+                subtitle = when {
+                    state.isLoading -> stringResource(R.string.recent_logs_subtitle_loading)
+                    state.errorMessage != null -> stringResource(R.string.recent_logs_subtitle_load_failure)
+                    else -> stringResource(R.string.recent_logs_subtitle_count, formatWholeNumber(state.logs.size))
                 },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.common_back),
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    scrolledContainerColor = MaterialTheme.colorScheme.surface,
-                ),
+                onBack = onBack,
             )
         },
         containerColor = MaterialTheme.colorScheme.background,
     ) { innerPadding ->
         when {
             state.isLoading -> {
-                RecentLogsStatusPane(
+                MindlayerStatusPane(
                     modifier = Modifier.padding(innerPadding),
                     title = stringResource(R.string.recent_logs_loading_title),
                     message = stringResource(R.string.recent_logs_loading_message),
@@ -123,7 +90,7 @@ fun RecentLogsScreen(
             }
 
             state.errorMessage != null -> {
-                RecentLogsStatusPane(
+                MindlayerStatusPane(
                     modifier = Modifier.padding(innerPadding),
                     title = stringResource(R.string.recent_logs_error_title),
                     message = state.errorMessage,
@@ -141,7 +108,7 @@ fun RecentLogsScreen(
             }
 
             state.logs.isEmpty() -> {
-                RecentLogsStatusPane(
+                MindlayerStatusPane(
                     modifier = Modifier.padding(innerPadding),
                     title = stringResource(R.string.recent_logs_empty_title),
                     message = stringResource(R.string.recent_logs_empty_message),
@@ -161,8 +128,8 @@ fun RecentLogsScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(innerPadding),
-                    contentPadding = PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    contentPadding = MindlayerScreenDefaults.ContentPadding,
+                    verticalArrangement = Arrangement.spacedBy(MindlayerScreenDefaults.ItemSpacing),
                 ) {
                     items(state.logs) { log ->
                         LogEntryCard(log)
@@ -174,60 +141,14 @@ fun RecentLogsScreen(
 }
 
 @Composable
-private fun RecentLogsStatusPane(
-    modifier: Modifier = Modifier,
-    title: String,
-    message: String,
-    showProgress: Boolean = false,
-    icon: (@Composable () -> Unit)? = null,
-    actionLabel: String? = null,
-    onAction: () -> Unit = {},
-) {
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(32.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (showProgress) LoadingIndicator()
-            icon?.invoke()
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                textAlign = TextAlign.Center,
-            )
-            Text(
-                text = message,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-            )
-            actionLabel?.let { label ->
-                FilledTonalButton(onClick = onAction) {
-                    Icon(
-                        imageVector = Icons.Filled.Refresh,
-                        contentDescription = stringResource(R.string.common_retry),
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(text = label)
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun LogEntryCard(log: LogUiItem) {
     val color = logCategoryColor(log.category)
-    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.extraLarge,
+    ) {
         Column(
-            modifier = Modifier.padding(12.dp),
+            modifier = Modifier.padding(MindlayerScreenDefaults.CardContentPadding),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Row(

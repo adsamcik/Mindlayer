@@ -2,9 +2,7 @@ package com.adsamcik.mindlayer.service.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,24 +15,17 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MediumTopAppBar
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,7 +33,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -94,7 +84,6 @@ private fun categoryIcon(category: String): ImageVector = when (category.upperca
     else        -> Icons.Filled.Info
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SessionDetailScreen(
     state: SessionDetailUiState,
@@ -103,32 +92,10 @@ fun SessionDetailScreen(
 ) {
     Scaffold(
         topBar = {
-            MediumTopAppBar(
-                title = {
-                    Column {
-                        Text(stringResource(R.string.session_timeline_title))
-                        if (state.displayId.isNotBlank()) {
-                            Text(
-                                text = state.displayId,
-                                style = MindlayerType.Mono.BodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.common_back),
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    scrolledContainerColor = MaterialTheme.colorScheme.surface,
-                ),
+            MindlayerSecondaryTopBar(
+                title = stringResource(R.string.session_timeline_title),
+                subtitle = state.displayId.takeIf(String::isNotBlank),
+                onBack = onBack,
             )
         },
         containerColor = MaterialTheme.colorScheme.background,
@@ -140,7 +107,7 @@ fun SessionDetailScreen(
         ) {
             when {
                 state.isLoading -> {
-                    DetailStatusPane(
+                    MindlayerStatusPane(
                         title = stringResource(R.string.session_detail_loading_title),
                         message = if (state.displayId.isNotBlank()) {
                             stringResource(R.string.session_detail_loading_message_with_id, state.displayId)
@@ -152,7 +119,7 @@ fun SessionDetailScreen(
                 }
 
                 state.errorMessage != null -> {
-                    DetailStatusPane(
+                    MindlayerStatusPane(
                         title = stringResource(R.string.session_detail_error_title),
                         message = state.errorMessage,
                         icon = {
@@ -169,7 +136,7 @@ fun SessionDetailScreen(
                 }
 
                 state.events.isEmpty() -> {
-                    DetailStatusPane(
+                    MindlayerStatusPane(
                         title = stringResource(R.string.session_detail_empty_title),
                         message = state.emptyMessage
                             ?: stringResource(R.string.session_detail_empty_message),
@@ -187,8 +154,8 @@ fun SessionDetailScreen(
                 else -> {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        contentPadding = MindlayerScreenDefaults.ContentPadding,
+                        verticalArrangement = Arrangement.spacedBy(MindlayerScreenDefaults.ItemSpacing),
                     ) {
                         item { SummaryCard(state) }
                         item {
@@ -210,8 +177,11 @@ fun SessionDetailScreen(
 
 @Composable
 private fun SummaryCard(state: SessionDetailUiState) {
-    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.extraLarge,
+    ) {
+        Column(modifier = Modifier.padding(MindlayerScreenDefaults.CardContentPadding)) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -273,8 +243,11 @@ private fun SummaryCard(state: SessionDetailUiState) {
 @Composable
 private fun EventRow(event: SessionEventItem) {
     val catColor = eventCategoryColor(event.category)
-    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp)) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.extraLarge,
+    ) {
+        Column(modifier = Modifier.padding(MindlayerScreenDefaults.CardContentPadding)) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -371,46 +344,6 @@ private fun SummaryLabelValue(label: String, value: String) {
             modifier = Modifier.weight(1f),
             textAlign = TextAlign.End,
         )
-    }
-}
-
-@Composable
-private fun DetailStatusPane(
-    title: String,
-    message: String,
-    showProgress: Boolean = false,
-    icon: (@Composable () -> Unit)? = null,
-    actionLabel: String? = null,
-    onAction: () -> Unit = {},
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(32.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (showProgress) LoadingIndicator()
-            icon?.invoke()
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = message,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            actionLabel?.let { label ->
-                FilledTonalButton(onClick = onAction) {
-                    Text(text = label)
-                }
-            }
-        }
     }
 }
 

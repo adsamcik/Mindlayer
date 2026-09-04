@@ -19,6 +19,8 @@ class ModelsScreenStateTest {
             isEngineLoaded = true,
             backend = "GPU",
             modelId = "path/to/gemma",
+            engineMaxTokens = 16_384,
+            modelSizeBytes = 3_500_000_000L,
             modelDelivery = mapOf(
                 ModelRole.CHAT_AND_VISION to ModelDeliveryState.Installed,
             ),
@@ -31,6 +33,9 @@ class ModelsScreenStateTest {
         assertEquals(ModelReadiness.READY, chat.readiness)
         assertEquals("GPU", chat.backend)
         assertEquals("gemma", chat.modelDisplayName)
+        assertEquals(16_384, chat.contextWindowTokens)
+        assertEquals(3_500_000_000L, chat.modelSizeBytes)
+        assertEquals(6_000_000_000L, chat.minimumFreeBytes)
         assertNull(chat.runtimeIssue)
     }
 
@@ -174,6 +179,8 @@ class ModelsScreenStateTest {
         assertNull(embeddings.lastVerificationPassed)
         assertNull(embeddings.backend)
         assertNull(embeddings.initTimeSeconds)
+        assertEquals(2_048, embeddings.contextWindowTokens)
+        assertEquals(1_000_000_000L, embeddings.minimumFreeBytes)
     }
 
     @Test
@@ -343,6 +350,18 @@ class ModelsScreenStateTest {
 
     @Test
     fun `overview prioritizes attention then model activity then downloaded count`() {
+        val checking = modelOverview(
+            ModelRole.entries.map { role ->
+                summary(
+                    role = role,
+                    deliveryState = ModelDeliveryState.Checking,
+                    readiness = ModelReadiness.CHECKING,
+                )
+            },
+        )
+        assertEquals(ModelOverviewKind.CHECKING, checking.kind)
+        assertEquals(3, checking.affectedCount)
+
         val attention = modelOverview(
             listOf(
                 summary(

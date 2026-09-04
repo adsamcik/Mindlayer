@@ -48,11 +48,11 @@
     <string name="consent_cancel">Cancel</string>
     <string name="consent_error_generic">Could not load this consent request. Please try again.</string>
     <string name="consent_error_expired">This consent request has expired. Ask the app to try again.</string>
-    <string name="allowed_apps_title">Allowed apps</string>
+    <string name="allowed_apps_title">App access</string>
     <string name="debug_auto_accept_title" translatable="false">Debug: auto-accept all callers</string>
     <string name="debug_auto_accept_body" translatable="false">Approves any bind-authorized app without the consent prompt. Debug builds only — never shipped in release. Explicitly denied apps stay blocked.</string>
     <string name="pending_approvals_count">Pending approvals (%1$d)</string>
-    <string name="allowed_apps_empty">No apps have been approved yet.</string>
+    <string name="allowed_apps_empty">No apps have access yet.</string>
     <string name="allowlist_claims_to_be">claims to be: %1$s</string>
     <string name="allowlist_installed_from">Installed from: %1$s</string>
     <string name="allowlist_deny">Deny</string>
@@ -89,9 +89,9 @@
     <string name="dashboard_last_sampled">Last sampled %1$s</string>
     <string name="dashboard_live">LIVE</string>
     <string name="dashboard_token_count">%1$d/%2$d tok</string>
-    <string name="dashboard_session_history">Session History</string>
+    <string name="dashboard_session_history">Past activity</string>
     <string name="dashboard_session_history_body">Past sessions and inference activity</string>
-    <string name="dashboard_recent_logs">Recent Logs</string>
+    <string name="dashboard_recent_logs">Diagnostics</string>
     <string name="dashboard_recent_logs_body">Diagnostics and event log entries</string>
     <string name="dashboard_test_verify">Verify AIDL control flow and pipe streaming end to end.</string>
     <string name="dashboard_output">Output</string>
@@ -117,26 +117,26 @@
     <string name="dashboard_freshness_stale_label">STALE</string>
 
     <!-- Dashboard: service health headline copy used in the hero banner and status section. -->
-    <string name="dashboard_health_service_disconnected">Service disconnected</string>
-    <string name="dashboard_health_status_polling_failed">Status polling failed</string>
-    <string name="dashboard_health_connecting_to_service">Connecting to service</string>
+    <string name="dashboard_health_service_disconnected">Mindlayer is offline</string>
+    <string name="dashboard_health_status_polling_failed">Status needs a refresh</string>
+    <string name="dashboard_health_connecting_to_service">Getting things ready</string>
     <string name="dashboard_health_engine_not_ready">Engine not ready</string>
-    <string name="dashboard_health_engine_idle">Engine idle</string>
-    <string name="dashboard_health_service_needs_attention">Service needs attention</string>
-    <string name="dashboard_health_service_ready">Service ready</string>
+    <string name="dashboard_health_engine_idle">Ready when you are</string>
+    <string name="dashboard_health_service_needs_attention">Mindlayer needs attention</string>
+    <string name="dashboard_health_service_ready">Mindlayer is ready</string>
 
     <!-- Dashboard: service health detail messages. -->
-    <string name="dashboard_health_detail_disconnected_with_sample">No live binder connection. Last good status sample %1$s.</string>
-    <string name="dashboard_health_detail_disconnected_no_sample">No live binder connection and no successful status sample yet.</string>
-    <string name="dashboard_health_detail_polling_failed">Binder is up, but live polling is failing. Check recent logs and reconnect the service if this persists.</string>
-    <string name="dashboard_health_detail_stale_with_sample">Last successful status sample %1$s. Values on screen may be stale.</string>
-    <string name="dashboard_health_detail_waiting_first_sample">Waiting for the first successful runtime sample.</string>
+    <string name="dashboard_health_detail_disconnected_with_sample">Pull down to reconnect. Last update %1$s.</string>
+    <string name="dashboard_health_detail_disconnected_no_sample">Pull down to reconnect.</string>
+    <string name="dashboard_health_detail_polling_failed">Pull down to refresh. Open Diagnostics if this continues.</string>
+    <string name="dashboard_health_detail_stale_with_sample">Pull down to refresh. Last update %1$s.</string>
+    <string name="dashboard_health_detail_waiting_first_sample">Checking the service now.</string>
     <string name="dashboard_health_detail_no_loaded_model">Binder is reachable, but the latest runtime sample does not report a loaded model or active backend.</string>
-    <string name="dashboard_health_detail_engine_idle">Service is ready. The engine loads on first use — tap Run test inference to load it now.</string>
-    <string name="dashboard_health_detail_thermal_critical">Thermal guard reached CRITICAL. Expect throttling or backend changes at request boundaries.</string>
-    <string name="dashboard_health_detail_thermal_hot">Thermal band is HOT. Prefer shorter bursts or a cooler backend.</string>
-    <string name="dashboard_health_detail_memory_elevated">Memory pressure is elevated. Session capacity and prefill reliability may degrade.</string>
-    <string name="dashboard_health_detail_ok">Binder, engine, and runtime samples are arriving normally.</string>
+    <string name="dashboard_health_detail_engine_idle">It starts automatically when an app needs it.</string>
+    <string name="dashboard_health_detail_thermal_critical">Your phone needs to cool before Mindlayer can run normally.</string>
+    <string name="dashboard_health_detail_thermal_hot">Your phone is warm, so Mindlayer may run more slowly.</string>
+    <string name="dashboard_health_detail_memory_elevated">Free some memory for smoother performance.</string>
+    <string name="dashboard_health_detail_ok">It’s available to apps you’ve allowed.</string>
 
     <!-- Dashboard: test inference badge labels. -->
     <string name="dashboard_test_badge_running">RUNNING</string>
@@ -166,6 +166,7 @@
     <string name="dashboard_a11y_card_section">%1$s section</string>
     <string name="dashboard_a11y_memory_pressure_available_mb">%1$s. %2$s megabytes available</string>
     <string name="dashboard_a11y_thermal_band_with_headroom">%1$s. %2$s</string>
+    <string name="dashboard_a11y_active_session">Session %1$d, %2$s, %3$d of %4$d tokens used</string>
 
     <!-- Dashboard: card titles and inline labels. -->
     <string name="dashboard_card_service_status_title">Service Status</string>
@@ -179,6 +180,8 @@
     <string name="dashboard_label_init_time">Init time</string>
     <string name="dashboard_label_uptime">Uptime</string>
     <string name="dashboard_label_sampled">Sampled</string>
+    <string name="dashboard_label_model">Model</string>
+    <string name="dashboard_label_session_limit">Session limit</string>
     <string name="dashboard_value_dash" translatable="false">—</string>
     <string name="dashboard_init_time_seconds" translatable="false">%1$.1fs</string>
     <string name="dashboard_sampled_never">never</string>
@@ -234,6 +237,41 @@
     <string name="dashboard_welcome_state_fail">One or more engines failed</string>
     <string name="dashboard_advanced_show">Show advanced runtime details</string>
     <string name="dashboard_advanced_hide">Hide advanced runtime details</string>
+    <string name="dashboard_technical_details">Technical details</string>
+    <string name="dashboard_details_expanded">Expanded</string>
+    <string name="dashboard_details_collapsed">Collapsed</string>
+    <string name="dashboard_overview_ready">Ready</string>
+    <string name="dashboard_overview_available">Available</string>
+    <string name="dashboard_overview_starting">Starting</string>
+    <string name="dashboard_overview_check_needed">Check needed</string>
+    <string name="dashboard_overview_attention">Needs attention</string>
+    <string name="dashboard_updated_short">Updated %1$s</string>
+    <string name="dashboard_acceleration_fallback">Mindlayer switched to a more compatible mode.</string>
+    <plurals name="dashboard_apps_using_now">
+        <item quantity="one">%1$d app using it</item>
+        <item quantity="other">%1$d apps using it</item>
+    </plurals>
+    <string name="dashboard_device_title">Your phone</string>
+    <string name="dashboard_temperature">Temperature</string>
+    <string name="dashboard_temperature_cool">Cool</string>
+    <string name="dashboard_temperature_warm">Warm</string>
+    <string name="dashboard_temperature_hot">Hot</string>
+    <string name="dashboard_temperature_critical">Too hot</string>
+    <string name="dashboard_temperature_ok_support">No slowdown from heat</string>
+    <string name="dashboard_temperature_hot_support">Mindlayer may run slower</string>
+    <string name="dashboard_temperature_critical_support">Pause and let it cool</string>
+    <string name="dashboard_temperature_not_reported">Not reported by this phone</string>
+    <string name="dashboard_metric_unavailable">Unavailable</string>
+    <string name="dashboard_memory_plenty">Plenty free</string>
+    <string name="dashboard_memory_getting_low">Getting low</string>
+    <string name="dashboard_memory_low">Low</string>
+    <string name="dashboard_memory_very_low">Very low</string>
+    <string name="dashboard_memory_available_short">%1$s available</string>
+    <string name="dashboard_memory_not_reported">Memory details unavailable</string>
+    <string name="dashboard_active_now">In use now</string>
+    <string name="dashboard_session_number">Session %1$d</string>
+    <string name="dashboard_last_active_short">Last active %1$s</string>
+    <string name="dashboard_more_title">More</string>
     <string name="dashboard_thermal_telemetry_unavailable">Telemetry unavailable</string>
     <string name="dashboard_thermal_headroom_not_reported">Headroom not reported</string>
     <string name="dashboard_active_sessions_waiting">Waiting for the first live session sample…</string>
@@ -316,38 +354,43 @@
 
     <!-- Models page -->
     <string name="models_title">Models</string>
+    <string name="models_subtitle">AI runs on this device. Download once, then use it offline.</string>
     <string name="models_offline_banner">AI requests stay on this device. Model files are delivered by Google Play and require connectivity for the initial download.</string>
     <string name="models_role_chat">Chat &amp; vision</string>
-    <string name="models_role_chat_description">Generates text replies and describes images for inference and structured extraction.</string>
+    <string name="models_role_chat_description">Writes replies and understands images.</string>
     <string name="models_role_embeddings">Embeddings</string>
-    <string name="models_role_embeddings_description">Turns text into vectors for on-device semantic search.</string>
+    <string name="models_role_embeddings_description">Finds related text by meaning.</string>
     <string name="models_role_ocr">OCR</string>
-    <string name="models_role_ocr_description">Recognizes text in images before optional model-based extraction.</string>
+    <string name="models_role_ocr_description">Reads text from images.</string>
 
-    <string name="models_refresh_action">Refresh delivery</string>
-    <string name="models_refreshing_action">Refreshing delivery…</string>
-    <string name="models_delivery_checked">Delivery checked %1$s</string>
-    <string name="models_delivery_not_checked">Delivery has not been checked yet</string>
-    <string name="models_refresh_warning_title">Couldn’t refresh delivery status</string>
-    <string name="models_refresh_failed_detail">Last-known delivery states remain visible. Runtime status continues updating automatically.</string>
-    <string name="models_try_again_action">Try delivery refresh again</string>
+    <string name="models_refresh_action">Refresh model status</string>
+    <string name="models_refreshing_action">Refreshing model status</string>
+    <string name="models_delivery_checked">Updated %1$s</string>
+    <string name="models_delivery_not_checked">Not checked yet</string>
+    <string name="models_refresh_warning_title">Couldn’t check downloads</string>
+    <string name="models_refresh_failed_detail">Showing the last known status.</string>
+    <string name="models_try_again_action">Try again</string>
 
     <string name="models_overview_title">Model availability</string>
     <plurals name="models_overview_attention">
-        <item quantity="one">%1$d model set needs attention</item>
-        <item quantity="other">%1$d model sets need attention</item>
+        <item quantity="one">%1$d model needs attention</item>
+        <item quantity="other">%1$d models need attention</item>
+    </plurals>
+    <plurals name="models_overview_checking">
+        <item quantity="one">Checking %1$d model</item>
+        <item quantity="other">Checking %1$d models</item>
     </plurals>
     <plurals name="models_overview_activity">
-        <item quantity="one">Model activity is in progress for %1$d model set</item>
-        <item quantity="other">Model activity is in progress for %1$d model sets</item>
+        <item quantity="one">Updating %1$d model</item>
+        <item quantity="other">Updating %1$d models</item>
     </plurals>
     <plurals name="models_overview_downloaded_count">
-        <item quantity="one">%1$d model set downloaded out of %2$d</item>
-        <item quantity="other">%1$d model sets downloaded out of %2$d</item>
+        <item quantity="one">%1$d of %2$d downloaded</item>
+        <item quantity="other">%1$d of %2$d downloaded</item>
     </plurals>
     <plurals name="models_overview_all_available">
-        <item quantity="one">%1$d model set is downloaded and available</item>
-        <item quantity="other">All %1$d model sets are downloaded and available</item>
+        <item quantity="one">%1$d model downloaded</item>
+        <item quantity="other">All %1$d downloaded</item>
     </plurals>
 
     <string name="models_readiness_checking">Checking</string>
@@ -460,11 +503,17 @@
     <string name="models_runtime_verification_not_run_detail">Run this model’s verification on the Tests tab. Verification results do not indicate current runtime loading.</string>
     <string name="models_time_unknown">at an unknown time</string>
 
-    <string name="models_show_technical_details">Show technical details</string>
-    <string name="models_hide_technical_details">Hide technical details</string>
+    <string name="models_show_technical_details">Details</string>
+    <string name="models_hide_technical_details">Less</string>
+    <string name="models_status_details_title">What this status means</string>
+    <string name="models_context_window_label">Context window</string>
+    <string name="models_context_window_value">%1$s tokens</string>
+    <string name="models_model_size_label">Model size</string>
+    <string name="models_setup_space_label">Setup space</string>
+    <string name="models_setup_space_value">Keep %1$s free</string>
     <string name="models_source_label">Source</string>
-    <string name="models_source_google_play">Google Play on-demand model delivery</string>
-    <string name="models_pack_names_label">Model pack names</string>
+    <string name="models_source_google_play">Google Play</string>
+    <string name="models_pack_names_label">Delivery packs</string>
     <string name="models_backend_label">Backend</string>
     <string name="models_init_time_label">Initialization time</string>
     <string name="models_last_verification_label">Last verification</string>

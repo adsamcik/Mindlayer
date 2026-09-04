@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,22 +16,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MediumTopAppBar
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,7 +53,6 @@ data class SessionHistoryItem(
     val totalTokens: Int,
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SessionHistoryScreen(
     state: SessionHistoryUiState,
@@ -72,33 +62,14 @@ fun SessionHistoryScreen(
 ) {
     Scaffold(
         topBar = {
-            MediumTopAppBar(
-                title = {
-                    Column {
-                        Text(stringResource(R.string.session_diagnostics_title))
-                        val subtitle = when {
-                            state.isLoading -> stringResource(R.string.session_history_subtitle_loading)
-                            state.errorMessage != null -> stringResource(R.string.session_history_subtitle_load_failure)
-                            else -> stringResource(R.string.session_history_subtitle_count, state.sessions.size)
-                        }
-                        Text(
-                            text = subtitle,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+            MindlayerSecondaryTopBar(
+                title = stringResource(R.string.session_diagnostics_title),
+                subtitle = when {
+                    state.isLoading -> stringResource(R.string.session_history_subtitle_loading)
+                    state.errorMessage != null -> stringResource(R.string.session_history_subtitle_load_failure)
+                    else -> stringResource(R.string.session_history_subtitle_count, state.sessions.size)
                 },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.common_back),
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    scrolledContainerColor = MaterialTheme.colorScheme.surface,
-                ),
+                onBack = onBack,
             )
         },
         containerColor = MaterialTheme.colorScheme.background,
@@ -110,14 +81,14 @@ fun SessionHistoryScreen(
         ) {
             when {
                 state.isLoading -> {
-                    HistoryStatusPane(
+                    MindlayerStatusPane(
                         title = stringResource(R.string.session_history_loading_title),
                         showProgress = true,
                     )
                 }
 
                 state.errorMessage != null -> {
-                    HistoryStatusPane(
+                    MindlayerStatusPane(
                         title = stringResource(R.string.session_history_error_title),
                         message = state.errorMessage,
                         icon = {
@@ -134,7 +105,7 @@ fun SessionHistoryScreen(
                 }
 
                 state.sessions.isEmpty() -> {
-                    HistoryStatusPane(
+                    MindlayerStatusPane(
                         title = stringResource(R.string.session_history_empty_title),
                         message = stringResource(R.string.session_history_empty_message),
                         icon = {
@@ -151,8 +122,8 @@ fun SessionHistoryScreen(
                 else -> {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        contentPadding = MindlayerScreenDefaults.ContentPadding,
+                        verticalArrangement = Arrangement.spacedBy(MindlayerScreenDefaults.ItemSpacing),
                     ) {
                         items(state.sessions, key = { it.sessionId }) { item ->
                             SessionCard(
@@ -172,8 +143,9 @@ private fun SessionCard(item: SessionHistoryItem, onClick: () -> Unit) {
     ElevatedCard(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.extraLarge,
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(modifier = Modifier.padding(MindlayerScreenDefaults.CardContentPadding)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -267,54 +239,6 @@ private fun BackendBadge(backend: String) {
             color = textColor,
             fontWeight = FontWeight.Bold,
         )
-    }
-}
-
-@Composable
-private fun HistoryStatusPane(
-    title: String,
-    message: String? = null,
-    showProgress: Boolean = false,
-    icon: (@Composable () -> Unit)? = null,
-    actionLabel: String? = null,
-    onAction: () -> Unit = {},
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(32.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (showProgress) LoadingIndicator()
-            icon?.invoke()
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            if (message != null) {
-                Text(
-                    text = message,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            actionLabel?.let { label ->
-                FilledTonalButton(onClick = onAction) {
-                    Icon(
-                        imageVector = Icons.Filled.Refresh,
-                        contentDescription = stringResource(R.string.common_retry),
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(text = label)
-                }
-            }
-        }
     }
 }
 

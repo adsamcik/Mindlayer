@@ -112,7 +112,10 @@ class DashboardViewModel @JvmOverloads constructor(
             // Dashboard shares this UID with the service — authorizeCall()
             // self-UID-bypasses, so this call always succeeds.
             viewModelScope.launch(Dispatchers.IO) {
-                try { svc.registerClient(livenessToken) } catch (_: Throwable) { }
+                try {
+                    svc.registerClient(livenessToken)
+                    svc.setClientVisible(livenessToken, true)
+                } catch (_: Throwable) { }
             }
             _uiState.update {
                 it.copy(
@@ -223,6 +226,7 @@ class DashboardViewModel @JvmOverloads constructor(
         deliveryStateJob = null
         deliveryManager?.close()
         deliveryManager = null
+        try { service?.setClientVisible(livenessToken, false) } catch (_: Throwable) { }
         context.unbindService(connection)
         service = null
         _uiState.update {
@@ -386,6 +390,10 @@ class DashboardViewModel @JvmOverloads constructor(
                             },
                             initTimeSeconds = engineInfo?.initTimeSeconds ?: 0f,
                             modelId = engineInfo?.modelId ?: "",
+                            engineMaxTokens = engineInfo?.maxTokens?.takeIf {
+                                status.isEngineLoaded
+                            } ?: 0,
+                            modelSizeBytes = engineInfo?.modelSizeBytes ?: 0L,
                             ocrFailureSnapshot = ocrFailureSnap,
                             ocrFailureCooldownMs = ocrCooldownMs,
                         )

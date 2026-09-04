@@ -99,6 +99,10 @@ data class DashboardUiState(
     val initTimeSeconds: Float = 0f,
     val uptimeMs: Long = 0,
     val modelId: String = "",
+    /** Live chat engine KV-cache budget reported by [com.adsamcik.mindlayer.EngineInfo]. */
+    val engineMaxTokens: Int = 0,
+    /** Live chat model size reported by [com.adsamcik.mindlayer.EngineInfo]. */
+    val modelSizeBytes: Long = 0L,
     // Thermal
     val thermalBand: String = "COOL",
     val headroom: Float? = null,
@@ -620,6 +624,12 @@ data class RoleModelSummary(
     val lastVerificationAtMs: Long?,
     val lastVerificationPassed: Boolean?,
     val deliveryState: ModelDeliveryState,
+    /** Active context budget, or a fixed per-model input limit when one exists. */
+    val contextWindowTokens: Int? = null,
+    /** Actual model size when the live engine reports it. */
+    val modelSizeBytes: Long? = null,
+    /** Conservative free-space requirement used by model setup. */
+    val minimumFreeBytes: Long = 0L,
 )
 
 enum class ModelRole { CHAT_AND_VISION, EMBEDDINGS, OCR }
@@ -728,6 +738,7 @@ internal fun ModelRole.toModelFamily(): com.adsamcik.mindlayer.service.modeldeli
 private const val MODEL_DISPLAY_CHAT_DEFAULT = "Gemma 4 E2B"
 private const val MODEL_DISPLAY_EMBEDDINGS = "EmbeddingGemma"
 private const val MODEL_DISPLAY_OCR = "PaddleOCR PP-OCRv5 mobile"
+private const val EMBEDDINGS_CONTEXT_WINDOW_TOKENS = 2_048
 
 /**
  * Pure derivation of the three role cards rendered by `ModelsScreen`.
@@ -766,11 +777,12 @@ fun DashboardUiState.modelSummaries(
         ?.substringAfterLast('/')
         ?.substringAfterLast('\\')
         ?: MODEL_DISPLAY_CHAT_DEFAULT
+    val chatSpec = ModelDeliveryCatalog.family(ModelRole.CHAT_AND_VISION.toModelFamily())
     val chatDelivery = modelDelivery[ModelRole.CHAT_AND_VISION] ?: ModelDeliveryState.Checking
     val chat = RoleModelSummary(
         role = ModelRole.CHAT_AND_VISION,
         modelDisplayName = chatDisplay,
-        deliveryPackNames = ModelDeliveryCatalog.family(ModelRole.CHAT_AND_VISION.toModelFamily()).packNames,
+        deliveryPackNames = chatSpec.packNames,
         state = chatState,
         evidence = chatEvidence,
         readiness = modelReadiness(
@@ -786,14 +798,18 @@ fun DashboardUiState.modelSummaries(
         lastVerificationAtMs = null,
         lastVerificationPassed = null,
         deliveryState = chatDelivery,
+        contextWindowTokens = engineMaxTokens.takeIf { it > 0 },
+        modelSizeBytes = modelSizeBytes.takeIf { it > 0L },
+        minimumFreeBytes = chatSpec.minimumFreeBytes,
     )
 
     val embeddingsRuntime = derivedTestRuntime(embeddingTest)
+    val embeddingsSpec = ModelDeliveryCatalog.family(ModelRole.EMBEDDINGS.toModelFamily())
     val embeddingsDelivery = modelDelivery[ModelRole.EMBEDDINGS] ?: ModelDeliveryState.Checking
     val embeddings = RoleModelSummary(
         role = ModelRole.EMBEDDINGS,
         modelDisplayName = MODEL_DISPLAY_EMBEDDINGS,
-        deliveryPackNames = ModelDeliveryCatalog.family(ModelRole.EMBEDDINGS.toModelFamily()).packNames,
+        deliveryPackNames = embeddingsSpec.packNames,
         state = embeddingsRuntime.state,
         evidence = ModelRuntimeEvidence.DASHBOARD_VERIFICATION,
         readiness = modelReadiness(
@@ -809,14 +825,17 @@ fun DashboardUiState.modelSummaries(
         lastVerificationAtMs = embeddingTest.lastCompletedAtMs,
         lastVerificationPassed = embeddingsRuntime.passed,
         deliveryState = embeddingsDelivery,
+        contextWindowTokens = EMBEDDINGS_CONTEXT_WINDOW_TOKENS,
+        minimumFreeBytes = embeddingsSpec.minimumFreeBytes,
     )
 
     val ocrRuntime = derivedTestRuntime(ocrTest)
+    val ocrSpec = ModelDeliveryCatalog.family(ModelRole.OCR.toModelFamily())
     val ocrDelivery = modelDelivery[ModelRole.OCR] ?: ModelDeliveryState.Checking
     val ocr = RoleModelSummary(
         role = ModelRole.OCR,
         modelDisplayName = MODEL_DISPLAY_OCR,
-        deliveryPackNames = ModelDeliveryCatalog.family(ModelRole.OCR.toModelFamily()).packNames,
+        deliveryPackNames = ocrSpec.packNames,
         state = ocrRuntime.state,
         evidence = ModelRuntimeEvidence.DASHBOARD_VERIFICATION,
         readiness = modelReadiness(
@@ -832,6 +851,7 @@ fun DashboardUiState.modelSummaries(
         lastVerificationAtMs = ocrTest.lastCompletedAtMs,
         lastVerificationPassed = ocrRuntime.passed,
         deliveryState = ocrDelivery,
+        minimumFreeBytes = ocrSpec.minimumFreeBytes,
     )
 
     return listOf(chat, embeddings, ocr)

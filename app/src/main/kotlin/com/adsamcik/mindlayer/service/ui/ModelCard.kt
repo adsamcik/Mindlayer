@@ -12,12 +12,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LinearWavyProgressIndicator
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -30,7 +37,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -40,10 +49,12 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.adsamcik.mindlayer.service.R
 import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryIssue
 import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryState
+import java.text.NumberFormat
 
 internal data class ModelsTonePalette(
     val container: Color,
@@ -71,21 +82,52 @@ internal fun modelsTonePalette(tone: DashboardMessageTone): ModelsTonePalette {
 internal fun ModelsBadge(
     text: String,
     tone: DashboardMessageTone,
+    modifier: Modifier = Modifier,
+    inProgress: Boolean = false,
 ) {
     val palette = modelsTonePalette(tone)
     Surface(
+        modifier = modifier,
         color = palette.container,
         contentColor = palette.content,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(14.dp),
     ) {
-        Text(
-            text = text,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-            style = MaterialTheme.typography.labelSmall,
-            color = palette.content,
-            fontWeight = FontWeight.Bold,
-        )
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (inProgress) {
+                LoadingIndicator(
+                    modifier = Modifier.size(18.dp),
+                    color = palette.content,
+                )
+            } else {
+                Icon(
+                    imageVector = statusIcon(tone),
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = palette.content,
+                )
+            }
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelLarge,
+                color = palette.content,
+                fontWeight = FontWeight.Bold,
+            )
+        }
     }
+}
+
+private fun statusIcon(tone: DashboardMessageTone): ImageVector = when (tone) {
+    DashboardMessageTone.SUCCESS -> Icons.Filled.CheckCircle
+    DashboardMessageTone.WARNING,
+    DashboardMessageTone.ERROR,
+    -> Icons.Filled.Warning
+    DashboardMessageTone.NEUTRAL,
+    DashboardMessageTone.INFO,
+    -> Icons.Filled.Info
 }
 
 @Composable
@@ -100,6 +142,13 @@ internal fun RoleModelCard(
     val roleTitle = stringResource(roleTitleRes(summary.role))
     val phase = modelPhasePresentation(summary)
     val readinessTone = phaseTone(phase, summary.readiness)
+    val statusCopy = phaseCopy(phase, summary)
+    val progress = modelProgressPresentation(summary)
+    val stateAnnouncement = stringResource(
+        R.string.models_a11y_phase_status,
+        roleTitle,
+        statusCopy.headline,
+    )
 
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
@@ -108,80 +157,159 @@ internal fun RoleModelCard(
         Column(
             modifier = Modifier
                 .animateContentSize()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(MindlayerScreenDefaults.CardContentPadding),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    imageVector = Icons.Filled.Build,
-                    contentDescription = null,
-                    modifier = Modifier
-                        .padding(top = 2.dp)
-                        .size(20.dp),
-                    tint = MaterialTheme.colorScheme.primary,
-                )
-                Text(
-                    text = roleTitle,
-                    modifier = Modifier
-                        .weight(1f)
-                        .semantics { heading() },
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                )
+                RoleIcon(summary.role)
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = roleTitle,
+                        modifier = Modifier.semantics { heading() },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = stringResource(roleDescriptionRes(summary.role)),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             ModelsBadge(
-                text = readinessLabel(phase, summary.readiness),
+                text = statusCopy.headline,
                 tone = readinessTone,
+                modifier = Modifier.semantics {
+                    contentDescription = stateAnnouncement
+                    liveRegion = LiveRegionMode.Polite
+                },
+                inProgress = progress.kind != ModelProgressKind.NONE,
             )
 
-            ReadinessSurface(
-                summary = summary,
-                roleTitle = roleTitle,
+            when (progress.kind) {
+                ModelProgressKind.DETERMINATE -> {
+                    LinearWavyProgressIndicator(
+                        progress = { progress.fraction ?: 0f },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = readinessTone.progressColor(),
+                    )
+                    DownloadProgressLabel(
+                        summary.deliveryState,
+                        MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                ModelProgressKind.INDETERMINATE -> {
+                    LinearWavyProgressIndicator(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = readinessTone.progressColor(),
+                    )
+                    if (summary.deliveryState is ModelDeliveryState.Downloading) {
+                        DownloadProgressLabel(
+                            summary.deliveryState,
+                            MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                ModelProgressKind.NONE -> Unit
+            }
+
+            ModelPrimaryAction(
+                state = summary.deliveryState,
                 onDownload = onDownload,
                 onRemove = onRemove,
                 onRetryActivation = onRetryActivation,
                 onConfirmDownload = onConfirmDownload,
             )
 
-            Text(
-                text = summary.modelDisplayName,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            Text(
-                text = stringResource(roleDescriptionRes(summary.role)),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            RuntimeVerificationSurface(summary, roleTitle)
-
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            TextButton(
-                onClick = { technicalExpanded = !technicalExpanded },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp),
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    stringResource(
-                        if (technicalExpanded) {
-                            R.string.models_hide_technical_details
-                        } else {
-                            R.string.models_show_technical_details
-                        },
-                    ),
+                    text = summary.modelDisplayName,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
+                TextButton(
+                    onClick = { technicalExpanded = !technicalExpanded },
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) {
+                    Text(
+                        stringResource(
+                            if (technicalExpanded) {
+                                R.string.models_hide_technical_details
+                            } else {
+                                R.string.models_show_technical_details
+                            },
+                        ),
+                    )
+                    Icon(
+                        imageVector = Icons.Filled.KeyboardArrowDown,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .padding(start = 4.dp)
+                            .size(18.dp)
+                            .rotate(if (technicalExpanded) 180f else 0f),
+                    )
+                }
             }
             if (technicalExpanded) {
-                TechnicalDetails(summary)
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                ModelDetails(
+                    summary = summary,
+                    statusCopy = statusCopy,
+                    roleTitle = roleTitle,
+                    onRemove = onRemove,
+                )
             }
         }
+    }
+}
+
+@Composable
+private fun DashboardMessageTone.progressColor(): Color = when (this) {
+    DashboardMessageTone.NEUTRAL -> MaterialTheme.colorScheme.primary
+    DashboardMessageTone.INFO -> MaterialTheme.colorScheme.secondary
+    DashboardMessageTone.SUCCESS -> MaterialTheme.colorScheme.primary
+    DashboardMessageTone.WARNING -> MaterialTheme.colorScheme.tertiary
+    DashboardMessageTone.ERROR -> MaterialTheme.colorScheme.error
+}
+
+@Composable
+private fun RoleIcon(role: ModelRole) {
+    val (icon, palette) = when (role) {
+        ModelRole.CHAT_AND_VISION -> Icons.Filled.Face to
+            modelsTonePalette(DashboardMessageTone.INFO)
+        ModelRole.EMBEDDINGS -> Icons.Filled.Search to
+            modelsTonePalette(DashboardMessageTone.SUCCESS)
+        ModelRole.OCR -> Icons.AutoMirrored.Filled.List to
+            modelsTonePalette(DashboardMessageTone.WARNING)
+    }
+    Surface(
+        modifier = Modifier.size(44.dp),
+        shape = MaterialTheme.shapes.large,
+        color = palette.container,
+        contentColor = palette.content,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.padding(11.dp),
+            tint = palette.content,
+        )
     }
 }
 
@@ -189,83 +317,6 @@ private data class ModelStatusCopy(
     val headline: String,
     val detail: String,
 )
-
-@Composable
-private fun ReadinessSurface(
-    summary: RoleModelSummary,
-    roleTitle: String,
-    onDownload: () -> Unit,
-    onRemove: () -> Unit,
-    onRetryActivation: () -> Unit,
-    onConfirmDownload: () -> Unit,
-) {
-    val phase = modelPhasePresentation(summary)
-    val copy = phaseCopy(phase, summary)
-    val palette = modelsTonePalette(phaseTone(phase, summary.readiness))
-    val progress = modelProgressPresentation(summary)
-    val stateAnnouncement = stringResource(
-        R.string.models_a11y_phase_status,
-        roleTitle,
-        copy.headline,
-    )
-
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        color = palette.container,
-        contentColor = palette.content,
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Text(
-                text = copy.headline,
-                modifier = Modifier.clearAndSetSemantics {
-                    contentDescription = stateAnnouncement
-                    liveRegion = LiveRegionMode.Polite
-                },
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = palette.content,
-            )
-            Text(
-                text = copy.detail,
-                style = MaterialTheme.typography.bodyMedium,
-                color = palette.content,
-            )
-            when (progress.kind) {
-                ModelProgressKind.DETERMINATE -> {
-                    LinearProgressIndicator(
-                        progress = { progress.fraction ?: 0f },
-                        modifier = Modifier.fillMaxWidth(),
-                        color = palette.content,
-                        trackColor = palette.content.copy(alpha = 0.24f),
-                    )
-                    DownloadProgressLabel(summary.deliveryState, palette.content)
-                }
-                ModelProgressKind.INDETERMINATE -> {
-                    LinearProgressIndicator(
-                        modifier = Modifier.fillMaxWidth(),
-                        color = palette.content,
-                        trackColor = palette.content.copy(alpha = 0.24f),
-                    )
-                    if (summary.deliveryState is ModelDeliveryState.Downloading) {
-                        DownloadProgressLabel(summary.deliveryState, palette.content)
-                    }
-                }
-                ModelProgressKind.NONE -> Unit
-            }
-            ModelActions(
-                state = summary.deliveryState,
-                onDownload = onDownload,
-                onRemove = onRemove,
-                onRetryActivation = onRetryActivation,
-                onConfirmDownload = onConfirmDownload,
-            )
-        }
-    }
-}
 
 @Composable
 private fun DownloadProgressLabel(
@@ -433,7 +484,7 @@ private fun phaseCopy(
 }
 
 @Composable
-private fun ModelActions(
+private fun ModelPrimaryAction(
     state: ModelDeliveryState,
     onDownload: () -> Unit,
     onRemove: () -> Unit,
@@ -481,16 +532,6 @@ private fun ModelActions(
         ModelDeliveryAction.NONE,
         -> Unit
     }
-    if (availability.secondary == ModelDeliveryAction.REMOVE) {
-        OutlinedButton(
-            onClick = onRemove,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 48.dp),
-        ) {
-            Text(stringResource(R.string.models_remove_action))
-        }
-    }
 }
 
 @Composable
@@ -505,74 +546,6 @@ private fun PrimaryAction(
             .heightIn(min = 48.dp),
     ) {
         Text(label)
-    }
-}
-
-@Composable
-private fun RuntimeVerificationSurface(
-    summary: RoleModelSummary,
-    roleTitle: String,
-) {
-    val category = runtimeSummaryCategory(summary)
-    val tone = when (category) {
-        RuntimeSummaryCategory.LIVE_READY,
-        RuntimeSummaryCategory.VERIFICATION_PASSED,
-        -> DashboardMessageTone.SUCCESS
-        RuntimeSummaryCategory.LIVE_FAILED,
-        RuntimeSummaryCategory.VERIFICATION_FAILED,
-        -> DashboardMessageTone.ERROR
-        RuntimeSummaryCategory.LAST_KNOWN_READY,
-        RuntimeSummaryCategory.LAST_KNOWN_NOT_LOADED,
-        RuntimeSummaryCategory.LAST_KNOWN_FAILED,
-        RuntimeSummaryCategory.SERVICE_UNAVAILABLE,
-        -> DashboardMessageTone.WARNING
-        RuntimeSummaryCategory.LIVE_STARTING,
-        RuntimeSummaryCategory.VERIFICATION_RUNNING,
-        -> DashboardMessageTone.INFO
-        RuntimeSummaryCategory.LIVE_NOT_LOADED,
-        RuntimeSummaryCategory.VERIFICATION_NOT_RUN,
-        -> DashboardMessageTone.NEUTRAL
-    }
-    val palette = modelsTonePalette(tone)
-    val copy = runtimeCopy(category, summary)
-    val stateAnnouncement = stringResource(
-        R.string.models_a11y_runtime_status,
-        roleTitle,
-        copy.headline,
-    )
-
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        color = palette.container,
-        contentColor = palette.content,
-    ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Text(
-                text = stringResource(R.string.models_runtime_section_title),
-                style = MaterialTheme.typography.labelLarge,
-                color = palette.content,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = copy.headline,
-                modifier = Modifier.clearAndSetSemantics {
-                    contentDescription = stateAnnouncement
-                    liveRegion = LiveRegionMode.Polite
-                },
-                style = MaterialTheme.typography.titleSmall,
-                color = palette.content,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = copy.detail,
-                style = MaterialTheme.typography.bodySmall,
-                color = palette.content,
-            )
-        }
     }
 }
 
@@ -643,15 +616,65 @@ private fun runtimeCopy(
 }
 
 @Composable
-private fun TechnicalDetails(summary: RoleModelSummary) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        TechnicalDetail(
-            label = stringResource(R.string.models_source_label),
-            value = stringResource(R.string.models_source_google_play),
+private fun ModelDetails(
+    summary: RoleModelSummary,
+    statusCopy: ModelStatusCopy,
+    roleTitle: String,
+    onRemove: () -> Unit,
+) {
+    val context = LocalContext.current
+    val runtime = runtimeCopy(runtimeSummaryCategory(summary), summary)
+    val runtimeAnnouncement = stringResource(
+        R.string.models_a11y_runtime_status,
+        roleTitle,
+        runtime.headline,
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            text = stringResource(R.string.models_status_details_title),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+        )
+        Text(
+            text = statusCopy.detail,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         TechnicalDetail(
-            label = stringResource(R.string.models_pack_names_label),
-            value = summary.deliveryPackNames.joinToString(separator = "\n"),
+            label = stringResource(R.string.models_runtime_section_title),
+            value = runtime.headline,
+            modifier = Modifier.clearAndSetSemantics {
+                contentDescription = runtimeAnnouncement
+            },
+        )
+        Text(
+            text = runtime.detail,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        summary.contextWindowTokens?.let { tokens ->
+            TechnicalDetail(
+                label = stringResource(R.string.models_context_window_label),
+                value = stringResource(
+                    R.string.models_context_window_value,
+                    NumberFormat.getIntegerInstance().format(tokens),
+                ),
+            )
+        }
+        summary.modelSizeBytes?.takeIf { it > 0L }?.let { modelSize ->
+            TechnicalDetail(
+                label = stringResource(R.string.models_model_size_label),
+                value = Formatter.formatShortFileSize(context, modelSize),
+            )
+        }
+        TechnicalDetail(
+            label = stringResource(R.string.models_setup_space_label),
+            value = stringResource(
+                R.string.models_setup_space_value,
+                Formatter.formatShortFileSize(context, summary.minimumFreeBytes),
+            ),
         )
         summary.backend?.let { backend ->
             TechnicalDetail(
@@ -675,6 +698,22 @@ private fun TechnicalDetails(summary: RoleModelSummary) {
                     ?: stringResource(R.string.models_verification_not_run),
             )
         }
+        TechnicalDetail(
+            label = stringResource(R.string.models_source_label),
+            value = stringResource(R.string.models_source_google_play),
+        )
+        TechnicalDetail(
+            label = stringResource(R.string.models_pack_names_label),
+            value = summary.deliveryPackNames.joinToString(separator = "\n"),
+        )
+        if (modelActionAvailability(summary.deliveryState).secondary == ModelDeliveryAction.REMOVE) {
+            OutlinedButton(
+                onClick = onRemove,
+                modifier = Modifier.heightIn(min = 48.dp),
+            ) {
+                Text(stringResource(R.string.models_remove_action))
+            }
+        }
     }
 }
 
@@ -682,15 +721,22 @@ private fun TechnicalDetails(summary: RoleModelSummary) {
 private fun TechnicalDetail(
     label: String,
     value: String,
+    modifier: Modifier = Modifier,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
         Text(
             text = label,
+            modifier = Modifier.weight(0.4f),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
             text = value,
+            modifier = Modifier.weight(0.6f),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface,
         )
@@ -704,30 +750,6 @@ private fun formatTimestamp(timestampMs: Long): String {
         context,
         timestampMs,
         DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME,
-    )
-}
-
-@Composable
-private fun readinessLabel(
-    phase: ModelPhasePresentation,
-    readiness: ModelReadiness,
-): String = if (phase == ModelPhasePresentation.VERIFICATION_RUNNING) {
-    stringResource(R.string.models_readiness_verifying)
-} else {
-    stringResource(
-        when (readiness) {
-            ModelReadiness.CHECKING -> R.string.models_readiness_checking
-            ModelReadiness.DOWNLOAD_REQUIRED -> R.string.models_readiness_download_required
-            ModelReadiness.WAITING -> R.string.models_readiness_waiting
-            ModelReadiness.DOWNLOADING -> R.string.models_readiness_downloading
-            ModelReadiness.PREPARING -> R.string.models_readiness_preparing
-            ModelReadiness.DOWNLOADED_IDLE -> R.string.models_readiness_downloaded
-            ModelReadiness.STARTING -> R.string.models_readiness_starting
-            ModelReadiness.READY -> R.string.models_readiness_ready
-            ModelReadiness.NEEDS_ATTENTION -> R.string.models_readiness_needs_attention
-            ModelReadiness.REMOVING -> R.string.models_readiness_removing
-            ModelReadiness.UNAVAILABLE -> R.string.models_readiness_unavailable
-        },
     )
 }
 

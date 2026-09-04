@@ -124,11 +124,14 @@ fun AllowedAppsCard(
         }
     }
 
-    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.extraLarge,
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(MindlayerScreenDefaults.CardContentPadding),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
