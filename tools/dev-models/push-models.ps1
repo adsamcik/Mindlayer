@@ -135,16 +135,33 @@ function Get-AdbArgs {
 
 function Invoke-Adb {
     param([Parameter(Mandatory)][string[]]$AdbArgs)
-    $full = (Get-AdbArgs) + $AdbArgs
-    & adb @full
-    return $LASTEXITCODE
+    $result = Invoke-AdbCapture -AdbArgs $AdbArgs
+    if ($result.Output) { Write-Host $result.Output }
+    return $result.ExitCode
 }
 
 function Invoke-AdbCapture {
     param([Parameter(Mandatory)][string[]]$AdbArgs)
     $full = (Get-AdbArgs) + $AdbArgs
-    $out = & adb @full 2>&1 | Out-String
-    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $out.TrimEnd() }
+    Get-Command adb -ErrorAction Stop | Out-Null
+    $previousErrorAction = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 turns redirected native stderr into error
+        # records. Missing-file probes are expected to fail: capture their
+        # diagnostics and let the caller decide from the native exit code.
+        $ErrorActionPreference = 'Continue'
+        $PSNativeCommandUseErrorActionPreference = $false
+        $out = & adb @full 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord] -and $_.FullyQualifiedErrorId -notin @('NativeCommandError', 'NativeCommandErrorMessage')) {
+                throw $_
+            }
+            $_.ToString()
+        } | Out-String
+        $nativeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    return [pscustomobject]@{ ExitCode = $nativeExitCode; Output = $out.TrimEnd() }
 }
 
 function Assert-AdbAvailable {

@@ -193,8 +193,24 @@ function Invoke-AdbCapture {
     $full = @()
     if (-not [string]::IsNullOrWhiteSpace($Device)) { $full += @('-s', $Device) }
     $full += $AdbArgs
-    $out = & adb @full 2>&1 | Out-String
-    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $out.TrimEnd() }
+    Get-Command adb -ErrorAction Stop | Out-Null
+    $previousErrorAction = $ErrorActionPreference
+    try {
+        # Capture native stderr on Windows PowerShell 5.1 without stopping
+        # before the existing install/launch exit-code checks can run.
+        $ErrorActionPreference = 'Continue'
+        $PSNativeCommandUseErrorActionPreference = $false
+        $out = & adb @full 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord] -and $_.FullyQualifiedErrorId -notin @('NativeCommandError', 'NativeCommandErrorMessage')) {
+                throw $_
+            }
+            $_.ToString()
+        } | Out-String
+        $nativeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    return [pscustomobject]@{ ExitCode = $nativeExitCode; Output = $out.TrimEnd() }
 }
 
 if ($SkipInstall -or $DryRun) {
