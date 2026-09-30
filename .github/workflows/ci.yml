@@ -13,12 +13,16 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  TRACEBOX_PACKAGES_READ_TOKEN: ${{ secrets.TRACEBOX_PACKAGES_READ_TOKEN || github.token }}
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
+      packages: read
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -118,6 +122,7 @@ jobs:
     continue-on-error: ${{ matrix.api-level != 33 }}
     permissions:
       contents: read
+      packages: read
     strategy:
       fail-fast: false
       matrix:
@@ -274,6 +279,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+      packages: read
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -372,6 +378,7 @@ jobs:
     if: ${{ false }}
     permissions:
       contents: read
+      packages: read
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

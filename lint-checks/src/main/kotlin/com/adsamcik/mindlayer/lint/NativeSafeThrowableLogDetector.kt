@@ -37,7 +37,11 @@ class NativeSafeThrowableLogDetector : Detector(), SourceCodeScanner {
         method: PsiMethod,
     ): UExpression? {
         val mapping = context.evaluator.computeArgumentMapping(node, method)
-        mapping.entries.firstOrNull { (_, parameter) -> parameter.name == "throwable" }?.let { return it.key }
+        // A named diagnosticThrowable can occupy source position five while
+        // throwable uses its null default. Respect resolved parameter names.
+        if (mapping.isNotEmpty()) {
+            return mapping.entries.firstOrNull { (_, parameter) -> parameter.name == "throwable" }?.key
+        }
 
         return node.valueArguments.firstOrNull { argument ->
             argument.asSourceString().trimStart().startsWith("throwable")

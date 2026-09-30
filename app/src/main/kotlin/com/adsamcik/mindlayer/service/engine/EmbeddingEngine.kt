@@ -189,7 +189,7 @@ class EmbeddingEngine(
                     }
                     _state.value = EmbeddingEngineState.Failed(failure)
                     logRepository?.logInitFailureCategorized(failure, featureName = "embeddings")
-                    MindlayerLog.w(TAG, "Embedding init failed: ${t.safeLabel()}", throwable = null)
+                    MindlayerLog.w(TAG, "Embedding init failed: ${t.safeLabel()}", diagnosticThrowable = t)
                     throw t
                 }
             }

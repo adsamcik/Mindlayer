@@ -3,6 +3,10 @@ package com.adsamcik.mindlayer.service.logging
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.adsamcik.mindlayer.service.BuildConfig
+import dev.tracebox.Tracebox
+import dev.tracebox.api.LogTemplate
+import dev.tracebox.api.argument
+import dev.tracebox.api.public
 
 /**
  * Structured logcat wrapper that prefixes all messages with correlation context.
@@ -41,17 +45,35 @@ object MindlayerLog {
         Log.i(tag(component), format(message, requestId, sessionId))
     }
 
-    fun w(component: String, message: String, requestId: String? = null, sessionId: String? = null, throwable: Throwable? = null) {
+    /** [diagnosticThrowable] retains redacted frames in Tracebox without emitting a logcat stack. */
+    fun w(component: String, message: String, requestId: String? = null, sessionId: String? = null, throwable: Throwable? = null, diagnosticThrowable: Throwable? = null) {
+        recordException(component, requestId, sessionId, throwable ?: diagnosticThrowable)
         if (throwable != null) Log.w(tag(component), format(message, requestId, sessionId), throwable)
         else Log.w(tag(component), format(message, requestId, sessionId))
     }
 
-    fun e(component: String, message: String, requestId: String? = null, sessionId: String? = null, throwable: Throwable? = null) {
+    fun e(component: String, message: String, requestId: String? = null, sessionId: String? = null, throwable: Throwable? = null, diagnosticThrowable: Throwable? = null) {
+        recordException(component, requestId, sessionId, throwable ?: diagnosticThrowable)
         if (throwable != null) Log.e(tag(component), format(message, requestId, sessionId), throwable)
         else Log.e(tag(component), format(message, requestId, sessionId))
     }
 
     private fun tag(component: String) = "$PREFIX.$component"
+
+    private fun recordException(component: String, requestId: String?, sessionId: String?, throwable: Throwable?) {
+        if (throwable == null) return
+        // Tracebox records frame identity, never Throwable.message or this free-form
+        // logcat message. Native exception messages can contain prompt fragments.
+        Tracebox.log.error(
+            throwable,
+            exceptionTemplate,
+            argument(component),
+            public(MindlayerDiagnostics.correlationId(requestId)),
+            public(MindlayerDiagnostics.correlationId(sessionId)),
+        )
+    }
+
+    private val exceptionTemplate = LogTemplate.of("Mindlayer handled exception component={} request={} session={}")
 
     private fun format(message: String, requestId: String?, sessionId: String?): String {
         if (requestId == null && sessionId == null) return message

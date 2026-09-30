@@ -1393,6 +1393,7 @@ class InferenceOrchestrator(
                     "Inference failed: $safe",
                     requestId = meta.requestId,
                     sessionId = meta.sessionId,
+                    diagnosticThrowable = t,
                 )
                 logRepository?.logInferenceError(
                     meta.requestId, meta.sessionId, safe

@@ -22,6 +22,10 @@ gradlew.bat text eol=crlf
 # (Linux CI). Without this, Git's autocrlf on Windows checkouts would
 # rewrite them to CRLF, breaking the shebang line.
 *.sh text eol=lf
+# Unified patches require space-only context lines; preserve upstream notice layout.
+third_party/tracebox/*.patch text eol=lf whitespace=-blank-at-eol
+third_party/tracebox/LICENSE whitespace=-blank-at-eof
+third_party/tracebox/NOTICE whitespace=-blank-at-eof
 
 # AIDL
 *.aidl text
@@ -36,6 +40,7 @@ gradlew.bat text eol=crlf
 # Binary
 *.litertlm binary
 *.jar binary
+*.aar binary
 *.so binary
 *.png binary
 *.jpg binary

@@ -71,8 +71,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun StatusScreen(
     state: DashboardUiState,
-    onNavigateToHistory: () -> Unit = {},
-    onNavigateToLogs: () -> Unit = {},
+    onNavigateToTroubleshoot: () -> Unit = {},
+    onNavigateToModels: () -> Unit = {},
     logRepository: LogRepository? = null,
     /**
      * F-055: cross-process revoke hook. The activity wires this to
@@ -109,12 +109,18 @@ fun StatusScreen(
             ) {
                 item { CardEnterAnimation(0) { DashboardHero() } }
                 item { CardEnterAnimation(1) { StatusOverviewCard(state) } }
-                item { CardEnterAnimation(2) { DeviceStatusRow(state) } }
+                item {
+                    DashboardShortcut(
+                        title = stringResource(if (state.needsModelSetup()) R.string.nav_models else R.string.nav_tests),
+                        icon = Icons.Filled.Build,
+                        contentDescription = stringResource(if (state.needsModelSetup()) R.string.nav_models else R.string.nav_tests),
+                        onClick = if (state.needsModelSetup()) onNavigateToModels else onNavigateToTroubleshoot,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 if (state.activeSessions.isNotEmpty()) {
                     item { CardEnterAnimation(3) { ActiveSessionsCard(state) } }
                 }
-                item { CardEnterAnimation(4) { ActivityNavigationCard(onNavigateToHistory, onNavigateToLogs) } }
-                item { CardEnterAnimation(5) { RuntimeDetailsCard(state) } }
                 item {
                     CardEnterAnimation(6) {
                         AllowedAppsCard(
@@ -123,6 +129,7 @@ fun StatusScreen(
                         )
                     }
                 }
+                item { CardEnterAnimation(7) { RuntimeDetailsCard(state) } }
                 item { Spacer(Modifier.height(MindlayerScreenDefaults.BottomSpacerHeight)) }
             }
         }
@@ -195,15 +202,6 @@ private fun StatusOverviewCard(state: DashboardUiState) {
         DashboardHealthLevel.DEGRADED -> MaterialTheme.colorScheme.tertiaryContainer
         DashboardHealthLevel.ERROR -> MaterialTheme.colorScheme.errorContainer
     }
-    val statusLabel = stringResource(
-        when (health) {
-            DashboardHealthLevel.HEALTHY -> R.string.dashboard_overview_ready
-            DashboardHealthLevel.IDLE -> R.string.dashboard_overview_available
-            DashboardHealthLevel.CONNECTING -> R.string.dashboard_overview_starting
-            DashboardHealthLevel.DEGRADED -> R.string.dashboard_overview_check_needed
-            DashboardHealthLevel.ERROR -> R.string.dashboard_overview_attention
-        },
-    )
     val serviceHealthLabel = stringResource(R.string.dashboard_a11y_service_health)
 
     Surface(
@@ -251,18 +249,19 @@ private fun StatusOverviewCard(state: DashboardUiState) {
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
-                    Badge(statusLabel, healthTint)
                     Text(
                         text = healthHeadline(state, health),
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
-                    Text(
-                        text = healthDetail(state, nowMs, health),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    if (health != DashboardHealthLevel.HEALTHY) {
+                        Text(
+                            text = healthDetail(state, nowMs, health),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
 
@@ -406,6 +405,7 @@ private fun RuntimeDetailsCard(state: DashboardUiState) {
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    DeviceStatusRow(state)
                     if (state.modelId.isNotBlank()) {
                         LabelValue(
                             stringResource(R.string.dashboard_label_model),
@@ -774,7 +774,7 @@ private fun SessionRow(session: SessionUiItem, ordinal: Int) {
 // ── Activity navigation (Session History + Recent Logs consolidated) ──────────
 
 @Composable
-private fun ActivityNavigationCard(
+internal fun ActivityNavigationCard(
     onNavigateToHistory: () -> Unit,
     onNavigateToLogs: () -> Unit,
 ) {
@@ -817,7 +817,7 @@ private fun DashboardShortcut(
 ) {
     Surface(
         modifier = modifier
-            .heightIn(min = 88.dp)
+            .heightIn(min = 56.dp)
             .clickable(onClick = onClick)
             .semantics(mergeDescendants = true) {
                 this.contentDescription = contentDescription
@@ -825,9 +825,10 @@ private fun DashboardShortcut(
         shape = MaterialTheme.shapes.large,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
     ) {
-        Column(
+        Row(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
                 imageVector = icon,

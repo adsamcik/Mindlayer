@@ -62,6 +62,7 @@ class LogRepository(
 
     // Fire-and-forget log (non-blocking)
     fun log(entry: LogEntry) {
+        MindlayerDiagnostics.record(entry)
         val ok = queue.trySend(entry).isSuccess
         if (!ok) droppedCount.incrementAndGet()
     }

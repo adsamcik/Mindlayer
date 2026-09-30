@@ -32,6 +32,7 @@ internal object LintTestStubs {
                     requestId: String? = null,
                     sessionId: String? = null,
                     throwable: Throwable? = null,
+                    diagnosticThrowable: Throwable? = null,
                 ) = Unit
 
                 fun e(
@@ -40,6 +41,7 @@ internal object LintTestStubs {
                     requestId: String? = null,
                     sessionId: String? = null,
                     throwable: Throwable? = null,
+                    diagnosticThrowable: Throwable? = null,
                 ) = Unit
             }
 

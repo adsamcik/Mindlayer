@@ -29,6 +29,7 @@
     -->
 
     <application
+        android:name=".MindlayerApplication"
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
@@ -49,6 +50,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- The Tracebox-owned review uses platform views. Give it a readable
+             floating window rather than the launcher's dark splash background. -->
+        <activity
+            android:name="dev.tracebox.TraceboxPackageDisclosureActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Mindlayer.Diagnostics" />
 
         <!--
             v0.10 consent-Intent flow (docs/architecture/CONSENT_ARCHITECTURE.md).

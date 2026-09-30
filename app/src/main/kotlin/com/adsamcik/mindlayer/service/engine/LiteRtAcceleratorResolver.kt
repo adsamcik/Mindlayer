@@ -211,8 +211,7 @@ internal object LiteRtAcceleratorResolver {
     private fun probeNpu(nativeLibraryDir: String?): NpuProbe {
         val override = environmentOverride
         val apiLevel = override?.apiLevel ?: Build.VERSION.SDK_INT
-        @Suppress("InlinedApi")
-        val soc = (override?.socModel ?: Build.SOC_MODEL.orEmpty()).lowercase()
+        val soc = (override?.socModel ?: if (Build.VERSION.SDK_INT >= 31) Build.SOC_MODEL.orEmpty() else "").lowercase()
         val key = ProbeKey(nativeLibraryDir, apiLevel, soc)
         return npuProbeCache.getOrPut(key) {
             val libs = override?.libs ?: nativeLibraryDir

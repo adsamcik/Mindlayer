@@ -47,7 +47,7 @@ internal object MindlayerScreenDefaults {
 @Composable
 internal fun MindlayerPageHeader(
     title: String,
-    subtitle: String,
+    subtitle: String? = null,
     modifier: Modifier = Modifier,
     action: @Composable RowScope.() -> Unit = {},
 ) {
@@ -71,11 +71,13 @@ internal fun MindlayerPageHeader(
             )
             action()
         }
-        Text(
-            text = subtitle,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        subtitle?.takeIf(String::isNotBlank)?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

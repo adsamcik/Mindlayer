@@ -49,6 +49,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.adsamcik.mindlayer.service.R
+import com.adsamcik.mindlayer.service.modeldelivery.ModelDeliveryState
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerColors
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerType
 
@@ -167,8 +168,12 @@ internal fun healthHeadline(state: DashboardUiState, health: DashboardHealthLeve
     health == DashboardHealthLevel.CONNECTING ->
         stringResource(R.string.dashboard_health_connecting_to_service)
     health == DashboardHealthLevel.IDLE ->
-        stringResource(R.string.dashboard_health_engine_idle)
-    health == DashboardHealthLevel.DEGRADED ->
+        stringResource(when {
+            state.needsModelSetup() -> R.string.dashboard_models_needed
+            state.modelDelivery.values.any { it == ModelDeliveryState.Installed } -> R.string.dashboard_health_engine_idle
+            else -> R.string.dashboard_service_idle
+        })
+    health == DashboardHealthLevel.DEGRADED || health == DashboardHealthLevel.ERROR ->
         stringResource(R.string.dashboard_health_service_needs_attention)
     else -> stringResource(R.string.dashboard_health_service_ready)
 }
@@ -198,7 +203,7 @@ internal fun healthDetail(state: DashboardUiState, nowMs: Long, health: Dashboar
     }
 
     health == DashboardHealthLevel.IDLE -> {
-        stringResource(R.string.dashboard_health_detail_engine_idle)
+        stringResource(if (state.needsModelSetup()) R.string.dashboard_models_needed_detail else R.string.dashboard_health_detail_engine_idle)
     }
 
     state.thermalBand.equals("CRITICAL", ignoreCase = true) -> {
@@ -216,6 +221,11 @@ internal fun healthDetail(state: DashboardUiState, nowMs: Long, health: Dashboar
 
     else -> stringResource(R.string.dashboard_health_detail_ok)
 }
+
+internal fun DashboardUiState.needsModelSetup(): Boolean = !isEngineLoaded &&
+    modelDelivery.isNotEmpty() && modelDelivery.values.all {
+        it == ModelDeliveryState.NotInstalled || it == ModelDeliveryState.Unsupported
+    }
 
 @Composable
 internal fun testBadgeLabel(state: DashboardUiState): String = when {

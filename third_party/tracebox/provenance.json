@@ -1,0 +1,37 @@
+{
+  "base_tag": "v0.1.0-alpha.7",
+  "base_commit": "b49e8fda94e0bd65859eb080cacd624d9b72a7f5",
+  "repair_commit": "98f997e532d2273233efeb57f7a0e1966a8b44b7",
+  "branch": "codex/managed-identity-restart",
+  "command": ".\\gradlew.bat :android:tracebox:testDebugUnitTest :android:tracebox:assembleRelease :android:tracebox:generatePomFileForReleasePublication --no-daemon --console=plain",
+  "java_home": "C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.8.9-hotspot\\",
+  "jdk": "Eclipse Adoptium 21.0.8",
+  "gradle": "9.6.1",
+  "agp": "9.3.1",
+  "kotlin": "2.4.10",
+  "compile_sdk": 37,
+  "android_sdk": "C:\\Users\\adam-\\AppData\\Local\\Android\\Sdk",
+  "aar": "android/tracebox/build/outputs/aar/tracebox-release.aar",
+  "aar_sha256": "2b71f04fd530ff53cd8898ef96e674122559f346342cb7fabfece218d26b1fd5",
+  "pom": "android/tracebox/build/publications/release/pom-default.xml",
+  "patch": "managed-identity-restart.patch",
+  "tests": {
+    "errors": 0,
+    "tests": 75,
+    "failures": 0,
+    "skipped": 0,
+    "suites": 12,
+    "managed_restart_tests": 2,
+    "managed_secondary_tests": 4
+  },
+  "native_libraries": 0,
+  "native_capture_classes": 0,
+  "validation_scope": "Host unit tests and managed release AAR build. Device restart/export validation is performed separately by the Mindlayer task.",
+  "patch_sha256": "0f85a22388c81762c66279170fc7e4d43e849c4fb9f06983097172d85f0241da",
+  "repairs": [
+    "Preserve and resize managed identity journal quota reservations on restart.",
+    "Reuse the healthy managed writer when a secondary process polls an unchanged policy.",
+    "Recover quota slots occupied by verified sealed zero-frame segments under the mutation barrier; preserve all recorded evidence and identity journals."
+  ],
+  "patch_line_endings": "LF, normalized for cross-platform application"
+}

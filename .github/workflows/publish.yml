@@ -17,6 +17,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  TRACEBOX_PACKAGES_READ_TOKEN: ${{ secrets.TRACEBOX_PACKAGES_READ_TOKEN || github.token }}
+
 defaults:
   run:
     shell: bash
@@ -27,6 +30,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      packages: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -230,6 +234,7 @@ jobs:
       # Need write to upload assets to the GitHub Release that the
       # `publish` job above just created.
       contents: write
+      packages: read
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -391,6 +396,7 @@ jobs:
     if: github.ref_type == 'tag'
     permissions:
       contents: write
+      packages: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 

@@ -1,39 +1,50 @@
 package com.adsamcik.mindlayer.service.ui
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.Icons
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.adsamcik.mindlayer.service.R
 import com.adsamcik.mindlayer.service.engine.OcrAcceleratorFailureCache
+import com.adsamcik.mindlayer.service.R
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
@@ -51,6 +62,9 @@ fun TestsScreen(
     onTestOcrLlmExtraction: () -> Unit = {},
     onClearOcrFailureCache: () -> Unit = {},
     onRunAllVerifications: () -> Unit = {},
+    onNavigateToHistory: () -> Unit = {},
+    onNavigateToLogs: () -> Unit = {},
+    onNavigateToDiagnostics: () -> Unit = {},
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -64,8 +78,15 @@ fun TestsScreen(
                 CardEnterAnimation(0) {
                     MindlayerPageHeader(
                         title = stringResource(R.string.tests_title),
-                        subtitle = stringResource(R.string.tests_subtitle),
                     )
+                }
+            }
+            item {
+                Button(
+                    onClick = onNavigateToDiagnostics,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                ) {
+                    Text(stringResource(R.string.troubleshoot_report_action))
                 }
             }
             item { CardEnterAnimation(1) { WelcomeCard(state, onRunAllVerifications) } }
@@ -85,6 +106,7 @@ fun TestsScreen(
                     )
                 }
             }
+            item { ActivityNavigationCard(onNavigateToHistory, onNavigateToLogs) }
             item { Spacer(Modifier.height(MindlayerScreenDefaults.BottomSpacerHeight)) }
         }
     }
@@ -97,8 +119,6 @@ private fun WelcomeCard(state: DashboardUiState, onRunAllVerifications: () -> Un
     val tone = state.verifyAllSummaryTone()
     val isRunning = state.isAnyTestRunning
     val (pillLabel, pillTone) = welcomePill(state, tone, isRunning)
-    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.3f
-
     DashboardCard(title = stringResource(R.string.dashboard_welcome_title), icon = Icons.Filled.Info) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(
@@ -133,89 +153,6 @@ private fun WelcomeCard(state: DashboardUiState, onRunAllVerifications: () -> Un
                 }
                 Badge(text = pillLabel, color = toneColor(pillTone))
             }
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(
-                        color = MaterialTheme.colorScheme.surfaceVariant
-                            .copy(alpha = if (darkTheme) 0.35f else 0.25f),
-                        shape = RoundedCornerShape(8.dp),
-                    )
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                WelcomeEngineLine(
-                    label = stringResource(R.string.dashboard_test_chat_label),
-                    isRunning = state.isTestRunning,
-                    completedAtMs = state.lastTestCompletedAtMs,
-                    tone = if (state.lastTestCompletedAtMs != null) state.testStatusTone else null,
-                )
-                WelcomeEngineLine(
-                    label = stringResource(R.string.dashboard_test_embeddings_label),
-                    isRunning = state.embeddingTest.isRunning,
-                    completedAtMs = state.embeddingTest.lastCompletedAtMs,
-                    tone = if (state.embeddingTest.lastCompletedAtMs != null) state.embeddingTest.tone else null,
-                )
-                WelcomeEngineLine(
-                    label = stringResource(R.string.dashboard_test_ocr_label),
-                    isRunning = state.ocrTest.isRunning,
-                    completedAtMs = state.ocrTest.lastCompletedAtMs,
-                    tone = if (state.ocrTest.lastCompletedAtMs != null) state.ocrTest.tone else null,
-                )
-                WelcomeEngineLine(
-                    label = stringResource(R.string.dashboard_test_image_inference_label),
-                    isRunning = state.imageInferenceTest.isRunning,
-                    completedAtMs = state.imageInferenceTest.lastCompletedAtMs,
-                    tone = if (state.imageInferenceTest.lastCompletedAtMs != null) state.imageInferenceTest.tone else null,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun WelcomeEngineLine(
-    label: String,
-    isRunning: Boolean,
-    completedAtMs: Long?,
-    tone: DashboardMessageTone?,
-) {
-    val effectiveTone = when {
-        isRunning -> DashboardMessageTone.INFO
-        tone != null -> tone
-        else -> DashboardMessageTone.NEUTRAL
-    }
-    val badgeLabel = when {
-        isRunning -> stringResource(R.string.dashboard_test_badge_running)
-        completedAtMs == null -> stringResource(R.string.dashboard_test_badge_idle)
-        tone == DashboardMessageTone.SUCCESS -> stringResource(R.string.dashboard_test_badge_pass)
-        tone == DashboardMessageTone.WARNING -> stringResource(R.string.dashboard_test_badge_warn)
-        tone == DashboardMessageTone.ERROR -> stringResource(R.string.dashboard_test_badge_fail)
-        else -> stringResource(R.string.dashboard_test_badge_idle)
-    }
-    val nowMs = System.currentTimeMillis()
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            completedAtMs?.let { ts ->
-                if (!isRunning) {
-                    Text(
-                        text = formatRelativeTimestamp(ts, nowMs),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            Badge(text = badgeLabel, color = toneColor(effectiveTone))
         }
     }
 }
@@ -226,14 +163,20 @@ private fun welcomePill(
     tone: DashboardMessageTone,
     isRunning: Boolean,
 ): Pair<String, DashboardMessageTone> {
-    val hasAnyCompleted = state.lastTestCompletedAtMs != null ||
-        state.embeddingTest.lastCompletedAtMs != null ||
-        state.ocrTest.lastCompletedAtMs != null ||
-        state.imageInferenceTest.lastCompletedAtMs != null
+    val completedCount = listOf(
+        state.lastTestCompletedAtMs,
+        state.embeddingTest.lastCompletedAtMs,
+        state.ocrTest.lastCompletedAtMs,
+        state.imageInferenceTest.lastCompletedAtMs,
+        state.sdkInferAsyncTest.lastCompletedAtMs,
+        state.sdkInferRealtimeTest.lastCompletedAtMs,
+        state.sdkGenerateWithImageTest.lastCompletedAtMs,
+        state.ocrLlmExtractionTest.lastCompletedAtMs,
+    ).count { it != null }
     return when {
         isRunning -> stringResource(R.string.dashboard_welcome_state_running) to DashboardMessageTone.INFO
-        !hasAnyCompleted -> stringResource(R.string.dashboard_welcome_state_idle) to DashboardMessageTone.NEUTRAL
-        tone == DashboardMessageTone.SUCCESS ->
+        completedCount == 0 -> stringResource(R.string.dashboard_welcome_state_idle) to DashboardMessageTone.NEUTRAL
+        completedCount == 8 && tone == DashboardMessageTone.SUCCESS ->
             stringResource(R.string.dashboard_welcome_state_pass) to DashboardMessageTone.SUCCESS
         tone == DashboardMessageTone.WARNING ->
             stringResource(R.string.dashboard_welcome_state_warn) to DashboardMessageTone.WARNING
@@ -259,26 +202,99 @@ private fun TestInferenceCard(
     onClearOcrFailureCache: () -> Unit,
 ) {
     DashboardCard(title = stringResource(R.string.dashboard_card_test_inference_title), icon = Icons.Filled.PlayArrow) {
-        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            ChatEngineRow(state, onTestInference)
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            CheckDisclosure(
+                title = stringResource(R.string.dashboard_test_chat_label),
+                status = testBadgeLabel(state),
+                tone = if (state.isTestRunning) DashboardMessageTone.INFO else state.testStatusTone,
+            ) { ChatEngineRow(state, onTestInference) }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            EmbeddingEngineRow(state, onTestEmbeddings)
+            CheckDisclosure(
+                title = stringResource(R.string.dashboard_test_embeddings_label),
+                status = engineTestBadgeLabel(state.embeddingTest),
+                tone = if (state.embeddingTest.isRunning) DashboardMessageTone.INFO else state.embeddingTest.tone,
+            ) { EmbeddingEngineRow(state, onTestEmbeddings) }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            OcrEngineRow(state, onTestOcr, onClearOcrFailureCache)
+            CheckDisclosure(
+                title = stringResource(R.string.dashboard_test_ocr_label),
+                status = engineTestBadgeLabel(state.ocrTest),
+                tone = if (state.ocrTest.isRunning) DashboardMessageTone.INFO else state.ocrTest.tone,
+            ) { OcrEngineRow(state, onTestOcr, onClearOcrFailureCache) }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            ImageInferenceEngineRow(state, onTestImageInference)
+            CheckDisclosure(
+                title = stringResource(R.string.dashboard_test_image_inference_label),
+                status = engineTestBadgeLabel(state.imageInferenceTest),
+                tone = if (state.imageInferenceTest.isRunning) DashboardMessageTone.INFO else state.imageInferenceTest.tone,
+            ) { ImageInferenceEngineRow(state, onTestImageInference) }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            SdkInferAsyncEngineRow(state, onTestSdkInferAsync)
+            CheckDisclosure(
+                title = stringResource(R.string.dashboard_test_sdk_infer_async_label),
+                status = engineTestBadgeLabel(state.sdkInferAsyncTest),
+                tone = if (state.sdkInferAsyncTest.isRunning) DashboardMessageTone.INFO else state.sdkInferAsyncTest.tone,
+            ) { SdkInferAsyncEngineRow(state, onTestSdkInferAsync) }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            SdkInferRealtimeEngineRow(state, onTestSdkInferRealtime)
+            CheckDisclosure(
+                title = stringResource(R.string.dashboard_test_sdk_infer_realtime_label),
+                status = engineTestBadgeLabel(state.sdkInferRealtimeTest),
+                tone = if (state.sdkInferRealtimeTest.isRunning) DashboardMessageTone.INFO else state.sdkInferRealtimeTest.tone,
+            ) { SdkInferRealtimeEngineRow(state, onTestSdkInferRealtime) }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            SdkGenerateWithImageEngineRow(state, onTestSdkGenerateWithImage)
+            CheckDisclosure(
+                title = stringResource(R.string.dashboard_test_sdk_generate_with_image_label),
+                status = engineTestBadgeLabel(state.sdkGenerateWithImageTest),
+                tone = if (state.sdkGenerateWithImageTest.isRunning) DashboardMessageTone.INFO else state.sdkGenerateWithImageTest.tone,
+            ) { SdkGenerateWithImageEngineRow(state, onTestSdkGenerateWithImage) }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            OcrLlmExtractionEngineRow(state, onTestOcrLlmExtraction)
+            CheckDisclosure(
+                title = stringResource(R.string.dashboard_test_ocr_llm_extraction_label),
+                status = engineTestBadgeLabel(state.ocrLlmExtractionTest),
+                tone = if (state.ocrLlmExtractionTest.isRunning) DashboardMessageTone.INFO else state.ocrLlmExtractionTest.tone,
+            ) { OcrLlmExtractionEngineRow(state, onTestOcrLlmExtraction) }
         }
     }
 }
 
+@Composable
+private fun CheckDisclosure(
+    title: String,
+    status: String,
+    tone: DashboardMessageTone,
+    content: @Composable () -> Unit,
+) {
+    var expanded by rememberSaveable(title) { mutableStateOf(false) }
+    val expansionState = stringResource(
+        if (expanded) R.string.dashboard_details_expanded else R.string.dashboard_details_collapsed,
+    )
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .clickable(role = Role.Button) { expanded = !expanded }
+                .semantics { stateDescription = expansionState }
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = title,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.titleSmall,
+            )
+            if (!expanded) {
+                Badge(text = status, color = toneColor(tone))
+            }
+            Icon(
+                imageVector = Icons.Filled.KeyboardArrowDown,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp).rotate(if (expanded) 180f else 0f),
+            )
+        }
+        if (expanded) {
+            Column(modifier = Modifier.padding(bottom = 12.dp)) { content() }
+        }
+    }
+}
 @Composable
 private fun ChatEngineRow(state: DashboardUiState, onTestInference: () -> Unit) {
     val nowMs = System.currentTimeMillis()
@@ -290,11 +306,6 @@ private fun ChatEngineRow(state: DashboardUiState, onTestInference: () -> Unit) 
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(
-            text = stringResource(R.string.dashboard_test_chat_label),
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
         Text(
             text = stringResource(R.string.dashboard_test_chat_subtitle),
             style = MaterialTheme.typography.bodySmall,
@@ -336,12 +347,6 @@ private fun ChatEngineRow(state: DashboardUiState, onTestInference: () -> Unit) 
 
         if (state.testStatus.isNotBlank()) {
             DiagnosticCallout(message = state.testStatus, tone = displayTone)
-        } else {
-            Text(
-                text = stringResource(R.string.dashboard_test_verify),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
 
         AnimatedVisibility(visible = state.shouldHighlightTestResult(nowMs)) {
@@ -374,11 +379,6 @@ private fun EmbeddingEngineRow(state: DashboardUiState, onTestEmbeddings: () -> 
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(
-            text = stringResource(R.string.dashboard_test_embeddings_label),
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
         Text(
             text = stringResource(R.string.dashboard_test_embeddings_subtitle),
             style = MaterialTheme.typography.bodySmall,
@@ -455,11 +455,6 @@ private fun OcrEngineRow(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(
-            text = stringResource(R.string.dashboard_test_ocr_label),
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
         Text(
             text = stringResource(R.string.dashboard_test_ocr_subtitle),
             style = MaterialTheme.typography.bodySmall,
@@ -543,11 +538,6 @@ private fun ImageInferenceEngineRow(
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(
-            text = stringResource(R.string.dashboard_test_image_inference_label),
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
             text = stringResource(R.string.dashboard_test_image_inference_subtitle),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -622,11 +612,6 @@ private fun SdkInferAsyncEngineRow(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(
-            text = stringResource(R.string.dashboard_test_sdk_infer_async_label),
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
         Text(
             text = stringResource(R.string.dashboard_test_sdk_infer_async_subtitle),
             style = MaterialTheme.typography.bodySmall,
@@ -703,11 +688,6 @@ private fun SdkInferRealtimeEngineRow(
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(
-            text = stringResource(R.string.dashboard_test_sdk_infer_realtime_label),
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
             text = stringResource(R.string.dashboard_test_sdk_infer_realtime_subtitle),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -783,11 +763,6 @@ private fun SdkGenerateWithImageEngineRow(
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(
-            text = stringResource(R.string.dashboard_test_sdk_generate_with_image_label),
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
             text = stringResource(R.string.dashboard_test_sdk_generate_with_image_subtitle),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -862,11 +837,6 @@ private fun OcrLlmExtractionEngineRow(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(
-            text = stringResource(R.string.dashboard_test_ocr_llm_extraction_label),
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
         Text(
             text = stringResource(R.string.dashboard_test_ocr_llm_extraction_subtitle),
             style = MaterialTheme.typography.bodySmall,

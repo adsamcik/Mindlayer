@@ -89,13 +89,12 @@
     <string name="dashboard_last_sampled">Last sampled %1$s</string>
     <string name="dashboard_live">LIVE</string>
     <string name="dashboard_token_count">%1$d/%2$d tok</string>
-    <string name="dashboard_session_history">Past activity</string>
+    <string name="dashboard_session_history">History</string>
     <string name="dashboard_session_history_body">Past sessions and inference activity</string>
-    <string name="dashboard_recent_logs">Diagnostics</string>
+    <string name="dashboard_recent_logs">Request log</string>
     <string name="dashboard_recent_logs_body">Diagnostics and event log entries</string>
-    <string name="dashboard_test_verify">Verify AIDL control flow and pipe streaming end to end.</string>
     <string name="dashboard_output">Output</string>
-    <string name="recent_logs_title">System Logs</string>
+    <string name="recent_logs_title">Request log</string>
     <string name="session_timeline_title">Session Timeline</string>
     <string name="session_detail_entries_newest">%1$s log entries · newest first</string>
     <string name="session_summary_title">Session summary</string>
@@ -121,17 +120,17 @@
     <string name="dashboard_health_status_polling_failed">Status needs a refresh</string>
     <string name="dashboard_health_connecting_to_service">Getting things ready</string>
     <string name="dashboard_health_engine_not_ready">Engine not ready</string>
-    <string name="dashboard_health_engine_idle">Ready when you are</string>
+    <string name="dashboard_health_engine_idle">Ready when needed</string>
     <string name="dashboard_health_service_needs_attention">Mindlayer needs attention</string>
-    <string name="dashboard_health_service_ready">Mindlayer is ready</string>
+    <string name="dashboard_health_service_ready">Ready</string>
 
     <!-- Dashboard: service health detail messages. -->
     <string name="dashboard_health_detail_disconnected_with_sample">Pull down to reconnect. Last update %1$s.</string>
     <string name="dashboard_health_detail_disconnected_no_sample">Pull down to reconnect.</string>
-    <string name="dashboard_health_detail_polling_failed">Pull down to refresh. Open Diagnostics if this continues.</string>
+    <string name="dashboard_health_detail_polling_failed">Pull down to refresh. Open Troubleshoot if this continues.</string>
     <string name="dashboard_health_detail_stale_with_sample">Pull down to refresh. Last update %1$s.</string>
     <string name="dashboard_health_detail_waiting_first_sample">Checking the service now.</string>
-    <string name="dashboard_health_detail_no_loaded_model">Binder is reachable, but the latest runtime sample does not report a loaded model or active backend.</string>
+    <string name="dashboard_health_detail_no_loaded_model">No model is running yet.</string>
     <string name="dashboard_health_detail_engine_idle">It starts automatically when an app needs it.</string>
     <string name="dashboard_health_detail_thermal_critical">Your phone needs to cool before Mindlayer can run normally.</string>
     <string name="dashboard_health_detail_thermal_hot">Your phone is warm, so Mindlayer may run more slowly.</string>
@@ -139,12 +138,12 @@
     <string name="dashboard_health_detail_ok">It’s available to apps you’ve allowed.</string>
 
     <!-- Dashboard: test inference badge labels. -->
-    <string name="dashboard_test_badge_running">RUNNING</string>
-    <string name="dashboard_test_badge_idle">IDLE</string>
-    <string name="dashboard_test_badge_pass">PASS</string>
-    <string name="dashboard_test_badge_warn">WARN</string>
-    <string name="dashboard_test_badge_fail">FAIL</string>
-    <string name="dashboard_test_badge_ready">READY</string>
+    <string name="dashboard_test_badge_running">Running</string>
+    <string name="dashboard_test_badge_idle">Not run</string>
+    <string name="dashboard_test_badge_pass">Passed</string>
+    <string name="dashboard_test_badge_warn">Needs attention</string>
+    <string name="dashboard_test_badge_fail">Failed</string>
+    <string name="dashboard_test_badge_ready">Ready</string>
 
     <!-- Dashboard: accessibility content descriptions. -->
     <string name="dashboard_a11y_service_health">Service health</string>
@@ -170,11 +169,11 @@
 
     <!-- Dashboard: card titles and inline labels. -->
     <string name="dashboard_card_service_status_title">Service Status</string>
-    <string name="dashboard_card_test_inference_title">Engine Verification</string>
+    <string name="dashboard_card_test_inference_title">Individual checks</string>
     <string name="dashboard_card_active_sessions_title">Active Sessions (%1$d)</string>
     <string name="dashboard_engine_loaded">LOADED</string>
     <string name="dashboard_engine_not_ready_badge">NOT READY</string>
-    <string name="dashboard_engine_idle_badge">IDLE</string>
+    <string name="dashboard_engine_idle_badge">Idle</string>
     <string name="dashboard_backend_none" translatable="false">NONE</string>
     <string name="dashboard_label_backend">Backend</string>
     <string name="dashboard_label_init_time">Init time</string>
@@ -189,55 +188,55 @@
     <string name="dashboard_callout_runtime_idle">Engine is not loaded yet. Tap Run test inference to warm it up.</string>
     <string name="dashboard_callout_engine_not_ready">Engine not ready — last test output is historical until you rerun after recovery.</string>
     <string name="dashboard_test_button_running">Running…</string>
-    <string name="dashboard_test_button_run">Run Test</string>
+    <string name="dashboard_test_button_run">Run check</string>
     <string name="dashboard_test_waiting_for_output">Waiting for output…</string>
-    <string name="dashboard_test_chat_label">Chat (LLM)</string>
-    <string name="dashboard_test_chat_subtitle">Streams Gemma 4 E2B tokens over an AIDL pipe.</string>
-    <string name="dashboard_test_embeddings_label">Embeddings</string>
-    <string name="dashboard_test_embeddings_subtitle">Asks EmbeddingGemma to embed two sentences and verifies the vectors are distinguishable.</string>
-    <string name="dashboard_test_embedding_button_run">Test embeddings</string>
+    <string name="dashboard_test_chat_label">Chat</string>
+    <string name="dashboard_test_chat_subtitle">Checks that a reply streams correctly.</string>
+    <string name="dashboard_test_embeddings_label">Text search</string>
+    <string name="dashboard_test_embeddings_subtitle">Checks that different sentences produce different search data.</string>
+    <string name="dashboard_test_embedding_button_run">Run check</string>
     <string name="dashboard_test_embedding_button_running">Embedding…</string>
-    <string name="dashboard_test_ocr_label">OCR</string>
-    <string name="dashboard_test_ocr_subtitle">Renders a small PNG with the words “Hello world 1234” and runs it through the PaddleOCR session pipeline.</string>
-    <string name="dashboard_test_ocr_button_run">Test OCR</string>
+    <string name="dashboard_test_ocr_label">Read text</string>
+    <string name="dashboard_test_ocr_subtitle">Checks that text can be read from a sample image.</string>
+    <string name="dashboard_test_ocr_button_run">Run check</string>
     <string name="dashboard_test_ocr_button_running">OCR…</string>
-    <string name="dashboard_test_image_inference_label">Image + Text (Gemma multimodal)</string>
-    <string name="dashboard_test_image_inference_subtitle">Renders a 320×240 PNG, attaches it to an inference request, and verifies Gemma returns a non-empty response.</string>
-    <string name="dashboard_test_image_inference_button_run">Test image</string>
+    <string name="dashboard_test_image_inference_label">Understand images</string>
+    <string name="dashboard_test_image_inference_subtitle">Checks that a sample image gets a response.</string>
+    <string name="dashboard_test_image_inference_button_run">Run check</string>
     <string name="dashboard_test_image_inference_button_running">Imaging…</string>
-    <string name="dashboard_test_sdk_infer_async_label">SDK infer — single-shot</string>
-    <string name="dashboard_test_sdk_infer_async_subtitle">Calls Mindlayer.inferAsync through the SDK facade and verifies a non-empty response is returned.</string>
-    <string name="dashboard_test_sdk_infer_async_button_run">Test SDK infer</string>
+    <string name="dashboard_test_sdk_infer_async_label">App replies</string>
+    <string name="dashboard_test_sdk_infer_async_subtitle">Checks the SDK reply connection used by other apps.</string>
+    <string name="dashboard_test_sdk_infer_async_button_run">Run check</string>
     <string name="dashboard_test_sdk_infer_async_button_running">Inferring…</string>
-    <string name="dashboard_test_sdk_infer_realtime_label">SDK infer — streaming</string>
-    <string name="dashboard_test_sdk_infer_realtime_subtitle">Calls Mindlayer.inferRealtime through the SDK facade and verifies token-delta events are streamed correctly.</string>
-    <string name="dashboard_test_sdk_infer_realtime_button_run">Test SDK stream</string>
+    <string name="dashboard_test_sdk_infer_realtime_label">App streaming</string>
+    <string name="dashboard_test_sdk_infer_realtime_subtitle">Checks that other apps receive replies as they are written.</string>
+    <string name="dashboard_test_sdk_infer_realtime_button_run">Run check</string>
     <string name="dashboard_test_sdk_infer_realtime_button_running">Streaming…</string>
-    <string name="dashboard_test_sdk_generate_with_image_label">SDK generate with image</string>
-    <string name="dashboard_test_sdk_generate_with_image_subtitle">Calls the stateless Mindlayer.generateWithImage with a rendered fixture PNG and verifies a non-empty description is returned.</string>
-    <string name="dashboard_test_sdk_generate_with_image_button_run">Test image gen</string>
+    <string name="dashboard_test_sdk_generate_with_image_label">App images</string>
+    <string name="dashboard_test_sdk_generate_with_image_subtitle">Checks image responses through the app SDK.</string>
+    <string name="dashboard_test_sdk_generate_with_image_button_run">Run check</string>
     <string name="dashboard_test_sdk_generate_with_image_button_running">Generating…</string>
-    <string name="dashboard_test_ocr_llm_extraction_label">OCR + LLM extraction</string>
-    <string name="dashboard_test_ocr_llm_extraction_subtitle">Calls Mindlayer.ocrAsync with LLM extraction enabled on a rendered text fixture and verifies at least one line is recognised.</string>
-    <string name="dashboard_test_ocr_llm_extraction_button_run">Test OCR+LLM</string>
+    <string name="dashboard_test_ocr_llm_extraction_label">Text extraction</string>
+    <string name="dashboard_test_ocr_llm_extraction_subtitle">Checks reading and interpreting text from a sample image.</string>
+    <string name="dashboard_test_ocr_llm_extraction_button_run">Run check</string>
     <string name="dashboard_test_ocr_llm_extraction_button_running">Extracting…</string>
     <!-- F-094 (OCR accelerator failure cache) status row strings -->
     <string name="dashboard_ocr_cooldown_message">%1$s acceleration disabled until %2$s</string>
     <string name="dashboard_ocr_cooldown_details">failed: %1$s × %2$d</string>
     <string name="dashboard_ocr_cooldown_retry">Retry now</string>
-    <string name="dashboard_welcome_title">On-device AI</string>
-    <string name="dashboard_welcome_body">Mindlayer runs the chat language model, sentence embeddings and OCR locally on this device. Nothing leaves your phone. Tap to verify all three engines respond.</string>
-    <string name="dashboard_welcome_button_run">Verify all engines</string>
-    <string name="dashboard_welcome_button_running">Verifying…</string>
-    <string name="dashboard_welcome_state_idle">Not verified yet</string>
+    <string name="dashboard_welcome_title">Check this device</string>
+    <string name="dashboard_welcome_body">Run eight checks for text, images and app connections.</string>
+    <string name="dashboard_welcome_button_run">Run checks</string>
+    <string name="dashboard_welcome_button_running">Checking…</string>
+    <string name="dashboard_welcome_state_idle">Not checked</string>
     <string name="dashboard_welcome_state_running">Running…</string>
-    <string name="dashboard_welcome_state_partial">Partial</string>
-    <string name="dashboard_welcome_state_pass">All engines healthy</string>
-    <string name="dashboard_welcome_state_warn">Some engines have warnings</string>
-    <string name="dashboard_welcome_state_fail">One or more engines failed</string>
+    <string name="dashboard_welcome_state_partial">Partly checked</string>
+    <string name="dashboard_welcome_state_pass">All passed</string>
+    <string name="dashboard_welcome_state_warn">Check warnings</string>
+    <string name="dashboard_welcome_state_fail">Check failed</string>
     <string name="dashboard_advanced_show">Show advanced runtime details</string>
     <string name="dashboard_advanced_hide">Hide advanced runtime details</string>
-    <string name="dashboard_technical_details">Technical details</string>
+    <string name="dashboard_technical_details">Device details</string>
     <string name="dashboard_details_expanded">Expanded</string>
     <string name="dashboard_details_collapsed">Collapsed</string>
     <string name="dashboard_overview_ready">Ready</string>
@@ -257,7 +256,7 @@
     <string name="dashboard_temperature_warm">Warm</string>
     <string name="dashboard_temperature_hot">Hot</string>
     <string name="dashboard_temperature_critical">Too hot</string>
-    <string name="dashboard_temperature_ok_support">No slowdown from heat</string>
+    <string name="dashboard_temperature_ok_support">Normal</string>
     <string name="dashboard_temperature_hot_support">Mindlayer may run slower</string>
     <string name="dashboard_temperature_critical_support">Pause and let it cool</string>
     <string name="dashboard_temperature_not_reported">Not reported by this phone</string>
@@ -323,15 +322,15 @@
     <string name="session_history_label_last_active">Last active</string>
 
     <!-- Recent logs screen. -->
-    <string name="recent_logs_subtitle_loading">Loading diagnostics log…</string>
-    <string name="recent_logs_subtitle_load_failure">Load failure</string>
-    <string name="recent_logs_subtitle_count">%1$s log entries</string>
-    <string name="recent_logs_loading_title">Loading system logs</string>
-    <string name="recent_logs_loading_message">Reading retained diagnostics entries from the local log database.</string>
-    <string name="recent_logs_error_title">Couldn\'t load system logs</string>
+    <string name="recent_logs_subtitle_loading">Loading…</string>
+    <string name="recent_logs_subtitle_load_failure">Couldn\'t load</string>
+    <string name="recent_logs_subtitle_count">%1$s events</string>
+    <string name="recent_logs_loading_title">Loading events</string>
+    <string name="recent_logs_loading_message">Reading saved events.</string>
+    <string name="recent_logs_error_title">Couldn\'t load events</string>
     <string name="recent_logs_a11y_load_error">System logs load error</string>
-    <string name="recent_logs_empty_title">No log entries recorded yet</string>
-    <string name="recent_logs_empty_message">Run a test inference or wait for a client request to generate diagnostic log entries.</string>
+    <string name="recent_logs_empty_title">No events yet</string>
+    <string name="recent_logs_empty_message">Run a check or use a connected app, then refresh.</string>
     <string name="recent_logs_a11y_empty">No log entries</string>
 
     <!-- Allowlist install source labels (resolveInstallSource fallbacks). -->
@@ -343,13 +342,13 @@
     <!-- Bottom navigation tab labels -->
     <string name="nav_status">Status</string>
     <string name="nav_models">Models</string>
-    <string name="nav_tests">Tests</string>
+    <string name="nav_tests">Troubleshoot</string>
     <string name="nav_a11y_status_tab">Status tab</string>
     <string name="nav_a11y_models_tab">Models tab</string>
-    <string name="nav_a11y_tests_tab">Tests tab</string>
+    <string name="nav_a11y_tests_tab">Troubleshoot tab</string>
 
     <!-- Tests page -->
-    <string name="tests_title">Engine verification</string>
+    <string name="tests_title">Troubleshoot</string>
     <string name="tests_subtitle">Exercise each on-device engine end to end. Tests run in the order shown when you tap Verify all.</string>
 
     <!-- Models page -->
@@ -358,9 +357,9 @@
     <string name="models_offline_banner">AI requests stay on this device. Model files are delivered by Google Play and require connectivity for the initial download.</string>
     <string name="models_role_chat">Chat &amp; vision</string>
     <string name="models_role_chat_description">Writes replies and understands images.</string>
-    <string name="models_role_embeddings">Embeddings</string>
+    <string name="models_role_embeddings">Text search</string>
     <string name="models_role_embeddings_description">Finds related text by meaning.</string>
-    <string name="models_role_ocr">OCR</string>
+    <string name="models_role_ocr">Read text</string>
     <string name="models_role_ocr_description">Reads text from images.</string>
 
     <string name="models_refresh_action">Refresh model status</string>
@@ -411,7 +410,7 @@
     <string name="models_status_checking_headline">Checking model status</string>
     <string name="models_status_checking_detail">Checking Google Play delivery and the files already on this device.</string>
     <string name="models_status_download_required_headline">Download required</string>
-    <string name="models_status_download_required_detail">Google Play downloads these files once. After download and verification, this model can be used offline.</string>
+    <string name="models_status_download_required_detail">Download once to use this model offline.</string>
     <string name="models_status_pending_headline">Waiting to start download</string>
     <string name="models_status_pending_detail">The request is queued with Google Play.</string>
     <string name="models_status_waiting_wifi_headline">Waiting for Wi-Fi</string>
@@ -436,7 +435,7 @@
     <string name="models_status_starting_headline">Starting model</string>
     <string name="models_status_starting_chat_detail">Chat startup may take about 15 seconds.</string>
     <string name="models_status_verification_running_headline">Verifying downloaded model</string>
-    <string name="models_status_verification_running_detail">Downloaded model verification is running from Tests. This does not mean the model is currently loaded for service use.</string>
+    <string name="models_status_verification_running_detail">A check is running in Troubleshoot. The model may not be loaded for app use.</string>
     <string name="models_status_ready_headline">Ready to use</string>
     <string name="models_status_ready_detail">Chat and vision are loaded in the live service.</string>
     <string name="models_status_storage_headline">Free storage to continue</string>
@@ -446,19 +445,19 @@
     <string name="models_status_verification_failed_headline">Model files couldn’t be verified</string>
     <string name="models_status_verification_failed_detail">Try the download again. Mindlayer will replace and prepare the model files.</string>
     <string name="models_status_activation_failed_headline">OCR couldn’t start</string>
-    <string name="models_status_activation_failed_detail">The OCR files remain downloaded. Retry activation, or remove the files and download them again.</string>
+    <string name="models_status_activation_failed_detail">The files are downloaded. Retry startup, or remove and download again.</string>
     <string name="models_status_removal_interrupted_headline">Removal needs to finish</string>
     <string name="models_status_removal_interrupted_detail">Active use was stopped, but file removal did not finish. Finish removing the files.</string>
     <string name="models_status_removal_failed_headline">Removal failed</string>
     <string name="models_status_removal_failed_detail">Mindlayer could not remove all model files. Retry removal.</string>
     <string name="models_status_runtime_failed_headline">Model couldn’t start</string>
-    <string name="models_status_runtime_failed_detail">The live service reported a startup failure. Retry from the Tests tab or reinstall the model files.</string>
+    <string name="models_status_runtime_failed_detail">Startup failed. Run a check in Troubleshoot or reinstall this model.</string>
     <string name="models_status_runtime_verification_failed_headline">Downloaded — verification needs attention</string>
-    <string name="models_status_runtime_verification_failed_detail">The model files remain downloaded. Run verification again from Tests.</string>
+    <string name="models_status_runtime_verification_failed_detail">The model is downloaded. Run its check again in Troubleshoot.</string>
     <string name="models_status_attention_headline">Model needs attention</string>
-    <string name="models_status_attention_detail">Review the runtime and delivery information below, then retry the available action.</string>
+    <string name="models_status_attention_detail">Open Details for the cause, then retry.</string>
     <string name="models_status_quiescing_headline">Waiting for active use to stop</string>
-    <string name="models_status_quiescing_detail">Mindlayer is safely draining active work before deleting model files.</string>
+    <string name="models_status_quiescing_detail">Waiting for active requests to finish.</string>
     <string name="models_status_removing_headline">Removing model files</string>
     <string name="models_status_removing_detail">Deletion may take a moment. The model can be downloaded again later.</string>
     <string name="models_status_unavailable_headline">Google Play delivery unavailable</string>
@@ -496,18 +495,18 @@
     <string name="models_runtime_unavailable_headline">Runtime status unavailable</string>
     <string name="models_runtime_unavailable_detail">No service sample has been received. Runtime status updates automatically when a fresh service sample arrives.</string>
     <string name="models_runtime_verification_running_headline">Verification in progress</string>
-    <string name="models_runtime_verification_running_detail">The Tests tab is exercising this model now. This does not mean it is currently loaded for service use.</string>
+    <string name="models_runtime_verification_running_detail">A check is running. The model may still be idle between requests.</string>
     <string name="models_runtime_verification_passed_headline">Last verification passed</string>
     <string name="models_runtime_verification_passed_detail">Completed %1$s. This is historical test evidence; it does not mean the model is currently loaded.</string>
     <string name="models_runtime_verification_failed_headline">Last verification failed</string>
-    <string name="models_runtime_verification_failed_detail">Completed %1$s. Run this model’s verification again on the Tests tab.</string>
+    <string name="models_runtime_verification_failed_detail">Completed %1$s. Run the check again in Troubleshoot.</string>
     <string name="models_runtime_verification_not_run_headline">Last verification not run</string>
-    <string name="models_runtime_verification_not_run_detail">Run this model’s verification on the Tests tab. Verification results do not indicate current runtime loading.</string>
+    <string name="models_runtime_verification_not_run_detail">Run a check in Troubleshoot. A passed check does not mean the model stays loaded.</string>
     <string name="models_time_unknown">at an unknown time</string>
 
     <string name="models_show_technical_details">Details</string>
     <string name="models_hide_technical_details">Less</string>
-    <string name="models_status_details_title">What this status means</string>
+    <string name="models_status_details_title">Status</string>
     <string name="models_context_window_label">Context window</string>
     <string name="models_context_window_value">%1$s tokens</string>
     <string name="models_model_size_label">Model size</string>
@@ -529,5 +528,25 @@
          test has ever been run. Replaces the use-site of
          `dashboard_callout_runtime_idle` for the calm path; the old key is
          retained for the failure/stale/throttled path. -->
-    <string name="status_idle_no_test_hint">Engine is idle. Tap any test on the Tests tab to warm it up.</string>
+    <string name="status_idle_no_test_hint">Ready when needed. Run a check in Troubleshoot to try it.</string>
+    <string name="troubleshoot_report_action">Share report</string>
+    <string name="logs_filter_all">All</string>
+    <string name="logs_filter_errors">Errors</string>
+    <string name="logs_request_details">Details</string>
+    <string name="logs_refresh">Refresh</string>
+    <string name="logs_no_errors">No recent errors</string>
+    <string name="report_title">Share report</string>
+    <string name="report_unavailable">Reports are unavailable</string>
+    <string name="report_unavailable_message">Close and reopen Mindlayer, then try again.</string>
+    <string name="logs_hide_details">Hide details</string>
+    <string name="report_details_title">Error report</string>
+    <string name="report_description">Recent errors and performance details from this device.</string>
+    <string name="report_review_notice">You review the report before sharing.</string>
+    <string name="report_review_action">Review and share</string>
+    <string name="report_not_ready">Recording is off or unavailable. Check Advanced options.</string>
+    <string name="report_recording">Record diagnostics</string>
+    <string name="report_recording_partial">Recording partly applied. Reopen Mindlayer and try again.</string>
+    <string name="dashboard_models_needed">Models need setup</string>
+    <string name="dashboard_models_needed_detail">Open Models to get started.</string>
+    <string name="dashboard_service_idle">Service idle</string>
 </resources>

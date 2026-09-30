@@ -117,6 +117,17 @@ class MindlayerLogTest {
         verify { Log.e("Mindlayer.Fatal", "[req=r6] crash", ex) }
     }
 
+    @Test
+    fun `diagnostic exceptions do not expose throwable messages or stacks to logcat`() {
+        val exception = IllegalStateException("private prompt text")
+        MindlayerLog.e("Engine", "Inference failed: IllegalStateException", diagnosticThrowable = exception)
+        MindlayerLog.w("Engine", "Backend failed: IllegalStateException", diagnosticThrowable = exception)
+        verify { Log.e("Mindlayer.Engine", "Inference failed: IllegalStateException") }
+        verify { Log.w("Mindlayer.Engine", "Backend failed: IllegalStateException") }
+        verify(exactly = 0) { Log.e(any(), any(), any()) }
+        verify(exactly = 0) { Log.w(any(), any<String>(), any()) }
+    }
+
     // ── format edge cases ────────────────────────────────────────────────
 
     @Test

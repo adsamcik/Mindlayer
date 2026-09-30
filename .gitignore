@@ -1,6 +1,7 @@
 # Built application files
 *.apk
 *.aar
+!/third_party/tracebox/repository/io/github/tracebox/tracebox/0.1.0-alpha.7-mindlayer.1/tracebox-0.1.0-alpha.7-mindlayer.1.aar
 *.ap_
 *.aab
 *.apks

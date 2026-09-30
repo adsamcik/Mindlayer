@@ -7,6 +7,31 @@ import org.junit.Test
 
 class NativeSafeThrowableLogDetectorTest {
     @Test
+    fun `allows redacted diagnostics while still rejecting raw positional and named throwable`() {
+        lint()
+            .projects(
+                ProjectDescription().name("app").files(
+                    LintTestStubs.mindlayerLog,
+                    kotlin(
+                        "src/main/kotlin/com/adsamcik/mindlayer/service/engine/DiagnosticsLog.kt",
+                        """
+                            package com.adsamcik.mindlayer.service.engine
+                            import com.adsamcik.mindlayer.service.logging.MindlayerLog
+                            fun evidence(t: Throwable) {
+                                MindlayerLog.e("Engine", "Failed", requestId = "r", sessionId = "s", diagnosticThrowable = t)
+                                MindlayerLog.e("Engine", "Failed", "r", "s", t)
+                                MindlayerLog.w("Engine", "Failed", diagnosticThrowable = t, throwable = t)
+                            }
+                        """.trimIndent(),
+                    ),
+                ),
+            )
+            .issues(NativeSafeThrowableLogDetector.ISSUE)
+            .run()
+            .expectErrorCount(2)
+    }
+
+    @Test
     fun `flags non-null throwable passed to MindlayerLog on native paths`() {
         lint()
             .projects(

@@ -218,7 +218,7 @@ class PaddleOcrEngine(
             }
             _state.value = PaddleOcrEngineState.Failed(failure)
             logRepository?.logInitFailureCategorized(failure, featureName = "ocr")
-            MindlayerLog.w(TAG, "PaddleOCR init failed: ${t.safeLabel()}", throwable = null)
+            MindlayerLog.w(TAG, "PaddleOCR init failed: ${t.safeLabel()}", diagnosticThrowable = t)
             throw t
         }
     }

@@ -755,6 +755,7 @@ val validateNoLiteRtNativeLibCollision = tasks.register("validateNoLiteRtNativeL
 
 android {
     namespace = "com.adsamcik.mindlayer.service"
+    compileOptions.isCoreLibraryDesugaringEnabled = true
     // compileSdk 37 / minSdk 26 / targetSdk 37 are set by the
     // mindlayer.android.application convention (build-logic). Compose BOM
     // requires compileSdk 37 via AAR metadata; minSdk is intentionally 26.
@@ -1185,6 +1186,14 @@ tasks.withType<Test> {
 
 dependencies {
     lintChecks(project(":lint-checks"))
+
+    // Managed-only capture: native dumps can retain prompt/media memory. Mindlayer
+    // uses redacted exception frames and structured metadata instead of raw dumps.
+    implementation("io.github.tracebox:tracebox:0.1.0-alpha.7-mindlayer.1") {
+        version { strictly("0.1.0-alpha.7-mindlayer.1") }
+    }
+    implementation("io.github.tracebox:tracebox-ui-compose:0.1.0-alpha.7")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
 
     implementation(project(":shared"))
     implementation(project(":sdk"))

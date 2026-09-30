@@ -9,7 +9,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
@@ -18,10 +19,16 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -33,12 +40,17 @@ import androidx.compose.ui.unit.dp
 import com.adsamcik.mindlayer.service.R
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerTheme
 import com.adsamcik.mindlayer.service.ui.theme.MindlayerType
+import java.text.DateFormat
+import java.util.Date
 
 data class RecentLogsUiState(
     val logs: List<LogUiItem> = emptyList(),
     val isLoading: Boolean = true,
     val errorMessage: String? = null,
+    val evidence: List<LogEvidence> = emptyList(),
 )
+
+data class LogEvidence(val timestampMs: Long, val requestId: String?, val sessionId: String?)
 
 @Composable
 private fun logCategoryColor(category: String): Color = when (category.uppercase()) {
@@ -65,6 +77,7 @@ fun RecentLogsScreen(
     onBack: () -> Unit = {},
     onRetry: () -> Unit = {},
 ) {
+    var errorsOnly by rememberSaveable { mutableStateOf(false) }
     Scaffold(
         topBar = {
             MindlayerSecondaryTopBar(
@@ -112,6 +125,8 @@ fun RecentLogsScreen(
                     modifier = Modifier.padding(innerPadding),
                     title = stringResource(R.string.recent_logs_empty_title),
                     message = stringResource(R.string.recent_logs_empty_message),
+                    actionLabel = stringResource(R.string.logs_refresh),
+                    onAction = onRetry,
                     icon = {
                         Icon(
                             imageVector = Icons.Filled.Info,
@@ -131,8 +146,30 @@ fun RecentLogsScreen(
                     contentPadding = MindlayerScreenDefaults.ContentPadding,
                     verticalArrangement = Arrangement.spacedBy(MindlayerScreenDefaults.ItemSpacing),
                 ) {
-                    items(state.logs) { log ->
-                        LogEntryCard(log)
+                    item {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            FilterChip(
+                                selected = !errorsOnly,
+                                onClick = { errorsOnly = false },
+                                label = { Text(stringResource(R.string.logs_filter_all)) },
+                            )
+                            FilterChip(
+                                selected = errorsOnly,
+                                onClick = { errorsOnly = true },
+                                label = { Text(stringResource(R.string.logs_filter_errors)) },
+                            )
+                            TextButton(onClick = onRetry) { Text(stringResource(R.string.logs_refresh)) }
+                        }
+                    }
+                    if (errorsOnly && state.logs.none { it.isError() }) {
+                        item { Text(stringResource(R.string.logs_no_errors)) }
+                    }
+                    itemsIndexed(state.logs) { index, log ->
+                        if (!errorsOnly || log.isError()) LogEntryCard(log, state.evidence.getOrNull(index))
                     }
                 }
             }
@@ -141,7 +178,8 @@ fun RecentLogsScreen(
 }
 
 @Composable
-private fun LogEntryCard(log: LogUiItem) {
+private fun LogEntryCard(log: LogUiItem, evidence: LogEvidence?) {
+    var expanded by rememberSaveable(log.event, evidence?.timestampMs, evidence?.requestId) { mutableStateOf(false) }
     val color = logCategoryColor(log.category)
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
@@ -189,16 +227,44 @@ private fun LogEntryCard(log: LogUiItem) {
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )
-            if (log.detail.isNotBlank()) {
-                Text(
-                    text = log.detail,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            if (log.detail.isNotBlank() || evidence != null) {
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(stringResource(if (expanded) R.string.logs_hide_details else R.string.logs_request_details))
+                }
+            }
+            if (expanded) {
+                SelectionContainer {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (log.detail.isNotBlank()) Text(
+                            text = log.detail,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        evidence?.let {
+                            Text(
+                                text = buildString {
+                                    append(DateFormat.getDateTimeInstance().format(Date(it.timestampMs)))
+                                    it.requestId?.let { id -> append("\nrequest=$id") }
+                                    it.sessionId?.let { id -> append("\nsession=$id") }
+                                },
+                                style = MindlayerType.Mono.LabelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
             }
         }
     }
 }
+
+internal fun LogUiItem.isError(): Boolean = category.equals("ERROR", ignoreCase = true) ||
+    event.contains("fail", ignoreCase = true) || event.contains("error", ignoreCase = true) ||
+    event.lowercase().replace('_', ' ') in setOf(
+        "tool call timeout", "tool call rejected", "stream frame too large", "stream backpressure",
+        "crash loop throttle", "rate limit reject", "session quota exceeded", "ocr frame rejected",
+        "binder death self", "binder death client",
+    )
 
 @Preview(showBackground = true)
 @Composable

@@ -5,6 +5,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.adsamcik.mindlayer.service.logging.LogDatabase
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,10 +18,12 @@ class RecentLogsViewModel(application: Application) : AndroidViewModel(applicati
     private val dao = LogDatabase.getInstance(application).logDao()
     private val _uiState = MutableStateFlow(RecentLogsUiState())
     val uiState: StateFlow<RecentLogsUiState> = _uiState.asStateFlow()
+    private var loadJob: Job? = null
 
     fun loadLogs() {
+        loadJob?.cancel()
         _uiState.update { it.copy(isLoading = true, errorMessage = null) }
-        viewModelScope.launch(Dispatchers.IO) {
+        loadJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 val entries = dao.getRecent(200)
                 val items = entries.map { entry ->
@@ -30,8 +35,14 @@ class RecentLogsViewModel(application: Application) : AndroidViewModel(applicati
                         detail = buildLogDetail(entry),
                     )
                 }
-                _uiState.update { it.copy(logs = items, isLoading = false, errorMessage = null) }
+                val evidence = entries.map { entry ->
+                    LogEvidence(entry.timestampMs, entry.requestId, entry.sessionId)
+                }
+                _uiState.update { it.copy(logs = items, evidence = evidence, isLoading = false, errorMessage = null) }
             } catch (exception: Exception) {
+                // A superseded refresh stays cancelled. Room can also report a closed
+                // database as cancellation while our job remains active: show that failure.
+                currentCoroutineContext().ensureActive()
                 _uiState.update {
                     it.copy(
                         isLoading = false,
@@ -52,7 +63,7 @@ class RecentLogsViewModel(application: Application) : AndroidViewModel(applicati
         entry.backend?.let { parts += it }
         entry.errorMessage?.let { parts += it }
         entry.memoryAvailableMb?.let { parts += "${it}MB free" }
-        val safeExtra = formatSafeExtraJsonForUi(entry.extraJson)
+        val safeExtra = formatSafeExtraJsonForUi(entry.event, entry.extraJson)
         if (safeExtra != null) parts += safeExtra
         return parts.joinToString(" • ")
     }

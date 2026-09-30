@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -119,11 +118,9 @@ class MainActivity : ComponentActivity() {
                                 }
                                 StatusScreen(
                                     state = state,
-                                    onNavigateToHistory = {
-                                        navController.navigate(MindlayerNavigation.HistoryRoute)
-                                    },
-                                    onNavigateToLogs = {
-                                        navController.navigate(MindlayerNavigation.LogsRoute)
+                                    onNavigateToModels = { navController.navigate(MindlayerNavigation.ModelsRoute) },
+                                    onNavigateToTroubleshoot = {
+                                        navController.navigate(MindlayerNavigation.TestsRoute)
                                     },
                                     logRepository = logRepository,
                                     onRevokeApp = { pkg -> dashboardViewModel.revokeApp(pkg) },
@@ -157,7 +154,20 @@ class MainActivity : ComponentActivity() {
                                     onTestOcrLlmExtraction = { dashboardViewModel.runOcrLlmExtractionTest(context) },
                                     onClearOcrFailureCache = { dashboardViewModel.clearOcrFailureCache() },
                                     onRunAllVerifications = { dashboardViewModel.runAllVerifications(context) },
+                                    onNavigateToHistory = {
+                                        navController.navigate(MindlayerNavigation.HistoryRoute)
+                                    },
+                                    onNavigateToLogs = {
+                                        navController.navigate(MindlayerNavigation.LogsRoute)
+                                    },
+                                    onNavigateToDiagnostics = {
+                                        DashboardDiagnostics.record(state)
+                                        navController.navigate(MindlayerNavigation.DiagnosticsRoute)
+                                    },
                                 )
+                            }
+                            composable(MindlayerNavigation.DiagnosticsRoute) {
+                                TroubleshootingScreen(onBack = { navController.popBackStack() })
                             }
                             composable(MindlayerNavigation.HistoryRoute) {
                                 LaunchedEffect(Unit) {
@@ -216,6 +226,7 @@ class MainActivity : ComponentActivity() {
                                 RecentLogsScreen(
                                     state = state,
                                     onBack = { navController.popBackStack() },
+                                    onRetry = logsViewModel::loadLogs,
                                 )
                             }
                         }
@@ -289,6 +300,7 @@ internal object MindlayerNavigation {
     const val TestsRoute = "tests"
     const val HistoryRoute = "history"
     const val LogsRoute = "logs"
+    const val DiagnosticsRoute = "diagnostics"
     const val SessionIdArgument = "sessionId"
     const val DetailRoute = "detail/{$SessionIdArgument}"
 
@@ -299,7 +311,7 @@ internal object MindlayerNavigation {
     internal val TopLevelTabs: List<BottomNavTab> = listOf(
         BottomNavTab(StatusRoute, R.string.nav_status, R.string.nav_a11y_status_tab, Icons.Filled.Info),
         BottomNavTab(ModelsRoute, R.string.nav_models, R.string.nav_a11y_models_tab, Icons.Filled.Build),
-        BottomNavTab(TestsRoute, R.string.nav_tests, R.string.nav_a11y_tests_tab, Icons.Filled.PlayArrow),
+        BottomNavTab(TestsRoute, R.string.nav_tests, R.string.nav_a11y_tests_tab, Icons.Filled.Build),
     )
 
     fun detailRoute(sessionId: String): String = "$DetailPrefix${Uri.encode(sessionId)}"

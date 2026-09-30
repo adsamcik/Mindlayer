@@ -576,7 +576,7 @@ class EngineManager(
                 // log DB stays class-name-only.
                 val safeDetail = t.safeLabel()
                 val safeDetailLogcat = t.safeLabelWithDetail()
-                MindlayerLog.w(TAG, "Backend $name failed: $safeDetailLogcat")
+                MindlayerLog.w(TAG, "Backend $name failed: $safeDetailLogcat", diagnosticThrowable = t)
                 // F-077: every per-backend failure now categorises into a
                 // typed [InitFailure.BackendUnavailable] — replaces the
                 // GPU-only `lastGpuFailureReason` string. The dashboard
@@ -606,6 +606,8 @@ class EngineManager(
                 throw t
             }
             val existingFailure = lastInitFailure
+            // Frame identity only; the message may contain inference content.
+            MindlayerLog.e(TAG, "Engine initialization failed: ${t.safeLabel()}", diagnosticThrowable = t)
             val failure = existingFailure ?: classifyInitFailure(t)
             if (existingFailure == null) recordInitFailure(failure)
             _state.value = EngineState.Failed(failure)

@@ -147,7 +147,6 @@ private fun ModelsHeader(
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         MindlayerPageHeader(
             title = stringResource(R.string.models_title),
-            subtitle = stringResource(R.string.models_subtitle),
         ) {
             FilledTonalIconButton(
                 onClick = onRefresh,

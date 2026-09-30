@@ -222,6 +222,14 @@ internal fun RoleModelCard(
                 ModelProgressKind.NONE -> Unit
             }
 
+            if (readinessTone == DashboardMessageTone.WARNING || readinessTone == DashboardMessageTone.ERROR) {
+                Text(
+                    text = statusCopy.detail,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
             ModelPrimaryAction(
                 state = summary.deliveryState,
                 onDownload = onDownload,

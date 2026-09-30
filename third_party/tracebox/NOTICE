@@ -1,0 +1,7 @@
+Tracebox
+Copyright 2026 The Tracebox Authors
+
+This product includes no bundled third-party runtime code in 0.1.0-alpha.1
+other than the separately resolved Kotlin and Kotlinx Coroutines dependencies
+identified in THIRD_PARTY_NOTICES.md.
+
