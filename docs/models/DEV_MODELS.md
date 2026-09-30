@@ -41,16 +41,36 @@ If you don't want to think about it, use the wrapper:
 
 ### Android Studio (Windows)
 
-The repository includes two shared run configurations in `.run/`:
+The repository includes three shared run configurations in `.run/`:
 
 - **Mindlayer - Deploy app + all models** builds and installs the code-only
   debug APK, then deploys all three model families from `.models`.
 - **Mindlayer - Deploy all models only** skips the build and APK install and
   refreshes missing or size-mismatched model files on an already-installed
   debug app.
+- **Mindlayer - Update app only** builds and reinstalls the code-only APK with
+  `-SkipModels`. It preserves models already on the device and does not scan,
+  hash, or transfer any model files.
 
-Select the target device in Android Studio as usual, but keep only that device
-connected when running these configurations. The scripts use `adb`'s sole
+Use **Deploy app + all models** once for each new device, then **Update app
+only** for everyday code changes. Run **Deploy all models only** when you
+change models or need to restore missing files. The combined deployment also
+skips size-matched transfers, but still verifies the local cache; the app-only
+configuration skips that work entirely.
+
+Choose the configuration in Android Studio's Run dropdown. These Windows
+configurations use the Shell Script runner and Windows PowerShell 5.1.
+Equivalent terminal commands are:
+
+```powershell
+.\scripts\dev-install.ps1                  # first setup
+.\scripts\dev-install.ps1 -SkipModels      # subsequent code updates
+.\scripts\dev-install.ps1 -SkipBuild -SkipInstall  # model updates only
+```
+
+The Shell Script runner does not inherit Android Studio's device selection.
+Keep only the intended device connected when running these configurations.
+The scripts use `adb`'s sole
 connected device automatically; if multiple devices are attached, copy the
 configuration and add `-Device <serial>` to **Script options**. Android Studio's
 SDK from `local.properties` is used automatically when `adb` is not on PATH.

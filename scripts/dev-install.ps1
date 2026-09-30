@@ -32,7 +32,8 @@
       - A populated model cache: the standardized ``<repo-root>\.models``
         directory (gitignored), or an explicit ``-Cache``/
         ``$env:MINDLAYER_MODEL_CACHE`` override (see
-        ``docs/models/DEV_MODELS.md`` for what to put in it)
+        ``docs/models/DEV_MODELS.md`` for what to put in it).
+        Not needed for ``-SkipModels`` code updates.
 
 .PARAMETER Cache
     Local cache directory holding the model files. Forwarded to
@@ -50,6 +51,10 @@
 .PARAMETER SkipInstall
     Don't run ``adb install``. Useful for ``-Force`` model pushes onto
     a device whose APK is already current.
+
+.PARAMETER SkipModels
+    Build and update only the code-only APK. Do not inspect the model cache
+    or push any model files. Use after the first app-and-model deployment.
 
 .PARAMETER Force
     Pass through to ``push-models.ps1`` so each file is re-pushed
@@ -70,6 +75,10 @@
     .\scripts\dev-install.ps1 -SkipBuild -SkipInstall
 
 .EXAMPLE
+    # Everyday code update: keep the models already on the device.
+    .\scripts\dev-install.ps1 -SkipModels
+
+.EXAMPLE
     # Same as the default loop, but explicitly target one of several
     # connected emulators.
     .\scripts\dev-install.ps1 -Device emulator-5554
@@ -80,6 +89,7 @@ param(
     [string]$Device,
     [switch]$SkipBuild,
     [switch]$SkipInstall,
+    [switch]$SkipModels,
     [switch]$Force,
     [switch]$DryRun
 )
@@ -155,7 +165,9 @@ if ($SkipBuild -or $DryRun) {
     Write-Host '== Building code-only debug APK (no AI Asset Packs bundled) ==' -ForegroundColor Cyan
     Push-Location $repoRoot
     try {
-        $gradle = if ($IsWindows -or $env:OS -eq 'Windows_NT') { '.\gradlew.bat' } else { './gradlew' }
+        # $IsWindows does not exist in Windows PowerShell 5.1, which the
+        # Android Studio run configurations use under StrictMode.
+        $gradle = if ($env:OS -eq 'Windows_NT') { '.\gradlew.bat' } else { './gradlew' }
         & $gradle ':app:assembleDebug' `
             '-Pmindlayer.bundleGemma=false' `
             '-Pmindlayer.bundleEmbeddings=false' `
@@ -241,22 +253,26 @@ if ($SkipInstall -or $DryRun) {
 # ---------------------------------------------------------------------------
 # Phase 3 - push models (no-op when already on device + sizes match)
 # ---------------------------------------------------------------------------
-Write-Host '== Pushing missing model files (skips already-present, size-matched files) ==' -ForegroundColor Cyan
+if ($SkipModels) {
+    Write-Host '[skip-models] keeping the models already on the device; no cache verification or model transfer' -ForegroundColor Cyan
+} else {
+    Write-Host '== Pushing missing model files (skips already-present, size-matched files) ==' -ForegroundColor Cyan
 
-if (-not (Test-Path -LiteralPath $pushScript)) {
-    throw "Expected $pushScript to exist - did the repo layout change?"
-}
+    if (-not (Test-Path -LiteralPath $pushScript)) {
+        throw "Expected $pushScript to exist - did the repo layout change?"
+    }
 
-$pushParams = @{ All = $true }
-if (-not [string]::IsNullOrWhiteSpace($Cache)) { $pushParams.Cache = $Cache }
-if (-not [string]::IsNullOrWhiteSpace($Device)) { $pushParams.Device = $Device }
-if ($Force) { $pushParams.Force = $true }
-if ($DryRun) { $pushParams.DryRun = $true }
+    $pushParams = @{ All = $true }
+    if (-not [string]::IsNullOrWhiteSpace($Cache)) { $pushParams.Cache = $Cache }
+    if (-not [string]::IsNullOrWhiteSpace($Device)) { $pushParams.Device = $Device }
+    if ($Force) { $pushParams.Force = $true }
+    if ($DryRun) { $pushParams.DryRun = $true }
 
-Write-Verbose ("push-models invocation: " + (($pushParams.GetEnumerator() | ForEach-Object { "-$($_.Key) $($_.Value)" }) -join ' '))
-& $pushScript @pushParams
-if ($LASTEXITCODE -ne 0) {
-    throw "push-models.ps1 failed (exit $LASTEXITCODE). See its output above for which model group failed."
+    Write-Verbose ("push-models invocation: " + (($pushParams.GetEnumerator() | ForEach-Object { "-$($_.Key) $($_.Value)" }) -join ' '))
+    & $pushScript @pushParams
+    if ($LASTEXITCODE -ne 0) {
+        throw "push-models.ps1 failed (exit $LASTEXITCODE). See its output above for which model group failed."
+    }
 }
 
 Write-Host ''
