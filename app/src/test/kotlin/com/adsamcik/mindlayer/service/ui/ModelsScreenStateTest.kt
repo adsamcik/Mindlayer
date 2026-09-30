@@ -338,6 +338,8 @@ class ModelsScreenStateTest {
                 ModelDeliveryAction.RETRY_DOWNLOAD,
             ModelDeliveryState.Failed(ModelDeliveryIssue.ConfirmationUnavailable) to
                 ModelDeliveryAction.CONFIRM,
+            ModelDeliveryState.Failed(ModelDeliveryIssue.RefreshFailed) to
+                ModelDeliveryAction.NONE,
             ModelDeliveryState.Unsupported to ModelDeliveryAction.NONE,
         )
 
@@ -346,6 +348,19 @@ class ModelsScreenStateTest {
         }
         assertEquals(0, ModelDeliveryState.Downloading(25L, 0L).progressPercent)
         assertEquals(25, ModelDeliveryState.Downloading(25L, 100L).progressPercent)
+    }
+
+    @Test
+    fun `failed status check stops progress and offers no download retry`() {
+        val model = summary(
+            deliveryState = ModelDeliveryState.Failed(ModelDeliveryIssue.RefreshFailed),
+            readiness = ModelReadiness.NEEDS_ATTENTION,
+        )
+
+        assertEquals(ModelPhasePresentation.STATUS_UNAVAILABLE, modelPhasePresentation(model))
+        assertEquals(ModelProgressKind.NONE, modelProgressPresentation(model).kind)
+        assertEquals(ModelDeliveryAction.NONE, modelActionAvailability(model.deliveryState).primary)
+        assertEquals(ModelOverviewKind.NEEDS_ATTENTION, modelOverview(listOf(model)).kind)
     }
 
     @Test

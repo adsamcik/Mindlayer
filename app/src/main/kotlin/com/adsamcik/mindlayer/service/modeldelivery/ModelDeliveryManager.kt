@@ -18,7 +18,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -109,6 +111,7 @@ class ModelDeliveryManager internal constructor(
     private val beforeInitialCallbackHandoff: suspend () -> Unit = {},
     private val beforeInitialCatchUp: suspend () -> Unit = {},
     private val clockMs: () -> Long = System::currentTimeMillis,
+    private val packRefreshTimeoutMs: Long = 5_000L,
 ) : AutoCloseable {
     private val appContext = context.applicationContext
     private val intentStore = ModelDeliveryIntentStore(appContext.filesDir)
@@ -159,7 +162,7 @@ class ModelDeliveryManager internal constructor(
         synchronized(operationLock) {
             if (refreshJob?.isActive == true) return
             _refreshState.update { current ->
-                current.copy(isRefreshing = true)
+                current.copy(isRefreshing = true, issue = null)
             }
             val job = scope.launch(start = CoroutineStart.LAZY) {
                 val successful = try {
@@ -169,6 +172,17 @@ class ModelDeliveryManager internal constructor(
                 } catch (error: Throwable) {
                     recordRefreshFailure(error)
                     false
+                }
+                if (!successful) {
+                    _states.update { current ->
+                        current.mapValues { (_, state) ->
+                            if (state == ModelDeliveryState.Checking) {
+                                ModelDeliveryState.Failed(ModelDeliveryIssue.RefreshFailed)
+                            } else {
+                                state
+                            }
+                        }
+                    }
                 }
                 _refreshState.update { current ->
                     if (successful) {
@@ -194,28 +208,34 @@ class ModelDeliveryManager internal constructor(
         }
     }
 
-    private suspend fun performRefresh(): Boolean {
+    private suspend fun performRefresh(): Boolean = coroutineScope {
         var successful = false
-        val ocrInstalledAtRefreshStart = familyMutex(ModelFamily.OCR).withLock {
-            materializer.isMarkedInstalled(ModelFamily.OCR)
-        }
         try {
             reconcileIntentMarkers()
             resumePendingRemovals()
-            var ocrBytesRemainInstalled = false
-            ModelFamily.entries.forEach { family ->
-                val installed = forceValidateInstalledBytes(family)
-                if (family == ModelFamily.OCR) {
-                    ocrBytesRemainInstalled = installed
+            // Play's status request and local validation are independent. A
+            // large chat file must not delay the other cards or start Play's
+            // timeout only after all local I/O has finished.
+            val packRefresh = async { refreshPackStates() }
+            val installedFamilies = ModelFamily.entries.map { family ->
+                async(blockingDispatcher) {
+                    val installed = validateInstalledBytes(family)
+                    if (packRefresh.await()) {
+                        reconcile(family, provisionIfReady = true)
+                    } else {
+                        _states.update { current ->
+                            if (current[family] == ModelDeliveryState.Checking) {
+                                current + (family to ModelDeliveryState.Failed(ModelDeliveryIssue.RefreshFailed))
+                            } else {
+                                current
+                            }
+                        }
+                    }
+                    family to installed
                 }
-            }
-            successful = runCatching {
-                client.refresh(ModelFamily.entries.flatMap { ModelDeliveryCatalog.family(it).packNames })
-            }.onFailure(::recordRefreshFailure).isSuccess
-            if (successful) {
-                ModelFamily.entries.forEach { family -> reconcile(family, provisionIfReady = true) }
-            }
-            if (ocrInstalledAtRefreshStart && ocrBytesRemainInstalled) {
+            }.awaitAll().toMap()
+            successful = packRefresh.await()
+            if (installedFamilies[ModelFamily.OCR] == true) {
                 familyMutex(ModelFamily.OCR).withLock {
                     if (
                         !ModelDeliveryFileLock.isRemovalAuthoritative(
@@ -237,7 +257,29 @@ class ModelDeliveryManager internal constructor(
                 enableCallbacksAndReconcileDirtyFamilies()
             }
         }
-        return successful
+        successful
+    }
+
+    private suspend fun refreshPackStates(): Boolean {
+        val startedAtNs = System.nanoTime()
+        return try {
+            val completed = withTimeoutOrNull(packRefreshTimeoutMs) {
+                client.refresh(ModelFamily.entries.flatMap { ModelDeliveryCatalog.family(it).packNames })
+                true
+            } ?: false
+            if (!completed) {
+                MindlayerLog.w(TAG, "Play download status check timed out after ${packRefreshTimeoutMs}ms")
+            }
+            completed
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            recordRefreshFailure(error)
+            false
+        } finally {
+            val elapsedMs = (System.nanoTime() - startedAtNs) / 1_000_000L
+            MindlayerLog.d(TAG, "Play download status check finished in ${elapsedMs}ms")
+        }
     }
 
     fun download(family: ModelFamily) {
@@ -615,9 +657,14 @@ class ModelDeliveryManager internal constructor(
         }
     }
 
-    private suspend fun forceValidateInstalledBytes(family: ModelFamily): Boolean =
+    private suspend fun validateInstalledBytes(family: ModelFamily): Boolean =
         familyMutex(family).withLock {
-            val installed = materializer.isMarkedInstalled(family, forceValidation = true)
+            // The materializer rehashes cold, changed, or expired fingerprints.
+            // Routine refreshes can reuse its existing verified cache.
+            val startedAtNs = System.nanoTime()
+            val installed = materializer.isMarkedInstalled(family)
+            val elapsedMs = (System.nanoTime() - startedAtNs) / 1_000_000L
+            MindlayerLog.d(TAG, "Local model validation finished: family=$family installed=$installed elapsedMs=$elapsedMs")
             if (installed) {
                 markInstalledPreservingActivationState(family)
             } else if (

@@ -369,6 +369,8 @@
     <string name="models_delivery_not_checked">Not checked yet</string>
     <string name="models_refresh_warning_title">Couldn’t check downloads</string>
     <string name="models_refresh_failed_detail">Showing the last known status.</string>
+    <string name="models_status_check_failed_headline">Couldn’t check model status</string>
+    <string name="models_status_check_failed_detail">Use Try again above to check downloads.</string>
     <string name="models_try_again_action">Try again</string>
 
     <string name="models_overview_title">Model availability</string>

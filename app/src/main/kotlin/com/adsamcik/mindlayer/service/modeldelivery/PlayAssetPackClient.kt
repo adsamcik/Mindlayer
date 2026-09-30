@@ -3,7 +3,9 @@ package com.adsamcik.mindlayer.service.modeldelivery
 import android.content.Context
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.IntentSenderRequest
+import com.adsamcik.mindlayer.service.logging.MindlayerLog
 import com.google.android.gms.tasks.Task
+import com.google.android.play.core.assetpacks.AssetPackException
 import com.google.android.play.core.assetpacks.AssetPackManager
 import com.google.android.play.core.assetpacks.AssetPackManagerFactory
 import com.google.android.play.core.assetpacks.AssetPackState
@@ -40,7 +42,14 @@ class PlayAssetPackClient internal constructor(
     }
 
     override suspend fun refresh(packNames: Collection<String>) {
-        val states = manager.getPackStates(packNames.toList()).await().packStates()
+        val states = try {
+            manager.getPackStates(packNames.toList()).await().packStates()
+        } catch (error: AssetPackException) {
+            // Preserve the actionable Play code without logging exception
+            // messages, paths, or other private runtime details.
+            MindlayerLog.w("PlayAssetPackClient", "Play download status request failed: errorCode=${error.errorCode}")
+            throw error
+        }
         states.values.forEach { update(it.toSnapshot()) }
     }
 

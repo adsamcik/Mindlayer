@@ -340,7 +340,7 @@ class ModelDeliveryManagerTest {
     }
 
     @Test
-    fun `refresh failure still activates one force-validated preexisting ocr install`() = runTest {
+    fun `refresh failure still activates one validated preexisting ocr install`() = runTest {
         val client = FakeAssetPackClient(
             emptyMap(),
             refreshFailure = IllegalStateException("transient Play refresh failure"),
@@ -361,7 +361,7 @@ class ModelDeliveryManagerTest {
 
             assertEquals(ModelDeliveryState.Installed, manager.states.value[ModelFamily.OCR])
             assertEquals(1, runtimeControl.activationCalls.get())
-            assertEquals(ModelFamily.entries.size, materializer.forcedValidationCalls.get())
+            assertEquals(0, materializer.forcedValidationCalls.get())
             assertTrue(materializer.isMarkedInstalled(ModelFamily.OCR))
             assertEquals(0, materializer.removeCalls.get())
             assertEquals(ModelDeliveryIssue.RefreshFailed, manager.refreshState.value.issue)
@@ -371,7 +371,7 @@ class ModelDeliveryManagerTest {
     }
 
     @Test
-    fun `initial refresh failure keeps checking states rather than claiming unsupported`() = runTest {
+    fun `initial refresh failure resolves checking without claiming unsupported`() = runTest {
         val client = FakeAssetPackClient(emptyMap(), refreshFailure = IllegalStateException("no Play"))
         val managerScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
         val manager = ModelDeliveryManager(
@@ -386,20 +386,114 @@ class ModelDeliveryManagerTest {
             advanceUntilIdle()
 
             assertEquals(
-                ModelDeliveryState.Checking,
+                ModelDeliveryState.Failed(ModelDeliveryIssue.RefreshFailed),
                 manager.states.value[ModelFamily.CHAT],
             )
             assertEquals(
-                ModelDeliveryState.Checking,
+                ModelDeliveryState.Failed(ModelDeliveryIssue.RefreshFailed),
                 manager.states.value[ModelFamily.EMBEDDINGS],
             )
             assertEquals(
-                ModelDeliveryState.Checking,
+                ModelDeliveryState.Failed(ModelDeliveryIssue.RefreshFailed),
                 manager.states.value[ModelFamily.OCR],
             )
             assertEquals(ModelDeliveryIssue.RefreshFailed, manager.refreshState.value.issue)
+            assertFalse(manager.refreshState.value.isRefreshing)
         } finally {
             manager.close()
+        }
+    }
+
+    @Test
+    fun `hung Play check times out while local installs remain visible and retry recovers`() = runTest {
+        val refreshGate = CompletableDeferred<Unit>()
+        val client = FakeAssetPackClient(emptyMap(), refreshGate = refreshGate)
+        val manager = ModelDeliveryManager(
+            context = context,
+            client = client,
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = CountingMaterializer(setOf(ModelFamily.CHAT)),
+            clockMs = { 99L },
+        )
+
+        try {
+            manager.start()
+            runCurrent()
+            assertEquals(ModelDeliveryState.Installed, manager.states.value[ModelFamily.CHAT])
+            assertTrue(manager.refreshState.value.isRefreshing)
+            advanceTimeBy(4_999L)
+            runCurrent()
+            assertTrue(manager.refreshState.value.isRefreshing)
+
+            advanceTimeBy(1L)
+            runCurrent()
+            assertFalse(manager.refreshState.value.isRefreshing)
+            assertNull(manager.refreshState.value.lastSuccessfulRefreshAtMs)
+            assertEquals(ModelDeliveryIssue.RefreshFailed, manager.refreshState.value.issue)
+            assertEquals(ModelDeliveryState.Installed, manager.states.value[ModelFamily.CHAT])
+            assertEquals(
+                ModelDeliveryState.Failed(ModelDeliveryIssue.RefreshFailed),
+                manager.states.value[ModelFamily.EMBEDDINGS],
+            )
+            assertEquals(
+                ModelDeliveryState.Failed(ModelDeliveryIssue.RefreshFailed),
+                manager.states.value[ModelFamily.OCR],
+            )
+
+            refreshGate.complete(Unit)
+            manager.refresh()
+            assertNull(manager.refreshState.value.issue)
+            advanceUntilIdle()
+            assertEquals(2, client.refreshCalls.get())
+            assertEquals(99L, manager.refreshState.value.lastSuccessfulRefreshAtMs)
+            assertNull(manager.refreshState.value.issue)
+            assertEquals(ModelDeliveryState.Installed, manager.states.value[ModelFamily.CHAT])
+            assertEquals(ModelDeliveryState.NotInstalled, manager.states.value[ModelFamily.EMBEDDINGS])
+        } finally {
+            manager.close()
+        }
+    }
+
+    @Test
+    fun `slow chat validation does not hold the other cards in checking`() = runTest {
+        val chatStarted = CountDownLatch(1)
+        val releaseChat = CountDownLatch(1)
+        val dispatcher = Executors.newFixedThreadPool(3).asCoroutineDispatcher()
+        val installed = CountingMaterializer(setOf(ModelFamily.OCR))
+        val materializer = object : ModelArtifactMaterializer by installed {
+            override fun isMarkedInstalled(family: ModelFamily, forceValidation: Boolean): Boolean {
+                if (family == ModelFamily.CHAT) {
+                    chatStarted.countDown()
+                    check(releaseChat.await(5, TimeUnit.SECONDS))
+                }
+                return installed.isMarkedInstalled(family, forceValidation)
+            }
+        }
+        val manager = ModelDeliveryManager(
+            context = context,
+            client = FakeAssetPackClient(emptyMap(), refreshFailure = IllegalStateException("no Play")),
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+            blockingDispatcher = dispatcher,
+            materializer = materializer,
+            runtimeControl = FakeRuntimeControl(),
+        )
+
+        try {
+            manager.start()
+            withContext(Dispatchers.IO) {
+                assertTrue(chatStarted.await(5, TimeUnit.SECONDS))
+                withTimeout(5_000L) {
+                    manager.states.first {
+                        it[ModelFamily.OCR] == ModelDeliveryState.Installed &&
+                            it[ModelFamily.EMBEDDINGS] == ModelDeliveryState.Failed(ModelDeliveryIssue.RefreshFailed)
+                    }
+                }
+            }
+            assertEquals(ModelDeliveryState.Checking, manager.states.value[ModelFamily.CHAT])
+        } finally {
+            releaseChat.countDown()
+            manager.close()
+            dispatcher.close()
         }
     }
 
@@ -992,7 +1086,7 @@ class ModelDeliveryManagerTest {
     }
 
     @Test
-    fun `startup and explicit refresh force installed byte validation for every family`() = runTest {
+    fun `startup and explicit refresh reuse materializer validation policy`() = runTest {
         val materializer = CountingMaterializer(setOf(ModelFamily.CHAT))
         val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
         val manager = ModelDeliveryManager(
@@ -1005,14 +1099,69 @@ class ModelDeliveryManagerTest {
         try {
             manager.start()
             advanceUntilIdle()
-            assertEquals(ModelFamily.entries.size, materializer.forcedValidationCalls.get())
+            assertEquals(0, materializer.forcedValidationCalls.get())
 
             manager.refresh()
             advanceUntilIdle()
-            assertEquals(ModelFamily.entries.size * 2, materializer.forcedValidationCalls.get())
-            assertEquals(ModelFamily.entries.size * 2, materializer.forcedValidationCalls.get())
+            assertEquals(0, materializer.forcedValidationCalls.get())
+            assertEquals(ModelDeliveryState.Installed, manager.states.value[ModelFamily.CHAT])
         } finally {
             manager.close()
+        }
+    }
+
+    @Test
+    fun `refresh hashes cold installed files once and rechecks changed bytes`() = runTest {
+        val sourceDir = File(context.filesDir, "refresh-cache-source").apply { mkdirs() }
+        val pins = createOcrPack(sourceDir)
+        val packDirectories = mapOf("paddleocr_model" to sourceDir)
+        val publisher = VerifiedModelMaterializer(
+            filesDir = context.filesDir,
+            releaseBuild = true,
+            pinnedSha256 = pins::get,
+        )
+        assertEquals(MaterializationResult.Installed, publisher.materialize(ModelFamily.OCR, packDirectories))
+        var digestCalls = 0
+        val materializer = VerifiedModelMaterializer(
+            filesDir = context.filesDir,
+            releaseBuild = true,
+            pinnedSha256 = pins::get,
+            installedDigest = { file ->
+                digestCalls += 1
+                sha256(file.readBytes())
+            },
+        )
+        val manager = ModelDeliveryManager(
+            context = context,
+            client = FakeAssetPackClient(emptyMap()),
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+            materializer = materializer,
+            runtimeControl = FakeRuntimeControl(),
+        )
+
+        try {
+            manager.start()
+            advanceUntilIdle()
+            val coldDigestCalls = digestCalls
+            assertEquals(ModelDeliveryCatalog.family(ModelFamily.OCR).files.size, coldDigestCalls)
+            manager.refresh()
+            advanceUntilIdle()
+            assertEquals(coldDigestCalls, digestCalls)
+            assertEquals(ModelDeliveryState.Installed, manager.states.value[ModelFamily.OCR])
+
+            val artifact = ModelDeliveryCatalog.family(ModelFamily.OCR).files.first()
+            val installed = File(ModelDeliveryFileLock.familyDir(context.filesDir, ModelFamily.OCR), artifact.filename)
+            val previousModified = installed.lastModified()
+            installed.writeBytes(ByteArray(installed.length().toInt()) { 0x5a })
+            assertTrue(installed.setLastModified(previousModified + 2_000L))
+            manager.refresh()
+            advanceUntilIdle()
+            assertTrue(digestCalls > coldDigestCalls)
+            assertEquals(ModelDeliveryState.NotInstalled, manager.states.value[ModelFamily.OCR])
+            assertFalse(File(installed.parentFile, "installed.json").exists())
+        } finally {
+            manager.close()
+            sourceDir.deleteRecursively()
         }
     }
 

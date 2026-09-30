@@ -31,6 +31,7 @@ internal data class ModelProgressPresentation(
 
 internal enum class ModelPhasePresentation {
     CHECKING,
+    STATUS_UNAVAILABLE,
     DOWNLOAD_REQUIRED,
     PENDING,
     WAITING_FOR_WIFI,
@@ -223,7 +224,7 @@ internal fun modelPhasePresentation(summary: RoleModelSummary): ModelPhasePresen
             ModelDeliveryIssue.PlayDeliveryFailed ->
                 ModelPhasePresentation.DOWNLOAD_FAILED
             ModelDeliveryIssue.RefreshFailed ->
-                ModelPhasePresentation.ATTENTION_REQUIRED
+                ModelPhasePresentation.STATUS_UNAVAILABLE
         }
         ModelDeliveryState.Unsupported -> ModelPhasePresentation.UNAVAILABLE
     }

@@ -681,6 +681,7 @@ fun modelDeliveryAction(
     ModelDeliveryState.NotInstalled -> ModelDeliveryAction.DOWNLOAD
     is ModelDeliveryState.Failed -> when (state.issue) {
         ModelDeliveryIssue.ConfirmationUnavailable -> ModelDeliveryAction.CONFIRM
+        ModelDeliveryIssue.RefreshFailed -> ModelDeliveryAction.NONE
         else -> ModelDeliveryAction.RETRY_DOWNLOAD
     }
     is ModelDeliveryState.RemovalFailed -> ModelDeliveryAction.RETRY_REMOVE

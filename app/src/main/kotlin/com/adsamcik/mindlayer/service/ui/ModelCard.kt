@@ -361,6 +361,10 @@ private fun phaseCopy(
             stringResource(R.string.models_status_checking_headline),
             stringResource(R.string.models_status_checking_detail),
         )
+        ModelPhasePresentation.STATUS_UNAVAILABLE -> ModelStatusCopy(
+            stringResource(R.string.models_status_check_failed_headline),
+            stringResource(R.string.models_status_check_failed_detail),
+        )
         ModelPhasePresentation.DOWNLOAD_REQUIRED -> ModelStatusCopy(
             stringResource(R.string.models_status_download_required_headline),
             stringResource(R.string.models_status_download_required_detail),
