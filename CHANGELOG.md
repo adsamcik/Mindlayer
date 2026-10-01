@@ -6,6 +6,13 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+### Added
+- SDK session scopes now accept an optional typed inference backend. Clients
+  can request CPU and a bounded total context together during cold engine
+  initialization, without speculative prewarm. Existing callers and custom
+  scopes retain the default behavior; the existing service wire contract is
+  sufficient, and already-loaded engines retain their active configuration.
+
 ### Changed
 - LLM prewarming now derives an 8,192-token context from an explicit 76 MiB
   KV-cache budget instead of allocating the device tier's maximum context.

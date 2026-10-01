@@ -320,6 +320,7 @@ internal class MindlayerImpl(
             val sessionId = createSessionInternal {
                 scope.systemPrompt?.let { systemPrompt(it) }
                 scope.maxTokens?.let { maxTokens(it) }
+                scope.backend?.let { backend(it.value) }
                 scope.toolsJson?.let { toolsJsonRaw(it) }
                 scope.extraContextJson?.let { extraContext(it) }
             }
@@ -471,6 +472,7 @@ internal class MindlayerImpl(
         return {
             session.systemPrompt?.let { systemPrompt(it) }
             session.maxTokens?.let { maxTokens(it) }
+            session.backend?.let { backend(it.value) }
             sampler.topK?.let { topK(it) }
             sampler.topP?.let { topP(it) }
             sampler.temperature?.let { temperature(it) }
@@ -619,6 +621,7 @@ internal class MindlayerImpl(
     private class CapturedSessionScope : SessionScope {
         override var systemPrompt: String? = null
         override var maxTokens: Int? = null
+        override var backend: InferenceBackend? = null
         override var historyPolicy: HistoryPolicy = HistoryPolicy.METADATA_ONLY
         override var toolsJson: String? = null
         override var extraContextJson: String? = null
