@@ -19,7 +19,9 @@ SDK Maven coordinate → `1.0.0-alpha.8` (`com.adsamcik.mindlayer:sdk:1.0.0-alph
 ### Upgrade notes
 - This SDK addition uses the existing session configuration wire field and
   does not require a Mindlayer service upgrade or change the AIDL contract.
-  Consume all Mindlayer SDK artifacts at the same version.
+  Use the SDK and shared modules at the same version. This SDK-focused release
+  publishes those two modules; camera integration modules retain their previous
+  published version.
 
 ## [1.0.0-alpha.7] — 2026-08-16
 

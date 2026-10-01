@@ -1,6 +1,6 @@
 # Selecting a backend for a bounded session
 
-The proposed SDK `1.0.0-alpha.8` adds an optional typed `SessionScope.backend`.
+SDK `1.0.0-alpha.8` adds an optional typed `SessionScope.backend`.
 It uses the existing `SessionConfig.backend` field, so a published alpha.7
 service can honor a CPU preference during cold engine initialization:
 
@@ -55,3 +55,29 @@ URL is `G:/Github/Mindlayer/build/starlit-sdk-validation-repo`. The publication
 tasks named above write to that local directory. No GitHub Packages publication
 task or `publishToMavenLocal` task is used. SDK POM and module metadata must point
 to `shared:1.0.0-alpha.8`; retain both modules together for consumer validation.
+
+
+## SDK-only publication through CI
+
+The `Publish SDK` workflow supports a manual SDK-only run. Select the reviewed
+alpha.7-based release branch as the dispatch ref and supply:
+
+- `sdk_only: true`
+- `publish_version: 1.0.0-alpha.8`
+
+The workflow must already be present on the repository's default branch before
+manual dispatch is available. The selected ref determines the source checkout;
+the exact validated SemVer input determines both artifact versions. Existing
+versions are skipped instead of overwritten, so use a new version for changed
+source. An empty or malformed version fails before tests or publication.
+
+This path runs the shared and SDK unit suites and publishes only those two
+Maven modules. It skips CameraX, the camera launcher, GitHub Release creation,
+and service APK/AAB jobs. Normal tag releases retain their existing behavior.
+SDK-only runs for a version share the matching tag's concurrency group, keeping
+publication attempts for that version serialized.
+
+```powershell
+gh workflow run publish.yml --repo adsamcik/Mindlayer --ref codex/sdk-bounded-cpu-alpha8 `
+    -f sdk_only=true -f publish_version=1.0.0-alpha.8
+```
