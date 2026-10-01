@@ -6,6 +6,21 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [1.0.0-alpha.8] — 2026-10-01
+
+SDK Maven coordinate → `1.0.0-alpha.8` (`com.adsamcik.mindlayer:sdk:1.0.0-alpha.8`).
+
+### Added
+- Optional typed backend selection on SDK session scopes. Clients can request
+  CPU together with a bounded context for a cold session without calling the
+  speculative, service-wide prewarm API. Existing callers keep their current
+  GPU preference, and already-loaded engines keep their active backend.
+
+### Upgrade notes
+- This SDK addition uses the existing session configuration wire field and
+  does not require a Mindlayer service upgrade or change the AIDL contract.
+  Consume all Mindlayer SDK artifacts at the same version.
+
 ## [1.0.0-alpha.7] — 2026-08-16
 
 SDK Maven coordinate → `1.0.0-alpha.7` (`com.adsamcik.mindlayer:sdk:1.0.0-alpha.7`).

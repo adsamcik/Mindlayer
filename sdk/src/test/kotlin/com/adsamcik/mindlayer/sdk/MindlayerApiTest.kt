@@ -243,6 +243,118 @@ class MindlayerApiTest {
     }
 
     @Test
+    fun `openSession sends bounded CPU config without speculative prewarm`() = runTest {
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "bounded-cpu"
+
+        mindlayer.openSession {
+            backend = InferenceBackend.CPU
+            maxTokens = 8192
+        }.closeAsync()
+
+        assertEquals("CPU", configSlot.captured.backend)
+        assertEquals(8192, configSlot.captured.maxTokens)
+        verify(exactly = 0) { mockService.prewarm(any()) }
+        verify(exactly = 0) { mockService.prewarmAndAwait(any(), any()) }
+    }
+
+    @Test
+    fun `ephemeral inference sends bounded CPU config without speculative prewarm`() = runTest {
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "bounded-ephemeral"
+        every { mockService.infer(any(), any(), any(), any()) } answers {
+            arg<ParcelFileDescriptor>(3).close()
+        }
+
+        mindlayer.infer {
+            ephemeralSession {
+                backend = InferenceBackend.CPU
+                maxTokens = 8192
+            }
+            text("test")
+        }.events.toList()
+
+        assertEquals("CPU", configSlot.captured.backend)
+        assertEquals(8192, configSlot.captured.maxTokens)
+        verify(exactly = 0) { mockService.prewarm(any()) }
+        verify(exactly = 0) { mockService.prewarmAndAwait(any(), any()) }
+    }
+
+    @Test
+    fun `canonical sessions retain GPU defaults when backend is omitted`() = runTest {
+        val configs = mutableListOf<SessionConfig>()
+        every { mockService.createSession(capture(configs)) } returns "default-session"
+        every { mockService.infer(any(), any(), any(), any()) } answers {
+            arg<ParcelFileDescriptor>(3).close()
+        }
+
+        mindlayer.openSession { }.closeAsync()
+        mindlayer.infer { ephemeralSession { }; text("test") }.events.toList()
+
+        assertEquals(2, configs.size)
+        configs.forEach {
+            assertEquals("GPU", it.backend)
+            assertEquals(4096, it.maxTokens)
+        }
+    }
+
+    @Test
+    fun `canonical session forwards each typed backend and preserves requested budget`() = runTest {
+        val configs = mutableListOf<SessionConfig>()
+        every { mockService.createSession(capture(configs)) } returns "typed-backend"
+
+        InferenceBackend.entries.forEach { requestedBackend ->
+            mindlayer.openSession {
+                backend = requestedBackend
+                maxTokens = 2048
+            }.closeAsync()
+        }
+
+        assertEquals(InferenceBackend.entries.map { it.value }, configs.map { it.backend })
+        assertTrue(configs.all { it.maxTokens == 2048 })
+    }
+
+    @Test
+    fun `high level ask retains bounded CPU session configuration`() = runTest {
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "bounded-helper"
+        every { mockService.infer(any(), any(), any(), any()) } answers {
+            arg<ParcelFileDescriptor>(3).close()
+        }
+
+        mindlayer.ask("test") {
+            backend = InferenceBackend.CPU
+            maxTokens = 8192
+        }
+
+        assertEquals("CPU", configSlot.captured.backend)
+        assertEquals(8192, configSlot.captured.maxTokens)
+        verify(exactly = 0) { mockService.prewarm(any()) }
+    }
+
+    @Test
+    fun `backend accessors have JVM defaults for existing custom scopes`() {
+        val legacyScope = object : SessionScope {
+            override var systemPrompt: String? = null
+            override var maxTokens: Int? = null
+            override var historyPolicy: HistoryPolicy = HistoryPolicy.METADATA_ONLY
+            override var toolsJson: String? = null
+            override var extraContextJson: String? = null
+        }
+
+        assertNull(legacyScope.backend)
+        legacyScope.backend = null
+        assertTrue(SessionScope::class.java.getMethod("getBackend").isDefault)
+        assertTrue(SessionScope::class.java.getMethod("setBackend", InferenceBackend::class.java).isDefault)
+        try {
+            legacyScope.backend = InferenceBackend.CPU
+            fail("An unsupported custom scope must not silently discard a backend request")
+        } catch (_: IllegalArgumentException) {
+            assertNull(legacyScope.backend)
+        }
+    }
+
+    @Test
     fun `listSessions_returnsAidlResult`() = runTest {
         val info1 = SessionInfo(
             sessionId = "s1", backend = "GPU", maxTokens = 4096,

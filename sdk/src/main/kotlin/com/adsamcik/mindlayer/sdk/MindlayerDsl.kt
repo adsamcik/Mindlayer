@@ -21,6 +21,20 @@ annotation class MindlayerDsl
 interface SessionScope {
     var systemPrompt: String?
     var maxTokens: Int?
+    /**
+     * Preferred backend when this session causes a cold engine initialization.
+     * `null` preserves the existing GPU preference. An already-loaded shared
+     * engine keeps its active backend; this is not an engine-switch request.
+     *
+     * Default accessors keep existing custom SessionScope implementations
+     * compatible. SDK-created scopes override both accessors and retain the
+     * preference. A custom scope must opt in before accepting a non-null value.
+     */
+    var backend: InferenceBackend?
+        get() = null
+        set(value) {
+            require(value == null) { "This SessionScope does not support backend selection" }
+        }
     var historyPolicy: HistoryPolicy
 
     /**
