@@ -5,13 +5,23 @@ on:
     tags:
       - 'v*'    # e.g. v0.1.0, v1.2.3
   workflow_dispatch:
+    inputs:
+      sdk_only:
+        description: Publish only the shared and SDK Maven packages
+        type: boolean
+        default: false
+      publish_version:
+        description: Exact SemVer for SDK-only publication (without a v prefix)
+        type: string
+        default: ''
 
 # Serialize publishes for a given ref. `cancel-in-progress: false` is
 # deliberate: a tag publish (Maven upload + GitHub Release + signed AAB
 # attach) must never be interrupted half-way, which could leave a partially
 # published version. Overlapping runs for the *same* tag simply queue.
 concurrency:
-  group: publish-${{ github.ref }}
+  # SDK-only dispatches join the corresponding tag's publication queue.
+  group: publish-${{ github.event_name == 'workflow_dispatch' && inputs.sdk_only && format('refs/tags/v{0}', inputs.publish_version) || github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -28,11 +38,31 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      sdk_publish_version: ${{ steps.sdk-version.outputs.version }}
+    env:
+      SDK_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.sdk_only }}
     permissions:
       contents: read
       packages: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Validate SDK-only publish version
+        if: env.SDK_ONLY == 'true'
+        id: sdk-version
+        run: |
+          set -euo pipefail
+          NUMERIC_IDENTIFIER='(0|[1-9][0-9]*)'
+          PRERELEASE_IDENTIFIER='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          SEMVER_REGEX="${NUMERIC_IDENTIFIER}[.]${NUMERIC_IDENTIFIER}[.]${NUMERIC_IDENTIFIER}(-${PRERELEASE_IDENTIFIER}([.]${PRERELEASE_IDENTIFIER})*)?([+][0-9A-Za-z-]+([.][0-9A-Za-z-]+)*)?"
+          if [[ ! "$REQUESTED_VERSION" =~ ^${SEMVER_REGEX}$ ]]; then
+            echo "::error::SDK-only publication requires publish_version as a valid SemVer without a v prefix"
+            exit 1
+          fi
+          printf 'version=%s\n' "$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+        env:
+          REQUESTED_VERSION: ${{ inputs.publish_version }}
 
       - name: Set up JDK 21 (compile target 17)
         uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
@@ -47,13 +77,22 @@ jobs:
         uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
 
       - name: Run tests before publishing
+        if: env.SDK_ONLY != 'true'
         run: ./gradlew testDebugUnitTest --no-daemon
+
+      - name: Run shared and SDK tests before SDK-only publication
+        if: env.SDK_ONLY == 'true'
+        run: ./gradlew :shared:testDebugUnitTest :sdk:testDebugUnitTest --no-daemon -PpublishVersion="$PUBLISH_VERSION"
+        env:
+          PUBLISH_VERSION: ${{ steps.sdk-version.outputs.version }}
 
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [ test ]
-    if: github.ref_type == 'tag'
+    if: (github.ref_type == 'tag' && !(github.event_name == 'workflow_dispatch' && inputs.sdk_only)) || (github.event_name == 'workflow_dispatch' && inputs.sdk_only && needs.test.outputs.sdk_publish_version != '')
+    env:
+      SDK_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.sdk_only }}
     permissions:
       packages: write
       contents: write
@@ -61,11 +100,13 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Extract version from tag
+      - name: Resolve publish version
         id: version
         run: |
           SEMVER_REGEX='[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?([+][0-9A-Za-z][0-9A-Za-z.-]*)?'
-          if [[ "$REF_TYPE" == "tag" ]]; then
+          if [[ "$SDK_ONLY" == "true" ]]; then
+            VERSION="$SDK_PUBLISH_VERSION"
+          elif [[ "$REF_TYPE" == "tag" ]]; then
             if [[ ! "$REF_NAME" =~ ^v${SEMVER_REGEX}$ ]]; then
               echo "::error::Release tags must be v<semver> (for example v1.2.3 or v1.2.3-rc.1)"
               exit 1
@@ -83,6 +124,7 @@ jobs:
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          SDK_PUBLISH_VERSION: ${{ needs.test.outputs.sdk_publish_version }}
 
       - name: Set up JDK 21 (compile target 17)
         uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
@@ -150,8 +192,15 @@ jobs:
 
           should_publish "shared" "com.adsamcik.mindlayer.shared" "publish-shared" publish_shared
           should_publish "sdk" "com.adsamcik.mindlayer.sdk" "publish-sdk" publish_sdk
-          should_publish "sdk-camerax" "com.adsamcik.mindlayer.sdk-camerax" "publish_sdk_camerax" publish_sdk_camerax
-          should_publish "sdk-camera-launcher" "com.adsamcik.mindlayer.sdk-camera-launcher" "publish_sdk_camera_launcher" publish_sdk_camera_launcher
+          publish_sdk_camerax=false
+          publish_sdk_camera_launcher=false
+          if [[ "$SDK_ONLY" == "true" ]]; then
+            echo "publish_sdk_camerax=false" >> "$GITHUB_OUTPUT"
+            echo "publish_sdk_camera_launcher=false" >> "$GITHUB_OUTPUT"
+          else
+            should_publish "sdk-camerax" "com.adsamcik.mindlayer.sdk-camerax" "publish_sdk_camerax" publish_sdk_camerax
+            should_publish "sdk-camera-launcher" "com.adsamcik.mindlayer.sdk-camera-launcher" "publish_sdk_camera_launcher" publish_sdk_camera_launcher
+          fi
 
           if [[ "$publish_shared" == "false" && "$publish_sdk" == "false" && "$publish_sdk_camerax" == "false" && "$publish_sdk_camera_launcher" == "false" ]]; then
             echo "::notice::All SDK Maven packages for $PUBLISH_VERSION are already published — publish steps will be skipped"
@@ -178,7 +227,7 @@ jobs:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
 
       - name: Publish SDK CameraX integration to GitHub Packages
-        if: steps.probe-packages.outputs.publish_sdk_camerax == 'true'
+        if: env.SDK_ONLY != 'true' && steps.probe-packages.outputs.publish_sdk_camerax == 'true'
         run: ./gradlew :sdk-camerax:publishReleasePublicationToGitHubPackagesRepository --no-daemon -PpublishVersion="$PUBLISH_VERSION"
         env:
           GITHUB_OWNER: ${{ github.repository_owner }}
@@ -186,7 +235,7 @@ jobs:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
 
       - name: Publish SDK camera launcher to GitHub Packages
-        if: steps.probe-packages.outputs.publish_sdk_camera_launcher == 'true'
+        if: env.SDK_ONLY != 'true' && steps.probe-packages.outputs.publish_sdk_camera_launcher == 'true'
         run: ./gradlew :sdk-camera-launcher:publishReleasePublicationToGitHubPackagesRepository --no-daemon -PpublishVersion="$PUBLISH_VERSION"
         env:
           GITHUB_OWNER: ${{ github.repository_owner }}
@@ -194,7 +243,7 @@ jobs:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
 
       - name: Create GitHub Release
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' && env.SDK_ONLY != 'true'
         id: gh-release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
@@ -393,7 +442,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [ publish ]
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' && !(github.event_name == 'workflow_dispatch' && inputs.sdk_only)
     permissions:
       contents: write
       packages: read
