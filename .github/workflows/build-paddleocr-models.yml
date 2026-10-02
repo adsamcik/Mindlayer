@@ -121,19 +121,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          # paddle2onnx 2.1.0 and onnx2tf 2.4.0 intentionally use
-          # incompatible ONNX versions. Keep them in isolated virtualenvs so
-          # the pinned conversion chain stays reproducible.
+          # Share the Docker pins and keep incompatible upstream requirements
+          # isolated. See scripts/build-paddleocr-models/DEPENDENCIES.md.
           python -m venv .venv-paddle2onnx
           .venv-paddle2onnx/bin/python -m pip install --upgrade pip
           .venv-paddle2onnx/bin/python -m pip install \
-            "setuptools==80.9.0" \
-            "paddlepaddle==3.0.0" \
             "paddle2onnx==${{ inputs.paddle2onnx_version }}" \
-            "onnx==1.16.2" \
-            "onnxruntime==1.18.1" \
-            "protobuf==4.25.4" \
-            "numpy==1.26.4"
+            -r scripts/build-paddleocr-models/requirements-paddle2onnx.txt
+          .venv-paddle2onnx/bin/python -m pip check
 
           python -m venv .venv-onnx2tf
           .venv-onnx2tf/bin/python -m pip install --upgrade pip
@@ -141,17 +136,11 @@ jobs:
           # we use to keep LayerNormalization native — see the "Why -tb
           # tf_converter" comment at the top of this workflow). onnxsim
           # folds dynamic shape arithmetic chains before tf_converter sees
-          # them. The onnx pin (1.20.1) matches what onnx2tf 2.4.0 pulls
-          # transitively; we pin it explicitly so the install is
-          # reproducible if the transitive resolution changes.
+          # them. Requirement files hold the shared direct dependency pins.
           .venv-onnx2tf/bin/python -m pip install \
             "onnx2tf==${{ inputs.onnx2tf_version }}" \
-            "tensorflow==2.19.1" \
-            "tf_keras==2.19.0" \
-            "onnxsim==0.6.3" \
-            "onnx==1.20.1" \
-            "protobuf==4.25.5" \
-            "numpy==1.26.4"
+            -r scripts/build-paddleocr-models/requirements-onnx2tf.txt
+          .venv-onnx2tf/bin/python -m pip check
 
           .venv-paddle2onnx/bin/python -c "import importlib.metadata as m; print('paddle2onnx=', m.version('paddle2onnx')); print('onnx=', m.version('onnx'))"
           .venv-onnx2tf/bin/python -c "import importlib.metadata as m; print('onnx2tf=', m.version('onnx2tf')); print('onnx=', m.version('onnx')); print('tensorflow=', m.version('tensorflow')); print('tf_keras=', m.version('tf_keras')); print('onnxsim=', m.version('onnxsim'))"
@@ -309,10 +298,8 @@ jobs:
             # and ../../scripts/build-paddleocr-models/tflite_gpu_fixup.py.
             # Rewrites RELU_0_TO_1 -> MAXIMUM(0)+MINIMUM(1), downgrades
             # TRANSPOSE_CONV v4 -> v3 and STRIDED_SLICE v4 -> v2 so the
-            # LiteRT 2.1.5 GPU delegate can compile the artefacts. Adds
-            # `tflite` to the venv so the surgery tool can read the
-            # flatbuffer schema.
-            ../.venv-onnx2tf/bin/python -m pip install --quiet "tflite==2.18.0"
+            # LiteRT 2.1.5 GPU delegate can compile the artefacts. The pinned
+            # `tflite` package supplies the flatbuffer schema.
             ../.venv-onnx2tf/bin/python ../scripts/build-paddleocr-models/tflite_gpu_fixup.py \
               "paddleocr-ppocrv5-mobile-${kind}.tflite" \
               "paddleocr-ppocrv5-mobile-${kind}.gpu.tflite"

@@ -1,0 +1,11 @@
+# paddle2onnx 2.1.0 requires ONNX <=1.17.0. See DEPENDENCIES.md.
+setuptools==83.0.0
+paddlepaddle==3.0.0
+onnx==1.17.0
+onnxruntime==1.18.1
+protobuf==5.29.6
+numpy==1.26.4
+# Preinstall constant-folding tools: Polygraphy's auto-install can upgrade NumPy
+# inside the running converter and break ONNX Runtime's NumPy 1.x ABI.
+polygraphy==0.53.6
+onnx-graphsurgeon==0.5.8

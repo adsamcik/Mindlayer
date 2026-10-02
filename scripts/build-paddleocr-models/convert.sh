@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Driver for the PaddleOCR PP-OCRv5 mobile -> ONNX -> TFLite conversion.
-# Mirrors the steps in .github/workflows/build-paddleocr-models.yml so
-# the local Docker run and the CI run produce byte-identical artifacts.
+# Uses the same tool dependencies as .github/workflows/build-paddleocr-models.yml.
+# The workflow still inlines conversion logic; output parity needs validation.
 #
 # This is the **source of truth** for the conversion pipeline. The CI
-# workflow inlines the same pip pins + bash logic to stay close to a
+# workflow uses shared requirement files and inlines bash logic to stay close to a
 # clean Ubuntu runner; if you change anything material here update the
 # workflow at the same time.
 #
