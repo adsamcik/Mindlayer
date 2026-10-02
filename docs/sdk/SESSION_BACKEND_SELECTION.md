@@ -17,7 +17,7 @@ mindlayer.infer {
 The same configuration works with `openSession`, `withSession`, and helpers
 that accept a `SessionScope`. Omitting the preference retains the existing
 GPU default. The alpha.7-based release patch retains its 128–8192 token
-validation, including input and output. Current unreleased main separately
+validation, including input and output. The main-based alpha.9 release separately
 permits 128–32768 tokens; this backend addition does not change that range.
 The service may reduce the effective context under memory
 pressure. The native engine is shared: a preference does not replace or resize
@@ -28,7 +28,7 @@ service implementation chooses the device's current maximum context instead
 of the app's session budget. Creating the cold session sends the backend and
 budget together through the existing wire contract.
 
-## Isolated validation
+## Historical alpha.8 validation
 
 This patch starts at the published `v1.0.0-alpha.7` tag; it does not include the
 unreleased changes on the repository's current main branch. Its artifact
@@ -59,27 +59,12 @@ task or `publishToMavenLocal` task is used. SDK POM and module metadata must poi
 to `shared:1.0.0-alpha.8`; retain both modules together for consumer validation.
 
 
-## SDK-only publication through CI
+## Main-based releases
 
-The `Publish SDK` workflow supports a manual SDK-only run. Select the reviewed
-alpha.7-based release branch as the dispatch ref and supply:
-
-- `sdk_only: true`
-- `publish_version: 1.0.0-alpha.8`
-
-The workflow must already be present on the repository's default branch before
-manual dispatch is available. The selected ref determines the source checkout;
-the exact validated SemVer input determines both artifact versions. Existing
-versions are skipped instead of overwritten, so use a new version for changed
-source. An empty or malformed version fails before tests or publication.
-
-This path runs the shared and SDK unit suites and publishes only those two
-Maven modules. It skips CameraX, the camera launcher, GitHub Release creation,
-and service APK/AAB jobs. Normal tag releases retain their existing behavior.
-SDK-only runs for a version share the matching tag's concurrency group, keeping
-publication attempts for that version serialized.
-
-```powershell
-gh workflow run publish.yml --repo adsamcik/Mindlayer --ref codex/sdk-bounded-cpu-alpha8 `
-    -f sdk_only=true -f publish_version=1.0.0-alpha.8
-```
+Alpha.8 was an SDK-only publication from the alpha.7-based branch. Alpha.9
+includes this backend API and the reviewed main service/runtime changes.
+The branch-only publication path has been removed. Release preparation follows
+`docs/project/RELEASE.md`: validate the main-based release, integrate and push
+main, then create its matching version tag. CI rejects a tag outside main's
+history or a version without matching committed version and changelog metadata.
+All four Maven modules and the code-only service APK are built from that tag.

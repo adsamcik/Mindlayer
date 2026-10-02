@@ -6,6 +6,10 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [1.0.0-alpha.9] — 2026-10-02
+
+SDK and service version → `1.0.0-alpha.9`. All four Maven modules use this version.
+
 ### Added
 - SDK session scopes now accept an optional typed inference backend. Clients
   can request CPU and a bounded total context together during cold engine
@@ -14,6 +18,9 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   sufficient, and already-loaded engines retain their active configuration.
 
 ### Changed
+- The dashboard now prioritizes service readiness and model setup, with deeper
+  diagnostics available through contextual details. Model cards distinguish
+  checking, download, installation, and recovery states more clearly.
 - LLM prewarming now derives an 8,192-token context from an explicit 76 MiB
   KV-cache budget instead of allocating the device tier's maximum context.
   Speculative no-budget prewarm is skipped on devices with at most 4 GiB RAM
@@ -58,11 +65,32 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   `Backend.GOOGLE_TENSOR` API variant.
 
 ### Fixed
+- Model status checks now leave the checking state after failed or incomplete
+  Play Asset Delivery responses, retain useful recovery feedback, and reject
+  stale refresh results rather than leaving setup apparently stuck.
+- Local diagnostics preserve managed capture after a process restart and offer
+  recent logs and reviewed support sharing from the simplified dashboard.
+- Android Studio now offers separate first-install/model deployment and app-only
+  update flows. Developer deployment handles native ADB stderr correctly and
+  keeps already-installed models during code-only updates.
 - Worked around upstream LiteRT issue #8474, which still publishes
   `litert:2.2.0` and its required `litert-api:2.2.0` dependency with the same
   Android namespace. AGP's global uniqueness check is relaxed, while the new
   `validateAndroidAarNamespaces` task scans the full release AAR graph and
   fails unless the only duplicate is the exact, byte-identical LiteRT pair.
+
+### Upgrade notes
+- Upgrade `shared`, `sdk`, `sdk-camerax`, and `sdk-camera-launcher` together.
+  The additive wire contract is `1.4.0` and service API is `11`; new SDK features
+  use capability checks with older services. Backend preferences do not replace
+  an already-loaded engine's active configuration.
+- SDK/shared `1.0.0-alpha.8` were an SDK-only publication from the alpha.7-based
+  source branch on 2026-10-01. Alpha.9 is the complete main-based release;
+  alpha.8 artifacts remain unchanged and camera modules first advance at alpha.9.
+- The GitHub service APK is a code-only, debug-signed build for sideload testing.
+  Install or retain models separately. Production Play bundles remain signed and
+  built locally; this release does not establish physical-device GPU/NPU memory,
+  inference performance, or model-distribution qualification.
 
 ## [1.0.0-alpha.7] — 2026-08-16
 

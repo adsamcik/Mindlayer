@@ -101,14 +101,29 @@ chore(release): prepare 1.0.0
 
 ### 2.2 Publish SDK artifacts
 
-After the release PR is merged, create and push its matching `v<semver>` tag:
+Run the release checks from the exact main-based source that will be tagged:
+
+```powershell
+python scripts/ci/release-metadata.py --version 1.0.0
+./gradlew.bat assembleDebug testDebugUnitTest :app:testReleaseUnitTest lintDebug
+```
+
+Use the intended release version in the metadata command. Preserve unfinished
+local work outside the release commit. After the release changes are integrated
+into `main` and main has been pushed, create and push its matching `v<semver>` tag:
 
 ```powershell
 git tag v1.0.0
 git push origin v1.0.0
 ```
 
-The tag workflow tests and publishes the Maven artifacts to GitHub Packages:
+The tag workflow requires that the tagged commit is in remote main's history,
+and that its committed default version and dated changelog match the tag. It
+runs debug and release unit tests plus lint before publishing. The GitHub
+Release uses the matching changelog entry. Branch-only package publication is
+not supported.
+
+The workflow publishes the Maven artifacts to GitHub Packages:
 
 - `com.adsamcik.mindlayer:shared`
 - `com.adsamcik.mindlayer:sdk`
