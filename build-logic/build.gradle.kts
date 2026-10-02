@@ -13,11 +13,10 @@ dependencies {
 
 // ── Security: pin patched build-only transitives on the build-logic classpath ──
 // This is a separate (included) build, so the root project's `allprojects`
-// resolution forces do NOT reach it. AGP's signing tooling (apksig) drags in the
-// vulnerable BouncyCastle 1.79 family (critical GHSA-574f-3g2m-x479, fixed in
-// 1.81.1) and AGP's Unified Test Platform pulls older netty — both then appear in
-// the submitted Gradle dependency graph even though neither ships in any
-// artifact. Mirror the root build's pins here so build-logic stays clean too.
+// resolution forces do NOT reach it. AGP signing, emulator control and other
+// build tools bring these libraries onto the plugin classpath. Mirror the root
+// build's patched versions so the actual loaded classes and submitted dependency
+// graph agree.
 // Keep this list in sync with `mindlayerSecurityDependencyForces` in the root
 // build.gradle.kts.
 configurations.configureEach {
@@ -25,6 +24,10 @@ configurations.configureEach {
         "org.bouncycastle:bcprov-jdk18on:1.85",
         "org.bouncycastle:bcpkix-jdk18on:1.85",
         "org.bouncycastle:bcutil-jdk18on:1.85",
+        // GHSA-2363-cqg2-863c, GHSA-3677-xxcr-wjqv, GHSA-j288-q9x7-2f5v.
+        "org.jdom:jdom2:2.0.6.1",
+        "org.bitbucket.b_c:jose4j:0.9.6",
+        "org.apache.commons:commons-lang3:3.18.0",
         "io.netty:netty-buffer:4.2.16.Final",
         "io.netty:netty-codec:4.2.16.Final",
         "io.netty:netty-codec-http:4.2.16.Final",

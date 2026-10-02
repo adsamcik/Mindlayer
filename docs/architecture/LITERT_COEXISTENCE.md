@@ -1,16 +1,24 @@
 # LiteRT + LiteRT-LM same-process coexistence risk
 
-> **Status: LiteRT-LM 0.16.1 and base LiteRT 2.2.0 are now upgraded as a
+> **Status: LiteRT-LM 0.17.1 and base LiteRT 2.2.0 are now upgraded as a
 > pair. LiteRT-LM still bundles neither colliding library, and the
 > native-collision guard passes. Real-device GPU/NPU coexistence remains
 > unverified.**
-> Last updated: 2026-08-20.
+> Last updated: 2026-10-02.
 >
 > The Mindlayer service loads **two distinct LiteRT-family runtimes**
 > in the same Android process: ``com.google.ai.edge.litertlm:litertlm-android``
 > for the Gemma chat path, and ``com.google.ai.edge.litert:litert:2.2.0``
 > for the embedding (EmbeddingGemma) and OCR (PaddleOCR PP-OCRv5
 > mobile) paths.
+>
+> **2026-10-02 dependency update:** LiteRT-LM 0.17.1 embeds upstream
+> LiteRT commit `9fe5be45564c868408e6514c8aabb83e211a0911` (2026-08-27),
+> as pinned in the [release's WORKSPACE](https://github.com/google-ai-edge/LiteRT-LM/blob/v0.17.1/WORKSPACE).
+> Base LiteRT remains 2.2.0. Native collision, ABI and duplicate-namespace
+> packaging checks pass for this pair. The August CPU inference evidence
+> below applies to 0.16.1 only; CPU, GPU and NPU coexistence with 0.17.1
+> still requires a fresh device run.
 >
 > **2026-08-20 paired-version update:** LiteRT-LM 0.16.1 pins upstream
 > LiteRT commit `0ff28117f1cb5556d0e015bf80b773f74e2bee51` (2026-08-04).

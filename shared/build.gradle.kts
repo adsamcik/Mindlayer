@@ -14,7 +14,8 @@ mindlayerPublish {
 }
 
 dependencies {
-    implementation(libs.kotlinx.serialization.json)
+    // StreamEvent.payload and generated serializers expose these types.
+    api(libs.kotlinx.serialization.json)
 
     testImplementation(libs.junit)
 }

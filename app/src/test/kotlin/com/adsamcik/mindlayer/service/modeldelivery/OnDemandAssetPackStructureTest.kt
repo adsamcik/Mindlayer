@@ -16,7 +16,7 @@ class OnDemandAssetPackStructureTest {
         val gradleProperties = root.resolve("gradle.properties").readText()
         val versions = root.resolve("gradle/libs.versions.toml").readText()
 
-        assertTrue(versions.contains("litertlm = \"0.16.1\""))
+        assertTrue(versions.contains("litertlm = \"0.17.1\""))
         assertTrue(versions.contains("litert = \"2.2.0\""))
         assertTrue(gradleProperties.contains("android.uniquePackageNames=false"))
         assertTrue(appBuild.contains("validateAndroidAarNamespaces"))

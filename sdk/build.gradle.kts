@@ -26,10 +26,12 @@ dependencies {
     lintChecks(project(":lint-checks"))
 
     api(project(":shared"))  // 'api' so consumers get shared types transitively
+    // Flow/StateFlow and JsonObject appear in the public SDK signatures.
+    api(libs.kotlinx.coroutines.core)
+    api(libs.kotlinx.serialization.json)
     implementation(libs.androidx.core.ktx)
     implementation(libs.lifecycle.process)
     implementation(libs.kotlinx.coroutines.android)
-    implementation(libs.kotlinx.serialization.json)
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
     implementation(libs.sqlcipher.android)

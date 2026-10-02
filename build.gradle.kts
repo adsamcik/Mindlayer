@@ -1,17 +1,15 @@
-// ── Security: pin patched BouncyCastle on the plugin/buildscript classpath ──────
-// AGP's APK-signing tooling (bundletool → apksig) drags in
-// org.bouncycastle:*-jdk18on 1.79 onto the buildscript classpath, which trips the
-// critical GHSA-574f-3g2m-x479 advisory (vulnerable <= 1.80.1). It never ships in
-// any artifact, but it appears in the submitted Gradle dependency graph, so we
-// force the patched 1.81.1 here. The `allprojects` block at the bottom of this
-// file pins the project-configuration (Robolectric / Unified Test Platform)
-// counterparts.
+// Patched build-only transitives, also pinned in build-logic and project
+// configurations below. Bouncy Castle 1.85 covers the current ASN.1/name
+// constraints advisories; JDOM, jose4j and Commons Lang arrive through AGP.
 buildscript {
     configurations.classpath {
         resolutionStrategy.force(
             "org.bouncycastle:bcprov-jdk18on:1.85",
             "org.bouncycastle:bcpkix-jdk18on:1.85",
             "org.bouncycastle:bcutil-jdk18on:1.85",
+            "org.jdom:jdom2:2.0.6.1",
+            "org.bitbucket.b_c:jose4j:0.9.6",
+            "org.apache.commons:commons-lang3:3.18.0",
         )
     }
 }
@@ -410,21 +408,18 @@ val validateNoFullGemmaInAssetPacks = tasks.register("validateNoFullGemmaInAsset
 }
 
 // ── Security: force patched versions of vulnerable BUILD/TEST-only transitives ──
-// None of these ship in the :app / :sdk APKs — they arrive purely through build
-// and test tooling — but they trip Dependabot advisories in the submitted Gradle
-// dependency graph, so we pin the patched versions across every project config:
-//   • org.bouncycastle:*-jdk18on 1.79 / 1.81.0 — pulled by Robolectric (unit
-//     tests) and AGP signing tooling. Critical GHSA-574f-3g2m-x479 is fixed in
-//     1.81.1 (the whole -jdk18on family is released together and must match).
-//   • io.netty:* 4.1.93 / 4.1.110.Final — pulled by AGP's Unified Test Platform
-//     (grpc-netty emulator control). High GHSA-c653-97m9-rcg9, GHSA-x4gw-5cx5-pgmh,
-//     GHSA-3qp7-7mw8-wx86 and moderate GHSA-hvcg-qmg6-jm4c, GHSA-563q-j3cm-6jxm,
-//     GHSA-c2gf-v879-257j, GHSA-5x3r-wrvg-rp6q are fixed in 4.1.135.Final. The
-//     entire netty family is pinned so all modules stay on one aligned version.
+// These arrive through AGP and unit-test tooling. Keep Bouncy Castle and Netty
+// families aligned, and cover both project and subproject buildscript graphs.
+// The root plugin classpath is pinned at the top of this file before resolution;
+// the independent included build mirrors these pins in build-logic.
 val mindlayerSecurityDependencyForces = listOf(
     "org.bouncycastle:bcprov-jdk18on:1.85",
     "org.bouncycastle:bcpkix-jdk18on:1.85",
     "org.bouncycastle:bcutil-jdk18on:1.85",
+    // GHSA-2363-cqg2-863c, GHSA-3677-xxcr-wjqv, GHSA-j288-q9x7-2f5v.
+    "org.jdom:jdom2:2.0.6.1",
+    "org.bitbucket.b_c:jose4j:0.9.6",
+    "org.apache.commons:commons-lang3:3.18.0",
     "io.netty:netty-buffer:4.2.16.Final",
     "io.netty:netty-codec:4.2.16.Final",
     "io.netty:netty-codec-http:4.2.16.Final",
@@ -440,6 +435,12 @@ val mindlayerSecurityDependencyForces = listOf(
 
 allprojects {
     configurations.configureEach {
+        resolutionStrategy.force(*mindlayerSecurityDependencyForces.toTypedArray())
+    }
+}
+
+subprojects {
+    buildscript.configurations.configureEach {
         resolutionStrategy.force(*mindlayerSecurityDependencyForces.toTypedArray())
     }
 }
