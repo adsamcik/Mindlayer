@@ -550,7 +550,9 @@ class InferencePipelineTest {
 
         // Verify service foreground lifecycle was called
         verify(atLeast = 1) { service.enterForeground() }
-        verify(atLeast = 1) { service.exitForeground() }
+        // Pipe EOF can reach the reader before the inference job finishes its
+        // finally block and releases foreground state.
+        verify(timeout = 5_000, atLeast = 1) { service.exitForeground() }
     }
 
     // ========================================================================
