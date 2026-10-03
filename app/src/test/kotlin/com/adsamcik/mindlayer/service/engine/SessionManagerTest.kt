@@ -394,11 +394,7 @@ class SessionManagerTest {
 
     @Test
     fun `getSession destroys an expired session that is NOT streaming (R-5 boundary)`() {
-        val convo = mockk<Conversation>(relaxed = true)
-        every { mockEngine.createConversation(any()) } returns convo
-
         val id = sessionManager.createSession(SessionConfig(sessionId = "exp-idle", expirationMs = 1L))
-        sessionManager.getSession(id)!!.conversation = convo
         Thread.sleep(5)
 
         assertNull("expired idle session must be destroyed/evicted", sessionManager.getSession(id))

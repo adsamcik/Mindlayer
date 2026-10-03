@@ -6,6 +6,11 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+- Android Studio's standard **Generate Signed App Bundle or APK** flow now
+  passes the release-signing guard without requiring `keystore.properties`.
+  Direct Gradle builds still support the gitignored properties file and CI
+  credentials, and reject release packaging without a configured signing method.
+
 ## [1.0.0-alpha.9] — 2026-10-02
 
 SDK and service version → `1.0.0-alpha.9`. All four Maven modules use this version.
