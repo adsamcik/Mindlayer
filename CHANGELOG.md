@@ -6,6 +6,10 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+- Completed deferred embedding results now survive client disconnects until
+  acknowledgement, expiry, or quota eviction. Revoking app access cancels active
+  work, purges deferred results, and retries interrupted cleanup before reapproval;
+  chat and embedding results now have separate per-app quota accounting.
 - Android Studio's standard **Generate Signed App Bundle or APK** flow now
   passes the release-signing guard without requiring `keystore.properties`.
   Direct Gradle builds still support the gitignored properties file and CI

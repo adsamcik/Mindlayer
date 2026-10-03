@@ -74,6 +74,8 @@ data class DeniedEntry(
      * cert under the package name.
      */
     val scope: DenialScope = DenialScope.CERT_PAIR,
+    /** UID whose deferred state still needs purge after this access removal. */
+    val pendingCleanupUid: Int? = null,
 )
 
 /**
@@ -173,9 +175,27 @@ class AllowlistStore(
      * tolerable since the caller-authorization path is already rate-limited.
      */
     fun isAllowed(pkg: String, sigSha256: String): Boolean {
-        val entry = readEntries().firstOrNull { it.packageName == pkg } ?: return false
-        return entry.signingCertSha256.equals(sigSha256, ignoreCase = true)
+        return approvalFor(pkg, sigSha256) != null
     }
+
+    /** Current non-denied approval generation for `(pkg, sig)`, read atomically from disk. */
+    fun approvalFor(pkg: String, sigSha256: String): AllowlistEntry? =
+        withFileLock {
+            val now = System.currentTimeMillis()
+            val denied = readDenied().any { entry ->
+                entry.packageName == pkg && (entry.permanent || entry.expiresAtMs > now) &&
+                    when (entry.scope) {
+                        DenialScope.PACKAGE_WIDE -> true
+                        DenialScope.CERT_PAIR ->
+                            entry.signingCertSha256?.equals(sigSha256, ignoreCase = true) == true
+                    }
+            }
+            if (denied) return@withFileLock null
+            readEntries().firstOrNull { entry ->
+                entry.packageName == pkg &&
+                    entry.signingCertSha256.equals(sigSha256, ignoreCase = true)
+            }
+        }
 
     fun list(): List<AllowlistEntry> = readEntries().also { _entries.value = it }
 
@@ -282,16 +302,29 @@ class AllowlistStore(
     private fun writeApprovalLocked(pkg: String, sigSha256: String, displayName: String?) {
         val now = System.currentTimeMillis()
         val current = readEntries()
+        val previousGrant = current
+            .firstOrNull { it.packageName == pkg }
+            ?.grantedAtMs
+            ?: Long.MIN_VALUE
+        val previousDenial = readDeniedIncludingExpired()
+            .filter { it.packageName == pkg }
+            .maxOfOrNull { it.deniedAtMs }
+            ?: Long.MIN_VALUE
+        val grantedAtMs = maxOf(
+            now,
+            previousGrant.takeIf { it < Long.MAX_VALUE }?.plus(1L) ?: Long.MAX_VALUE,
+            previousDenial.takeIf { it < Long.MAX_VALUE }?.plus(1L) ?: Long.MAX_VALUE,
+        )
         val updated = current.filterNot { it.packageName == pkg } +
-            AllowlistEntry(pkg, sigSha256, now, displayName)
+            AllowlistEntry(pkg, sigSha256, grantedAtMs, displayName)
         writeEntries(updated)
         _entries.value = updated
     }
 
-    fun revoke(pkg: String) {
-        withFileLock {
+    fun revoke(pkg: String, pendingCleanupUid: Int? = null): AllowlistEntry? {
+        return withFileLock {
             val current = readEntries()
-            val target = current.firstOrNull { it.packageName == pkg } ?: return@withFileLock
+            val target = current.firstOrNull { it.packageName == pkg } ?: return@withFileLock null
             val updated = current.filterNot { it.packageName == pkg }
             writeEntries(updated)
             _entries.value = updated
@@ -309,8 +342,10 @@ class AllowlistStore(
                     deniedAtMs = now,
                     expiresAtMs = Long.MAX_VALUE,
                     permanent = true,
+                    pendingCleanupUid = pendingCleanupUid,
                 )
             writeDenied(deniedUpdated)
+            target
         }
     }
 
@@ -401,7 +436,12 @@ class AllowlistStore(
      * replaced (single-row-per-package invariant). Use [revoke] to remove
      * a prior approval at the same time as denying.
      */
-    fun deny(pkg: String, sigSha256: String?, kind: Int) {
+    fun deny(
+        pkg: String,
+        sigSha256: String?,
+        kind: Int,
+        pendingCleanupUid: Int? = null,
+    ): AllowlistEntry? {
         val now = System.currentTimeMillis()
         val entry = when (kind) {
             com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H -> {
@@ -425,8 +465,48 @@ class AllowlistStore(
             )
             else -> throw IllegalArgumentException("Unsupported deny kind: $kind")
         }
+        return withFileLock {
+            val currentApprovals = readEntries()
+            val removedApproval = currentApprovals.firstOrNull { approval ->
+                approval.packageName == pkg &&
+                    when (entry.scope) {
+                        DenialScope.PACKAGE_WIDE -> true
+                        DenialScope.CERT_PAIR ->
+                            approval.signingCertSha256.equals(sigSha256, ignoreCase = true)
+                    }
+            }
+            val approvals = currentApprovals.filterNot { approval ->
+                removedApproval != null && approval === removedApproval
+            }
+            writeEntries(approvals)
+            _entries.value = approvals
+            val persistedEntry = entry.copy(
+                pendingCleanupUid = pendingCleanupUid.takeIf { removedApproval != null },
+            )
+            val updated =
+                readDeniedIncludingExpired().filterNot { it.packageName == pkg } + persistedEntry
+            writeDenied(updated)
+            removedApproval
+        }
+    }
+
+    fun pendingCleanupFor(pkg: String): DeniedEntry? =
+        readDeniedIncludingExpired().firstOrNull {
+            it.packageName == pkg && it.pendingCleanupUid != null
+        }
+
+    fun pendingCleanups(): List<DeniedEntry> =
+        readDeniedIncludingExpired().filter { it.pendingCleanupUid != null }
+
+    fun clearPendingCleanup(pkg: String, uid: Int) {
         withFileLock {
-            val updated = readDeniedIncludingExpired().filterNot { it.packageName == pkg } + entry
+            val updated = readDeniedIncludingExpired().map { entry ->
+                if (entry.packageName == pkg && entry.pendingCleanupUid == uid) {
+                    entry.copy(pendingCleanupUid = null)
+                } else {
+                    entry
+                }
+            }
             writeDenied(updated)
         }
     }
@@ -492,7 +572,9 @@ class AllowlistStore(
         // never pruned by expiry — they are sticky tombstones of an explicit
         // user decision. Time-bounded rows from consent "Deny for 24h"
         // still expire at expiresAtMs.
-        val pruned = list.filter { it.permanent || it.expiresAtMs > now }
+        val pruned = list.filter {
+            it.permanent || it.expiresAtMs > now || it.pendingCleanupUid != null
+        }
         val array = JSONArray()
         for (e in pruned.sortedBy { it.packageName }) {
             array.put(JSONObject().apply {
@@ -504,6 +586,7 @@ class AllowlistStore(
                 put("expiresAtMs", e.expiresAtMs)
                 if (e.permanent) put("permanent", true)
                 put("scope", e.scope.name)
+                e.pendingCleanupUid?.let { put("pendingCleanupUid", it) }
             })
         }
         atomicWrite(deniedFile, signedEnvelope(DENIED_KEY, array).toString())
@@ -621,6 +704,8 @@ class AllowlistStore(
                             expiresAtMs = o.optLong("expiresAtMs", 0L),
                             permanent = o.optBoolean("permanent", false),
                             scope = parseDenialScope(o.optString("scope")),
+                            pendingCleanupUid =
+                                o.optInt("pendingCleanupUid").takeIf { o.has("pendingCleanupUid") },
                         )
                     )
                 }
@@ -647,6 +732,8 @@ class AllowlistStore(
                                 expiresAtMs = expires,
                                 permanent = permanent,
                                 scope = parseDenialScope(o.optString("scope")),
+                                pendingCleanupUid =
+                                    o.optInt("pendingCleanupUid").takeIf { o.has("pendingCleanupUid") },
                             )
                         )
                     }
@@ -811,6 +898,9 @@ class AllowlistStore(
             append(",\"permanent\":").append(item.optBoolean("permanent", false))
             val scope = item.optString("scope").ifEmpty { DenialScope.CERT_PAIR.name }
             append(",\"scope\":").append(JSONObject.quote(scope))
+            if (version >= SIGNED_FILE_VERSION_PENDING_CLEANUP && item.has("pendingCleanupUid")) {
+                append(",\"pendingCleanupUid\":").append(item.optInt("pendingCleanupUid"))
+            }
         }
         append('}')
     }
@@ -932,7 +1022,8 @@ class AllowlistStore(
          */
         private val PROCESS_LOCKS = ConcurrentHashMap<String, ReentrantLock>()
 
-        // Bumped to 3 (v0.10 consent-architecture + security-review S-9):
+        // Bumped to 4 for the HMAC-bound pendingCleanupUid revocation marker.
+        // Bumped to 3 previously (v0.10 consent-architecture + security-review S-9):
         //  - DeniedEntry gained `scope` (cert-pair vs package-wide), and the
         //    canonical denied payload now binds both `permanent` and `scope`
         //    so an offline attacker can no longer flip a 24h denial to
@@ -948,11 +1039,12 @@ class AllowlistStore(
         // MIN_SUPPORTED_VERSION..SIGNED_FILE_VERSION so legacy v2 files still
         // verify; canonicalPayload() is version-aware so the v3 pre-image picks
         // up the new fields only when the file declares v3.
-        private const val SIGNED_FILE_VERSION = 3
+        private const val SIGNED_FILE_VERSION = 4
         private const val MIN_SUPPORTED_VERSION = 2
 
         /** First version whose canonical pre-image binds `prevSig`/`permanent`. */
         private const val SIGNED_FILE_VERSION_METADATA = 3
+        private const val SIGNED_FILE_VERSION_PENDING_CLEANUP = 4
         private const val ENTRIES_KEY = "entries"
         private const val DENIED_KEY = "denied"
         private const val MAC_KEY = "mac"

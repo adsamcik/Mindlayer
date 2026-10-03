@@ -72,6 +72,7 @@ import kotlinx.coroutines.withTimeout
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.ReentrantLock
 
 /**
  * AIDL binder implementation. Every entry point enforces:
@@ -188,6 +189,7 @@ class ServiceBinder(
      */
     private val activeInferenceUids = ConcurrentHashMap<String, Int>()
     private val activeInferenceOwners = ConcurrentHashMap<String, Any>()
+    private val deferredLifecycleLocks = ConcurrentHashMap<Int, ReentrantLock>()
 
     /**
      * v0.4 recently-completed inference tracking. Maps `scopedKey
@@ -245,6 +247,12 @@ class ServiceBinder(
      * once per process; reconnect-after-rebind retries are rare.
      */
     private val registrationAttempts = ConcurrentHashMap<Int, Int>()
+
+    init {
+        scope.launch(Dispatchers.IO) {
+            retryPendingCleanups()
+        }
+    }
 
     companion object {
         private const val TAG = "ServiceBinder"
@@ -333,6 +341,7 @@ class ServiceBinder(
          * this risk pinning a binder thread for unacceptable durations.
          */
         const val PREWARM_AWAIT_MAX_TIMEOUT_MS: Long = 30_000L
+        private const val SELF_APPROVAL_GENERATION: Long = Long.MIN_VALUE
 
         /**
          * Capability strings the current service implementation supports.
@@ -845,21 +854,25 @@ class ServiceBinder(
     }
 
     private fun onClientRegistrationDisconnected(registration: ClientRegistration) {
-        val activeKeys = activeInferenceOwners.entries
-            .filter { it.value == registration }
-            .map { it.key }
+        withDeferredLifecycleLock(registration.ownerUid) {
+            val activeKeys = activeInferenceOwners.entries
+                .filter { it.value == registration }
+                .map { it.key }
 
-        activeKeys.forEach { key ->
-            MindlayerLog.i(TAG, "Cancelling active inference for disconnected registration")
-            orchestrator.cancelInference(key)
-        }
+            activeKeys.forEach { key ->
+                MindlayerLog.i(TAG, "Cancelling active inference for disconnected registration")
+                orchestrator.cancelInference(key)
+            }
 
-        val orphaned = orchestrator.closeAllOwnedBy(registration)
-        if (orphaned.isNotEmpty()) {
-            MindlayerLog.i(TAG, "Released ${orphaned.size} session(s) for disconnected registration")
+            val orphaned = orchestrator.closeAllOwnedBy(registration)
+            if (orphaned.isNotEmpty()) {
+                MindlayerLog.i(TAG, "Released ${orphaned.size} session(s) for disconnected registration")
+            }
+            ocrSessionManager.closeAllForUid(registration.ownerUid)
+            embeddingCoordinator?.let { coordinator ->
+                runBlocking { coordinator.cancelAllForUid(registration.ownerUid) }
+            }
         }
-        ocrSessionManager.closeAllForUid(registration.ownerUid)
-        embeddingCoordinator?.cancelAllForUid(registration.ownerUid)
         service.onClientVisibilityChanged()
     }
 
@@ -909,22 +922,187 @@ class ServiceBinder(
      * in [registerClient], and by tests. Idempotent.
      */
     fun onClientDisconnected(uid: Int) {
-        val prefix = "$uid:"
-        val activeKeys = activeInferenceUids.keys
-            .filter { it.startsWith(prefix) }
+        withDeferredLifecycleLock(uid) {
+            val prefix = "$uid:"
+            val activeKeys = activeInferenceUids.keys
+                .filter { it.startsWith(prefix) }
 
-        activeKeys.forEach { key ->
-            MindlayerLog.i(TAG, "Cancelling active inference for disconnected uid=$uid")
-            orchestrator.cancelInference(key)
-            activeInferenceOwners.remove(key)
-        }
+            activeKeys.forEach { key ->
+                MindlayerLog.i(TAG, "Cancelling active inference for disconnected uid=$uid")
+                orchestrator.cancelInference(key)
+                activeInferenceOwners.remove(key)
+            }
 
-        val orphaned = orchestrator.closeAllOwnedByUid(uid)
-        if (orphaned.isNotEmpty()) {
-            MindlayerLog.i(TAG, "Released ${orphaned.size} session(s) for uid=$uid")
+            val orphaned = orchestrator.closeAllOwnedByUid(uid)
+            if (orphaned.isNotEmpty()) {
+                MindlayerLog.i(TAG, "Released ${orphaned.size} session(s) for uid=$uid")
+            }
+            ocrSessionManager.closeAllForUid(uid)
+            embeddingCoordinator?.let { coordinator ->
+                runBlocking { coordinator.cancelAllForUid(uid) }
+            }
         }
-        ocrSessionManager.closeAllForUid(uid)
-        embeddingCoordinator?.cancelAllForUid(uid)
+    }
+
+    private fun deferredLifecycleLock(uid: Int): ReentrantLock =
+        deferredLifecycleLocks.computeIfAbsent(uid) { ReentrantLock() }
+
+    private inline fun <T> withDeferredLifecycleLock(uid: Int, block: () -> T): T {
+        val lock = deferredLifecycleLock(uid)
+        lock.lock()
+        return try {
+            block()
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    private fun approvalGeneration(identity: CallerIdentity, uid: Int): Long {
+        if (uid == Process.myUid()) return SELF_APPROVAL_GENERATION
+        return allowlistStore.approvalFor(identity.packageName, identity.signingCertSha256)
+            ?.grantedAtMs
+            ?: throw typedBinderException(MindlayerErrorCode.CONSENT_REQUIRED, "App access revoked")
+    }
+
+    private fun isApprovalGenerationCurrent(
+        identity: CallerIdentity,
+        uid: Int,
+        expectedGeneration: Long,
+    ): Boolean {
+        if (uid == Process.myUid()) return true
+        return allowlistStore.approvalFor(identity.packageName, identity.signingCertSha256)
+            ?.grantedAtMs == expectedGeneration
+    }
+
+    private fun requireApprovalGeneration(
+        identity: CallerIdentity,
+        uid: Int,
+        expectedGeneration: Long,
+    ) {
+        if (!isApprovalGenerationCurrent(identity, uid, expectedGeneration)) {
+            throw typedBinderException(MindlayerErrorCode.CONSENT_REQUIRED, "App access revoked")
+        }
+    }
+
+    private fun resolveVerifiedUid(
+        packageName: String,
+        expectedSigSha256: String?,
+        expectedUid: Int? = null,
+    ): Int? {
+        val uid = try {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageUid(packageName, 0)
+        } catch (_: android.content.pm.PackageManager.NameNotFoundException) {
+            return null
+        } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "UID lookup failed: ${t.javaClass.simpleName}")
+            return null
+        }
+        if (expectedUid != null && uid != expectedUid) {
+            MindlayerLog.w(TAG, "UID cleanup deferred after UID reassignment")
+            return null
+        }
+        val liveIdentity = try {
+            callerVerifier.identify(context, uid)
+        } catch (t: Throwable) {
+            MindlayerLog.w(TAG, "UID identity verification failed: ${t.javaClass.simpleName}")
+            null
+        } ?: return null
+        if (liveIdentity.packageName != packageName ||
+            (expectedSigSha256 != null &&
+                !liveIdentity.signingCertSha256.equals(expectedSigSha256, ignoreCase = true))) {
+            MindlayerLog.w(TAG, "UID cleanup skipped after package identity change")
+            return null
+        }
+        return uid
+    }
+
+    private fun revokeApprovedAccessAndCleanup(
+        packageName: String,
+        expectedSigSha256: String,
+    ): Int? {
+        val uid = resolveVerifiedUid(packageName, expectedSigSha256)
+        if (uid == null) {
+            allowlistStore.revoke(packageName)
+            return null
+        }
+        return withDeferredLifecycleLock(uid) {
+            val removed = allowlistStore.revoke(packageName, pendingCleanupUid = uid)
+                ?: return@withDeferredLifecycleLock null
+            try {
+                closeAllOwnedByRevokedUid(uid)
+                allowlistStore.clearPendingCleanup(packageName, uid)
+                uid
+            } catch (t: Throwable) {
+                MindlayerLog.w(TAG, "Revocation cleanup deferred: ${t.javaClass.simpleName}")
+                throw t
+            }
+        }
+    }
+
+    private fun denyAccessAndCleanup(packageName: String, sigSha256: String, kind: Int) {
+        val packageWide =
+            kind == com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_PERMANENT
+        val uid = resolveVerifiedUid(packageName, expectedSigSha256 = sigSha256.takeUnless { packageWide })
+        if (uid == null) {
+            allowlistStore.deny(
+                packageName,
+                sigSha256.takeUnless { packageWide },
+                kind,
+            )
+            return
+        }
+        withDeferredLifecycleLock(uid) {
+            val removed = allowlistStore.deny(
+                packageName,
+                sigSha256.takeUnless { packageWide },
+                kind,
+                pendingCleanupUid = uid,
+            )
+            if (removed != null) {
+                try {
+                    closeAllOwnedByRevokedUid(uid)
+                    allowlistStore.clearPendingCleanup(packageName, uid)
+                } catch (t: Throwable) {
+                    MindlayerLog.w(TAG, "Denial cleanup deferred: ${t.javaClass.simpleName}")
+                    throw t
+                }
+            }
+        }
+    }
+
+    private fun retryPendingCleanup(entry: com.adsamcik.mindlayer.service.security.DeniedEntry): Boolean {
+        val pendingUid = entry.pendingCleanupUid ?: return true
+        val expectedSig = entry.signingCertSha256.takeIf {
+            entry.scope == com.adsamcik.mindlayer.service.security.DenialScope.CERT_PAIR
+        }
+        val verifiedUid = resolveVerifiedUid(
+            packageName = entry.packageName,
+            expectedSigSha256 = expectedSig,
+            expectedUid = pendingUid,
+        ) ?: return false
+        withDeferredLifecycleLock(verifiedUid) {
+            closeAllOwnedByRevokedUid(verifiedUid)
+            allowlistStore.clearPendingCleanup(entry.packageName, verifiedUid)
+        }
+        return true
+    }
+
+    private fun retryPendingCleanupForPackage(packageName: String): Boolean {
+        val entry = allowlistStore.pendingCleanupFor(packageName) ?: return true
+        return retryPendingCleanup(entry)
+    }
+
+    private fun retryPendingCleanups() {
+        allowlistStore.pendingCleanups().forEach { entry ->
+            runCatching { retryPendingCleanup(entry) }
+                .onFailure {
+                    MindlayerLog.w(
+                        TAG,
+                        "Pending revocation cleanup retry failed: ${it.javaClass.simpleName}",
+                    )
+                }
+        }
     }
 
     private fun closeAllOwnedByRevokedUid(uid: Int) {
@@ -943,7 +1121,11 @@ class ServiceBinder(
             MindlayerLog.i(TAG, "Revoked ${revoked.size} session(s) for uid=$uid")
         }
         ocrSessionManager.closeAllForUid(uid)
-        embeddingCoordinator?.cancelAllForUid(uid)
+        embeddingCoordinator?.let { coordinator ->
+            runBlocking { coordinator.revokeAllForUid(uid) }
+        } ?: deferredStore?.let { store ->
+            runBlocking { store.purgeForUid(uid) }
+        }
     }
 
     // ---- Session management ------------------------------------------------
@@ -1544,6 +1726,7 @@ class ServiceBinder(
     ): DeferredHandle {
         val parts = media ?: emptyList()
         var handedOff = false
+        var lifecycleLock: ReentrantLock? = null
         try {
         val identity = authorizeCall()
         val uid = Binder.getCallingUid()
@@ -1559,6 +1742,15 @@ class ServiceBinder(
             throw typedBinderException(MindlayerErrorCode.INVALID_REQUEST, "Invalid request: ${e.message}")
         }
         requireOwnership(meta.sessionId)
+        val expectedApprovalGeneration = approvalGeneration(identity, uid)
+        deferredLifecycleLock(uid).also { lock ->
+            lock.lock()
+            lifecycleLock = lock
+        }
+        requireApprovalGeneration(identity, uid, expectedApprovalGeneration)
+        if (ownerToken != null && currentRegistrationByUid[uid] != ownerToken) {
+            throw SecurityException("Client disconnected before deferred submission")
+        }
 
         if (!rateLimiter.beginInference(uid)) {
             throw typedBinderException(
@@ -1624,6 +1816,7 @@ class ServiceBinder(
         // generic `INTERNAL` and lose the retry / truncation hints.
         try {
             try {
+                requireApprovalGeneration(identity, uid, expectedApprovalGeneration)
                 orchestrator.infer(scopedKey, deferredMeta, image, audio, writeEnd) { releaseSlot() }
             } catch (e: com.adsamcik.mindlayer.service.engine.ContextOverflowException) {
                 releaseSlot()
@@ -1717,6 +1910,11 @@ class ServiceBinder(
                 }
             }
             handedOff = true
+            if (!isApprovalGenerationCurrent(identity, uid, expectedApprovalGeneration)) {
+                orchestrator.cancelInference(scopedKey)
+                runBlocking { requireDeferredStore().purgeForUid(uid) }
+                throw typedBinderException(MindlayerErrorCode.CONSENT_REQUIRED, "App access revoked")
+            }
         } finally {
             if (!handedOff) {
                 try { writeEnd.close() } catch (_: Exception) {}
@@ -1739,12 +1937,16 @@ class ServiceBinder(
             // duplicate) that returns/throws before the orchestrator takes
             // ownership. The inner finally only covers dispatch-phase
             // failures; this outer one covers everything before it.
-            if (!handedOff) {
-                val callerSources = java.util.Collections.newSetFromMap(
-                    java.util.IdentityHashMap<ParcelFileDescriptor, Boolean>(),
-                )
-                parts.forEach { callerSources.add(it.source) }
-                callerSources.forEach { src -> try { src.close() } catch (_: Exception) {} }
+            try {
+                if (!handedOff) {
+                    val callerSources = java.util.Collections.newSetFromMap(
+                        java.util.IdentityHashMap<ParcelFileDescriptor, Boolean>(),
+                    )
+                    parts.forEach { callerSources.add(it.source) }
+                    callerSources.forEach { src -> try { src.close() } catch (_: Exception) {} }
+                }
+            } finally {
+                lifecycleLock?.unlock()
             }
         }
     }
@@ -2176,26 +2378,20 @@ class ServiceBinder(
         }
         val store = allowlistStore
 
-        // Look up the live entry (so we can log a sigPrefix even after revoke
-        // erases the row) and resolve the UID before mutating state.
+        // Look up the live entry so the cleanup target is cert-pinned before
+        // any UID-scoped cancellation or deferred-row deletion.
         val entry = store.list().firstOrNull { it.packageName == packageName }
         val sigPrefix = entry?.signingCertSha256?.take(8) ?: "unknown"
-        val targetUid: Int? = try {
-            @Suppress("DEPRECATION")
-            context.packageManager.getPackageUid(packageName, 0)
-        } catch (_: android.content.pm.PackageManager.NameNotFoundException) {
-            null
-        } catch (t: Throwable) {
-            MindlayerLog.w(TAG, "revokeApp: getPackageUid failed: ${t.javaClass.simpleName}")
-            null
-        }
-
-        store.revoke(packageName)
-
-        if (targetUid != null) {
-            // Cancel inferences and destroy sessions for the revoked UID.
-            // Explicit user revoke is involuntary, so fire eviction notices.
-            closeAllOwnedByRevokedUid(targetUid)
+        val targetUid = if (entry != null) {
+            revokeApprovedAccessAndCleanup(packageName, entry.signingCertSha256)
+        } else {
+            val pending = store.pendingCleanupFor(packageName)
+            if (pending != null && retryPendingCleanup(pending)) {
+                pending.pendingCleanupUid
+            } else {
+                store.revoke(packageName)
+                null
+            }
         }
 
         logRepository?.logSecurityDecision(
@@ -2807,10 +3003,24 @@ class ServiceBinder(
     }
 
     override fun embedBatchDeferred(reqs: List<com.adsamcik.mindlayer.EmbeddingRequest>?): DeferredHandle {
-        authorizeCall(cost = 0.5)
+        val identity = authorizeCall(cost = 0.5)
+        val ownerToken = requireRegisteredClient()
         val list = reqs ?: emptyList()
         validateEmbeddingRequestsOrThrow(list, requireEmbeddingCoordinator().maxBatchTotal)
-        return runBlocking { requireEmbeddingCoordinator().embedBatchDeferred(Binder.getCallingUid(), list) }
+        val uid = Binder.getCallingUid()
+        val expectedApprovalGeneration = approvalGeneration(identity, uid)
+        val isStillAuthorized = {
+            isApprovalGenerationCurrent(identity, uid, expectedApprovalGeneration)
+        }
+        return withDeferredLifecycleLock(uid) {
+            requireApprovalGeneration(identity, uid, expectedApprovalGeneration)
+            if (ownerToken != null && currentRegistrationByUid[uid] != ownerToken) {
+                throw SecurityException("Client disconnected before deferred submission")
+            }
+            runBlocking {
+                requireEmbeddingCoordinator().embedBatchDeferred(uid, list, isStillAuthorized)
+            }
+        }
     }
 
     override fun fetchEmbeddingBatchResult(requestId: String): com.adsamcik.mindlayer.VectorBlobHandle {
@@ -3459,6 +3669,12 @@ class ServiceBinder(
 
         when (kind) {
             com.adsamcik.mindlayer.ConsentDecision.KIND_GRANT -> {
+                if (!retryPendingCleanupForPackage(pkg)) {
+                    throw typedBinderException(
+                        MindlayerErrorCode.CONSENT_DENIED,
+                        "Pending revocation cleanup must complete before reapproval",
+                    )
+                }
                 // Atomic grant: the denial check and the F-031 live-signer
                 // re-verify + write happen under ONE AllowlistStore file lock
                 // (approveFromConsent), so a concurrent deny() cannot slip
@@ -3505,7 +3721,11 @@ class ServiceBinder(
                 )
             }
             com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H -> {
-                allowlistStore.deny(pkg, sig, com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H)
+                denyAccessAndCleanup(
+                    pkg,
+                    sig,
+                    com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H,
+                )
                 consentAttemptStore.clear(pkg, sig)
                 logRepository?.logSecurityDecision(
                     action = "consent_denied_temporary",
@@ -3514,9 +3734,11 @@ class ServiceBinder(
                 )
             }
             com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_PERMANENT -> {
-                // Package-wide block — also clear any existing approval.
-                allowlistStore.revoke(pkg)
-                allowlistStore.deny(pkg, null, com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_PERMANENT)
+                denyAccessAndCleanup(
+                    pkg,
+                    sig,
+                    com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_PERMANENT,
+                )
                 consentAttemptStore.clear(pkg, sig)
                 logRepository?.logSecurityDecision(
                     action = "consent_denied_permanent",
@@ -3646,7 +3868,6 @@ class ServiceBinder(
         if (callback == null) return
         evictionRegistry.unregister(uid, callback)
     }
-
     override fun getModelReadiness(): com.adsamcik.mindlayer.ModelReadinessSnapshot {
         authorizeCall(cost = 0.25)
         return modelReadinessSnapshot()

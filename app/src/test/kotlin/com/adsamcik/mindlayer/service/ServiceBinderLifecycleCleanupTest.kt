@@ -16,6 +16,8 @@ import com.adsamcik.mindlayer.service.security.CallerIdentity
 import com.adsamcik.mindlayer.service.security.RateLimiter
 import io.mockk.CapturingSlot
 import io.mockk.Runs
+import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
@@ -70,7 +72,7 @@ class ServiceBinderLifecycleCleanupTest {
             every { closeAllForUid(any()) } just Runs
         }
         embedding = mockk(relaxed = true) {
-            every { cancelAllForUid(any()) } just Runs
+            coEvery { cancelAllForUid(any()) } returns Unit
         }
         binder = ServiceBinder(
             service = service,
@@ -102,7 +104,7 @@ class ServiceBinderLifecycleCleanupTest {
         death.captured.binderDied()
 
         verify(exactly = 1) { ocr.closeAllForUid(UID) }
-        verify(exactly = 1) { embedding.cancelAllForUid(UID) }
+        coVerify(exactly = 1) { embedding.cancelAllForUid(UID) }
     }
 
     @Test fun `re-registering the same stable token is idempotent (R-19a)`() {

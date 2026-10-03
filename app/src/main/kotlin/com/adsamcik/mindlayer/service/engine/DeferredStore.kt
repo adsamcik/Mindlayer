@@ -318,6 +318,21 @@ class DeferredStore(
     suspend fun entityByRequestIdOrNull(requestId: String): DeferredEntity? =
         dao.byRequestId(requestId)
 
+    suspend fun purgeForUid(uid: Int): Int {
+        val rows = dao.rowsForUid(uid)
+        val deleted = dao.deleteForUid(uid)
+        rows.forEach(::deleteBlob)
+        return deleted
+    }
+
+    suspend fun discard(uid: Int, requestId: String): Boolean {
+        val entity = dao.byRequestId(requestId) ?: return false
+        if (entity.uid != uid) return false
+        val deleted = dao.deleteOwned(requestId, uid) > 0
+        if (deleted) deleteBlob(entity)
+        return deleted
+    }
+
     suspend fun pruneExpired(): Int {
         val now = clock()
         dao.expiredBefore(now).forEach { deleteBlob(it) }
@@ -330,8 +345,8 @@ class DeferredStore(
         } else {
             maxResultBytesPerUid
         }
-        while (dao.resultBytes(uid) > cap) {
-            val oldest = dao.oldestCompletedWithText(uid) ?: return
+        while (dao.resultBytes(uid, kind) > cap) {
+            val oldest = dao.oldestCompletedWithText(uid, kind) ?: return
             dao.deleteAny(oldest.requestId)
             deleteBlob(oldest)
         }

@@ -15,17 +15,23 @@ interface DeferredDao {
     @Query("SELECT * FROM deferred_inference WHERE requestId = :requestId LIMIT 1")
     suspend fun byRequestId(requestId: String): DeferredEntity?
 
-    @Query("SELECT COUNT(*) FROM deferred_inference WHERE uid = :uid AND statusCode = :running")
-    suspend fun runningCount(uid: Int, running: Int = DeferredResult.STILL_RUNNING): Int
+    @Query("SELECT COUNT(*) FROM deferred_inference WHERE uid = :uid AND kind = :kind AND statusCode = :running")
+    suspend fun runningCount(uid: Int, kind: String, running: Int = DeferredResult.STILL_RUNNING): Int
 
-    @Query("SELECT COUNT(*) FROM deferred_inference WHERE uid = :uid AND statusCode != :running AND fetchedAtMs IS NULL")
-    suspend fun pendingCompletedCount(uid: Int, running: Int = DeferredResult.STILL_RUNNING): Int
+    @Query("SELECT COUNT(*) FROM deferred_inference WHERE uid = :uid AND kind = :kind AND statusCode != :running AND fetchedAtMs IS NULL")
+    suspend fun pendingCompletedCount(uid: Int, kind: String, running: Int = DeferredResult.STILL_RUNNING): Int
 
-    @Query("SELECT COALESCE(SUM(LENGTH(resultText)), 0) + COALESCE(SUM(blob_bytes), 0) FROM deferred_inference WHERE uid = :uid")
-    suspend fun resultBytes(uid: Int): Long
+    @Query("SELECT COALESCE(SUM(LENGTH(resultText)), 0) + COALESCE(SUM(blob_bytes), 0) FROM deferred_inference WHERE uid = :uid AND kind = :kind")
+    suspend fun resultBytes(uid: Int, kind: String): Long
 
-    @Query("SELECT * FROM deferred_inference WHERE uid = :uid AND statusCode != :running AND (resultText IS NOT NULL OR blob_path IS NOT NULL) ORDER BY completedAtMs ASC LIMIT 1")
-    suspend fun oldestCompletedWithText(uid: Int, running: Int = DeferredResult.STILL_RUNNING): DeferredEntity?
+    @Query("SELECT * FROM deferred_inference WHERE uid = :uid AND kind = :kind AND statusCode != :running AND (resultText IS NOT NULL OR blob_path IS NOT NULL) ORDER BY completedAtMs ASC LIMIT 1")
+    suspend fun oldestCompletedWithText(uid: Int, kind: String, running: Int = DeferredResult.STILL_RUNNING): DeferredEntity?
+
+    @Query("SELECT * FROM deferred_inference WHERE uid = :uid")
+    suspend fun rowsForUid(uid: Int): List<DeferredEntity>
+
+    @Query("DELETE FROM deferred_inference WHERE uid = :uid")
+    suspend fun deleteForUid(uid: Int): Int
 
     @Query("UPDATE deferred_inference SET resultText = NULL WHERE requestId = :requestId")
     suspend fun clearResultText(requestId: String): Int
@@ -65,10 +71,9 @@ interface DeferredDao {
 
     @Transaction
     suspend fun createIfWithinQuota(entity: DeferredEntity, maxRunning: Int, maxCompletedPending: Int): Boolean {
-        if (runningCount(entity.uid) >= maxRunning) return false
-        if (pendingCompletedCount(entity.uid) >= maxCompletedPending) return false
+        if (runningCount(entity.uid, entity.kind) >= maxRunning) return false
+        if (pendingCompletedCount(entity.uid, entity.kind) >= maxCompletedPending) return false
         insert(entity)
         return true
     }
 }
-

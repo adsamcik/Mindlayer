@@ -393,7 +393,7 @@ class ServiceBinderTest {
             every { closeAllForUid(any()) } returns Unit
         }
         val embedding = mockk<EmbeddingCoordinator>(relaxed = true) {
-            every { cancelAllForUid(any()) } returns Unit
+            coEvery { cancelAllForUid(any()) } returns Unit
         }
         every { orchestrator.closeAllOwnedBy(any()) } returns emptyList()
         val localBinder = newBinder(diagnosticExporter, ocrSessionManager = ocr, embeddingCoordinator = embedding)
@@ -402,7 +402,7 @@ class ServiceBinderTest {
         death.captured.binderDied()
 
         verify(exactly = 1) { ocr.closeAllForUid(uid) }
-        verify(exactly = 1) { embedding.cancelAllForUid(uid) }
+        coVerify(exactly = 1) { embedding.cancelAllForUid(uid) }
     }
 
     @Test

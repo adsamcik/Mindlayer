@@ -1,6 +1,7 @@
 package com.adsamcik.mindlayer.service
 
 import android.os.Binder
+import android.os.IBinder
 import android.os.Process
 import com.adsamcik.mindlayer.EmbeddingBatchResult
 import com.adsamcik.mindlayer.EmbeddingBatchTransfer
@@ -78,7 +79,9 @@ class ServiceBinderEmbeddingTest {
         every { coordinator.maxInputBytes } returns 512L * 1024L
         coEvery { coordinator.embed(any(), any(), any()) } returns EmbeddingResult(vector = floatArrayOf(), dim = 0, modelId = "m", tokenCount = 0, truncated = false, backend = "CPU", durationMs = 0)
         coEvery { coordinator.embedBatch(any(), any(), any()) } returns EmbeddingBatchResult(results = emptyList(), totalDurationMs = 0, backend = "CPU")
-        coEvery { coordinator.embedBatchDeferred(any(), any()) } returns com.adsamcik.mindlayer.DeferredHandle(requestId = "d", expiresAtMs = 1)
+        coEvery {
+            coordinator.embedBatchDeferred(any(), any(), any())
+        } returns com.adsamcik.mindlayer.DeferredHandle(requestId = "d", expiresAtMs = 1)
         coEvery { coordinator.fetchEmbeddingBatchResult(any(), any()) } returns VectorBlobHandle(status = 0)
         coEvery { coordinator.cancelEmbeddingBatch(any(), any()) } returns 0
         coEvery { coordinator.acknowledgeEmbeddingBatchResult(any(), any()) } returns true
@@ -95,6 +98,7 @@ class ServiceBinderEmbeddingTest {
             rateLimiter = rateLimiter,
             embeddingCoordinator = coordinator,
         )
+        binder.registerClient(mockk<IBinder>(relaxed = true))
     }
 
     @After fun tearDown() = unmockkAll()

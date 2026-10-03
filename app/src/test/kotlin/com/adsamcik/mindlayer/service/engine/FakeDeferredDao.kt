@@ -7,11 +7,11 @@ import com.adsamcik.mindlayer.DeferredResult
  *
  * Mirrors the SQL semantics encoded in the DAO annotations:
  *  - `byRequestId(requestId)` → row keyed by primary key
- *  - `runningCount(uid)` → rows where uid matches AND statusCode = STILL_RUNNING
- *  - `pendingCompletedCount(uid)` → uid matches AND statusCode != STILL_RUNNING
+ *  - `runningCount(uid, kind)` → rows where uid/kind match AND statusCode = STILL_RUNNING
+ *  - `pendingCompletedCount(uid, kind)` → uid/kind match AND statusCode != STILL_RUNNING
  *    AND fetchedAtMs IS NULL
- *  - `resultBytes(uid)` → SUM(LENGTH(resultText)) where uid matches
- *  - `oldestCompletedWithText(uid)` → ORDER BY completedAtMs ASC LIMIT 1
+ *  - `resultBytes(uid, kind)` → per-kind SUM(LENGTH(resultText) + blob_bytes)
+ *  - `oldestCompletedWithText(uid, kind)` → per-kind ORDER BY completedAtMs ASC LIMIT 1
  *
  * Keeping this fake colocated with the test makes the semantics auditable.
  * The real Room DAO is exercised by integration tests (planned, see F-D2).
@@ -30,19 +30,32 @@ internal class FakeDeferredDao : DeferredDao {
 
     override suspend fun byRequestId(requestId: String): DeferredEntity? = rows[requestId]
 
-    override suspend fun runningCount(uid: Int, running: Int): Int =
-        rows.values.count { it.uid == uid && it.statusCode == running }
+    override suspend fun runningCount(uid: Int, kind: String, running: Int): Int =
+        rows.values.count { it.uid == uid && it.kind == kind && it.statusCode == running }
 
-    override suspend fun pendingCompletedCount(uid: Int, running: Int): Int =
-        rows.values.count { it.uid == uid && it.statusCode != running && it.fetchedAtMs == null }
+    override suspend fun pendingCompletedCount(uid: Int, kind: String, running: Int): Int =
+        rows.values.count {
+            it.uid == uid && it.kind == kind && it.statusCode != running && it.fetchedAtMs == null
+        }
 
-    override suspend fun resultBytes(uid: Int): Long =
-        rows.values.filter { it.uid == uid }.sumOf { (it.resultText?.length?.toLong() ?: 0L) + (it.blobBytes ?: 0L) }
-
-    override suspend fun oldestCompletedWithText(uid: Int, running: Int): DeferredEntity? =
+    override suspend fun resultBytes(uid: Int, kind: String): Long =
         rows.values
-            .filter { it.uid == uid && it.statusCode != running && (it.resultText != null || it.blobPath != null) }
+            .filter { it.uid == uid && it.kind == kind }
+            .sumOf { (it.resultText?.length?.toLong() ?: 0L) + (it.blobBytes ?: 0L) }
+
+    override suspend fun oldestCompletedWithText(uid: Int, kind: String, running: Int): DeferredEntity? =
+        rows.values
+            .filter { it.uid == uid && it.kind == kind && it.statusCode != running && (it.resultText != null || it.blobPath != null) }
             .minByOrNull { it.completedAtMs ?: Long.MAX_VALUE }
+
+    override suspend fun rowsForUid(uid: Int): List<DeferredEntity> =
+        rows.values.filter { it.uid == uid }
+
+    override suspend fun deleteForUid(uid: Int): Int {
+        val victims = rows.values.filter { it.uid == uid }.map { it.requestId }
+        victims.forEach(rows::remove)
+        return victims.size
+    }
 
     override suspend fun clearResultText(requestId: String): Int {
         val r = rows[requestId] ?: return 0
@@ -159,6 +172,3 @@ internal class FakeDeferredDao : DeferredDao {
         return flipped
     }
 }
-
-
-

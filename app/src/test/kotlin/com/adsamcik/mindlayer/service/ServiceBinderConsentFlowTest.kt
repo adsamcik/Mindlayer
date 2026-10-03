@@ -1,5 +1,6 @@
 package com.adsamcik.mindlayer.service
 
+import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.Process
 import com.adsamcik.mindlayer.ConsentDecision
@@ -9,6 +10,7 @@ import com.adsamcik.mindlayer.service.engine.MemoryBudget
 import com.adsamcik.mindlayer.service.engine.SessionManager
 import com.adsamcik.mindlayer.service.engine.ThermalMonitor
 import com.adsamcik.mindlayer.service.logging.DiagnosticExporter
+import com.adsamcik.mindlayer.service.security.AllowlistEntry
 import com.adsamcik.mindlayer.service.security.AllowlistStore
 import com.adsamcik.mindlayer.service.security.CallerIdentity
 import com.adsamcik.mindlayer.service.security.ConsentAttemptStore
@@ -50,6 +52,7 @@ class ServiceBinderConsentFlowTest {
     private lateinit var rateLimiter: RateLimiter
     private lateinit var challengeStore: ConsentChallengeStore
     private lateinit var attemptStore: ConsentAttemptStore
+    private lateinit var orchestrator: InferenceOrchestrator
     private lateinit var binder: ServiceBinder
 
     @Before fun setUp() {
@@ -57,9 +60,13 @@ class ServiceBinderConsentFlowTest {
         mockkStatic(Process::class)
         every { Process.myUid() } returns selfUid
 
+        val packageManager = mockk<PackageManager>(relaxed = true) {
+            every { getPackageUid("com.client", 0) } returns externalUid
+        }
         val service = mockk<MindlayerMlService>(relaxed = true) {
             every { sessionManager } returns mockk<SessionManager>(relaxed = true)
             every { packageName } returns "com.adsamcik.mindlayer"
+            every { getPackageManager() } returns packageManager
         }
         allowlist = mockk(relaxed = true) {
             every { isDenied(any(), any()) } returns false
@@ -67,6 +74,10 @@ class ServiceBinderConsentFlowTest {
             every { denialFor(any(), any()) } returns null
             every { approveFromConsent(any(), any(), any(), any()) } returns null
             every { list() } returns emptyList()
+            every { pendingCleanupFor(any()) } returns null
+            every { pendingCleanups() } returns emptyList()
+            every { deny(any(), any(), any(), any()) } returns
+                AllowlistEntry("com.client", "sigC", 1L)
         }
         rateLimiter = mockk(relaxed = true) {
             every { tryAcquireConsentChallenge(any()) } returns true
@@ -75,11 +86,12 @@ class ServiceBinderConsentFlowTest {
         attemptStore = mockk(relaxed = true) {
             every { checkGate(any(), any()) } returns ConsentGate.Allow
         }
+        orchestrator = mockk(relaxed = true)
 
         binder = ServiceBinder(
             service = service,
             engineManager = mockk<EngineManager>(relaxed = true),
-            orchestrator = mockk<InferenceOrchestrator>(relaxed = true),
+            orchestrator = orchestrator,
             diagnosticExporter = mockk<DiagnosticExporter>(relaxed = true),
             thermalMonitor = mockk<ThermalMonitor>(relaxed = true) {
                 every { currentPolicy } returns MutableStateFlow(mockk(relaxed = true))
@@ -304,7 +316,14 @@ class ServiceBinderConsentFlowTest {
             expiresAtMs = Long.MAX_VALUE,
         )
         binder.completeConsent("n3", ConsentDecision(kind = ConsentDecision.KIND_DENY_PERMANENT))
-        verify { allowlist.revoke("com.client") }
-        verify { allowlist.deny("com.client", null, ConsentDecision.KIND_DENY_PERMANENT) }
+        verify {
+            allowlist.deny(
+                "com.client",
+                null,
+                ConsentDecision.KIND_DENY_PERMANENT,
+                externalUid,
+            )
+        }
+        verify { orchestrator.closeAllOwnedByUidForRevoke(externalUid) }
     }
 }

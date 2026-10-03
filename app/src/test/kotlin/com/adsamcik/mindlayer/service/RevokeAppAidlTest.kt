@@ -147,7 +147,11 @@ class RevokeAppAidlTest {
             memoryBudget = memoryBudget,
             context = context,
             callerVerifier = { _, uid ->
-                CallerIdentity("test.caller", "testsig", "Test Caller")
+                if (uid == targetUid) {
+                    CallerIdentity("com.target.app", "deadbeef", "Target App")
+                } else {
+                    CallerIdentity("test.caller", "testsig", "Test Caller")
+                }
             },
             allowlistStore = allowlistStore,
             rateLimiter = rateLimiter,
@@ -193,6 +197,16 @@ class RevokeAppAidlTest {
         binder.revokeApp("com.target.app")
 
         verify { orchestrator.closeAllOwnedByUidForRevoke(targetUid) }
+    }
+
+    @Test
+    fun `revokeApp retries persisted cleanup when approval row is already gone`() {
+        allowlistStore.revoke("com.target.app", pendingCleanupUid = targetUid)
+
+        binder.revokeApp("com.target.app")
+
+        verify { orchestrator.closeAllOwnedByUidForRevoke(targetUid) }
+        assertTrue(allowlistStore.pendingCleanupFor("com.target.app") == null)
     }
 
     @Test

@@ -28,12 +28,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
@@ -53,7 +56,8 @@ import kotlin.concurrent.thread
  * persist an AES-256-GCM wrapped copy of that same layout to
  * `cacheDir/embedding-blobs/<uid>/<requestId>.bin` with atomic rename:
  * deferred results must survive engine completion, client death, service
- * process restart, and reconnect until fetch/ack/cancel cleanup.
+ * process restart, and reconnect. Fetch marks a result delivered; the blob
+ * remains DeferredStore-owned until acknowledgement, quota eviction, or expiry.
  */
 class EmbeddingCoordinator(
     private val engine: EmbeddingEngine,
@@ -93,6 +97,8 @@ class EmbeddingCoordinator(
     },
 ) {
     private val activeJobs = ConcurrentHashMap<String, Job>()
+    private val uidLifecycleLocks = ConcurrentHashMap<Int, Mutex>()
+    private val uidLifecycleEpochs = ConcurrentHashMap<Int, AtomicInteger>()
     private val activeCount = AtomicInteger(0)
 
     val activeEmbeddingBatchCount: Int get() = activeCount.get()
@@ -190,11 +196,15 @@ class EmbeddingCoordinator(
         writeTransfer(uid, requestId, results, (System.nanoTime() - started) / 1_000_000L)
     }
 
-    suspend fun embedBatchDeferred(uid: Int, reqs: List<EmbeddingRequest>): DeferredHandle {
+    suspend fun embedBatchDeferred(
+        uid: Int,
+        reqs: List<EmbeddingRequest>,
+        isStillAuthorized: () -> Boolean = { true },
+    ): DeferredHandle {
         validateBatch(reqs, maxBatchTotal)
         val requestId = "emb-$uid-${UUID.randomUUID()}"
-        val handle = deferredStore.createEmbeddingBatch(uid, requestId, reqs.size)
-            ?: throw typed(MindlayerErrorCode.DEFERRED_QUOTA_EXHAUSTED, "deferred quota exhausted")
+        val scopedKey = key(uid, requestId)
+        val observedEpoch = uidLifecycleEpoch(uid).get()
         val job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             activeCount.incrementAndGet()
             var foregroundEntered = false
@@ -229,22 +239,28 @@ class EmbeddingCoordinator(
                     putString("backend", results.firstOrNull()?.backend ?: "CPU")
                     putLong("totalDurationMs", total)
                 }
-                deferredStore.completeEmbeddingBatch(
-                    requestId = requestId,
-                    uid = uid,
-                    blobPath = file.absolutePath,
-                    blobBytes = file.length(),
-                    metrics = metrics,
-                    metadata = results.map { EmbeddingItemMetadata(it.tag, it.tokenCount, it.truncated) },
-                )
-                // Successful completion — DeferredStore now owns the blob's
-                // lifetime via ack/expire. Null out so the finally cleanup
-                // doesn't delete it.
-                blobFile = null
+                val completed = withContext(NonCancellable) {
+                    deferredStore.completeEmbeddingBatch(
+                        requestId = requestId,
+                        uid = uid,
+                        blobPath = file.absolutePath,
+                        blobBytes = file.length(),
+                        metrics = metrics,
+                        metadata = results.map { EmbeddingItemMetadata(it.tag, it.tokenCount, it.truncated) },
+                    )
+                }
+                if (completed) {
+                    // DeferredStore owns the blob after the READY row and quota
+                    // enforcement complete atomically with respect to coroutine
+                    // cancellation.
+                    blobFile = null
+                }
             } catch (ce: CancellationException) {
                 deleteOrphanBlobQuietly(blobFile)
                 blobFile = null
-                deferredStore.completeEmbeddingCancelled(requestId, uid)
+                withContext(NonCancellable) {
+                    deferredStore.completeEmbeddingCancelled(requestId, uid)
+                }
                 throw ce
             } catch (e: EngineNotReadyException) {
                 deleteOrphanBlobQuietly(blobFile)
@@ -259,23 +275,58 @@ class EmbeddingCoordinator(
                 MindlayerLog.w(TAG, "Deferred embedding failed: ${t.safeLabel()}", requestId = requestId, throwable = null)
                 deleteOrphanBlobQuietly(blobFile)
                 blobFile = null
-                deferredStore.failEmbeddingBatch(
-                    requestId,
-                    uid,
-                    MindlayerErrorCode.INTERNAL,
-                    MindlayerErrorCode.nameOf(MindlayerErrorCode.INTERNAL),
-                )
+                withContext(NonCancellable) {
+                    deferredStore.failEmbeddingBatch(
+                        requestId,
+                        uid,
+                        MindlayerErrorCode.INTERNAL,
+                        MindlayerErrorCode.nameOf(MindlayerErrorCode.INTERNAL),
+                    )
+                }
             } finally {
                 deleteOrphanBlobQuietly(blobFile)
-                activeJobs.remove(key(uid, requestId))
+                activeJobs.remove(scopedKey)
                 if (foregroundEntered) exitForeground()
                 activeCount.decrementAndGet()
                 callbackBroker.notifyEmbeddingBatchComplete(uid, requestId)
             }
         }
-        activeJobs[key(uid, requestId)] = job
-        job.start()
-        return handle
+        check(activeJobs.putIfAbsent(scopedKey, job) == null) { "duplicate deferred embedding requestId" }
+        return uidLifecycleLock(uid).withLock {
+            if (!isStillAuthorized()) {
+                activeJobs.remove(scopedKey, job)
+                job.cancel()
+                throw typed(MindlayerErrorCode.CONSENT_REQUIRED, "app access revoked")
+            }
+            val handle = try {
+                deferredStore.createEmbeddingBatch(uid, requestId, reqs.size)
+                    ?: throw typed(MindlayerErrorCode.DEFERRED_QUOTA_EXHAUSTED, "deferred quota exhausted")
+            } catch (t: Throwable) {
+                activeJobs.remove(scopedKey, job)
+                job.cancel()
+                throw t
+            }
+
+            val currentEpoch = uidLifecycleEpoch(uid).get()
+            val authorized = isStillAuthorized()
+            if (authorized && currentEpoch == observedEpoch && job.start()) {
+                return@withLock handle
+            }
+
+            activeJobs.remove(scopedKey, job)
+            job.cancel()
+            withContext(NonCancellable) {
+                if (!authorized) {
+                    deferredStore.discard(uid, requestId)
+                } else {
+                    deferredStore.completeEmbeddingCancelled(requestId, uid)
+                }
+            }
+            if (!authorized) {
+                throw typed(MindlayerErrorCode.CONSENT_REQUIRED, "app access revoked")
+            }
+            handle
+        }
     }
 
     suspend fun fetchEmbeddingBatchResult(uid: Int, requestId: String): VectorBlobHandle {
@@ -319,17 +370,47 @@ class EmbeddingCoordinator(
         return CancelResult.CANCELLED
     }
 
-    fun cancelAllForUid(uid: Int) {
-        val prefix = "$uid:"
-        val keys = activeJobs.keys.filter { it.startsWith(prefix) }
-        keys.forEach { activeJobs.remove(it)?.cancel() }
-        blobDir(uid).listFiles()?.forEach { file ->
-            if (file.isFile && (file.name.endsWith(".bin") || file.name.contains(".tmp-"))) {
-                runCatching { file.delete() }
+    /**
+     * Cancel in-flight work for [uid] without deleting completed deferred
+     * results. Binder death is a transport-lifecycle event, not an
+     * acknowledgement that the caller consumed its persisted result.
+     */
+    suspend fun cancelAllForUid(uid: Int) {
+        uidLifecycleLock(uid).withLock {
+            val epoch = uidLifecycleEpoch(uid)
+            epoch.incrementAndGet()
+            try {
+                val jobs = removeActiveJobsForUid(uid)
+                jobs.forEach { it.job.cancel() }
+                withContext(NonCancellable) {
+                    jobs.forEach { deferredStore.completeEmbeddingCancelled(it.requestId, uid) }
+                }
+                if (jobs.isNotEmpty()) {
+                    MindlayerLog.i(TAG, "Cancelled ${jobs.size} embedding job(s) for uid=$uid")
+                }
+            } finally {
+                epoch.incrementAndGet()
             }
         }
-        if (keys.isNotEmpty()) {
-            MindlayerLog.i(TAG, "Cancelled ${keys.size} embedding job(s) for uid=$uid")
+    }
+
+    suspend fun revokeAllForUid(uid: Int) {
+        uidLifecycleLock(uid).withLock {
+            val epoch = uidLifecycleEpoch(uid)
+            epoch.incrementAndGet()
+            try {
+                val jobs = removeActiveJobsForUid(uid)
+                jobs.forEach { it.job.cancel() }
+                jobs.map { it.job }.joinAll()
+                withContext(NonCancellable) {
+                    deferredStore.purgeForUid(uid)
+                }
+                if (jobs.isNotEmpty()) {
+                    MindlayerLog.i(TAG, "Revoked and cancelled ${jobs.size} embedding job(s) for uid=$uid")
+                }
+            } finally {
+                epoch.incrementAndGet()
+            }
         }
     }
 
@@ -454,16 +535,20 @@ class EmbeddingCoordinator(
         writeLayout(buffer, results)
         val encrypted = blobCipher.encrypt(uid, buffer.array())
         buffer.array().fill(0)
-        RandomAccessFile(temp, "rw").use { raf ->
-            raf.channel.use { channel ->
-                channel.lock().use {
-                    channel.write(ByteBuffer.wrap(encrypted))
-                    channel.force(true)
+        try {
+            RandomAccessFile(temp, "rw").use { raf ->
+                raf.channel.use { channel ->
+                    channel.lock().use {
+                        channel.write(ByteBuffer.wrap(encrypted))
+                        channel.force(true)
+                    }
                 }
             }
+            java.nio.file.Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            target
+        } finally {
+            runCatching { if (temp.exists()) temp.delete() }
         }
-        java.nio.file.Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-        target
     }
 
     private fun transferFromBlob(uid: Int, path: String, metrics: Bundle?, metadata: List<EmbeddingItemMetadata>): EmbeddingBatchTransfer {
@@ -544,6 +629,23 @@ class EmbeddingCoordinator(
         runCatching { if (file.exists()) file.delete() }
     }
 
+    private fun removeActiveJobsForUid(uid: Int): List<ActiveDeferredJob> {
+        val prefix = "$uid:"
+        return activeJobs.keys
+            .filter { it.startsWith(prefix) }
+            .mapNotNull { scopedKey ->
+                activeJobs.remove(scopedKey)?.let { job ->
+                    ActiveDeferredJob(scopedKey.removePrefix(prefix), job)
+                }
+            }
+    }
+
+    private fun uidLifecycleLock(uid: Int): Mutex =
+        uidLifecycleLocks.computeIfAbsent(uid) { Mutex() }
+
+    private fun uidLifecycleEpoch(uid: Int): AtomicInteger =
+        uidLifecycleEpochs.computeIfAbsent(uid) { AtomicInteger(0) }
+
     private fun key(uid: Int, requestId: String): String = "$uid:$requestId"
 
     private fun enterForeground() { (context as? MindlayerMlService)?.enterForeground() }
@@ -555,6 +657,11 @@ class EmbeddingCoordinator(
     private companion object {
         private const val TAG = "EmbeddingCoordinator"
     }
+
+    private data class ActiveDeferredJob(
+        val requestId: String,
+        val job: Job,
+    )
 }
 
 interface EmbeddingBlobCipher {

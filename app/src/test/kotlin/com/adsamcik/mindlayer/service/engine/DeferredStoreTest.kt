@@ -17,6 +17,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.File
 
 /**
  * Tests for [DeferredStore] using a hand-rolled in-memory [DeferredDao] fake.
@@ -51,6 +52,7 @@ class DeferredStoreTest {
         maxRunning: Int = 4,
         maxPending: Int = 4,
         maxBytesUid: Long = 1024L * 1024L,
+        maxEmbeddingBytesUid: Long = 64L * 1024 * 1024,
         maxBytesResult: Int = 256 * 1024,
     ) = DeferredStore(
         dao = dao,
@@ -59,6 +61,7 @@ class DeferredStoreTest {
         maxRunningPerUid = maxRunning,
         maxCompletedPendingPerUid = maxPending,
         maxResultBytesPerUid = maxBytesUid,
+        maxEmbeddingResultBytesPerUid = maxEmbeddingBytesUid,
         maxResultBytesPerResult = maxBytesResult,
     )
 
@@ -343,5 +346,72 @@ class DeferredStoreTest {
         assertNull("oldest 'a' must be evicted first", dao.snapshot("a"))
         assertNull("next-oldest 'b' must also be evicted", dao.snapshot("b"))
         assertNotNull("newest 'c' survives", dao.snapshot("c"))
+    }
+
+    @Test
+    fun `chat and embedding byte quotas are independent`() = runTest {
+        val s = store(maxBytesUid = 5L, maxEmbeddingBytesUid = 100L, maxPending = 16)
+        val blob = File.createTempFile("embedding-quota", ".bin").apply { writeBytes(ByteArray(20)) }
+        s.createEmbeddingBatch(uid = 1, requestId = "emb", batchSize = 1)
+        now = 100L
+        s.completeEmbeddingBatch(
+            requestId = "emb",
+            uid = 1,
+            blobPath = blob.absolutePath,
+            blobBytes = blob.length(),
+            metrics = null,
+        )
+
+        s.create(uid = 1, requestId = "chat", meta = meta("chat"), mediaCount = 0)
+        now = 200L
+        s.completeReady("chat", uid = 1, text = "CHAT", metrics = null)
+
+        assertNotNull("chat quota must not evict embedding results", dao.snapshot("emb"))
+        assertNotNull("chat result fits its own quota", dao.snapshot("chat"))
+        blob.delete()
+    }
+
+    @Test
+    fun `chat and embedding running quotas are independent`() = runTest {
+        val s = store(maxRunning = 1, maxPending = 16)
+
+        assertNotNull(s.create(uid = 1, requestId = "chat", meta = meta("chat"), mediaCount = 0))
+        assertNotNull(s.createEmbeddingBatch(uid = 1, requestId = "emb", batchSize = 1))
+        assertNull(s.create(uid = 1, requestId = "chat-2", meta = meta("chat-2"), mediaCount = 0))
+        assertNull(s.createEmbeddingBatch(uid = 1, requestId = "emb-2", batchSize = 1))
+    }
+
+    @Test
+    fun `chat and embedding completed quotas are independent`() = runTest {
+        val s = store(maxRunning = 16, maxPending = 1)
+        val blob = File.createTempFile("embedding-pending-quota", ".bin").apply {
+            writeBytes(ByteArray(8))
+        }
+        s.create(uid = 1, requestId = "chat", meta = meta("chat"), mediaCount = 0)
+        s.completeReady("chat", uid = 1, text = "ready", metrics = null)
+
+        assertNotNull(s.createEmbeddingBatch(uid = 1, requestId = "emb", batchSize = 1))
+        s.completeEmbeddingBatch("emb", 1, blob.absolutePath, blob.length(), null)
+        assertNull(s.create(uid = 1, requestId = "chat-2", meta = meta("chat-2"), mediaCount = 0))
+        assertNull(s.createEmbeddingBatch(uid = 1, requestId = "emb-2", batchSize = 1))
+        blob.delete()
+    }
+
+    @Test
+    fun `purge for uid removes rows and embedding blobs only for that uid`() = runTest {
+        val s = store(maxPending = 16)
+        val blob = File.createTempFile("embedding-purge", ".bin").apply { writeBytes(ByteArray(8)) }
+        s.createEmbeddingBatch(uid = 1, requestId = "emb", batchSize = 1)
+        s.completeEmbeddingBatch("emb", 1, blob.absolutePath, blob.length(), null)
+        s.create(uid = 1, requestId = "chat", meta = meta("chat"), mediaCount = 0)
+        s.completeReady("chat", 1, "ready", null)
+        s.create(uid = 2, requestId = "other", meta = meta("other"), mediaCount = 0)
+
+        assertEquals(2, s.purgeForUid(1))
+
+        assertNull(dao.snapshot("emb"))
+        assertNull(dao.snapshot("chat"))
+        assertNotNull(dao.snapshot("other"))
+        assertFalse(blob.exists())
     }
 }

@@ -55,19 +55,13 @@ class AllowlistAtomicWriteTest {
         )
         assertTrue("entries.json must exist", entriesFile.exists())
 
-        // Production format (post-b15b656 H7 hardening; v3): the persisted
-        // shape is `{"version":3,"entries":[...],"mac":"<hex>"}` — an
-        // HMAC-integrity envelope around the entry array. SIGNED_FILE_VERSION
-        // was bumped to 3 by the v0.10 consent-architecture (denial-side
-        // permanent+scope HMAC fix) and security-review S-9 (entry `prevSig`
-        // binding); the entries.json structure is otherwise unchanged but it
-        // carries the global file-format version. Earlier versions of this
-        // test asserted the file was a raw JSON array, which silently broke
-        // when integrity was added. We now assert both the envelope shape AND
-        // the inner entries layout.
+        // The persisted shape is an HMAC-integrity envelope around the entry
+        // array. Version 4 additionally binds pending revocation cleanup UIDs
+        // in denied.json; entries.json carries the same global format version.
+        // Assert both the envelope shape and the inner entries layout.
         val text = entriesFile.readText()
         val envelope = JSONObject(text)
-        assertEquals("envelope version must be 3", 3, envelope.getInt("version"))
+        assertEquals("envelope version must be 4", 4, envelope.getInt("version"))
         val mac = envelope.getString("mac")
         assertTrue("mac must be a non-empty hex string", mac.isNotEmpty() && mac.matches(Regex("^[0-9a-fA-F]+$")))
         val arr = envelope.getJSONArray("entries")
@@ -85,7 +79,7 @@ class AllowlistAtomicWriteTest {
 
         // See `approve writes a valid JSON array` for the envelope shape.
         val envelope = JSONObject(entriesFile.readText())
-        assertEquals(3, envelope.getInt("version"))
+        assertEquals(4, envelope.getInt("version"))
         assertNotNull("mac field must survive revoke", envelope.optString("mac", null))
         val arr = envelope.getJSONArray("entries")
         assertEquals(1, arr.length())

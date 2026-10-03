@@ -77,12 +77,75 @@ class AllowlistStoreTest {
     }
 
     @Test
+    fun `deny atomically removes an existing approval`() {
+        store.approveDirect("com.example", "abc123")
+
+        store.deny("com.example", "abc123", com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H)
+
+        assertTrue(store.list().isEmpty())
+        assertFalse(store.isAllowed("com.example", "abc123"))
+        assertTrue(store.isDenied("com.example", "abc123"))
+    }
+
+    @Test
+    fun `active denial suppresses a stale approval row`() {
+        store.deny("com.example", "abc123", com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H)
+        store.approveDirect("com.example", "abc123")
+
+        assertTrue("fixture must contain the stale approval row", store.list().isNotEmpty())
+        assertFalse(store.isAllowed("com.example", "abc123"))
+        assertTrue(store.approvalFor("com.example", "abc123") == null)
+    }
+
+    @Test
+    fun `cert-pair denial preserves approval for a rotated signer`() {
+        store.approveDirect("com.example", "new-signer")
+
+        store.deny(
+            "com.example",
+            "old-signer",
+            com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_24H,
+        )
+
+        assertTrue(store.isAllowed("com.example", "new-signer"))
+        assertEquals("new-signer", store.list().single().signingCertSha256)
+    }
+
+    @Test
+    fun `pending cleanup marker persists until explicitly cleared`() {
+        store.approveDirect("com.example", "abc123")
+
+        store.deny(
+            "com.example",
+            null,
+            com.adsamcik.mindlayer.ConsentDecision.KIND_DENY_PERMANENT,
+            pendingCleanupUid = 24_680,
+        )
+
+        assertEquals(24_680, store.pendingCleanupFor("com.example")!!.pendingCleanupUid)
+        val reopened = AllowlistStore(context, dirName)
+        assertEquals(24_680, reopened.pendingCleanupFor("com.example")!!.pendingCleanupUid)
+        reopened.clearPendingCleanup("com.example", 24_680)
+        assertTrue(reopened.pendingCleanupFor("com.example") == null)
+    }
+
+    @Test
     fun `approve replaces existing entry for same package`() {
         store.approveDirect("com.example", "old")
         store.approveDirect("com.example", "new")
         assertEquals(1, store.list().size)
         assertTrue(store.isAllowed("com.example", "new"))
         assertFalse(store.isAllowed("com.example", "old"))
+    }
+
+    @Test
+    fun `approval generation increases across immediate replacement`() {
+        store.approveDirect("com.example", "sig")
+        val firstGeneration = store.approvalFor("com.example", "sig")!!.grantedAtMs
+
+        store.approveDirect("com.example", "sig")
+
+        assertTrue(store.approvalFor("com.example", "sig")!!.grantedAtMs > firstGeneration)
     }
 
 
@@ -194,12 +257,9 @@ class AllowlistStoreTest {
         // Rewrite with keys reordered but the same envelope version + MAC.
         // The HMAC pre-image is built from a canonical (key-sorted) form
         // by `canonicalPayload`, so a key-reordered JSON must still verify.
-        // Version is the current SIGNED_FILE_VERSION (3 since the v0.10
-        // consent-architecture bump for the denial permanent+scope HMAC
-        // fix — entries shape is unchanged but the global file-format
-        // version applies).
+        val version = envelope.getInt("version")
         entriesFile.writeText(
-            """{"version":3,"entries":[{"displayName":"${entry.getString("displayName")}","grantedAtMs":${entry.getLong("grantedAtMs")},"sig":"${entry.getString("sig")}","pkg":"${entry.getString("pkg")}"}],"mac":"${envelope.getString("mac")}"}""",
+            """{"version":$version,"entries":[{"displayName":"${entry.getString("displayName")}","grantedAtMs":${entry.getLong("grantedAtMs")},"sig":"${entry.getString("sig")}","pkg":"${entry.getString("pkg")}"}],"mac":"${envelope.getString("mac")}"}""",
         )
 
         assertTrue(store.isAllowed("com.example", "sig"))
