@@ -1,7 +1,7 @@
 # paddle2onnx 2.1.0 requires ONNX <=1.17.0. See DEPENDENCIES.md.
 setuptools==83.0.0
 paddlepaddle==3.0.0
-onnx==1.17.0
+onnx==1.22.0
 onnxruntime==1.18.1
 protobuf==5.29.6
 numpy==1.26.4
