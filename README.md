@@ -110,7 +110,7 @@ adb shell am start -n com.adsamcik.mindlayer/com.adsamcik.mindlayer.service.ui.M
 | Capability | API | Current gate |
 |---|---|---|
 | Chat / multimodal inference | `infer`, `ask`, `describe`, `transcribe` | Production surface; check stream/protocol features for optional behavior. |
-| Embeddings | `embed`, `vector`, `vectors`; `embed { deferred() }` in unreleased source | `ServiceCapabilities.FEATURE_EMBEDDINGS`; depends on model extraction + integrity verification. |
+| Embeddings | `embed`, `vector`, `vectors`; `embed { deferred() }` from 1.0.0-alpha.10 | `ServiceCapabilities.FEATURE_EMBEDDINGS`; depends on model extraction + integrity verification. |
 | OCR | `ocr`, `ocrSession`, `:sdk-camerax`, `:sdk-camera-launcher` | Production flag enabled; the corresponding OCR capability requires verified, available model assets. |
 | Health check | `ping` / SDK liveness fallback | `ServiceCapabilities.FEATURE_HEALTH_CHECK` |
 
@@ -145,7 +145,7 @@ In short: you are free to use, modify, and distribute this software, including o
 
 `SPDX-License-Identifier: AGPL-3.0-only`
 
-### Deferred embeddings (Unreleased)
+### Deferred embeddings (1.0.0-alpha.10)
 
 `embed { items(batch); deferred() }` returns a durable request handle. Call
 `awaitReady()` for vectors and metadata, then `acknowledge()` to release the

@@ -72,9 +72,9 @@ transport. `openSession { }` returns an owned session. Terminals:
 
 - `InferenceHandle.Text.awaitText(): String`
 - `InferenceHandle.Structured.awaitJson(): JsonObject` (lenient parse — strips
-  ```` ```json ```` fences and isolates the outermost JSON object). As of the
-  current `[Unreleased]` line, `infer { outputJson(schema) }` and the
-  `extractJson(...)` helper now **enforce** the schema: the ephemeral session is
+  ```` ```json ```` fences and isolates the outermost JSON object). In the
+  current canonical API, `infer { outputJson(schema) }` and the
+  `extractJson(...)` helper **enforce** the schema: the ephemeral session is
   created with the `{"structured_output":{schema,strategy,max_retries,validation_depth}}`
   envelope (the same one `SessionConfigBuilder.jsonOutput { }` emits), so the
   service validates `enum`/`type`/`required`/… and retries or fails closed.
@@ -139,7 +139,7 @@ Two **breaking** knock-on changes:
 - `JsonOutputBuilder.validation(depth)` was renamed to `validationDepth(depth)`
   (matches the DSL example above and the internal field). Update any call sites.
 
-## Completed SDK options (Unreleased)
+## Completed SDK options (1.0.0-alpha.10)
 
 - **Manual tool results.** Cast a tool-output handle to `InferenceHandle.Tools`
   and answer each observed call with `submitToolResult(callId, resultJson)`.

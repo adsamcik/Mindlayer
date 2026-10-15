@@ -12,7 +12,7 @@ and old validation totals are not current release evidence.
 - The canonical SDK exposes streaming `infer`, `ocr`, multi-frame `ocrSession`,
   `embed`, and owned sessions. See [SDK migration](../sdk/SDK_V1_MIGRATION.md).
   Manual tool-result submission, explicit deferred embeddings, embedding/OCR
-  deadlines and capability-gated sampler seeds are completed in unreleased source.
+  deadlines and capability-gated sampler seeds are completed for `1.0.0-alpha.10`.
 - OCR and embedding production feature flags are enabled. The
   [OCR driver](../../samples/ocr-driver) exists; callers still need the relevant
   model assets installed and their runtime capabilities advertised.

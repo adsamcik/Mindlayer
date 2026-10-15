@@ -6,25 +6,56 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
-- Camera capture waits for its initial readiness probe before allowing capture,
-  survives activity recreation without restarting the task, and reports startup
-  failures through recoverable UI state.
-- Completed canonical SDK options: manual tool-result submission through the
-  inference handle, explicit deferred embedding handles with acknowledgement,
-  enforced embedding/OCR deadlines, and capability-gated native sampler seeds.
-  Per-request sampling settings on existing named sessions now fail explicitly
-  rather than being ignored.
-- Updated SDK examples and migration notes to match the shipped canonical API;
-  the roadmap now separates delivered OCR/SDK work from remaining native,
-  model-provenance and Play-delivery qualification.
-- Completed deferred embedding results now survive client disconnects until
-  acknowledgement, expiry, or quota eviction. Revoking app access cancels active
-  work, purges deferred results, and retries interrupted cleanup before reapproval;
-  chat and embedding results now have separate per-app quota accounting.
-- Android Studio's standard **Generate Signed App Bundle or APK** flow now
-  passes the release-signing guard without requiring `keystore.properties`.
-  Direct Gradle builds still support the gitignored properties file and CI
-  credentials, and reject release packaging without a configured signing method.
+## [1.0.0-alpha.10] — 2026-10-15
+
+SDK and service version → `1.0.0-alpha.10`. Upgrade all four Maven modules together.
+
+### Added
+
+- Manual tool-result submission through `InferenceHandle.Tools`, with matching
+  tool names and rejection of unknown, duplicate or stale call IDs.
+- Explicit deferred embedding handles with per-item metadata, result
+  acknowledgement, and best-effort cancellation and disposal on close.
+- Positive OCR and embedding deadlines, including image loading or durable
+  embedding submission and result waiting. An active synchronous OCR Binder
+  call completes independently after the SDK wait stops.
+- Capability-gated sampler seeds for ephemeral inference sessions. Older
+  services reject seeds explicitly; non-null per-request sampling on an
+  existing named session fails instead of being silently ignored.
+
+### Fixed
+
+- Camera capture now starts its preview while checking readiness, retains its
+  task and SDK connection across activity recreation, rebinds CameraX to the
+  current lifecycle, and reports finalization timeouts as failures.
+- Completed deferred embedding results survive client disconnects until
+  acknowledgement, expiry or quota eviction. Access revocation cancels work,
+  purges retained results, and retries interrupted cleanup before reapproval.
+  Chat and embedding results have separate per-app quota accounting.
+- Cancelled ephemeral inference cleanup no longer waits for reconnection;
+  finite embedding deadlines also cover result acknowledgement.
+- Android Studio's standard **Generate Signed App Bundle or APK** flow accepts
+  wizard-injected signing credentials without requiring `keystore.properties`.
+  Direct Gradle release packaging still requires configured signing.
+
+### Changed
+
+- Updated LiteRT-LM from 0.16.1 to 0.17.1 while retaining base LiteRT 2.2.0,
+  with Android/build dependency updates and a pinned Gradle distribution hash.
+  SDK API dependencies and converter/build dependency pins were corrected.
+- Hosted Android instrumentation now runs only on Android 17 / API 37.2, replacing
+  the older API 33/34 matrix. Unit-test SDK pins and supported app APIs are unchanged.
+- Refreshed canonical SDK examples, migration guidance and the roadmap to
+  distinguish implemented functionality from outstanding release qualification.
+
+### Upgrade notes
+
+- Use `shared`, `sdk`, `sdk-camerax` and `sdk-camera-launcher` at the same
+  version. The additive sampler-seed capability uses the existing wire contract.
+- The GitHub APK is a code-only, debug-signed sideload build; install or retain
+  models separately. This alpha does not qualify current ARM64 native camera/
+  inference behavior or model-bearing public Play distribution. Model provenance
+  and Play delivery checks remain open in `docs/project/ROADMAP.md`.
 
 ## [1.0.0-alpha.9] — 2026-10-02
 

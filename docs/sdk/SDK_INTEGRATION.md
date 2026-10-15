@@ -44,7 +44,7 @@ In your client app's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.adsamcik.mindlayer:sdk:1.0.0-alpha.9")
+    implementation("com.adsamcik.mindlayer:sdk:1.0.0-alpha.10")
     // 'shared' types are included transitively via 'api' dependency
 }
 ```
@@ -242,7 +242,7 @@ For JSON, use `infer { text(prompt); outputJson(schema) }.awaitJson()` or
 schema enforcement. A named session must configure its schema up front through
 `openSession { jsonOutput { schema(schemaText) } }`.
 
-In unreleased source, `sampling { seed = 42 }` configures the native sampler
+From `1.0.0-alpha.10`, `sampling { seed = 42 }` configures the native sampler
 for an ephemeral session. It requires `FEATURE_SAMPLER_SEED`; older services
 reject it explicitly. Non-null sampling settings on a named session fail with
 `INVALID_REQUEST`, since the session already owns its configuration. An empty
@@ -270,7 +270,7 @@ handle.events.collect { event ->
 }
 ```
 
-Manual submission is available in the unreleased source. Submit each observed
+Manual submission is available from `1.0.0-alpha.10`. Submit each observed
 call once; unknown, duplicate or stale IDs are rejected. Alternatively register
 `onToolCall { call -> executeTool(call.name, call.argsJson) }` inside `infer`
 to run the response loop automatically. Choose one response owner. A throwing
@@ -435,7 +435,7 @@ the normalized rotated quad. Optional LLM extraction uses
 `extractWithLlm(schema)` and requires the generative model too. Check
 `FEATURE_OCR_SESSION` / `FEATURE_OCR_IMAGE_ONESHOT` before the relevant path.
 
-In unreleased source, `deadline(timeout)` accepts a positive duration or
+From `1.0.0-alpha.10`, `deadline(timeout)` accepts a positive duration or
 `Duration.INFINITE`. A finite OCR deadline covers image loading, submission and
 result mapping. Timeout or caller cancellation promptly stops SDK waiting;
 an active synchronous Binder call completes independently and releases its
@@ -454,7 +454,7 @@ import kotlin.time.Duration.Companion.seconds
 val vector = mindlayer.vector("Search text", EmbeddingTask.RetrievalQuery)
 val batch = mindlayer.embed { items(embeddingItems) }.awaitVectors()
 
-// Unreleased: durable submission with an end-to-end time bound.
+// From 1.0.0-alpha.10: durable submission with an end-to-end time bound.
 val pending = mindlayer.embed {
     items(embeddingItems)
     deferred()

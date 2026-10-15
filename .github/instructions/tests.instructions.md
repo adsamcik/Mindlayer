@@ -83,7 +83,8 @@ class FooTest {
 ## Instrumented (`androidTest/`)
 
 - Runner: `androidx.test.runner.AndroidJUnitRunner`.
-- API level matrix: 33 (one row in CI). When adding instrumented coverage, target 33 first.
+- Hosted CI instrumentation uses only the latest stable platform: Android 17 / API 37.2. Keep the single CI pin current; do not add older-API matrix rows.
+- Local runtime testing uses only an existing, configured device/AVD at the highest stable API available. Do not create or clone an AVD for local validation.
 - DB-encryption tests live here (`DbKeyProviderTest`, `EncryptedDbWiringTest`) — they need real AndroidKeystore.
 
 ## Don't
