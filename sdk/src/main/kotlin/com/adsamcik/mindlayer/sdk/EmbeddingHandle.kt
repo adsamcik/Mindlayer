@@ -50,7 +50,7 @@ data class EmbeddingResultItem(
     val durationMs: Long? = null,
 )
 
-/** Caller-facing embedding event stream type. Behaviour lands in C2. */
+/** Caller-facing embedding completion events. Failures propagate from the collecting coroutine. */
 sealed interface EmbeddingEvent {
     /** Terminal success frame carrying the computed results. */
     data class Completed(val items: List<EmbeddingResultItem>) : EmbeddingEvent
@@ -60,10 +60,12 @@ sealed interface EmbeddingEvent {
 }
 
 /**
- * Cold handle for an embedding call. The returned subtype depends on the
+ * Result handle for an embedding call. The returned subtype depends on the
  * request shape (single text, batch, or deferred).
  *
- * Behavioural wiring lands in C2; in C1 this is the public type skeleton.
+ * Single and batch results are computed before the handle is returned. Explicit
+ * deferred requests return after submission; [Deferred.awaitReady] fetches and
+ * caches the result, preserving its per-item metadata.
  */
 sealed interface EmbeddingHandle {
     val events: Flow<EmbeddingEvent>
@@ -78,7 +80,15 @@ sealed interface EmbeddingHandle {
         suspend fun awaitVectors(): List<EmbeddingResultItem>
     }
 
-    /** Deferred (out-of-band) batch embedding with explicit acknowledgement. */
+    /**
+     * Durable out-of-band embedding with explicit acknowledgement.
+     * Waiting does not delete the service result. [requestId] identifies the
+     * durable service record; the public SDK cannot restore this handle after
+     * client-process death. Cancelling one wait stops that wait;
+     * [close] best-effort cancels and acknowledges without waiting
+     * for reconnection. Use [acknowledge] after a successful wait when disposal must
+     * be confirmed. A configured deadline remains active even between waits.
+     */
     interface Deferred : EmbeddingHandle, AutoCloseable {
         val requestId: String
         suspend fun awaitReady(): List<EmbeddingResultItem>

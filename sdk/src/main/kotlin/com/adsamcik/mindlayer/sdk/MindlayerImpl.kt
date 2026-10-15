@@ -48,6 +48,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
+import kotlin.time.TimeSource
 
 /**
  * Client for the Mindlayer on-device LLM service.
@@ -301,6 +302,7 @@ internal class MindlayerImpl(
     }
 
     override suspend fun ocr(build: OcrRequest.Builder.() -> Unit): OcrHandle.OneShot {
+        val started = TimeSource.Monotonic.markNow()
         val request = OcrRequest.Builder().apply(build)
         return instrument(
             method = "ocr",
@@ -310,7 +312,20 @@ internal class MindlayerImpl(
                 "boxes" to request.emitBoundingBoxes.toString(),
             ),
         ) {
-            runOcrRequest(request)
+            // Independent SDK work lets a cancelled/timed-out caller return even
+            // when a synchronous Binder call cannot be interrupted. Its existing
+            // media cleanup still runs when that call eventually returns.
+            suspend fun awaitWork(): OcrHandle.OneShot {
+                val work = lifecycleScope.async(Dispatchers.IO) { runOcrRequest(request) }
+                return try {
+                    work.await()
+                } finally {
+                    work.cancel()
+                }
+            }
+            val timeout = request.deadline?.takeIf { it.isFinite() }
+            if (timeout == null) awaitWork()
+            else withTimeout(timeout - started.elapsedNow()) { awaitWork() }
         }
     }
 
@@ -351,9 +366,16 @@ internal class MindlayerImpl(
         val prompt = request.promptText.orEmpty()
         val sessionId = overrideSessionId ?: request.sessionId
         val toolHandler = request.toolHandler
+        val sampler = CapturedSamplerScope().apply { request.samplerConfigure?.invoke(this) }
         val requestId = "infer-${UUID.randomUUID()}"
 
         if (sessionId != null) {
+            if (sampler.topK != null || sampler.topP != null || sampler.temperature != null || sampler.seed != null) {
+                throw MindlayerException(
+                    message = "Sampling is configured when a session is created; use an ephemeral session to change it.",
+                    code = MindlayerErrorCode.INVALID_REQUEST,
+                )
+            }
             // Named session: stream directly, caller owns session lifecycle
             val handle = runStreamingInference(
                 sessionId = sessionId,
@@ -365,11 +387,14 @@ internal class MindlayerImpl(
                 priority = request.priorityHint,
             )
             if (toolHandler == null) return handle
-            return buildHandle(requestId, wireToolHandler(handle.events, requestId, toolHandler))
+            return buildHandle(
+                requestId, wireToolHandler(handle.events, requestId, toolHandler),
+                sessionId = sessionId, automaticToolResults = true, cancelDelegate = handle,
+            )
         }
 
         // Ephemeral session: create → stream → destroy on completion
-        val configure = sessionConfigureFrom(request)
+        val configure = sessionConfigureFrom(request, sampler)
         val ephemeralId = createSessionInternal(configure)
 
         val innerHandle = runStreamingInference(
@@ -393,10 +418,19 @@ internal class MindlayerImpl(
 
         // Wrap the event flow with ephemeral session cleanup on terminal/error/cancel
         val cleanupFlow = streamedEvents.onCompletion {
-            runCatching { destroySession(ephemeralId) }
+            withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
+                // Cleanup must not bind/reconnect after cancellation or explicit disconnect.
+                val service = connection.getService()
+                if (service != null) {
+                    runCatching { withTypedErrorsSync(service, sessionId = ephemeralId) { it.destroySession(ephemeralId) } }
+                }
+            }
         }
 
-        return buildHandle(requestId, cleanupFlow)
+        return buildHandle(
+            requestId, cleanupFlow, sessionId = ephemeralId,
+            automaticToolResults = toolHandler != null, cancelDelegate = innerHandle,
+        )
     }
 
     /**
@@ -452,7 +486,7 @@ internal class MindlayerImpl(
     /**
      * Translate the [SessionScope] / [SamplerScope] captured by an inference
      * request into a [SessionConfigBuilder] configure block for the ephemeral
-     * one-shot session. [SamplerScope.seed] is dropped (no builder field).
+     * one-shot session, including capability-gated sampling seeds.
      *
      * [InferenceRequest.OutputMode.Json] is materialised here into the
      * `structured_output` envelope on the session's `extraContextJson` so the
@@ -461,9 +495,17 @@ internal class MindlayerImpl(
      * schema. [InferenceRequest.OutputMode.Tools] is materialised into the
      * session's tools JSON.
      */
-    private fun sessionConfigureFrom(request: InferenceRequest.Builder): SessionConfigBuilder.() -> Unit {
+    private suspend fun sessionConfigureFrom(
+        request: InferenceRequest.Builder,
+        sampler: CapturedSamplerScope,
+    ): SessionConfigBuilder.() -> Unit {
         val session = CapturedSessionScope().apply { request.sessionConfigure?.invoke(this) }
-        val sampler = CapturedSamplerScope().apply { request.samplerConfigure?.invoke(this) }
+        if (sampler.seed != null && !getCapabilities().supports(ServiceCapabilities.FEATURE_SAMPLER_SEED)) {
+            throw MindlayerException(
+                message = "The connected Mindlayer service does not support sampling seeds.",
+                code = MindlayerErrorCode.NOT_SUPPORTED,
+            )
+        }
         val mode = request.outputMode
         val toolsJsonFromOutput = when (mode) {
             is InferenceRequest.OutputMode.Tools -> toolSpecListToJson(mode.tools)
@@ -482,6 +524,7 @@ internal class MindlayerImpl(
             // Apply any caller-provided extra context first so the structured
             // output envelope below merges into it instead of clobbering it.
             session.extraContextJson?.let { extraContext(it) }
+            sampler.seed?.let { seed(it) }
             // OutputMode.Json: emit the `structured_output` envelope the service
             // consumes so the response is validated against the schema (with the
             // generate → validate → retry semantics). Reuses the single-sourced
@@ -800,6 +843,7 @@ internal class MindlayerImpl(
     }
 
     override suspend fun embed(build: EmbeddingRequest.Builder.() -> Unit): EmbeddingHandle {
+        val started = TimeSource.Monotonic.markNow()
         val request = EmbeddingRequest.Builder().apply(build)
         return instrument(
             method = "embed",
@@ -809,7 +853,7 @@ internal class MindlayerImpl(
                 "deferred" to request.deferred.toString(),
             ),
         ) {
-            runEmbedRequest(request)
+            runEmbedRequest(request, started)
         }
     }
 
@@ -820,16 +864,62 @@ internal class MindlayerImpl(
      *  - `items(...)` → [embedManyConfigsInternal] (batch; picks the cheapest
      *    viable transport — inline, SharedMemory, or deferred — automatically).
      *
-     * C3 deviations (documented in `docs/sdk/SDK_V1_MIGRATION.md`):
-     *  - `deferred()` is accepted but currently materialises to an inline batch.
-     *    True deferred wiring will land alongside the canonical builder for
-     *    [EmbeddingHandle.Deferred].
-     *  - `deadline(...)` is recorded for telemetry but not enforced at this
-     *    layer; the AIDL call inherits the service-side default budget.
+     * Explicit deferred requests return before computation completes. Finite
+     * deadlines also use durable submission so expiry can cancel by request ID;
+     * the ordinary single/batch shape is preserved when deferred was not requested.
      */
-    private suspend fun runEmbedRequest(request: EmbeddingRequest.Builder): EmbeddingHandle {
+    private suspend fun runEmbedRequest(
+        request: EmbeddingRequest.Builder,
+        started: TimeSource.Monotonic.ValueTimeMark,
+    ): EmbeddingHandle {
         val single = request.singleItem
         val items = request.items
+        if (single == null && items == null) {
+            throw MindlayerException(
+                message = "Mindlayer v1 — embed{} requires text(...) or items(...).",
+                code = MindlayerErrorCode.INVALID_REQUEST,
+            )
+        }
+        val timeout = request.deadline?.takeIf { it.isFinite() }
+        if (request.deferred || timeout != null) {
+            val configs = (single?.let(::listOf) ?: items.orEmpty()).map { it.toConfig() }
+            var submitted: EmbeddingBatchHandle? = null
+            val handle = try {
+                val submit: suspend () -> EmbeddingBatchHandle = {
+                    withContext(Dispatchers.IO) {
+                        submitEmbeddingBatchDeferred(configs) { submitted = it }
+                    }
+                }
+                val raw = if (timeout == null) submit() else withTimeout(timeout - started.elapsedNow()) { submit() }
+                DeferredEmbeddingHandle(
+                    requestId = raw.requestId,
+                    scope = lifecycleScope,
+                    remainingTimeout = timeout?.minus(started.elapsedNow()),
+                    fetch = { withContext(Dispatchers.IO) { awaitEmbeddingBatch(raw).map { it.toResultItem() } } },
+                    acknowledgeResult = { withContext(Dispatchers.IO) { acknowledgeEmbeddingBatch(raw) } },
+                    discard = { discardEmbeddingBatch(raw) },
+                )
+            } catch (t: Throwable) {
+                // The synchronous submission may return after cancellation. Its ID
+                // is captured inside the IO block before withContext can drop it.
+                submitted?.let(::discardEmbeddingBatch)
+                throw t
+            }
+            if (request.deferred) return handle
+            try {
+                return withTimeout(requireNotNull(timeout) - started.elapsedNow()) {
+                    val resultItems = handle.awaitReady()
+                    handle.acknowledge()
+                    if (single != null) {
+                        CompletedEmbeddingSingle(resultItems.single().vector.data, resultItems.single())
+                    } else {
+                        CompletedEmbeddingBatch(resultItems)
+                    }
+                }
+            } finally {
+                handle.close()
+            }
+        }
         return when {
             single != null -> {
                 val config = EmbeddingConfig(
@@ -866,24 +956,35 @@ internal class MindlayerImpl(
                         normalize = item.normalize,
                     )
                 }
-                val resultItems = embedManyConfigsInternal(configs).results.map { result ->
-                    EmbeddingResultItem(
-                        tag = result.tag,
-                        vector = EmbeddingVector(result.vector),
-                        dim = result.dim,
-                        modelId = result.modelId,
-                        tokenCount = result.tokenCount,
-                        truncated = result.truncated,
-                        backend = result.backend,
-                        durationMs = result.durationMs,
-                    )
-                }
+                val resultItems = embedManyConfigsInternal(configs).results.map { it.toResultItem() }
                 CompletedEmbeddingBatch(resultItems)
             }
             else -> throw MindlayerException(
                 message = "Mindlayer v1 — embed{} requires text(...) or items(...).",
                 code = MindlayerErrorCode.INVALID_REQUEST,
             )
+        }
+    }
+
+    private fun EmbeddingItem.toConfig() = EmbeddingConfig(text, task, normalize, outputDim, modelId, tag)
+
+    private fun com.adsamcik.mindlayer.EmbeddingResult.toResultItem() = EmbeddingResultItem(
+        tag = tag,
+        vector = EmbeddingVector(vector),
+        dim = dim,
+        modelId = modelId,
+        tokenCount = tokenCount,
+        truncated = truncated,
+        backend = backend,
+        durationMs = durationMs,
+    )
+
+    /** Best-effort disposal is off the caller thread and never waits for a new binding. */
+    private fun discardEmbeddingBatch(handle: EmbeddingBatchHandle) {
+        val service = connection.getService() ?: return
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching { service.cancelEmbeddingBatch(handle.requestId) }
+            runCatching { service.acknowledgeEmbeddingBatchResult(handle.requestId) }
         }
     }
 
@@ -1882,13 +1983,21 @@ internal class MindlayerImpl(
      * Capability-gated by [ServiceCapabilities.FEATURE_EMBEDDINGS]; old service
      * binaries throw [MindlayerException] with `NOT_SUPPORTED`.
      */
-    suspend fun embedBatchDeferred(configs: List<EmbeddingConfig>): EmbeddingBatchHandle {
+    suspend fun embedBatchDeferred(configs: List<EmbeddingConfig>): EmbeddingBatchHandle =
+        submitEmbeddingBatchDeferred(configs) {}
+
+    private suspend fun submitEmbeddingBatchDeferred(
+        configs: List<EmbeddingConfig>,
+        onSubmitted: (EmbeddingBatchHandle) -> Unit,
+    ): EmbeddingBatchHandle {
         val caps = requireEmbeddingCapability()
         validateEmbeddingBatchSize(configs, caps.maxEmbeddingBatchTotal, "deferred")
         return try {
             withContext(Dispatchers.IO) {
-                val handle = withTypedErrors { it.embedBatchDeferred(configs.map { config -> config.toAidlRequest() }) }
-                EmbeddingBatchHandle(handle.requestId, handle.expiresAtMs)
+                withTypedErrors {
+                    val handle = it.embedBatchDeferred(configs.map { config -> config.toAidlRequest() })
+                    EmbeddingBatchHandle(handle.requestId, handle.expiresAtMs).also(onSubmitted)
+                }
             }
         } catch (_: NoSuchMethodError) {
             throw embeddingNotSupported()
@@ -1930,11 +2039,11 @@ internal class MindlayerImpl(
         try {
             val pollJob = async {
                 while (isActive) {
-                    delay(pollIntervalMs)
                     val outcome = fetchEmbeddingBatch(handle)
                     if (outcome !is EmbeddingBatchOutcome.StillRunning) {
                         return@async outcome
                     }
+                    delay(pollIntervalMs)
                 }
                 EmbeddingBatchOutcome.StillRunning
             }
@@ -2694,7 +2803,7 @@ internal class MindlayerImpl(
             )
         }
 
-        return buildHandle(requestId, flow)
+        return buildHandle(requestId, flow, sessionId = sessionId)
     }
 
     /**
@@ -2735,13 +2844,33 @@ internal class MindlayerImpl(
      *    [Conversation.close]. Best-effort against the currently-cached
      *    binder; silently drops the cancel when no connection is available.
      */
-    private fun buildHandle(requestId: String, flow: Flow<InferenceEvent>): InferenceHandle {
-        return InferenceHandleImpl(requestId, flow).also { handle ->
+    private fun buildHandle(
+        requestId: String,
+        flow: Flow<InferenceEvent>,
+        sessionId: String = "",
+        automaticToolResults: Boolean = false,
+        cancelDelegate: InferenceHandle? = null,
+    ): InferenceHandle {
+        return InferenceHandleImpl(
+            requestId, flow, sessionId, automaticToolResults,
+            submitToolResultCallback = { callId, toolName, resultJson ->
+                withContext(Dispatchers.IO) {
+                    val result = submitToolResultDetailed(requestId, callId, toolName, resultJson)
+                    check(result.outcome == com.adsamcik.mindlayer.ToolSubmitResult.ACCEPTED) {
+                        "Tool result was not accepted (outcome=${result.outcome})"
+                    }
+                }
+            },
+        ).also { handle ->
             handle.setCancelCallback {
-                withContext(Dispatchers.IO) { cancelInferenceNow(requestId) }
+                cancelDelegate?.cancel() ?: withContext(Dispatchers.IO) { cancelInferenceNow(requestId) }
             }
             handle.setSyncCancelCallback {
-                cancelInferenceNow(requestId)
+                if (cancelDelegate is InferenceHandleImpl) {
+                    cancelDelegate.cancelSync()
+                } else {
+                    cancelInferenceNow(requestId)
+                }
             }
         }
     }
@@ -3404,6 +3533,14 @@ class SessionConfigBuilder {
      * This is injected alongside the system prompt.
      */
     fun extraContext(json: String) { extraContextJson = json }
+
+    /** Wire-compatible seed extension; the canonical inference builder checks support first. */
+    internal fun seed(value: Int) {
+        extraContextJson = mergeExtraContext(
+            extraContextJson,
+            kotlinx.serialization.json.buildJsonObject { put("sampler_seed", JsonPrimitive(value)) },
+        )
+    }
 
     /**
      * Request structured JSON output that conforms to a schema.

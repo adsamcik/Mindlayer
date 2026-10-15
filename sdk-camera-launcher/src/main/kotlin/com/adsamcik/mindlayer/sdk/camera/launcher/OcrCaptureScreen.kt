@@ -41,7 +41,7 @@ import androidx.lifecycle.LifecycleOwner
  * State-machine over [OcrCaptureUiState]:
  *
  *  - `AwaitingPermission` / `PermissionDenied` → rationale + Grant button.
- *  - `Connecting`                              → spinner + "Connecting…".
+ *  - `Connecting`                              → preview + "Connecting…" progress.
  *  - `Ready` / `AsyncCapturing` /
  *    `RealtimeStreaming` / `RealtimeFinalizing` → preview + per-mode controls.
  *  - `Completed` → empty placeholder while the activity tears down.
@@ -72,10 +72,7 @@ internal fun OcrCaptureScreen(
                     onCancel = onCancel,
                 )
 
-                CapturePhase.Connecting -> CenteredSpinner(
-                    label = stringResource(R.string.mindlayer_ocr_capture_connecting),
-                )
-
+                CapturePhase.Connecting,
                 CapturePhase.Ready,
                 CapturePhase.AsyncCapturing,
                 CapturePhase.RealtimeStreaming,
@@ -163,6 +160,9 @@ private fun CameraSurface(
                 previewView
             },
         )
+        if (state.phase == CapturePhase.Connecting) {
+            CenteredSpinner(label = stringResource(R.string.mindlayer_ocr_capture_connecting))
+        }
         TopBar(
             title = request.titleOverride
                 ?: defaultTitleFor(request),

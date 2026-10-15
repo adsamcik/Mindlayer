@@ -8,7 +8,9 @@ import androidx.test.core.app.ApplicationProvider
 import com.adsamcik.mindlayer.IMindlayerService
 import com.adsamcik.mindlayer.RequestMeta
 import com.adsamcik.mindlayer.ServiceStatus
+import com.adsamcik.mindlayer.ServiceCapabilities
 import com.adsamcik.mindlayer.SessionConfig
+import com.adsamcik.mindlayer.shared.MindlayerErrorCode
 import com.adsamcik.mindlayer.sdk.db.MindlayerDatabase
 import io.mockk.coEvery
 import io.mockk.every
@@ -484,5 +486,55 @@ class MindlayerInferStreamingTest {
             env["thinking"]!!.jsonObject["enable"]!!.jsonPrimitive.boolean,
         )
         assertNotNull("structured_output must be merged in", env["structured_output"])
+    }
+
+    @Test
+    fun `sampling seed reaches session envelope while preserving caller and schema context`() = runTest {
+        val baseline = ServiceCapabilities.v0Baseline()
+        every { mockService.capabilities } returns baseline.copy(
+            supportedFeatures = baseline.supportedFeatures + ServiceCapabilities.FEATURE_SAMPLER_SEED,
+        )
+        val configSlot = slot<SessionConfig>()
+        every { mockService.createSession(capture(configSlot)) } returns "seeded-session"
+        every { mockService.infer(any(), any(), any(), any()) } answers { arg<ParcelFileDescriptor>(3).close() }
+        val handle = mindlayer.infer {
+            ephemeralSession { extraContextJson = """{"client":{"task":"sample"},"thinking":true}""" }
+            sampling { seed = 42; topK = 7 }
+            outputJson(enumSchema)
+            text("Classify this")
+        }
+        handle.events.toList()
+        val config = configSlot.captured
+        val envelope = Json.parseToJsonElement(config.extraContextJson!!).jsonObject
+        assertEquals(42, envelope["sampler_seed"]!!.jsonPrimitive.int)
+        assertEquals("sample", envelope["client"]!!.jsonObject["task"]!!.jsonPrimitive.content)
+        assertTrue(envelope["thinking"]!!.jsonPrimitive.boolean)
+        assertNotNull(envelope["structured_output"])
+        assertEquals(7, config.samplerTopK)
+    }
+
+    @Test
+    fun `sampling seed fails explicitly on service without support`() = runTest {
+        every { mockService.capabilities } returns ServiceCapabilities.v0Baseline()
+        val failure = runCatching {
+            mindlayer.infer { text("hello"); sampling { seed = 42 } }
+        }.exceptionOrNull()
+        assertTrue(failure is MindlayerException)
+        assertEquals(MindlayerErrorCode.NOT_SUPPORTED, (failure as MindlayerException).code)
+        verify(exactly = 0) { mockService.createSession(any()) }
+    }
+
+    @Test
+    fun `named session rejects changed sampler but allows empty sampling block`() = runTest {
+        val failure = runCatching {
+            mindlayer.infer { session("named"); text("hello"); sampling { seed = 42 } }
+        }.exceptionOrNull()
+        assertTrue(failure is MindlayerException)
+        assertEquals(MindlayerErrorCode.INVALID_REQUEST, (failure as MindlayerException).code)
+        every { mockService.infer(any(), any(), any(), any()) } answers { arg<ParcelFileDescriptor>(3).close() }
+        val handle = mindlayer.infer { session("named"); text("hello"); sampling {} }
+        handle.events.toList()
+        verify(exactly = 1) { mockService.infer(any(), any(), any(), any()) }
+        verify(exactly = 0) { mockService.createSession(any()) }
     }
 }

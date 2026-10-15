@@ -10,7 +10,7 @@ import kotlin.time.Duration
  * Declarative description of a one-shot OCR call, assembled through [Builder]
  * inside [Mindlayer.ocr].
  *
- * C1 lands the builder surface only; behavioural wiring lands in C2.
+ * Loads one image and returns the recognized text, optional boxes, and extraction result.
  */
 class OcrRequest private constructor() {
 
@@ -52,7 +52,13 @@ class OcrRequest private constructor() {
             emitBoundingBoxes = true
         }
 
+        /**
+         * Total client wait budget, including image loading and encoding.
+         * [Duration.INFINITE] leaves the wait unbounded. Timeout/cancellation stops
+         * waiting promptly; synchronous service-side OCR may finish in the background.
+         */
         fun deadline(timeout: Duration) {
+            require(timeout > Duration.ZERO) { "deadline must be positive" }
             deadline = timeout
         }
 
@@ -70,7 +76,7 @@ class OcrRequest private constructor() {
  * Declarative description of a streaming multi-frame OCR session, assembled
  * through [Builder] inside [Mindlayer.ocrSession].
  *
- * C1 lands the builder surface only; behavioural wiring lands in C2.
+ * Opens a live session for frame intake, streamed OCR events, and finalization.
  */
 class OcrSessionRequest private constructor() {
 

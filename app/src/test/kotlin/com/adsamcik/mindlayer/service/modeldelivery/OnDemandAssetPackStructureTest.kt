@@ -12,7 +12,8 @@ class OnDemandAssetPackStructureTest {
     @Test
     fun `litert namespace workaround remains narrowly fail closed`() {
         val root = repoRoot()
-        val appBuild = root.resolve("app/build.gradle.kts").readText()
+        // Keep the multiline wiring assertion independent of checkout line endings.
+        val appBuild = root.resolve("app/build.gradle.kts").readText().replace("\r\n", "\n")
         val gradleProperties = root.resolve("gradle.properties").readText()
         val versions = root.resolve("gradle/libs.versions.toml").readText()
 

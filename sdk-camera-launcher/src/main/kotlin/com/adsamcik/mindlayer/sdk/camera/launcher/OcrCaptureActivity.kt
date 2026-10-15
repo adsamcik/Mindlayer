@@ -27,7 +27,7 @@ import androidx.lifecycle.viewmodel.CreationExtras
  *     to declare it themselves; the manifest-merger picks it up from
  *     this module.
  *  2. The Mindlayer SDK connection lifecycle for the duration of the
- *     capture — connects on resume, disconnects on destroy.
+ *     capture — retained across Activity recreation and released on final ViewModel teardown.
  *  3. The CameraX preview + analysis pipeline.
  *  4. The Compose UI.
  *  5. The result handoff back to [OcrCaptureContract.parseResult].
@@ -114,7 +114,7 @@ class OcrCaptureActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        viewModel.shutdown()
+        viewModel.detachCamera(this)
         super.onDestroy()
     }
 

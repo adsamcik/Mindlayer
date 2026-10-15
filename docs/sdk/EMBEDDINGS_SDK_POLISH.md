@@ -1,5 +1,10 @@
 # Embeddings SDK polish — proposal
 
+> Historical design record. The current public API is `embed` / `vector` /
+> `vectors`; explicit deferred handles and deadlines are completed in unreleased
+> source. Use [SDK integration](SDK_INTEGRATION.md#embeddings), rather than the
+> old method inventory and proposed follow-ups below.
+
 > Status: **proposal + minimal facade slice**. Companion PR adds the new
 > facade methods and deprecates the old ones; deeper consolidation (batch
 > rename, deferred wrapper, `indexBuilder`) is staged for a follow-up.

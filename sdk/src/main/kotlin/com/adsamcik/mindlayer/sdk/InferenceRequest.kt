@@ -22,8 +22,8 @@ enum class InferencePriority(internal val wireValue: Int) {
  * Declarative description of a single inference call, assembled through
  * [Builder] inside [Mindlayer.infer].
  *
- * C1 lands the builder surface only — the builder records intent into private
- * fields but no AIDL request is produced until C2 wires [Mindlayer.infer].
+ * The builder configures a streaming request. Collect the returned handle once
+ * to begin inference; ephemeral sessions are released when the stream ends.
  */
 class InferenceRequest private constructor() {
 
@@ -130,7 +130,7 @@ class InferenceRequest private constructor() {
             toolHandler = handler
         }
 
-        // ---- Internal recorded intent (consumed in C2) ----------------------
+        // ---- Internal recorded intent --------------------------------------
 
         internal var sessionId: String? = null
         internal var sessionConfigure: (SessionScope.() -> Unit)? = null

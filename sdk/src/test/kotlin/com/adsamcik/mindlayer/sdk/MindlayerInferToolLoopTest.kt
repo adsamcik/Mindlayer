@@ -8,6 +8,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.adsamcik.mindlayer.IMindlayerService
 import com.adsamcik.mindlayer.ServiceCapabilities
 import com.adsamcik.mindlayer.ToolResult
+import com.adsamcik.mindlayer.ToolSubmitResult
 import com.adsamcik.mindlayer.sdk.db.MindlayerDatabase
 import com.adsamcik.mindlayer.shared.StreamEvent
 import com.adsamcik.mindlayer.shared.StreamEventType
@@ -19,7 +20,12 @@ import io.mockk.mockkStatic
 import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
@@ -225,6 +231,161 @@ class MindlayerInferToolLoopTest {
 
         assertTrue(events.any { it is InferenceEvent.ToolCall && it.callId == "call-noauto" })
         verify(exactly = 0) { mockService.submitToolResult(any(), any()) }
+    }
+
+    @Test
+    fun `manual result uses observed tool name and rejects unknown duplicate and ended calls`() = runTest {
+        stubInferEmits(
+            toolCallEvent(1, "get_weather", "{}", "manual-call"),
+            textDeltaEvent(2, "sunny"),
+            doneEvent(3),
+        )
+        val resultSlot = slot<ToolResult>()
+        every { mockService.submitToolResult(any(), capture(resultSlot)) } returns Unit
+        val handle = mindlayer.infer {
+            session("s1")
+            text("weather?")
+            outputTools(listOf(weatherTool))
+        } as InferenceHandle.Tools
+        assertEquals("s1", handle.sessionId)
+        assertTrue(runCatching { handle.submitToolResult("not-observed", "{}") }.exceptionOrNull() is IllegalArgumentException)
+        handle.events.collect { event ->
+            if (event is InferenceEvent.ToolCall) {
+                handle.submitToolResult(event.callId, """{"tempC":21}""")
+                assertTrue(runCatching { handle.submitToolResult(event.callId, "{}") }.exceptionOrNull() is IllegalArgumentException)
+            }
+        }
+        assertEquals(handle.requestId, resultSlot.captured.requestId)
+        assertEquals("manual-call", resultSlot.captured.callId)
+        assertEquals("get_weather", resultSlot.captured.toolName)
+        assertEquals("""{"tempC":21}""", resultSlot.captured.resultJson)
+        assertTrue(runCatching { handle.submitToolResult("manual-call", "{}") }.exceptionOrNull() is IllegalStateException)
+        verify(exactly = 1) { mockService.submitToolResult(handle.requestId, any()) }
+    }
+
+    @Test
+    fun `ephemeral manual tool exchange submits before destroying its session`() = runTest {
+        every { mockService.createSession(any()) } returns "ephemeral-tools"
+        stubInferEmits(toolCallEvent(1, "get_weather", "{}", "ephemeral-call"), doneEvent(2))
+        var submitted = false
+        every { mockService.submitToolResult(any(), any()) } answers { submitted = true }
+        every { mockService.destroySession("ephemeral-tools") } answers { assertTrue(submitted) }
+        val handle = mindlayer.infer {
+            text("weather?")
+            outputTools(listOf(weatherTool))
+        } as InferenceHandle.Tools
+        assertEquals("ephemeral-tools", handle.sessionId)
+        handle.events.collect { event ->
+            if (event is InferenceEvent.ToolCall) handle.submitToolResult(event.callId, "{}")
+        }
+        verify(exactly = 1) { mockService.submitToolResult(handle.requestId, any()) }
+        verify(exactly = 1) { mockService.destroySession("ephemeral-tools") }
+    }
+
+    @Test
+    fun `automatic handler owns tool results even while caller observes call`() = runTest {
+        stubInferEmits(toolCallEvent(1, "get_weather", "{}", "automatic-call"), doneEvent(2))
+        val handle = mindlayer.infer {
+            session("s1")
+            text("weather?")
+            outputTools(listOf(weatherTool))
+            onToolCall { "{}" }
+        } as InferenceHandle.Tools
+        handle.events.collect { event ->
+            if (event is InferenceEvent.ToolCall) {
+                assertTrue(runCatching { handle.submitToolResult(event.callId, "{}") }.exceptionOrNull() is IllegalStateException)
+            }
+        }
+        verify(exactly = 1) { mockService.submitToolResult(handle.requestId, any()) }
+    }
+
+    @Test
+    fun `cancel invalidates an observed manual tool call`() = runTest {
+        stubInferEmits(toolCallEvent(1, "get_weather", "{}", "cancelled-call"), doneEvent(2))
+        val handle = mindlayer.infer {
+            session("s1")
+            text("weather?")
+            outputTools(listOf(weatherTool))
+        } as InferenceHandle.Tools
+        handle.events.collect { event ->
+            if (event is InferenceEvent.ToolCall) {
+                handle.cancel()
+                assertTrue(runCatching { handle.submitToolResult(event.callId, "{}") }.exceptionOrNull() is IllegalStateException)
+            }
+        }
+        verify(exactly = 0) { mockService.submitToolResult(any(), any()) }
+        verify(exactly = 1) { mockService.cancelInference(handle.requestId) }
+    }
+
+    @Test
+    fun `manual submission reports service rejection instead of claiming success`() = runTest {
+        val baseline = ServiceCapabilities.v0Baseline()
+        every { mockService.capabilities } returns baseline.copy(
+            supportedFeatures = baseline.supportedFeatures + ServiceCapabilities.FEATURE_DETAILED_CANCEL,
+        )
+        every { mockService.submitToolResultV2(any(), any()) } returns ToolSubmitResult(
+            outcome = ToolSubmitResult.NO_PENDING_CALL,
+        )
+        stubInferEmits(toolCallEvent(1, "get_weather", "{}", "stale-call"), doneEvent(2))
+        val handle = mindlayer.infer {
+            session("s1")
+            text("weather?")
+            outputTools(listOf(weatherTool))
+        } as InferenceHandle.Tools
+        handle.events.collect { event ->
+            if (event is InferenceEvent.ToolCall) {
+                assertTrue(runCatching { handle.submitToolResult(event.callId, "{}") }.exceptionOrNull() is IllegalStateException)
+            }
+        }
+        verify(exactly = 1) { mockService.submitToolResultV2(handle.requestId, any()) }
+        verify(exactly = 0) { mockService.submitToolResult(any(), any()) }
+    }
+
+    @Test
+    fun `cancelling ephemeral collection cancels native inference once and destroys session`() = runTest {
+        every { mockService.createSession(any()) } returns "ephemeral-cancel"
+        stubInferEmits(toolCallEvent(1, "get_weather", "{}", "abandoned-call"), doneEvent(2))
+        val handle = mindlayer.infer {
+            text("weather?")
+            outputTools(listOf(weatherTool))
+        } as InferenceHandle.Tools
+        val observed = CompletableDeferred<Unit>()
+        val collection = launch {
+            handle.events.collect { event ->
+                if (event is InferenceEvent.ToolCall) {
+                    observed.complete(Unit)
+                    awaitCancellation()
+                }
+            }
+        }
+        observed.await()
+        collection.cancelAndJoin()
+        assertTrue(runCatching { handle.submitToolResult("abandoned-call", "{}") }.exceptionOrNull() is IllegalStateException)
+        verify(exactly = 1) { mockService.cancelInference(handle.requestId) }
+        verify(exactly = 1) { mockService.destroySession("ephemeral-cancel") }
+        verify(exactly = 0) { mockService.submitToolResult(any(), any()) }
+    }
+
+    @Test
+    fun `cancelling disconnected ephemeral collection never waits for reconnection`() = runTest {
+        every { mockService.createSession(any()) } returns "ephemeral-disconnected"
+        stubInferEmits(toolCallEvent(1, "get_weather", "{}", "abandoned-call"), doneEvent(2))
+        val handle = mindlayer.infer { text("weather?"); outputTools(listOf(weatherTool)) }
+        val observed = CompletableDeferred<Unit>()
+        val collection = launch {
+            handle.events.collect { event ->
+                if (event is InferenceEvent.ToolCall) {
+                    observed.complete(Unit)
+                    awaitCancellation()
+                }
+            }
+        }
+        observed.await()
+        io.mockk.clearMocks(mockConnection, answers = false)
+        every { mockConnection.getService() } returns null
+        collection.cancelAndJoin()
+        io.mockk.coVerify(exactly = 0) { mockConnection.awaitConnected() }
+        verify(exactly = 0) { mockService.destroySession("ephemeral-disconnected") }
     }
 
     // ── frame helpers (mirror the wire format TokenStreamReader consumes) ────

@@ -12,7 +12,7 @@ dependencyResolutionManagement {
         google()
         mavenCentral()
         maven {
-            url = uri("https://maven.pkg.github.com/YOUR_GITHUB_USER/Mindlayer")
+            url = uri("https://maven.pkg.github.com/adsamcik/Mindlayer")
             credentials {
                 username = providers.gradleProperty("GITHUB_OWNER").getOrElse("")
                 password = providers.gradleProperty("GITHUB_TOKEN").getOrElse("")
@@ -44,7 +44,7 @@ In your client app's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.adsamcik.mindlayer:sdk:1.0.0-alpha.6")
+    implementation("com.adsamcik.mindlayer:sdk:1.0.0-alpha.9")
     // 'shared' types are included transitively via 'api' dependency
 }
 ```
@@ -67,7 +67,7 @@ dependencies {
 
 `sdk-camerax` is `compileOnly` against CameraX, so its consumers choose their
 own compatible CameraX version. `sdk-camera-launcher` supplies its own CameraX
-capture UI. Both are published with the next `v<semver>` tag and use that tag's
+capture UI. All modules are published from the same `v<semver>` tag and use that tag's
 version.
 
 ### 3. No permission required
@@ -98,13 +98,13 @@ separate consent/resume flow — per feature:
 
 ```kotlin
 import com.adsamcik.mindlayer.sdk.Mindlayer
-import com.adsamcik.mindlayer.sdk.MindlayerEvent
+import kotlin.time.Duration
 
 // One shared client for the whole app process (LLM + OCR + embeddings).
 val mindlayer = Mindlayer.shared(context)
 
-// Wait until connected (optional — chat() does this automatically)
-mindlayer.awaitConnected()
+// Wait until connected (optional — feature calls connect automatically)
+mindlayer.awaitConnected(Duration.INFINITE)
 ```
 
 - The shared client object lives for the **process**. Its service binding may be
@@ -124,7 +124,7 @@ mindlayer.awaitConnected()
 
 Mindlayer is default-deny: the first time your app calls the service, it is
 rejected because the user has not yet granted your app access. The SDK surfaces
-this as `ConnectionState.REJECTED_NOT_APPROVED` and `awaitConnected()` throws
+this as `ConnectionState.REJECTED_NOT_APPROVED` and `awaitConnected(Duration.INFINITE)` throws
 (the service returned `MindlayerErrorCode.CONSENT_REQUIRED`). This is a
 **terminal state** — the SDK will not silently retry (that would poll the
 service and burn the rate limit).
@@ -145,7 +145,7 @@ private val consentLauncher = registerForActivityResult(
 ) { result ->
     if (result.resultCode == Activity.RESULT_OK) {
         // Approved — retry connect()/your call. It will now succeed.
-        lifecycleScope.launch { mindlayer.awaitConnected() }
+        lifecycleScope.launch { mindlayer.awaitConnected(Duration.INFINITE) }
     }
     // RESULT_CANCELED => the user declined or dismissed; surface a message.
 }
@@ -156,7 +156,7 @@ lifecycleScope.launch {
         is ConsentRequestResult.Available ->
             consentLauncher.launch(IntentSenderRequest.Builder(r.intentSender).build())
         ConsentRequestResult.AlreadyApproved ->
-            mindlayer.awaitConnected() // already granted; just (re)connect
+            mindlayer.awaitConnected(Duration.INFINITE) // already granted; just (re)connect
         is ConsentRequestResult.Denied -> {
             // r.untilEpochMs == null  => permanently blocked (user unblocks in dashboard)
             // r.untilEpochMs != null  => temporary block; retry after that time
@@ -173,7 +173,7 @@ options. Approving runs a biometric confirmation, then pins the SHA-256 of your
 **current** signing certificate — a later re-signed APK is treated as a new app
 and must be approved again.
 
-- On **Approve**, the next `connect()` / `awaitConnected()` succeeds.
+- On **Approve**, the next `connect()` / `awaitConnected(Duration.INFINITE)` succeeds.
 - On **Deny**, the user can choose "Not now" (you may ask again later),
   "Deny for 24 hours", or "Block permanently". A denied app cannot re-trigger
   the prompt until the denial lapses; `requestConsent()` returns
@@ -199,290 +199,118 @@ with SQLCipher. The passphrases are random 32-byte blobs wrapped in an
 unreadable DB** — the Keystore key doesn't move with a system backup. If
 you ship a restore flow, treat the conversation history as ephemeral.
 
-### Create a session
+### Inference and sessions
 
 ```kotlin
-val sessionId = mindlayer.createSession {
-    systemPrompt("You are a helpful coding assistant")
-    maxTokens(4096)      // KV cache budget (input + output)
-    // Mindlayer picks the best backend automatically.
-    topK(40)
-    topP(0.95f)
-    temperature(0.7f)
+import com.adsamcik.mindlayer.sdk.InferenceEvent
+
+// A fresh session is owned and cleaned up by the inference handle.
+val reply = mindlayer.ask("Summarize this paragraph")
+
+// Keep an explicit session when several turns share context.
+val session = mindlayer.openSession {
+    systemPrompt = "Answer briefly."
+    maxTokens = 2048
 }
-```
-
-### Text chat (streaming)
-
-```kotlin
-val handle = mindlayer.chat(sessionId, "Explain Kotlin coroutines briefly")
-handle.events.collect { event ->
-    when (event) {
-        is MindlayerEvent.TextDelta -> print(event.text)        // incremental token
-        is MindlayerEvent.Done     -> println("\n[done]")       // generation complete
-        is MindlayerEvent.Error    -> println("Error: ${event.message}")
-        is MindlayerEvent.Started  -> { /* stream opened */ }
-        is MindlayerEvent.Metrics  -> { /* optional perf data */ }
-        is MindlayerEvent.ToolCall -> { /* function calling */ }
+try {
+    mindlayer.infer {
+        session(session.id)
+        text("Hello!")
+    }.events.collect { event ->
+        when (event) {
+            is InferenceEvent.TextDelta -> print(event.text)
+            is InferenceEvent.Error -> showError(event.message)
+            else -> Unit
+        }
     }
+} finally {
+    session.closeAsync()
 }
 ```
 
-### Image + text
+`infer { }` streams real service deltas. Collect its events once; cancelling
+that coroutine cancels unfinished native inference. Use `handle.cancel()` for
+an explicit Stop action. The `awaitText()` and `awaitJson()` extensions consume
+the same stream, so do not also collect it separately.
 
-```kotlin
-val bitmap: Bitmap = // your image
-val handle = mindlayer.chatWithImage(sessionId, "What's in this image?", bitmap)
-handle.events.collect { event ->
-    // same event handling as above
-}
-```
+Add `image(bitmap)` or `audio(file)` inside `infer` for multimodal input, or use
+`describe(prompt, bitmap)` / `transcribe(audioFile)` for common one-shot tasks.
+Media uses the SDK transport; keep large payloads out of AIDL parcels.
 
-### Vision tasks (object detection, captioning, locating)
+For JSON, use `infer { text(prompt); outputJson(schema) }.awaitJson()` or
+`extractJson(prompt, schema)`. The ephemeral session configures service-side
+schema enforcement. A named session must configure its schema up front through
+`openSession { jsonOutput { schema(schemaText) } }`.
 
-For higher-level vision workflows the SDK ships typed helpers in
-`com.adsamcik.mindlayer.sdk.vision` that wrap Gemma 4's native
-[vision capabilities](https://ai.google.dev/gemma/docs/capabilities/vision):
-
-```kotlin
-import com.adsamcik.mindlayer.sdk.vision.*
-
-// Object detection — Gemma emits {"box_2d": [y1, x1, y2, x2], "label": ...} JSON
-// in a 0..1000 grid; the helper parses it into typed DetectedObjects with
-// normalized 0..1 coordinates you can project onto any image size.
-val people = mindlayer.detectObjects(bitmap, labels = listOf("person", "car"))
-for (obj in people) {
-    val rect = obj.box.toPixelRect(bitmap.width, bitmap.height)
-    canvas.drawRect(rect, paint)
-}
-
-// Strict variant — distinguish "no objects" from "model didn't comply"
-when (val r = mindlayer.detectObjectsResult(bitmap, listOf("dog"))) {
-    is DetectionResult.Success           -> useObjects(r.objects)
-    DetectionResult.NoStructuredOutput   -> logPromptDrift()
-    is DetectionResult.ParseError        -> logParseFailure(r.message)
-}
-
-// Locate a single thing by free-form description
-val redCar = mindlayer.locateObject(bitmap, "the red car on the left")
-
-// Caption / describe with documented best-practice prompts
-val caption = mindlayer.captionImage(bitmap, CaptionStyle.Short)
-val long = mindlayer.describeImage(bitmap, DescribeDetail.Long, focus = "the lighting")
-
-// Approximate counting (per Gemma docs, dense scenes are not exact)
-val n = mindlayer.countItems(bitmap, "people")
-```
-
-The helpers use the existing `infer { image(...) }` path and add no service,
-wire, or model requirements. They work today against any model that
-`ModelInfo.supportsVision = true` advertises (Gemma 4 family). Heavy-weight
-OCR for documents is still served by the separate PaddleOCR pipeline via
-[`mindlayer.ocr { ... }`](#ocr); detection-shaped tasks should use the
-helpers above.
-
-### Audio + text
-
-```kotlin
-val audioFile: File = // your WAV/MP3 file
-val handle = mindlayer.chatWithAudio(sessionId, "Transcribe this audio", audioFile)
-handle.events.collect { event ->
-    // same event handling as above
-}
-```
+In unreleased source, `sampling { seed = 42 }` configures the native sampler
+for an ephemeral session. It requires `FEATURE_SAMPLER_SEED`; older services
+reject it explicitly. Non-null sampling settings on a named session fail with
+`INVALID_REQUEST`, since the session already owns its configuration. An empty
+or all-null block is allowed. Seeds do not guarantee identical output across
+backends.
 
 ### Function calling (tools)
 
 ```kotlin
-val sessionId = mindlayer.createSession {
-    systemPrompt("You have access to tools")
-    tools("""[{
-        "name": "get_weather",
-        "description": "Get current weather",
-        "parameters": {
-            "type": "object",
-            "properties": { "city": { "type": "string" } },
-            "required": ["city"]
-        }
-    }]""")
-}
+import com.adsamcik.mindlayer.sdk.InferenceHandle
 
-val handle = mindlayer.chat(sessionId, "What's the weather in Prague?")
+// tools: List<ToolSpec>; executeTool returns JSON for the observed call.
+val handle = mindlayer.infer {
+    text(prompt)
+    outputTools(tools)
+} as InferenceHandle.Tools
 handle.events.collect { event ->
     when (event) {
-        is MindlayerEvent.ToolCall -> {
-            val result = fetchWeather(event.arguments) // your tool implementation
-            mindlayer.submitToolResult(
-                requestId = handle.requestId,
-                callId = event.callId,
-                toolName = event.toolName,
-                resultJson = result,
-            )
-        }
-        is MindlayerEvent.TextDelta -> print(event.text)
-        is MindlayerEvent.Done -> println()
-        else -> {}
+        is InferenceEvent.ToolCall ->
+            handle.submitToolResult(event.callId, executeTool(event.toolName, event.arguments))
+        is InferenceEvent.TextDelta -> print(event.text)
+        is InferenceEvent.Error -> showError(event.message)
+        else -> Unit
     }
 }
 ```
 
-### Structured JSON output
-
-```kotlin
-val sessionId = mindlayer.createSession {
-    jsonOutput {
-        schema("""{
-            "type": "object",
-            "required": ["name"],
-            "properties": {
-                "name": { "type": "string" },
-                "age": { "type": "integer" }
-            }
-        }""")
-        strategy(JsonOutputStrategy.PromptAndValidate)
-    }
-}
-```
-
-Structured output validation is intentionally **shallow**. The service checks
-that the response is valid JSON, that top-level required fields exist, and that
-top-level property types match the schema (`string`, `number`, `integer`,
-`boolean`, `array`, `object`). It does **not** recursively enforce nested JSON
-Schema rules such as nested `required`, `enum`, `format`, numeric ranges,
-`pattern`, or `additionalProperties`. If a client treats structured output as a
-security or business-rule boundary, validate the returned JSON again in the
-client with a full schema validator.
-
-### Session convenience wrapper
-
-```kotlin
-val session = mindlayer.session(sessionId)
-val handle = session.chat("Hello!")
-handle.events.collect { ... }
-session.delete()
-```
-
+Manual submission is available in the unreleased source. Submit each observed
+call once; unknown, duplicate or stale IDs are rejected. Alternatively register
+`onToolCall { call -> executeTool(call.name, call.argsJson) }` inside `infer`
+to run the response loop automatically. Choose one response owner. A throwing
+automatic handler cancels inference and emits `TOOL_HANDLER_FAILED`.
 
 ### Capabilities and prewarming
 
-```kotlin
-val caps = mindlayer.getCapabilities()
-if (caps.supports(ServiceCapabilities.FEATURE_CONTEXT_AWARE_PREWARM)) {
-    // Match the maxTokens the next session will request.
-    mindlayer.prewarmForContext(maxTokens = 8_192)
-}
-```
+Use `getCapabilities()` before optional features. Model availability and
+integrity still determine whether OCR and embeddings are advertised; enabling
+the production feature flags alone does not load a model.
 
-Use `prewarm()` only when a conservative best-effort warmup is sufficient. It
-uses a fixed 76 MiB KV-cache budget (currently 8,192 tokens) and skips
-speculative loading on devices with at most 4 GiB RAM or while memory pressure
-is elevated. Prefer `prewarmForContext(maxTokens)` when the app knows its next
-session size (128-32,768 tokens); this is also the explicit opt-in path on
-low-RAM devices.
+`prewarmForContext(maxTokens, backend)` requests a known total context
+(128–32,768 input plus output tokens). It is capability-gated and a safe no-op
+on older services. A larger context may require a service-process restart.
+`prewarm(backend)` uses a conservative speculative memory budget.
 
-If the requested session later exceeds the loaded engine's context, Mindlayer
-quiesces inference and restarts the `:ml` process with the larger budget. The
-SDK reconnects and retries session creation. This makes underestimating the
-prewarm size a cold-start cost, not an unsafe native-engine mismatch.
+`priority(InferencePriority.INTERACTIVE)` inside `infer` orders queued work;
+it does not preempt an active request or bypass quotas.
 
-`prewarmAndAwait()` retains the conservative automatic policy when UI needs a
-ready/failure signal before enabling chat.
+### Lifecycle, history and cleanup
 
-### Queue priority
+Reuse the shared client. After five hidden idle minutes its binding may be
+released; visibility or another API call reconnects lazily. Owned sessions
+should still be closed when their task ends.
 
-Mindlayer schedules queued LLM requests around the state already warm in the
-native engine, then by explicit priority and estimated cost. Apps can describe
-user intent without implementing their own global queue:
-
-```kotlin
-val handle = mindlayer.infer {
-    session(sessionId)
-    text(prompt)
-    priority(InferencePriority.INTERACTIVE)
-}
-```
-
-`BACKGROUND`, `NORMAL`, `INTERACTIVE`, and `URGENT` map to bounded wire hints.
-They do not preempt active inference or bypass per-client/global quotas, and
-starvation protection eventually advances old work. Keep ordinary requests at
-`NORMAL`; reserve `URGENT` for genuinely time-critical user-visible work.
-
-### Idle memory release
-
-The SDK automatically reports process visibility. When all clients are hidden
-and no inference or prewarm remains active, the service closes EmbeddingGemma
-and PaddleOCR after 30 seconds. After five minutes the SDK requests an atomic
-idle-disconnect grant and unbinds; the isolated `:ml` process then exits so
-LiteRT-LM's native allocations are reclaimed without unsafe in-process engine
-recreation. A foreground transition or any subsequent SDK call reconnects and
-reloads engines as needed.
-
-This behavior requires `ServiceCapabilities.FEATURE_IDLE_RELEASE`. With an
-older service the SDK conservatively remains bound. Apps do not need to mirror
-Activity callbacks or call `disconnect()` during normal backgrounding.
-
-### Eviction notices
-
-```kotlin
-mindlayer.evictionNotices().collect { notice ->
-    // Session was evicted or revoked; update UI and recover if appropriate.
-}
-```
-
-### Detailed control responses
-
-`cancelInferenceDetailed(requestId)` and `submitToolResultDetailed(result)` return structured outcomes for callers that need to distinguish success from `NO_ACTIVE_REQUEST` or validation failures. The simpler `cancelInference()` / `submitToolResult()` helpers remain available.
-
-### Multimodal media
-
-For one or more media parts, prefer `chatWithMedia(sessionId, text, mediaParts)` over chaining image/audio-specific calls. Use `chatWithImage` and `chatWithAudio` for simple single-media cases.
-
-### History policy and recovery
-
-The SDK defaults to `HistoryPolicy.METADATA_ONLY` for privacy. Transparent OOM/crash replay requires:
-
-```kotlin
-val mindlayer = Mindlayer.connect(context, historyPolicy = HistoryPolicy.FULL_CONTENT)
-```
-
-`FULL_CONTENT` stores prompts and model outputs in the SQLCipher-backed Room history database so `SessionRecovery` can recreate the service session. Cross-install backup/restore is intentionally unrecoverable because the SQLCipher key is wrapped by Android Keystore and does not move with backups.
-
-If `recoverSession()` returns `pendingUserText`, resolve the returned pending turn before re-sending it:
-
-```kotlin
-val recovered = mindlayer.recovery?.recoverSession(sessionId)
-recovered?.markPendingUserResolved(mindlayer.recovery!!)
-recovered?.pendingUserText?.let { text ->
-    mindlayer.chat(recovered.newSessionId, text)
-}
-```
-
-### Conversation vs MindlayerSession
-
-`Conversation` is the SDK-side convenience type for local lifecycle/history ergonomics. `MindlayerSession` is a lightweight wrapper around a live service `sessionId`. Server-side live sessions can disappear due to eviction or expiration; local history can outlive them.
-
-### One-shot convenience family
-
-Use `chatOnce`, `chatWithImageOnce`, `chatWithAudioOnce`, `generate`, `generateWithImage`, and `generateWithAudio` when you want a single complete `String` instead of streaming events. These methods convert stream `ERROR` frames into typed `MindlayerException`s.
-
-### Cleanup
-
-```kotlin
-mindlayer.destroySession(sessionId)
-mindlayer.disconnect()
-```
-
----
+`HistoryPolicy.METADATA_ONLY` is the default. Explicitly choose
+`HistoryPolicy.FULL_CONTENT` when conversation replay/persistence is wanted;
+this stores prompt and response content in the encrypted SDK history database.
+Do not log prompts, model output or embedding vectors.
 
 ## Diagnostics
 
 ```kotlin
-// Get a full JSON diagnostic dump (engine, thermal, memory, sessions, logs)
-val diagnostics: String = mindlayer.getDiagnostics()
-println(diagnostics) // paste into bug reports
+val snapshot = mindlayer.getDiagnosticsTyped() // null on unsupported/refused calls
+val status = mindlayer.getStatus()
 ```
 
----
+These expose operational metadata. Debug transport checks do not establish
+physical-device inference, accelerator coexistence or Play delivery. See the
+[remaining qualification work](../project/ROADMAP.md).
 
 ## Testing your integration in CI (mock engines)
 
@@ -512,7 +340,7 @@ With the flag set:
 - `getCapabilities()` advertises `FEATURE_EMBEDDINGS`, `FEATURE_OCR_SESSION`,
   and `FEATURE_OCR_IMAGE_ONESHOT` (the LLM streaming features are always
   advertised).
-- `embed(text)` returns a deterministic 768-d unit vector: the **same** text
+- `vector(text)` returns a deterministic 768-d unit vector: the **same** text
   yields the **same** vector (cosine 1.0) and **different** text yields a
   near-orthogonal one (cosine well below 0.99) — so cache/idempotency and
   "distinct inputs → distinct embeddings" assertions hold. Matryoshka
@@ -520,7 +348,7 @@ With the flag set:
 - OCR returns `[mock]`-prefixed lines (honouring `maxLines` and the
   bounding-box capability); the single-image OCR→LLM extraction returns
   `[mock]` fields.
-- **LLM chat / vision / audio** (`createSession` + `infer` / `inferStream`)
+- **LLM chat / vision / audio** (`openSession` + `infer`)
   streams a synthetic `[mock]` reply over the real pipe — header → token
   deltas → `done(finish=stop)` — that reflects the request modality (e.g.
   "Received an image request…") and echoes a short prefix of your prompt. No
@@ -588,235 +416,74 @@ Release tags publish these same modules automatically. Set the root
 - **Android 8.0+** (minSdk 26)
 - **Model files** must be downloaded from Mindlayer's Models screen or staged for development
 
-## Deferred async inference (push primary, polling fallback)
-
-Release criterion #7 is supported through the deferred API. Use
-`chatDeferred(...)` to submit work, keep the returned
-`DeferredHandle.requestId`, then prefer the push completion stream
-`deferredCompletions()`. Poll `fetchDeferredResult(requestId)` only as a
-fallback for old service versions, recovered processes, or UIs that cannot keep
-a collector active.
-
-```kotlin
-val handle = mindlayer.chatDeferred(sessionId, "Summarize this later")
-mindlayer.deferredCompletions().collect { notice ->
-    if (notice.requestId == handle.requestId) {
-        val result = mindlayer.fetchDeferredResult(notice.requestId)
-        if (result.status == DeferredResult.READY) println(result.text)
-        mindlayer.acknowledgeDeferred(notice.requestId)
-    }
-}
-```
-
-Results are stored by the service until acknowledged or expired. Defaults: 16 in-flight deferred requests per UID, 64 completed/pending-fetch results per UID, 1 MiB accumulated result text per UID, and 24 hour TTL. Prompt text is never persisted in the deferred store; model result text is persisted intentionally for retrieval and is encrypted at rest with SQLCipher.
-
-Failure modes are returned in `DeferredResult.status`: `STILL_RUNNING`, `NOT_FOUND_OR_NOT_OWNED` (also used for cross-UID anti-enumeration), `EXPIRED`, `FAILED`, or `CANCELLED`. New SDKs check `ServiceCapabilities.FEATURE_DEFERRED_INFERENCE`; if an older service does not advertise it, deferred calls throw `MindlayerErrorCode.NOT_SUPPORTED`.
-
 ## OCR
 
-Mindlayer OCR is a multi-frame session API for receipts, documents, ID cards,
-whiteboards, and screen captures. The API and event stream are wired, but the
-service currently keeps `FEATURE_OCR_SESSION` dark because
-`OcrFeatureFlags.IS_PRODUCTION_READY=false`; production callers must degrade
-when the capability is absent.
-
-### Quick start
-
 ```kotlin
-val session = mindlayer.ocrSession(OcrProfile.Receipt) { maxFrames = 30 }
-val ack = session.pushFrame(meta, yPlaneBytes, width, height)
-session.finalize()
+val result = mindlayer.ocr {
+    image(imageBytes, "image/jpeg")
+    emitBoundingBoxes()
+}.awaitResult()
 ```
 
-### Capability check
+`ocrSession { profile(OcrProfile.Receipt) }` opens a multi-frame
+`OcrHandle.MultiFrame`. Push encoded or raw Y-plane frames, collect its events,
+and `finalize()` to obtain the accumulated result; close the session afterwards.
+`OcrImageAnalyzer` in `sdk-camerax` adapts CameraX frames to that handle.
 
-The SDK's OCR methods call an internal `requireOcrCapability()` guard and throw
-a typed `MindlayerException` with `FEATURE_NOT_SUPPORTED` when the connected
-service does not advertise OCR. Check explicitly when enabling UI:
+The axis-aligned `boundingBox` is in source pixels; `boundingBoxQuad` retains
+the normalized rotated quad. Optional LLM extraction uses
+`extractWithLlm(schema)` and requires the generative model too. Check
+`FEATURE_OCR_SESSION` / `FEATURE_OCR_IMAGE_ONESHOT` before the relevant path.
 
-```kotlin
-val caps = mindlayer.getCapabilities()
-if (!caps.supports(ServiceCapabilities.FEATURE_OCR_SESSION)) {
-    showOcrUnavailable()
-    return
-}
-```
+In unreleased source, `deadline(timeout)` accepts a positive duration or
+`Duration.INFINITE`. A finite OCR deadline covers image loading, submission and
+result mapping. Timeout or caller cancellation promptly stops SDK waiting;
+an active synchronous Binder call completes independently and releases its
+staged descriptors when it returns.
 
-### Inputs: Y-plane vs encoded bytes
-
-- `session.pushFrame(meta, yPlane, width, height, rowStride, pixelStride)` is
-  the preferred camera path. It sends a defensive copy of the luminance plane
-  and preserves stride metadata.
-- `session.pushEncodedFrame(meta, bytes, mimeType)` accepts pre-encoded
-  JPEG/PNG/WEBP bytes from non-CameraX pipelines.
-- Payloads at or below the Binder-sized `MAX_FRAME_BYTES` guard are sent inline;
-  larger frames should be downscaled or routed through the SharedMemory-backed
-  media helpers.
-
-### Event stream
-
-Attach `session.events` before pushing frames so no events are lost. If a frame
-arrives first, the service returns
-`OcrFrameAck.STATUS_REJECTED_STREAM_NOT_ATTACHED`.
-
-```kotlin
-session.events.collect { event ->
-    when (event) {
-        is OcrEvent.FrameProcessing -> showProgress(event.frameId)
-        is OcrEvent.FrameDroppedBusy -> throttle(event.retryAfterMs)
-        is OcrEvent.ResultFinalized -> renderJson(event.fullJson)
-        is OcrEvent.Error -> showError(event.code, event.message)
-        else -> Unit
-    }
-}
-```
-
-### Error handling and finalize semantics
-
-Synchronous intake failures are returned as `OcrFrameAck` statuses. AIDL
-failures become typed `MindlayerException`s through the SDK chokepoint. Stream
-failures are surfaced as `OcrEvent.Error` before the flow terminates.
-
-`session.finalize()` transitions the service session into a drain state:
-accepted in-flight frames complete, later pushes are rejected with
-`STATUS_REJECTED_FINALIZED`, and the event stream emits
-`OcrEvent.ResultFinalized` followed by `DONE`/pipe close.
-
-### CameraX helper
-
-Add `com.adsamcik.mindlayer:sdk-camerax:<version>` for
-`OcrImageAnalyzer`, an `ImageAnalysis.Analyzer` that copies the Y-plane,
-runs optional client-side presort, pushes accepted frames, and closes each
-`ImageProxy` immediately. The adapter is `compileOnly` against CameraX; the
-host app supplies its CameraX version.
+For a complete capture activity, use the `sdk-camera-launcher` module. Its
+Activity Result contract returns result data to your caller; see
+[capture contract](../../sdk-camera-launcher/src/main/kotlin/com/adsamcik/mindlayer/sdk/camera/launcher/OcrCaptureContract.kt).
 
 ## Embeddings
 
-Mindlayer embeddings compute semantic vectors for short text on-device with EmbeddingGemma-300M. Use them for RAG, semantic search, clustering, and classification when `ServiceCapabilities.FEATURE_EMBEDDINGS` is advertised; clients should degrade gracefully until the user downloads and verifies the Embeddings pack.
-
-### Capability check
-
 ```kotlin
-if (!mindlayer.getCapabilities().supports(ServiceCapabilities.FEATURE_EMBEDDINGS)) {
-    // Show "Indexing unavailable"; the user may still be downloading the model.
+import com.adsamcik.mindlayer.sdk.EmbeddingHandle
+import kotlin.time.Duration.Companion.seconds
+
+val vector = mindlayer.vector("Search text", EmbeddingTask.RetrievalQuery)
+val batch = mindlayer.embed { items(embeddingItems) }.awaitVectors()
+
+// Unreleased: durable submission with an end-to-end time bound.
+val pending = mindlayer.embed {
+    items(embeddingItems)
+    deferred()
+    deadline(30.seconds)
+} as EmbeddingHandle.Deferred
+try {
+    val results = pending.awaitReady()
+    saveResults(results)
+    pending.acknowledge()
+} finally {
+    pending.close()
 }
 ```
 
-### Quick start
+Ordinary requests choose inline, SharedMemory or deferred fallback transport
+automatically. `deferred()` explicitly returns a durable request handle after
+submission. `awaitReady()` preserves item tags and available model/token/backend
+metadata. Successful results survive a disconnect until acknowledgement, expiry
+or quota eviction; revoking app access purges them.
+Cancelling `awaitReady()` stops the wait without discarding the durable request;
+call `close()` explicitly when cancelling the operation itself.
 
-Single embed:
+`deadline` accepts a positive duration or `Duration.INFINITE`. A finite bound
+starts at `embed` invocation and covers submission plus waiting, including time
+before `awaitReady()`. Finite bounds use deferred transport to support native
+cancellation. `close()` performs best-effort cancellation and acknowledgement;
+use `acknowledge()` when durable release must be awaited.
 
-```kotlin
-val vector: FloatArray = mindlayer.embed("the cat sat on the mat")
-```
-
-Inline batch (≤ 64 items):
-
-```kotlin
-val results = mindlayer.embedBatch(
-    listOf(
-        EmbeddingConfig(text = "doc1", tag = "doc1"),
-        EmbeddingConfig(text = "doc2", tag = "doc2"),
-    ),
-)
-```
-
-Deferred batch with push completion:
-
-```kotlin
-val handle = mindlayer.embedBatchDeferred(documents.map { (id, text) ->
-    EmbeddingConfig(text = text, tag = id)
-})
-
-mindlayer.embeddingBatchCompletions().collect { requestId ->
-    if (requestId == handle.requestId) {
-        when (val outcome = mindlayer.fetchEmbeddingBatch(handle)) {
-            is EmbeddingBatchOutcome.Ready -> {
-                // Store outcome.results in your app-owned index.
-                mindlayer.acknowledgeEmbeddingBatch(handle)
-            }
-            else -> Unit
-        }
-    }
-}
-```
-
-### RAG cookbook
-
-```kotlin
-val mindlayer = Mindlayer.connect(context)
-mindlayer.awaitConnected()
-
-val caps = mindlayer.getCapabilities()
-if (!caps.supports(ServiceCapabilities.FEATURE_EMBEDDINGS)) {
-    showIndexingUnavailable()
-    return
-}
-
-val documents = listOf(
-    "doc1" to "the cat sat on the mat",
-    "doc2" to "a small dog slept by the door",
-    "doc3" to "semantic search returns nearby meaning",
-)
-
-val index = InMemoryVectorIndex()
-val embeddedDocs = mindlayer.embedBatch(
-    documents.map { (id, text) ->
-        EmbeddingConfig(
-            text = text,
-            task = EmbeddingTask.RetrievalDocument,
-            tag = id,
-        )
-    },
-)
-
-embeddedDocs.forEach { result ->
-    val id = result.tag ?: return@forEach
-    val source = documents.first { it.first == id }.second
-    index.put(id = id, vector = result.vector, payload = source)
-}
-
-val query = "find notes about cats"
-val queryResult = mindlayer.embed(
-    EmbeddingConfig(
-        text = query,
-        task = EmbeddingTask.RetrievalQuery,
-    ),
-)
-
-val contextText = index.search(queryResult.vector, k = 3)
-    .joinToString("\n") { hit -> "- ${hit.payload as String}" }
-
-val sessionId = mindlayer.createSession {
-    systemPrompt("Answer using only the supplied context when possible.")
-}
-
-mindlayer.chat(
-    sessionId,
-    "Context:\n$contextText\n\nQuestion: $query",
-).events.collect { event ->
-    if (event is MindlayerEvent.TextDelta) print(event.text)
-}
-```
-
-### Threat model
-
-Embeddings are derived from source text and can leak content via inversion or similarity-oracle attacks. Treat vectors as sensitive: never log text inputs or vectors, keep indexes per app/UID, and rely on Mindlayer's per-UID service isolation for cross-caller separation.
-
-### Performance ballpark
-
-S25 Ultra spike measurements for EmbeddingGemma-300M:
-
-| Backend | 256 tokens | 512 tokens |
-|---|---:|---:|
-| NPU | 8-18 ms | 18 ms |
-| GPU | 64-119 ms | 119 ms |
-| CPU | 66-169 ms | 169 ms |
-
-### Asset Pack delivery
-
-The `:gemma_embed_model` standard PAD pack is downloaded on demand and carries
-both `embedding-gemma-300m-v1.tflite` and
-`embedding-gemma-300m-v1.spm.model`. The service advertises
-`FEATURE_EMBEDDINGS` only after local materialization and SHA-256 verification
-succeed.
+Check `FEATURE_EMBEDDINGS`; installed weights and tokenizer must pass integrity
+verification. Supported output dimensions are 768, 512, 256 and 128. Keep query
+and document task types paired for asymmetric retrieval. Treat vectors and
+indexes as sensitive application data.

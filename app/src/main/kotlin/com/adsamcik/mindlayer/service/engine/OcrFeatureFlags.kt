@@ -15,9 +15,11 @@ object OcrFeatureFlags {
      *
      * Gates ServiceCapabilities.FEATURE_OCR_SESSION and
      * ServiceCapabilities.FEATURE_OCR_IMAGE_ONESHOT — both flip together with
-     * this constant. The validation matrix that justified the flip lives in
-     * `docs/OCR_VALIDATION_REPORT.md` and is exercised end-to-end by the
-     * sample driver in `samples/ocr-driver/` (`ValidationRunner.runAll()`).
+     * this constant. Historical driver results live in `docs/archive/`; those
+     * include skipped inference and error-handling scenarios, so their pass
+     * totals do not qualify the current native runtime. See
+     * `docs/project/ROADMAP.md` for remaining native/model qualification and
+     * `samples/ocr-driver/` for the driver (`ValidationRunner.runAll()`).
      *
      * Flipping back to `false` is the documented hot-fix path if a regression
      * is discovered on real hardware — both feature flags disappear from the

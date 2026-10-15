@@ -1,5 +1,9 @@
 # Inference SDK Polish — design proposal
 
+> Historical design record. The removed v0 methods and future-work statements
+> below do not describe the current SDK. Use [SDK integration](SDK_INTEGRATION.md)
+> and [v1 migration](SDK_V1_MIGRATION.md) for streaming, tools and cancellation.
+
 > Status: **proposal**. This document describes the eventual coherent shape for
 > the inference public surface of `:sdk` and the **minimal slice** that lands
 > in PR `feat/inference-sdk-polish`. The wire surface (`IMindlayerService`

@@ -6,6 +6,17 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+- Camera capture waits for its initial readiness probe before allowing capture,
+  survives activity recreation without restarting the task, and reports startup
+  failures through recoverable UI state.
+- Completed canonical SDK options: manual tool-result submission through the
+  inference handle, explicit deferred embedding handles with acknowledgement,
+  enforced embedding/OCR deadlines, and capability-gated native sampler seeds.
+  Per-request sampling settings on existing named sessions now fail explicitly
+  rather than being ignored.
+- Updated SDK examples and migration notes to match the shipped canonical API;
+  the roadmap now separates delivered OCR/SDK work from remaining native,
+  model-provenance and Play-delivery qualification.
 - Completed deferred embedding results now survive client disconnects until
   acknowledgement, expiry, or quota eviction. Revoking app access cancels active
   work, purges deferred results, and retries interrupted cleanup before reapproval;

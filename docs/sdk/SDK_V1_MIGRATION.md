@@ -1,9 +1,10 @@
-# Mindlayer SDK v1 Migration Guide (`1.0.0-alpha02`)
+# Mindlayer SDK v1 Migration Guide
 
 This release finalizes the v1 SDK surface. The canonical builders and terminals
 are now implemented; several legacy types and methods were renamed, hidden, or
 removed. This document lists what changed and the intentional alpha-stage
-deviations consumers should be aware of.
+deviations consumers should be aware of. Examples describe the current source;
+unreleased additions are identified below.
 
 ## `1.0.0-alpha.2` — all deprecated methods removed
 
@@ -35,7 +36,7 @@ first enriched into a **strict superset**, so each removed method has a
 | `chat(sid, text)` / `inferRealtime(sid, text, *media)` | `infer { session(sid); text(text); image(...)/audio(...)/media(...) }` (streams) |
 | `chatWithImage` / `chatWithAudio` / `chatWithMedia` | `infer { session(sid); text(text); image(bitmap) / audio(file) / media(part) }` |
 | `inferAsync(sid, text, *media)` | `infer { session(sid); text(text); … }.awaitText()` |
-| `inferTools(sid, text, *media)` | `infer { session(toolSessionId); text(text); … }` — `ToolCall` events stream; answer with `submitToolResultDetailed` |
+| `inferTools(sid, text, *media)` | `infer { session(toolSessionId); text(text); outputTools(tools) }` — collect `ToolCall` events and answer with `InferenceHandle.Tools.submitToolResult(callId, resultJson)`, or register `onToolCall` |
 | `chat(text)` / `generate(text, …)` | `ask(text) { … }` |
 | `chat(text, image)` / `generateWithImage(…)` | `describe(text, image) { … }` |
 | `generateWithAudio(…)` | `transcribe(prompt, audio) { … }` |
@@ -65,9 +66,9 @@ The streaming event type is now a single `sealed class InferenceEvent`:
 Helper extensions `textDeltas()` and `throwOnError()` are provided.
 
 ### 2. Canonical builders are now implemented
-`infer { }`, `ocr { }`, and `openSession { }` previously threw
-`NotImplementedError`. They now bridge onto the legacy one-shot methods and
-return working handles. Terminals:
+`infer { }` streams service events, `ocr { }` returns a one-shot OCR handle,
+`ocrSession { }` opens a multi-frame session, and `embed { }` selects an embedding
+transport. `openSession { }` returns an owned session. Terminals:
 
 - `InferenceHandle.Text.awaitText(): String`
 - `InferenceHandle.Structured.awaitJson(): JsonObject` (lenient parse — strips
@@ -88,10 +89,11 @@ return working handles. Terminals:
   already-created session.
 - `InferenceHandle.Tools.awaitToolCalls(): List<ToolCall>`
 
-### 3. Cancellation API removed
-Public `InferenceHandle.cancel()` / `isCancelled` are removed. Cancellation is
-handled internally by `Conversation.close()` and session teardown. There is no
-consumer-facing replacement in alpha.
+### 3. Cancellation and ownership
+`InferenceHandle.cancel()` explicitly requests native cancellation. Cancelling
+the coroutine collecting `events` also cancels unfinished inference. Collect
+each inference stream once, and close sessions you own (`closeAsync()` waits
+for service acknowledgement). `isCancelled` is internal.
 
 ### 4. `prewarm` / `getEngineInfo` promoted to the interface
 `connect()` returns the `Mindlayer` interface. `prewarm(backend)`,
@@ -137,22 +139,43 @@ Two **breaking** knock-on changes:
 - `JsonOutputBuilder.validation(depth)` was renamed to `validationDepth(depth)`
   (matches the DSL example above and the internal field). Update any call sites.
 
+## Completed SDK options (Unreleased)
+
+- **Manual tool results.** Cast a tool-output handle to `InferenceHandle.Tools`
+  and answer each observed call with `submitToolResult(callId, resultJson)`.
+  The handle retains the matching tool name and rejects unknown, duplicate, or
+  stale call IDs. `onToolCall { call -> resultJson }` remains the automatic
+  alternative; choose one owner for each tool response.
+- **Deferred embeddings.** `embed { items(batch); deferred() }` returns an
+  `EmbeddingHandle.Deferred` after durable submission. `awaitReady()` returns
+  vectors with their per-item metadata; `acknowledge()` releases the stored
+  result. `close()` performs best-effort cancellation and acknowledgement.
+  Cancelling an `awaitReady()` coroutine stops that wait; explicitly close the
+  handle to cancel and release the durable request.
+- **Embedding deadlines.** `deadline(timeout)` accepts a positive duration or
+  `Duration.INFINITE`. A finite bound starts at `embed` invocation and covers
+  submission and result waiting, including time before `awaitReady()`. Finite
+  deadlines use deferred transport so timed-out work can be cancelled; ordinary
+  requests retain automatic transport selection.
+- **OCR deadlines.** `ocr { deadline(timeout) }` accepts a positive duration or
+  `Duration.INFINITE`. A finite bound covers image loading, submission and
+  result mapping. Timeout or caller cancellation promptly stops the SDK wait;
+  an already-running synchronous Binder call cannot be preempted, and its
+  staged descriptors are cleaned up when it returns.
+- **Sampler seed.** `infer { sampling { seed = 42 } }` passes the seed to the
+  native sampler through the capability-gated `sampler_seed` JSON envelope.
+  Older services without `FEATURE_SAMPLER_SEED` reject the request explicitly.
+  Set sampling when creating an ephemeral session; non-null per-request
+  sampling settings on a named session fail with `INVALID_REQUEST` because
+  an existing session cannot be reconfigured. An empty or all-null sampling
+  block is allowed. A seed does not guarantee identical output across backends.
+
 ## Intentional alpha deviations
 
-- **Eager (non-streaming) `infer` bridge.** The `infer { }` path runs the legacy
-  one-shot under the hood and replays a synthetic
-  `Started → TextDelta(full) → Done` stream. For true token streaming, use the
-  legacy streaming methods directly.
-- **`SamplerScope.seed` is dropped.** The underlying `SessionConfigBuilder` has
-  no seed field, so a seed supplied through `infer { }` is ignored.
-- **Tool-calling via `infer { }` is not wired.** Requesting tools through the
-  canonical builder throws `NOT_SUPPORTED`; `submitToolResult` throws
-  `NotImplementedError`.
 - **OCR bounding boxes are denormalized.** The legacy engine returns an 8-float
   normalized quad `[x1,y1,…,x4,y4]` (0..1, clockwise). The v1 `OcrLine.boundingBox`
   is an axis-aligned source-pixel rect `[left, top, right, bottom]`, computed by
   collapsing the quad against the decoded image dimensions. Returns `null` when
   the quad or image dimensions are unavailable.
-- **`ocrSession` / `embed` remain unimplemented** and throw `NOT_SUPPORTED`.
 - **`InferenceEvent.seq` is nullable** in alpha (the spec models it as a
   monotonic `Long`).

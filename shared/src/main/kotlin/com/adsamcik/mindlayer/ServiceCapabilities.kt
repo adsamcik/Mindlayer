@@ -213,6 +213,9 @@ data class ServiceCapabilities(
          */
         const val FEATURE_THINKING_MODE: String = "thinking_mode"
 
+        /** SessionConfig.extraContextJson.sampler_seed is applied to the native sampler. */
+        const val FEATURE_SAMPLER_SEED: String = "sampler_seed"
+
         /** v0.6: durable deferred inference with fetch and completion callback. */
         const val FEATURE_DEFERRED_INFERENCE: String = "deferred_inference"
 

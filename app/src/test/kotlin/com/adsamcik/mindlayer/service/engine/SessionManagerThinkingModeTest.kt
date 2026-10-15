@@ -16,6 +16,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -90,6 +91,40 @@ class SessionManagerThinkingModeTest {
     fun tearDown() {
         sessionManager.shutdown()
         unmockkAll()
+    }
+
+    @Test
+    fun `session sampler uses explicit Int seed while retaining sampling settings`() {
+        val sessionId = sessionManager.createSession(
+            SessionConfig(
+                samplerTopK = 7,
+                samplerTopP = 0.8f,
+                samplerTemperature = 0.6f,
+                extraContextJson = """{"sampler_seed":-2147483648,"thinking":true}""",
+            ),
+        )
+        val sampler = sessionManager.getSession(sessionId)!!.baseConversationConfig.samplerConfig!!
+        assertEquals(Int.MIN_VALUE, sampler.seed)
+        assertEquals(7, sampler.topK)
+        assertEquals(0.8f.toDouble(), sampler.topP, 0.0)
+        assertEquals(0.6f.toDouble(), sampler.temperature, 0.0)
+    }
+
+    @Test
+    fun `session without seed retains native default`() {
+        val sessionId = sessionManager.createSession(SessionConfig())
+        assertEquals(0, sessionManager.getSession(sessionId)!!.baseConversationConfig.samplerConfig!!.seed)
+        assertEquals(Int.MAX_VALUE, SessionConfigValidator.parseSamplerSeed("""{"sampler_seed":2147483647}"""))
+    }
+
+    @Test
+    fun `explicit seed rejects non Int JSON values`() {
+        listOf("2147483648", "-2147483649", "1.5", "true", "null", "\"42\"", "[]", "{}").forEach { value ->
+            val failure = assertThrows(IllegalArgumentException::class.java) {
+                sessionManager.createSession(SessionConfig(extraContextJson = """{"sampler_seed":$value}"""))
+            }
+            assertEquals("samplerSeed", failure.message)
+        }
     }
 
     // ---- parseThinkingOptIn ------------------------------------------------

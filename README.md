@@ -42,15 +42,12 @@ Mindlayer runs as a headless Android service that loads the Gemma 4 model once a
 val mindlayer = Mindlayer.shared(context) // one shared client per process
 val caps = mindlayer.getCapabilities()
 require(caps.supports(ServiceCapabilities.FEATURE_PIPE_STREAM_V1))
-val sessionId = mindlayer.createSession {
-    systemPrompt("You are a helpful assistant")
-}
-
-val handle = mindlayer.chat(sessionId, "Hello!")
+val handle = mindlayer.infer { text("Hello!") }
 handle.events.collect { event ->
     when (event) {
-        is MindlayerEvent.TextDelta -> print(event.text)
-        is MindlayerEvent.Done -> println()
+        is InferenceEvent.TextDelta -> print(event.text)
+        is InferenceEvent.Error -> showError(event.message)
+        else -> Unit
     }
 }
 ```
@@ -58,7 +55,7 @@ handle.events.collect { event ->
 > **First-run user consent.** Mindlayer is default-deny: the first call lands the
 > client in `REJECTED_NOT_APPROVED` (`MindlayerErrorCode.CONSENT_REQUIRED`). Use
 > `MindlayerConsent.requestConsent(context)` to show the consent screen, then
-> retry via `awaitConnected()`. Reuse one client (`Mindlayer.shared(context)`) so
+> retry via `awaitConnected(Duration.INFINITE)`. Reuse one client (`Mindlayer.shared(context)`) so
 > every feature shares a single binding + consent flow. Full walkthrough and a
 > copy-paste example: [`docs/sdk/SDK_INTEGRATION.md`](docs/sdk/SDK_INTEGRATION.md#first-run-user-consent).
 
@@ -102,6 +99,7 @@ adb shell am start -n com.adsamcik.mindlayer/com.adsamcik.mindlayer.service.ui.M
 | `app/` | Service app — engine, IPC, logging, dashboard UI |
 | `sdk/` | Client SDK — connect, chat, media transfer, history, recovery, embeddings, OCR |
 | `sdk-camerax/` | Optional CameraX OCR adapter (`OcrImageAnalyzer`) |
+| `sdk-camera-launcher/` | Activity Result camera capture flow |
 | `shared/` | Shared Parcelable types + streaming protocol |
 | `gemma_model/`, `gemma_model_part_2/` | Standard on-demand PAD fragments for Gemma 4 E2B |
 | `gemma_embed_model/` | Standard on-demand PAD pack for EmbeddingGemma |
@@ -111,15 +109,14 @@ adb shell am start -n com.adsamcik.mindlayer/com.adsamcik.mindlayer.service.ui.M
 
 | Capability | API | Current gate |
 |---|---|---|
-| Chat / multimodal inference | `chat`, `chatWithImage`, `chatWithAudio`, `chatWithMedia` | Production surface; check stream/protocol features for optional behavior. |
-| Deferred inference | `chatDeferred`, `deferredCompletions`, `fetchDeferredResult` | `ServiceCapabilities.FEATURE_DEFERRED_INFERENCE` |
-| Embeddings | `embed`, `embedBatch`, `embedBatchShm`, deferred batch | `ServiceCapabilities.FEATURE_EMBEDDINGS`; depends on model extraction + integrity verification. |
-| OCR | `ocrSession`, `OcrEvent`, `:sdk-camerax` | `ServiceCapabilities.FEATURE_OCR_SESSION`; currently hidden by `OcrFeatureFlags.IS_PRODUCTION_READY=false`. |
+| Chat / multimodal inference | `infer`, `ask`, `describe`, `transcribe` | Production surface; check stream/protocol features for optional behavior. |
+| Embeddings | `embed`, `vector`, `vectors`; `embed { deferred() }` in unreleased source | `ServiceCapabilities.FEATURE_EMBEDDINGS`; depends on model extraction + integrity verification. |
+| OCR | `ocr`, `ocrSession`, `:sdk-camerax`, `:sdk-camera-launcher` | Production flag enabled; the corresponding OCR capability requires verified, available model assets. |
 | Health check | `ping` / SDK liveness fallback | `ServiceCapabilities.FEATURE_HEALTH_CHECK` |
 
 ## Caller Authorization
 
-Every AIDL entry point is gated by a default-deny user-approved allowlist. The first time a client app tries to bind, Mindlayer records it as pending and rejects the call; the user approves the app explicitly from the dashboard, pinning its signing-cert SHA-256 at approval time. See [`docs/architecture/AUTHORIZATION.md`](docs/architecture/AUTHORIZATION.md) for the full flow, failure modes, and threat model, and [`docs/sdk/SDK_INTEGRATION.md`](docs/sdk/SDK_INTEGRATION.md#first-run-user-approval) for the client-side API.
+Service calls are default-deny until the user approves the client through Mindlayer's consent screen, pinning its signing-certificate SHA-256. The dashboard lets the user revoke or unblock apps. See [`CONSENT_ARCHITECTURE.md`](docs/architecture/CONSENT_ARCHITECTURE.md) for the trust model and [`SDK_INTEGRATION.md`](docs/sdk/SDK_INTEGRATION.md#first-run-user-consent) for the client flow.
 
 ## Model Deployment
 
@@ -136,7 +133,7 @@ Production builds for the Play Store are **signed locally**. See [`docs/project/
 
 ## Roadmap
 
-What's done, what's next, and what's gated on device validation lives in [`docs/project/ROADMAP.md`](docs/project/ROADMAP.md). It's the single source of truth for outstanding work — OCR `IS_PRODUCTION_READY` flip criteria, model artifact pipeline, the ICDAR2015 numeric validation harness, and the Phase 7/8 polish backlog.
+Implemented features, remaining native/model/Play qualification, and optional research live in [`docs/project/ROADMAP.md`](docs/project/ROADMAP.md). Code-only alpha publication and model-bearing Play distribution have separate evidence requirements.
 
 ## License
 
@@ -148,6 +145,10 @@ In short: you are free to use, modify, and distribute this software, including o
 
 `SPDX-License-Identifier: AGPL-3.0-only`
 
-### Deferred async inference
+### Deferred embeddings (Unreleased)
 
-Mindlayer supports fire-and-fetch-later flows for long-running work. Submit with `mindlayer.chatDeferred(sessionId, text)`, subscribe to `mindlayer.deferredCompletions()` for push notification, then call `fetchDeferredResult(requestId)`. Results are SQLCipher-encrypted at rest, scoped per UID, quota-limited, and expire after 24 hours by default.
+`embed { items(batch); deferred() }` returns a durable request handle. Call
+`awaitReady()` for vectors and metadata, then `acknowledge()` to release the
+stored result. An optional positive `deadline` bounds submission and waiting.
+See [SDK integration](docs/sdk/SDK_INTEGRATION.md#embeddings) for cleanup and
+timeout behavior.

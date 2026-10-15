@@ -10,6 +10,7 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCase
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
@@ -27,8 +28,9 @@ import com.adsamcik.mindlayer.sdk.OcrHandle
 import com.adsamcik.mindlayer.sdk.camerax.OcrImageAnalyzer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -88,7 +90,7 @@ internal data class OcrCaptureUiState(
  * The ViewModel scope outlives configuration changes; the camera is
  * unbound/rebound on the new lifecycle owner. The Mindlayer
  * connection survives configuration changes — only a final
- * [shutdown] (from [OcrCaptureActivity.onDestroy]) closes it.
+ * ViewModel teardown closes it; Activity destruction only detaches its camera.
  *
  * # Threading
  *
@@ -99,7 +101,13 @@ internal data class OcrCaptureUiState(
  * - The CameraX analyzer runs on a dedicated single-threaded
  *   executor — required by `ImageAnalysis.Analyzer` contract.
  */
-internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(application) {
+internal class OcrCaptureViewModel(
+    application: Application,
+    private val connect: (Context) -> Mindlayer = { Mindlayer.connect(it) },
+    private val getCameraProvider: suspend (Context) -> ProcessCameraProvider = {
+        ProcessCameraProvider.getInstance(it).await()
+    },
+) : AndroidViewModel(application) {
 
     private val analyzerExecutor = Executors.newSingleThreadExecutor()
 
@@ -115,6 +123,12 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
     @Volatile private var session: OcrHandle.MultiFrame? = null
     private var analyzer: OcrImageAnalyzer? = null
     private var realtimeEventJob: Job? = null
+    private var realtimeSessionJob: Deferred<OcrHandle.MultiFrame>? = null
+    private var cameraBindingJob: Job? = null
+    private var cameraOwner: LifecycleOwner? = null
+    private var cameraGeneration = 0L
+    private var boundUseCases: List<UseCase> = emptyList()
+    private var closed = false
     @Volatile private var finalJson: String? = null
 
     /** Returns the original [OcrCaptureRequest] for instance-state persistence. */
@@ -153,22 +167,31 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
 
     /**
      * Bind CameraX preview + analysis / capture use-cases. Called from
-     * the Compose layer once the [PreviewView] surface is created. Safe
-     * to call multiple times — only the first binding succeeds; later
-     * calls are no-ops (handled internally by [ProcessCameraProvider]).
+     * the Compose layer once the [PreviewView] surface is created. A replacement
+     * Activity gets fresh use cases while the SDK connection/session is retained.
      */
     fun bindCamera(context: Context, lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
         val request = request ?: return
-        if (_state.value.phase != CapturePhase.Connecting) return
-        viewModelScope.launch {
+        if (closed || _state.value.phase == CapturePhase.Completed ||
+            _state.value.phase == CapturePhase.AwaitingPermission ||
+            _state.value.phase == CapturePhase.PermissionDenied
+        ) return
+        if (cameraOwner === lifecycleOwner) return
+        cameraOwner?.let(::detachCamera)
+        cameraOwner = lifecycleOwner
+        val generation = ++cameraGeneration
+        cameraBindingJob = viewModelScope.launch {
             try {
                 ensureMindlayerConnected(context)
-                val provider = withContext(Dispatchers.Main) {
-                    ProcessCameraProvider.getInstance(context).await()
-                }
+                val provider = getCameraProvider(context.applicationContext)
+                if (generation != cameraGeneration || closed ||
+                    _state.value.phase == CapturePhase.Completed
+                ) return@launch
                 cameraProvider = provider
                 bindCameraOnMain(provider, lifecycleOwner, previewView, request)
-                _state.update { it.copy(phase = CapturePhase.Ready) }
+                _state.update {
+                    if (it.phase == CapturePhase.Connecting) it.copy(phase = CapturePhase.Ready) else it
+                }
                 if (request.mode == OcrCaptureMode.Realtime) {
                     startRealtimeSession()
                 }
@@ -183,9 +206,23 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
         }
     }
 
+    /** Release only the old Activity's camera surfaces; retain the SDK/session across recreation. */
+    @MainThread
+    fun detachCamera(owner: LifecycleOwner) {
+        if (cameraOwner !== owner) return
+        cameraOwner = null
+        cameraGeneration++
+        cameraBindingJob?.cancel()
+        cameraBindingJob = null
+        cameraProvider?.unbind(*boundUseCases.toTypedArray())
+        boundUseCases = emptyList()
+        imageCapture = null
+        pendingAnalysisUseCase = null
+    }
+
     private suspend fun ensureMindlayerConnected(context: Context) {
         if (mindlayer != null && mindlayer?.connectionState?.value == ConnectionState.CONNECTED) return
-        val client = mindlayer ?: Mindlayer.connect(context.applicationContext).also { mindlayer = it }
+        val client = mindlayer ?: connect(context.applicationContext).also { mindlayer = it }
         val ok = withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
             client.connectionState.first { it == ConnectionState.CONNECTED }
             true
@@ -204,7 +241,6 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
         previewView: PreviewView,
         request: OcrCaptureRequest,
     ) = withContext(Dispatchers.Main) {
-        provider.unbindAll()
         val selector = CameraSelector.DEFAULT_BACK_CAMERA
         val preview = Preview.Builder().build().apply {
             surfaceProvider = previewView.surfaceProvider
@@ -226,6 +262,7 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
                     .build()
                 imageCapture = capture
                 provider.bindToLifecycle(lifecycleOwner, selector, preview, capture)
+                boundUseCases = listOf(preview, capture)
             }
             OcrCaptureMode.Realtime -> {
                 val analysis = ImageAnalysis.Builder()
@@ -236,6 +273,7 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
                 // The analyzer is bound in startRealtimeSession() once
                 // the session is open.
                 provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+                boundUseCases = listOf(preview, analysis)
                 pendingAnalysisUseCase = analysis
             }
         }
@@ -244,28 +282,35 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
     private var pendingAnalysisUseCase: ImageAnalysis? = null
 
     private suspend fun startRealtimeSession() {
+        // Recreating the preview while finalization drains must not resume frame intake.
+        if (_state.value.phase == CapturePhase.RealtimeFinalizing) return
         val request = request ?: return
         val client = mindlayer ?: return
         val analysis = pendingAnalysisUseCase ?: return
         val profile = request.profileId.profile
-        val opened = client.ocrSession {
-            profile(profile)
-            languageHints(request.languageHints)
-            if (request.maxFrames > 0) maxFrames(request.maxFrames)
-            request.extractionSchemaJson?.let { extractWithLlm(JsonSchema.parse(it)) }
+        // Session creation belongs to the retained ViewModel. Detaching an Activity
+        // must not abandon an in-flight session or open another one on recreation.
+        val opened = session ?: (realtimeSessionJob ?: viewModelScope.async {
+            client.ocrSession {
+                profile(profile)
+                languageHints(request.languageHints)
+                if (request.maxFrames > 0) maxFrames(request.maxFrames)
+                request.extractionSchemaJson?.let { extractWithLlm(JsonSchema.parse(it)) }
+            }.also { session = it }
+        }.also { realtimeSessionJob = it }).await()
+        val activeAnalyzer = analyzer ?: OcrImageAnalyzer(opened).also { analyzer = it }
+        analysis.setAnalyzer(analyzerExecutor, activeAnalyzer)
+        _state.update {
+            if (it.phase == CapturePhase.Ready || it.phase == CapturePhase.Connecting) {
+                it.copy(phase = CapturePhase.RealtimeStreaming)
+            } else it
         }
-        session = opened
-        analyzer = OcrImageAnalyzer(opened).also {
-            analysis.setAnalyzer(analyzerExecutor, it)
-        }
-        _state.update { it.copy(phase = CapturePhase.RealtimeStreaming) }
+        if (realtimeEventJob != null) return
         realtimeEventJob = viewModelScope.launch {
             try {
                 opened.events.collect { event ->
                     when (event) {
-                        is OcrEvent.FrameReceived,
-                        is OcrEvent.FrameProcessing,
-                        is OcrEvent.FrameProcessed -> {
+                        is OcrEvent.FrameReceived -> {
                             _state.update { it.copy(framesPushed = it.framesPushed + 1) }
                         }
                         is OcrEvent.ResultFinalized -> {
@@ -380,6 +425,7 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
         val request = request ?: return
         if (request.mode != OcrCaptureMode.Realtime) return
         if (_state.value.phase != CapturePhase.RealtimeStreaming) return
+        pendingAnalysisUseCase?.clearAnalyzer()
         _state.update { it.copy(phase = CapturePhase.RealtimeFinalizing) }
         viewModelScope.launch {
             try {
@@ -387,10 +433,15 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
                     session?.finalize()
                 }
                 if (_state.value.phase == CapturePhase.RealtimeFinalizing) {
-                    if (result != null) {
+                    if (result == null) {
+                        fail(
+                            code = com.adsamcik.mindlayer.shared.MindlayerErrorCode.UNKNOWN,
+                            message = "OCR finalization timed out; try scanning again",
+                        )
+                    } else {
                         finalJson = result.fullJsonString()
+                        completeRealtime()
                     }
-                    completeRealtime()
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -410,13 +461,18 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
         complete(OcrCaptureResult.Cancelled)
     }
 
-    /** Called from [OcrCaptureActivity.onDestroy]. Releases CameraX and the SDK. */
+    /** Final ViewModel teardown; Activity recreation only detaches its camera surfaces. */
     fun shutdown() {
+        if (closed) return
+        closed = true
+        cameraOwner?.let(::detachCamera)
+        realtimeSessionJob?.cancel()
         realtimeEventJob?.cancel()
         realtimeEventJob = null
         try { session?.close() } catch (_: Exception) {}
         session = null
-        try { cameraProvider?.unbindAll() } catch (_: Exception) {}
+        analyzer?.close()
+        analyzer = null
         cameraProvider = null
         try { mindlayer?.disconnect() } catch (_: Exception) {}
         mindlayer = null
@@ -424,8 +480,8 @@ internal class OcrCaptureViewModel(application: Application) : AndroidViewModel(
     }
 
     override fun onCleared() {
+        shutdown()
         super.onCleared()
-        viewModelScope.cancel()
     }
 
     private fun completeRealtime() {

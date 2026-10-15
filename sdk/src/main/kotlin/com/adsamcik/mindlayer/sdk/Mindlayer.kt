@@ -16,8 +16,9 @@ import kotlin.time.Duration
  * **Canonical, builder-based** (the recommended surface): [infer], [ocr],
  * [ocrSession], [embed]. Each accepts a DSL block that records intent into a
  * typed [com.adsamcik.mindlayer.sdk.InferenceRequest] / [OcrRequest] /
- * [OcrSessionRequest] / [EmbeddingRequest] and returns a cold handle. Spike-E
- * §0/§1 surface; behaviour lands in C2.
+ * [OcrSessionRequest] / [EmbeddingRequest] and returns a typed handle. Inference
+ * streams are cold; ordinary embeddings are computed before returning, while
+ * explicit deferred embeddings return after submission.
  *
  * **High-level helpers** ([ask], [describe], [transcribe], [extractJson],
  * [vector], [vectors], [readText], [readStructuredJson], [withSession],
@@ -161,6 +162,7 @@ interface Mindlayer {
     suspend fun ocrSession(build: OcrSessionRequest.Builder.() -> Unit): OcrHandle.MultiFrame =
         error("Mindlayer v1 — C2 lands behaviour")
 
+    /** Compute a single/batch result, or submit a durable request with `deferred()`. */
     suspend fun embed(build: EmbeddingRequest.Builder.() -> Unit): EmbeddingHandle =
         error("Mindlayer v1 — C2 lands behaviour")
 

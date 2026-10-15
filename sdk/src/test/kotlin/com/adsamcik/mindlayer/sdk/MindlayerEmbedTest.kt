@@ -21,6 +21,7 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.slot
 import io.mockk.unmockkAll
+import io.mockk.verify
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -28,6 +29,7 @@ import org.junit.Assert.fail
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Before
@@ -35,6 +37,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.nanoseconds
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Covers the canonical `embed { }` builder path (single-shot) and the
@@ -83,6 +89,7 @@ class MindlayerEmbedTest {
         mockConnection = mockk(relaxed = true)
         every { mockConnection.state } returns MutableStateFlow(ConnectionState.CONNECTED)
         coEvery { mockConnection.awaitConnected() } returns mockService
+        every { mockConnection.getService() } returns mockService
         mindlayer = buildMindlayer(mockConnection)
     }
 
@@ -116,6 +123,124 @@ class MindlayerEmbedTest {
         val handle = mindlayer.embedBatchDeferred(listOf(EmbeddingConfig("a")))
         assertEquals("emb-1", handle.requestId)
         assertEquals(123L, handle.expiresAtMs)
+    }
+
+    @Test fun `canonical deferred single preserves configuration and metadata without inline computation`() = runTest {
+        val submitted = slot<List<AidlEmbeddingRequest>>()
+        every { mockService.embedBatchDeferred(capture(submitted)) } returns DeferredHandle(requestId = "emb-canonical", expiresAtMs = 123L)
+        every { mockService.fetchEmbeddingBatchResult("emb-canonical") } answers {
+            VectorBlobHandle(status = DeferredResult.READY, transfer = transfer(listOf(floatArrayOf(1f, 2f)), listOf("tag")))
+        }
+        val handle = mindlayer.embed {
+            text("hello", tag = "tag", task = EmbeddingTask.RetrievalQuery, outputDim = 128, normalize = false)
+            deferred()
+        } as EmbeddingHandle.Deferred
+        assertEquals("emb-canonical", handle.requestId)
+        assertEquals(com.adsamcik.mindlayer.EmbeddingTask.RETRIEVAL_QUERY, submitted.captured.single().taskType)
+        assertEquals(128, submitted.captured.single().outputDim)
+        assertEquals(false, submitted.captured.single().normalize)
+        val results = handle.awaitReady()
+        assertEquals("tag", results.single().tag)
+        assertEquals(5, results.single().tokenCount)
+        assertEquals("NPU", results.single().backend)
+        assertArrayEquals(floatArrayOf(1f, 2f), results.single().vector.data, 0f)
+        handle.awaitReady()
+        verify(exactly = 1) { mockService.fetchEmbeddingBatchResult("emb-canonical") }
+        verify(exactly = 0) { mockService.embed(any()) }
+        verify(exactly = 0) { mockService.acknowledgeEmbeddingBatchResult(any()) }
+        handle.acknowledge()
+        verify(exactly = 1) { mockService.acknowledgeEmbeddingBatchResult("emb-canonical") }
+        handle.close()
+    }
+
+    @Test fun `deadline computes through cancellable deferred transport and preserves single result shape`() = runTest {
+        every { mockService.embedBatchDeferred(any()) } returns DeferredHandle(requestId = "emb-bounded", expiresAtMs = 123L)
+        every { mockService.fetchEmbeddingBatchResult("emb-bounded") } answers {
+            VectorBlobHandle(status = DeferredResult.READY, transfer = transfer(listOf(floatArrayOf(3f, 4f))))
+        }
+        val handle = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            mindlayer.embed { text("hello"); deadline(10.seconds) }
+        }
+        assertArrayEquals(floatArrayOf(3f, 4f), (handle as EmbeddingHandle.Single).awaitVector(), 0f)
+        verify(exactly = 1) { mockService.acknowledgeEmbeddingBatchResult("emb-bounded") }
+        verify(exactly = 0) { mockService.embed(any()) }
+    }
+
+    @Test fun `canonical deferred batch preserves item ordering and correlation`() = runTest {
+        every { mockService.embedBatchDeferred(any()) } returns DeferredHandle(requestId = "emb-batch", expiresAtMs = 123L)
+        every { mockService.fetchEmbeddingBatchResult("emb-batch") } answers {
+            VectorBlobHandle(
+                status = DeferredResult.READY,
+                transfer = transfer(listOf(floatArrayOf(1f, 2f), floatArrayOf(3f, 4f)), listOf("first", "second")),
+            )
+        }
+        val handle = mindlayer.embed {
+            items(listOf(EmbeddingItem("one", "first"), EmbeddingItem("two", "second")))
+            deferred()
+        } as EmbeddingHandle.Deferred
+        val results = handle.awaitReady()
+        assertEquals(listOf("first", "second"), results.map { it.tag })
+        assertArrayEquals(floatArrayOf(3f, 4f), results[1].vector.data, 0f)
+        handle.acknowledge()
+        handle.close()
+    }
+
+    @Test fun `cancellation during submission disposes the returned durable request id`() = runTest {
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = java.util.concurrent.CountDownLatch(1)
+        val cleaned = kotlinx.coroutines.CompletableDeferred<Unit>()
+        every { mockService.embedBatchDeferred(any()) } answers {
+            entered.complete(Unit)
+            check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            DeferredHandle(requestId = "emb-cancel-submit", expiresAtMs = 123L)
+        }
+        every { mockService.acknowledgeEmbeddingBatchResult("emb-cancel-submit") } answers { cleaned.complete(Unit); Unit }
+        val submitting = launch(kotlinx.coroutines.Dispatchers.Default) { mindlayer.embed { text("hello"); deferred() } }
+        try {
+            entered.await()
+            submitting.cancel()
+        } finally {
+            release.countDown()
+        }
+        submitting.join()
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            kotlinx.coroutines.withTimeout(5.seconds) { cleaned.await() }
+        }
+        verify(exactly = 1) { mockService.cancelEmbeddingBatch("emb-cancel-submit") }
+        verify(exactly = 1) { mockService.acknowledgeEmbeddingBatchResult("emb-cancel-submit") }
+    }
+
+    @Test fun `expired deadline does not submit or compute and invalid durations are rejected`() = runTest {
+        val failure = runCatching { mindlayer.embed { text("hello"); deadline(1.nanoseconds) } }.exceptionOrNull()
+        assertTrue(failure is kotlinx.coroutines.TimeoutCancellationException)
+        for (invalid in listOf(Duration.ZERO, -1.seconds)) {
+            assertTrue(runCatching { mindlayer.embed { text("hello"); deadline(invalid) } }.exceptionOrNull() is IllegalArgumentException)
+        }
+        verify(exactly = 0) { mockService.embedBatchDeferred(any()) }
+        verify(exactly = 0) { mockService.embed(any()) }
+    }
+
+    @Test fun `deadline also bounds acknowledgement when the connection stalls after fetching`() = runTest {
+        val fetched = java.util.concurrent.atomic.AtomicBoolean(false)
+        val cancelled = kotlinx.coroutines.CompletableDeferred<Unit>()
+        every { mockService.embedBatchDeferred(any()) } returns DeferredHandle(requestId = "emb-ack", expiresAtMs = 123L)
+        every { mockService.fetchEmbeddingBatchResult("emb-ack") } answers {
+            fetched.set(true)
+            VectorBlobHandle(status = DeferredResult.READY, transfer = transfer(listOf(floatArrayOf(1f, 2f))))
+        }
+        coEvery { mockConnection.awaitConnected() } coAnswers {
+            if (fetched.get()) kotlinx.coroutines.awaitCancellation() else mockService
+        }
+        every { mockService.cancelEmbeddingBatch("emb-ack") } answers {
+            cancelled.complete(Unit)
+            CancelResult(outcome = CancelResult.CANCELLED)
+        }
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            val failure = runCatching { mindlayer.embed { text("hello"); deadline(500.milliseconds) } }.exceptionOrNull()
+            assertTrue(failure is kotlinx.coroutines.TimeoutCancellationException)
+            assertTrue(fetched.get())
+            kotlinx.coroutines.withTimeout(5.seconds) { cancelled.await() }
+        }
     }
 
     @Test fun `fetchEmbeddingBatch maps vector blob statuses`() = runTest {

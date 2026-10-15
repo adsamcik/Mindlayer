@@ -154,6 +154,7 @@ Stable feature-flag strings allocated:
 | `"ocr_bounding_boxes"` | OCR field events can include per-line bounding-box geometry. |
 | `"health_check"` | Lightweight `ping()` health check returning `HealthCheck` is implemented. |
 | `"model_readiness"` | Task-aware CHAT/OCR readiness and a Mindlayer-owned setup action are available. |
+| `"sampler_seed"` | `SessionConfig.extraContextJson.sampler_seed` accepts an Int seed and applies it to LiteRT-LM's native sampler. Older services lack `FEATURE_SAMPLER_SEED`; SDK requests must fail explicitly rather than drop the seed. No Parcelable fields or AIDL methods change. |
 
 Old SDKs that don't probe capabilities should call new methods inside a `try/catch (e: AbstractMethodError)` (or `NoSuchMethodError`) and fall back. New SDKs that probe should consult `supportedFeatures` first.
 

@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.intOrNull
 
 /**
  * Pure-function helpers for validating and parsing client-supplied
@@ -40,6 +41,17 @@ internal object SessionConfigValidator {
      */
     fun validateSessionConfig(config: SessionConfig) {
         IpcInputValidator.validateSessionConfig(config)
+        parseSamplerSeed(config.extraContextJson)
+    }
+
+    /** Missing seeds retain the runtime default; an explicit seed must be a JSON Int. */
+    fun parseSamplerSeed(extraContextJson: String?): Int? {
+        if (extraContextJson.isNullOrBlank()) return null
+        val envelope = runCatching { Json.parseToJsonElement(extraContextJson) }.getOrNull() as? JsonObject
+            ?: return null
+        val seed = envelope["sampler_seed"] ?: return null
+        require(seed is JsonPrimitive && !seed.isString && seed.intOrNull != null) { "samplerSeed" }
+        return seed.intOrNull
     }
 
     /**

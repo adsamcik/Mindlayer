@@ -366,10 +366,13 @@ class SessionManager @OptIn(ExperimentalCoroutinesApi::class) constructor(
             engineManager.requireEngine()
         }
 
+        // LiteRT-LM v0.17.1 Config.kt exposes seed: Int; its executor forwards
+        // session sampler parameters. No parcelable layout change is required.
         val samplerConfig = SamplerConfig(
             topK = config.samplerTopK,
             topP = config.samplerTopP.toDouble(),
             temperature = config.samplerTemperature.toDouble(),
+            seed = SessionConfigValidator.parseSamplerSeed(config.extraContextJson) ?: 0,
         )
 
         // Parse client-supplied tool definitions (OpenAPI JSON array)

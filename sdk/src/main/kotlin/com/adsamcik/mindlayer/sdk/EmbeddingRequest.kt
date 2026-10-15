@@ -7,7 +7,8 @@ import kotlin.time.Duration
  * inside [Mindlayer.embed].
  *
  * `text(...)` and `items(...)` are mutually exclusive; the last call wins.
- * C1 lands the builder surface only; behavioural wiring lands in C2.
+ * Explicit [Builder.deferred] requests return a durable result handle; other
+ * requests return completed single/batch handles.
  */
 class EmbeddingRequest private constructor() {
 
@@ -32,11 +33,18 @@ class EmbeddingRequest private constructor() {
             singleItem = null
         }
 
+        /** Submit without waiting for computation; explicitly acknowledge or close the returned handle. */
         fun deferred() {
             deferred = true
         }
 
+        /**
+         * Total budget from [Mindlayer.embed] invocation to obtaining the result,
+         * including connection/submission and time before [EmbeddingHandle.Deferred.awaitReady].
+         * Expiry requests cancellation and disposal. [Duration.INFINITE] keeps the service's default budget.
+         */
         fun deadline(timeout: Duration) {
+            require(timeout > Duration.ZERO) { "Embedding deadline must be positive" }
             deadline = timeout
         }
 

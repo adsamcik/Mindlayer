@@ -370,6 +370,7 @@ class ServiceBinder(
             // user-visible answer. See SessionManager.parseThinkingOptIn
             // and ServiceCapabilities.FEATURE_THINKING_MODE.
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_THINKING_MODE,
+            com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_SAMPLER_SEED,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_EVICTION_CALLBACK,
             com.adsamcik.mindlayer.ServiceCapabilities.FEATURE_DEFERRED_INFERENCE,
             // Phase 2 #6: ZXing barcode anchor injected into the OCR
@@ -1310,6 +1311,7 @@ class ServiceBinder(
             config.extraContextJson?.let {
                 require(it.length <= SessionManager.MAX_EXTRA_CONTEXT_CHARS) { "extraContextJson" }
             }
+            com.adsamcik.mindlayer.service.engine.SessionConfigValidator.parseSamplerSeed(config.extraContextJson)
             config.initialHistory?.let { hist ->
                 require(hist.size <= SessionManager.MAX_INITIAL_HISTORY_TURNS) { "initialHistory.size" }
                 for (turn in hist) {
